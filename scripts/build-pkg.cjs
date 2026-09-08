@@ -16,6 +16,10 @@ const path = require('node:path')
 const SRC = path.join(__dirname, '..')
 const OUT = path.join(SRC, 'packages', 'dsh-agent-board')
 
+// 读取时统一行尾为 LF：Windows 上 git autocrlf=true 会把 checkout 的文件转成 CRLF，
+// 本脚本所有锚点都是 \n，不归一化会导致 replaceCounted 全部失配（Node 版本无关）
+function readLf(p) { return fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n') }
+
 function replaceCounted(text, from, to, expect, label) {
   const count = text.split(from).length - 1
   if (count !== expect) throw new Error(`[build] ${label}: expected ${expect} occurrence(s) of ${JSON.stringify(from.slice(0, 60))}, found ${count}`)
@@ -23,7 +27,7 @@ function replaceCounted(text, from, to, expect, label) {
 }
 
 // ─── host ────────────────────────────────────────────────────────────────
-let host = fs.readFileSync(path.join(SRC, 'host-v30.js'), 'utf8')
+let host = readLf(path.join(SRC, 'host-v30.js'))
 
 host = replaceCounted(host,
   "return {\n  apply(ctx) {\n    const fs = ctx.get('fs')\n    if (fs === undefined) { console.error('[task-board] fs unavailable'); return }",
@@ -108,7 +112,7 @@ export const inject = ['fs', 'timer', 'subagents', 'agents', 'tools', 'webServer
 ` + host + '\n'
 
 // ─── client ──────────────────────────────────────────────────────────────
-let client = fs.readFileSync(path.join(SRC, 'client-v30.js'), 'utf8')
+let client = readLf(path.join(SRC, 'client-v30.js'))
 
 client = replaceCounted(client,
   "return {\n  inject: ['timer'],\n  apply(ctx) {",

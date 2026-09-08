@@ -1,0 +1,3 @@
+# 强制 LF 行尾：build-pkg.cjs 的锚点匹配依赖 \n，
+# Windows 上 autocrlf=true 会把 checkout 转 CRLF 导致构建失配
+* text=auto eol=lf
