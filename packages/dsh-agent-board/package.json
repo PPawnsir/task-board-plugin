@@ -1,0 +1,32 @@
+{
+  "name": "dsh-agent-board",
+  "description": "Agent 任务看板：任务卡片 + 常驻 Worker/Verifier 池 + 流水线分档 + 依赖调度 + Team 模式（歧义上报主窗口裁决）",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "index.mjs",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "MIT"
+}

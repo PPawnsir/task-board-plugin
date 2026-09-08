@@ -1,0 +1,5 @@
+# dsh-agent-board bundle patch: inserts the plugin row into the web composition.
+# Install with `dsh plugin --profile <name> add <path>`.
+- insert:
+    - id: agent-board
+      name: dsh-agent-board

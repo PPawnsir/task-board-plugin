@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>登录</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    min-height: 100vh;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .card {
+    width: 100%; max-width: 400px;
+    background: rgba(255, 255, 255, 0.15);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 20px;
+    padding: 40px 36px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.2);
+    animation: rise .5s ease-out;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: none; } }
+  .logo { text-align: center; margin-bottom: 8px; font-size: 40px; }
+  h1 { color: #fff; font-size: 24px; font-weight: 700; text-align: center; margin-bottom: 6px; }
+  .subtitle { color: rgba(255,255,255,.75); font-size: 13px; text-align: center; margin-bottom: 28px; }
+  .field { margin-bottom: 18px; position: relative; }
+  .field label { display: block; color: rgba(255,255,255,.9); font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  .field input {
+    width: 100%; padding: 12px 42px 12px 14px;
+    background: rgba(255,255,255,.12);
+    border: 1.5px solid rgba(255,255,255,.25);
+    border-radius: 10px; color: #fff; font-size: 14px;
+    outline: none; transition: border-color .2s, background .2s;
+  }
+  .field input::placeholder { color: rgba(255,255,255,.5); }
+  .field input:focus { border-color: #fff; background: rgba(255,255,255,.2); }
+  .field input.invalid { border-color: #ff6b6b; }
+  .toggle-pw {
+    position: absolute; right: 10px; top: 34px;
+    background: none; border: none; cursor: pointer;
+    color: rgba(255,255,255,.7); font-size: 16px; padding: 4px;
+  }
+  .error { color: #ffb3b3; font-size: 12px; margin-top: 5px; min-height: 16px; }
+  .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; font-size: 13px; }
+  .remember { display: flex; align-items: center; gap: 6px; color: rgba(255,255,255,.85); cursor: pointer; }
+  .remember input { accent-color: #667eea; cursor: pointer; }
+  .forgot { color: rgba(255,255,255,.85); text-decoration: none; }
+  .forgot:hover { color: #fff; text-decoration: underline; }
+  .submit {
+    width: 100%; padding: 13px;
+    background: #fff; color: #667eea;
+    border: none; border-radius: 10px;
+    font-size: 15px; font-weight: 700; cursor: pointer;
+    transition: transform .15s, box-shadow .15s;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  .submit:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+  .submit:disabled { opacity: .6; cursor: not-allowed; }
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid rgba(102,126,234,.3); border-top-color: #667eea;
+    border-radius: 50%; animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .toast {
+    position: fixed; top: 24px; left: 50%; transform: translateX(-50%);
+    padding: 12px 22px; border-radius: 10px; font-size: 14px; font-weight: 600;
+    color: #fff; box-shadow: 0 8px 24px rgba(0,0,0,.25);
+    opacity: 0; pointer-events: none; transition: opacity .3s, transform .3s;
+    z-index: 100;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.ok { background: #2f9e6e; }
+  .toast.err { background: #d6455b; }
+  .footer { text-align: center; margin-top: 22px; color: rgba(255,255,255,.75); font-size: 13px; }
+  .footer a { color: #fff; font-weight: 600; text-decoration: none; }
+  .footer a:hover { text-decoration: underline; }
+  @media (max-width: 480px) {
+    .card { padding: 30px 22px; border-radius: 16px; }
+    h1 { font-size: 21px; }
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">🔐</div>
+  <h1>欢迎回来</h1>
+  <p class="subtitle">登录以继续使用您的账户</p>
+  <form id="loginForm" novalidate>
+    <div class="field">
+      <label for="email">邮箱</label>
+      <input type="email" id="email" placeholder="you@example.com" autocomplete="email">
+      <div class="error" id="emailErr"></div>
+    </div>
+    <div class="field">
+      <label for="password">密码</label>
+      <input type="password" id="password" placeholder="至少 8 位" autocomplete="current-password">
+      <button type="button" class="toggle-pw" id="togglePw" title="显示/隐藏密码">👁</button>
+      <div class="error" id="pwErr"></div>
+    </div>
+    <div class="row">
+      <label class="remember"><input type="checkbox" id="remember"> 记住我</label>
+      <a class="forgot" href="#" id="forgot">忘记密码？</a>
+    </div>
+    <button type="submit" class="submit" id="submitBtn">登 录</button>
+  </form>
+  <p class="footer">还没有账户？<a href="#" id="toRegister">立即注册</a></p>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  var form = document.getElementById('loginForm');
+  var email = document.getElementById('email');
+  var pw = document.getElementById('password');
+  var emailErr = document.getElementById('emailErr');
+  var pwErr = document.getElementById('pwErr');
+  var btn = document.getElementById('submitBtn');
+  var toast = document.getElementById('toast');
+  var EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  // 演示账号（真实环境替换为后端 API 调用）
+  var DEMO_KEY = 'demo_users';
+  if (!localStorage.getItem(DEMO_KEY)) {
+    localStorage.setItem(DEMO_KEY, JSON.stringify([{ email: 'demo@example.com', password: 'Demo1234' }]));
+  }
+
+  function showToast(msg, ok) {
+    toast.textContent = msg;
+    toast.className = 'toast show ' + (ok ? 'ok' : 'err');
+    setTimeout(function () { toast.classList.remove('show'); }, 2600);
+  }
+  function setErr(el, input, msg) {
+    el.textContent = msg || '';
+    input.classList.toggle('invalid', !!msg);
+  }
+  function validate() {
+    var ok = true;
+    if (!EMAIL_RE.test(email.value.trim())) { setErr(emailErr, email, '请输入有效的邮箱地址'); ok = false; } else setErr(emailErr, email);
+    if (pw.value.length < 8) { setErr(pwErr, pw, '密码至少 8 位'); ok = false; } else setErr(pwErr, pw);
+    return ok;
+  }
+
+  document.getElementById('togglePw').addEventListener('click', function () {
+    pw.type = pw.type === 'password' ? 'text' : 'password';
+  });
+  email.addEventListener('input', function () { setErr(emailErr, email); });
+  pw.addEventListener('input', function () { setErr(pwErr, pw); });
+
+  // 记住我：恢复邮箱
+  if (localStorage.getItem('remember_email')) {
+    email.value = localStorage.getItem('remember_email');
+    document.getElementById('remember').checked = true;
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (!validate()) return;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> 登录中…';
+
+    // 模拟异步认证（真实环境：fetch('/api/auth/login', { method:'POST', body: JSON.stringify({...}) })）
+    setTimeout(function () {
+      var users = JSON.parse(localStorage.getItem(DEMO_KEY) || '[]');
+      var em = email.value.trim().toLowerCase();
+      var found = users.find(function (u) { return u.email.toLowerCase() === em; });
+      btn.disabled = false;
+      btn.textContent = '登 录';
+      if (!found) { showToast('账户不存在', false); return; }
+      if (found.password !== pw.value) { showToast('密码错误', false); return; }
+
+      // 模拟签发 JWT
+      var token = btoa(JSON.stringify({ sub: em, iat: Date.now(), exp: Date.now() + 3600000 }));
+      var storage = document.getElementById('remember').checked ? localStorage : sessionStorage;
+      storage.setItem('auth_token', token);
+      if (document.getElementById('remember').checked) localStorage.setItem('remember_email', em);
+      else localStorage.removeItem('remember_email');
+
+      showToast('登录成功，正在跳转…', true);
+      setTimeout(function () { showToast('（演示）已进入主页，token 已写入 ' + (storage === localStorage ? 'localStorage' : 'sessionStorage'), true); }, 900);
+    }, 900);
+  });
+
+  document.getElementById('forgot').addEventListener('click', function (e) { e.preventDefault(); showToast('（演示）重置链接已发送至邮箱', true); });
+  document.getElementById('toRegister').addEventListener('click', function (e) { e.preventDefault(); showToast('（演示）跳转到注册页', true); });
+})();
+</script>
+</body>
+</html>
