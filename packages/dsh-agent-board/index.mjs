@@ -39,10 +39,8 @@ export function apply(ctx) {
     // 已知会话集合：心跳驱动这些会话的 poolCycle（摆脱对客户端轮询的依赖）
     var knownSessions = {}
     function touchSession(sid) { if (sid && typeof sid === 'string' && sid !== 'unknown') knownSessions[sid] = Date.now() }
-    // teamMode 缓存：由 rt() 同步，供 tools/pre-execute 同步拦截使用（#6 硬拦截）
+    // teamMode 缓存：由 rt() 同步，供 systemPrompt 动态引导段读取（v65）
     var teamModeCache = {}
-    // 执行约束缓存（v64：与 teamMode 解耦，控制 tools/pre-execute 硬拦截）
-    var strictCache = {}
     function fileFor(sid) { return '.dsh/tasks-' + sid + '.json' }
     function vt(d) { return d && typeof d === 'object' && Array.isArray(d.tasks) }
     function ah(t, f, to, ac, n) { if (!Array.isArray(t.history)) t.history = []; t.history.push({ from: f, to: to, timestamp: new Date().toISOString(), actor: ac, note: n || '' }) }
@@ -90,8 +88,8 @@ export function apply(ctx) {
       if (/文档|调研|整理|总结|报告|指南|白皮书|readme|分析文/.test(text)) return 'work'
       return 'full'
     }
-    function seed(sid) { return { version: 10, ownerSession: sid, boardMode: 'auto', teamMode: false, strictExec: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, verifierModel: 'qwen/deepseek-v4-pro', poolRoster: { nextW: 1, nextV: 1, members: [] }, tasks: [] } }
-    async function rt(sid) { try { var t = await fs.resolve(fileFor(sid)); var r = await fs.readText(t); var d = JSON.parse(r); if (vt(d) && d.ownerSession === sid) { teamModeCache[sid] = !!d.teamMode; strictCache[sid] = !!d.strictExec; return d }; return seed(sid) } catch (_) { return seed(sid) } }
+    function seed(sid) { return { version: 10, ownerSession: sid, boardMode: 'auto', teamMode: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, verifierModel: 'qwen/deepseek-v4-pro', poolRoster: { nextW: 1, nextV: 1, members: [] }, tasks: [] } }
+    async function rt(sid) { try { var t = await fs.resolve(fileFor(sid)); var r = await fs.readText(t); var d = JSON.parse(r); if (vt(d) && d.ownerSession === sid) { teamModeCache[sid] = !!d.teamMode; return d }; return seed(sid) } catch (_) { return seed(sid) } }
     async function wt(sid, d) { var c = JSON.stringify(d, null, 2); try { var t = await fs.resolve(fileFor(sid)); await fs.writeText(t, c) } catch (e) { console.error('[task-board] write:', String(e)); throw e } }
     // 每会话一条 promise 链，串行化所有 读-改-写，消除并发写竞争
     var fileLocks = {}
@@ -471,19 +469,6 @@ export function apply(ctx) {
     // Host 侧调度心跳：每 15s 对所有已知会话跑 poolCycle（客户端轮询只是触发器之一，面板关闭/后台节流时池照常运转）
     ;(function () { var tm = ctx.timer; if (!tm) return; var disposeTick = tm.interval(function () { Object.keys(knownSessions).forEach(function (sid) { poolCycle(sid).catch(function () {}) }) }, 15000); ctx.effect(function () { return disposeTick }) })()
 
-    // ===== #6 执行约束硬拦截：strictExec 开启时，root agent（主窗口）的直接执行工具被 deny =====
-    // 池中子 Agent（非 root）直接放行；strictCache 由 rt() 同步。拦截列表只含写/执行类，读类放行（主窗口仍需查看代码做裁决）。
-    // 与 teamMode 解耦（v64）：teamMode 只管任务流转+歧义裁决；strictExec 才是研发阶段的强制看板约束，调研阶段不开。
-    var TEAM_BLOCKED = { write: 1, edit: 1, pwsh: 1 }
-    ctx.on('tools/pre-execute', function (exec, next) {
-      if (!exec || !exec.agent || !TEAM_BLOCKED[exec.name]) return next()
-      var aid = String(exec.agent.id || '')
-      var rootSid = resolveRoot(aid)
-      if (aid !== rootSid) return next() // 子 Agent（池成员）放行
-      if (!strictCache[rootSid]) return next() // 执行约束未开启
-      return { kind: 'deny', reason: '[任务看板 执行约束] 直接执行已被拦截：所有改动必须走看板流程。请用 task_create 将工作提交为任务（Worker 池执行 + Verifier 验收），或在看板面板 ⚙️ 关闭"执行约束"。' }
-    })
-
     // ===== Team 模式提示词引导（v65）：teamMode 开启时往主窗口 agent 的 system prompt 注入看板派发引导 =====
     // 用动态 section（text 函数每次组装求值）：开启时注入，关闭时返回空串不落盘。
     // 只对 root agent 注入（池中 worker/verifier 有自己的 prompt 契约，不需要这段）。
@@ -522,7 +507,6 @@ export function apply(ctx) {
     handle('update-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (args.title !== undefined) t.title = args.title; if (args.description !== undefined) t.description = args.description; if (args.priority !== undefined) t.priority = args.priority; if (args.assignMode !== undefined) t.assignMode = args.assignMode; if (args.assignee !== undefined) t.assignee = args.assignee || null; if (args.dependsOn !== undefined) { var derr = validateDeps(d, t.id, args.dependsOn); if (derr) return { ok: false, error: derr }; t.dependsOn = args.dependsOn } if (args.pipeline !== undefined) { t.pipeline = args.pipeline; t.pipelineAuto = false } if (args.publish) { if (t.status !== 'draft') return { ok: false, error: 'not a draft' }; t.status = 'pending'; ah(t, 'draft', 'pending', actor, 'published') } if (args.resetToPending) { var ps = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'pending', actor, 'reset to pending after edit') }; return { ok: true, task: t } }) })
     handle('set-board-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.boardMode = args.mode === 'manual' ? 'manual' : 'auto'; return { ok: true, boardMode: d.boardMode } }) })
     handle('set-team-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.teamMode = !!args.enabled; return { ok: true, teamMode: d.teamMode } }) })
-    handle('set-strict-exec', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.strictExec = !!args.enabled; strictCache[sid] = d.strictExec; return { ok: true, strictExec: d.strictExec } }) })
     // 裁决回流：用户/主 Agent 裁决后，答案入队原 Worker（同一 Worker 保有上下文）
     async function doResolveEscalation(sid, actor, taskId, answer) {
       var result = await mutateLocked(sid, function (d) {
@@ -726,5 +710,5 @@ export function apply(ctx) {
       },
     })
 
-    console.log('[task-board] v66 loaded (task done/blocked receipts to main window for pool tasks)')
+    console.log('[task-board] v67 loaded (hard exec-block removed; team mode = prompt guidance only)')
 }
