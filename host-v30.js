@@ -215,6 +215,29 @@ return {
     // 从 mutateLocked 结果中读 teamMode，决定是否推聊天通知
     function maybeNotify(sid, task) { if (task && task.escalation) { rt(sid).then(function (d) { if (d.teamMode) notifyMainWindow(sid, task, task.escalation.question) }).catch(function () {}) } }
 
+    // ===== 任务回执通知（v66）：池执行的任务在 完成/阻塞 时通知主窗口 =====
+    // 只通知池派发执行的任务（claimedBy 是池成员），主窗口自己手动处理的任务不回执（自己干的自己知道）。
+    // followup 是队列语义：主窗口忙时排队，闲时送达——正好是长程任务的期望行为。
+    function isPoolMember(sid, id) { if (!id) return false; var p = poolFor(sid); return !!(p.workers[id] || p.verifiers[id]) }
+    function notifyTaskDone(sid, t, kind) {
+      if (!t || !isPoolMember(sid, t.claimedBy)) return
+      var root = rootForSession(sid)
+      if (!root) return
+      var lines
+      if (kind === 'resolved') {
+        lines = ['✅ [任务看板] 任务已完成', '', '任务: ' + t.title + ' (' + t.id + ')']
+        if (t.deliverable && t.deliverable.summary) lines.push('开发描述: ' + t.deliverable.summary.slice(0, 400))
+        if (t.verification && t.verification.verdict) lines.push('验收: ' + (t.verification.verdict === 'approved' ? '通过' : '驳回') + (t.verification.summary ? ' — ' + t.verification.summary.slice(0, 200) : ''))
+        lines.push('', '可在看板查看详情或归档；依赖它的任务已自动进入派发。')
+      } else {
+        lines = ['🛑 [任务看板] 任务被阻塞，需要关注', '', '任务: ' + t.title + ' (' + t.id + ')']
+        var lastNote = (t.history && t.history.length) ? t.history[t.history.length - 1].note : ''
+        if (lastNote) lines.push('原因: ' + String(lastNote).slice(0, 300))
+        lines.push('', '可用 task_intervene 指导、task_terminate 终止重派，或在看板详情页处理。')
+      }
+      try { root.followup(makeMsg(lines.join('\n'))) } catch (e) { console.error('[task-board] done-notify failed:', String(e)) }
+    }
+
     function onWorkerDone(sid, w, item) {
       var output = readOutput(w.agent, item.minTurn)
       var escalated = /\[ESCALATE\]/i.test(output || '')
@@ -240,6 +263,7 @@ return {
         return null // 状态不符不写文件
       }).then(function (r) {
         if (r && r.escalated) maybeNotify(sid, r.task)
+        if (r && r.task && r.task.status === 'resolved') notifyTaskDone(sid, r.task, 'resolved') // work/direct 档直接完成
         finishTurn(sid, w)
       }).catch(function () { finishTurn(sid, w) })
     }
@@ -258,7 +282,7 @@ return {
           return t
         }
         return null
-      }).catch(function () {})
+      }).then(function (t) { if (t && t.status === 'blocked') notifyTaskDone(sid, t, 'blocked') }).catch(function () {})
       w.running = null; w.busy = false; w.taskId = null; w.dead = true
     }
 
@@ -313,6 +337,9 @@ return {
         }
         return null
       }).then(function (t) {
+        // 回执：approved→resolved 通知完成；blocked（驳回超预算）通知阻塞
+        if (t && t.status === 'resolved') notifyTaskDone(sid, t, 'resolved')
+        if (t && t.status === 'blocked') notifyTaskDone(sid, t, 'blocked')
         // 驳回且未超预算 → 修正任务入队原 worker（锁外 enqueue，避免嵌套锁）
         if (t && !approved && t.claimedBy && (t.rejectCount || 0) < 3) {
           var w = poolFor(sid).workers[t.claimedBy]
@@ -577,6 +604,7 @@ return {
         return r
       })
       if (result && result.ok && result.escalated) maybeNotify(sid, result.task)
+      if (result && result.ok && result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved') // 工具直报路径也要回执（work 档 board_report 直接落 resolved）
       return result
     } }))
     harness.registerTool(ctx, harness.defineTool({ name: 'board_verdict', description: '[任务看板 Verifier 专用] 提交验收结论。verdict=approved/rejected；summary=测试概要；checks=逐条核对证据。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, verdict: { type: 'string', enum: ['approved', 'rejected'] }, summary: { type: 'string' }, checks: { type: 'string' } }, required: ['taskId', 'verdict'] }, output: jo(), execute: async function (args) {
@@ -591,6 +619,10 @@ return {
         if (!approved) { t.rejectCount = (t.rejectCount || 0) + 1; if (t.rejectCount >= 3) { t.status = 'blocked'; ah(t, 'in-progress', 'blocked', 'system', 'verifier 驳回 x' + t.rejectCount + '，待人工裁决') } }
         return { ok: true, task: t }
       })
+      if (result && result.ok && result.task) {
+        if (result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved')
+        if (result.task.status === 'blocked') notifyTaskDone(sid, result.task, 'blocked')
+      }
       if (result && result.ok && !approved) {
         var t = result.task
         if (t.claimedBy && (t.rejectCount || 0) < 3) { var w = poolFor(sid).workers[t.claimedBy]; if (w && !w.dead) { enqueue(sid, w, { taskId: t.id, kind: 'retry', prompt: '你之前提交的任务被驳回了。\n\n任务: ' + t.title + '\n驳回原因: ' + ((args.summary || '') + ' ' + (args.checks || '')).slice(0, 300) + '\n\n请修正后重新调用 board_report 上报。' }) } }
@@ -643,6 +675,6 @@ return {
         return { ok: true, done: done, skipped: skipped }
       })
     })
-    console.log('[task-board] v65 loaded (team mode = prompt guidance via systemPrompt section; strictExec remains as opt-in hard block)')
+    console.log('[task-board] v66 loaded (task done/blocked receipts to main window for pool tasks)')
   }
 }
