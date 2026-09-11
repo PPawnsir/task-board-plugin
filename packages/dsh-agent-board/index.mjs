@@ -88,7 +88,7 @@ export function apply(ctx) {
       if (/文档|调研|整理|总结|报告|指南|白皮书|readme|分析文/.test(text)) return 'work'
       return 'full'
     }
-    function seed(sid) { return { version: 10, ownerSession: sid, boardMode: 'auto', teamMode: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, verifierModel: 'qwen/deepseek-v4-pro', poolRoster: { nextW: 1, nextV: 1, members: [] }, tasks: [] } }
+    function seed(sid) { return { version: 10, ownerSession: sid, boardMode: 'auto', teamMode: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, verifierModel: '', poolRoster: { nextW: 1, nextV: 1, members: [] }, tasks: [] } }
     async function rt(sid) { try { var t = await fs.resolve(fileFor(sid)); var r = await fs.readText(t); var d = JSON.parse(r); if (vt(d) && d.ownerSession === sid) { teamModeCache[sid] = !!d.teamMode; return d }; return seed(sid) } catch (_) { return seed(sid) } }
     async function wt(sid, d) { var c = JSON.stringify(d, null, 2); try { var t = await fs.resolve(fileFor(sid)); await fs.writeText(t, c) } catch (e) { console.error('[task-board] write:', String(e)); throw e } }
     // 每会话一条 promise 链，串行化所有 读-改-写，消除并发写竞争
@@ -140,10 +140,15 @@ export function apply(ctx) {
     // （worker 的 parent 挂错会话 → 工具 resolveRoot 到别的看板 → "幽灵指派" not found）
     var pools = {}
     function poolFor(sid) { if (!pools[sid]) pools[sid] = { workers: {}, verifiers: {}, nextW: 1, nextV: 1 }; return pools[sid] }
+    // 模型熔断：带覆盖模型的 agent 若 init turn 即死（如 UNKNOWN_MODEL——模型在当前网关没配置），
+    // 记入坏名单，该会话后续 spawn 不再带此模型（回退父级），避免死亡循环
+    var badModels = {}
+    function modelKey(sid, model) { return sid + '|' + model }
 
     async function spawnAgent(sid, role, num, modelOverride) {
       var subagents = ctx.subagents; if (!subagents) return null
       var parent = rootForSession(sid); if (!parent) { console.error('[task-board] no root agent for session ' + sid + ', skip spawn'); return null }
+      if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited for ' + sid + ', using parent model'); modelOverride = undefined }
       var providers = subagents.list(); if (!providers.length) return null
       var prompt = role === 'worker'
         ? '你是一个任务执行 Worker #' + num + '。当收到任务时，阅读任务描述并完成它。\n\n重要契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete，填 summary=开发描述/changes=改动清单/selfTest=自测情况）；若工具不可用，则按分段格式文本输出（## 开发描述 / ## 改动清单 / ## 自测情况）。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate，填 question）；若工具不可用，输出以 [ESCALATE] 开头的说明。不要猜测。\n3. 任务消息中会给出 taskId，上报时原样携带。\n4. 等待接收任务分配。'
@@ -162,8 +167,10 @@ export function apply(ctx) {
         }
         // running 初始置为 init 哨兵：init turn 未完成前 pump 不派发任务（否则 whenIdle 会提前 resolve 在 init turn 上，读到 seed 旧消息）
         var agent = { id: String(run.id), num: num, role: role, run: run, agent: run.localAgent, busy: false, taskId: null, eventBoundary: 0, dead: false, tasksCompleted: 0, queue: [], running: { init: true }, model: (modelOverride && role === 'verifier') ? modelOverride : '' }
-        run.result.then(function () { agent.eventBoundary = agent.agent.session.events.length; agent.running = null; agent.busy = false; pump(sid, agent) }).catch(function () { agent.dead = true; agent.running = null })
-        withTimeout(run.result, 30000, 'init-' + role + '-' + num).catch(function () { agent.dead = true })
+        // 熔断钩子：init turn 失败且带模型覆盖 → 该模型进坏名单（UNKNOWN_MODEL 发生在首 turn 运行时，start() 的 try/catch 接不住）
+        function markDead(e) { agent.dead = true; agent.running = null; if (agent.model && agent.tasksCompleted === 0) { badModels[modelKey(sid, agent.model)] = true; console.error('[task-board] model circuited: ' + agent.model + ' (' + String(e) + '), future spawns use parent model') } }
+        run.result.then(function () { agent.eventBoundary = agent.agent.session.events.length; agent.running = null; agent.busy = false; pump(sid, agent) }).catch(markDead)
+        withTimeout(run.result, 30000, 'init-' + role + '-' + num).catch(markDead)
         return agent
       } catch (e) { console.error('[task-board] spawn ' + role + ' failed:', String(e)); return null }
     }
@@ -447,8 +454,7 @@ export function apply(ctx) {
         d.poolStatus.verifiers.forEach(function (v) { var k = 'verifier-' + v.num; var prev = memberMap[k]; memberMap[k] = { role: 'verifier', num: v.num, done: Math.max(v.done, prev ? prev.done || 0 : 0), lastId: v.id, lastSeen: new Date().toISOString() } })
         d.poolRoster = { nextW: poolFor(sid).nextW, nextV: poolFor(sid).nextV, members: Object.values(memberMap) }
         d.minWorkers = cc.minWorkers; d.maxWorkers = cc.maxWorkers; d.minVerifiers = cc.minVerifiers; d.maxVerifiers = cc.maxVerifiers
-        if (typeof d.verifierModel !== 'string') d.verifierModel = 'qwen/deepseek-v4-pro' // #17 老文件迁移默认值
-        else if (d.verifierModel === 'zhipu/glm-5.2') d.verifierModel = 'qwen/deepseek-v4-pro' // 网关 402 未订阅，迁移到可用异构模型
+        if (typeof d.verifierModel !== 'string') d.verifierModel = '' // v69 起默认空=继承父级模型（环境无关，异构审查需在 ⚙️ 里显式配置本网关可用的模型）
         if (info.length > 0) d.dispatchInfo = info.join('; ')
         return d // 始终写（池状态刷新）
       })
@@ -709,5 +715,5 @@ export function apply(ctx) {
       },
     })
 
-    console.log('[task-board] v68 loaded (single-source: package files are the source, no transform layer)')
+    console.log('[task-board] v69 loaded (verifierModel default = inherit parent; model circuit breaker for UNKNOWN_MODEL)')
 }
