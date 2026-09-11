@@ -167,9 +167,25 @@ function apply(ctx) {
     // #11 头部减负：池配置收纳进 ⚙️ 弹出层（含 #17 verifier 异构模型设置）
     function ModelCfg(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
-      var _a = useState(props.value || ''), val = _a[0], setVal = _a[1]; var _b = useState(false), dirty = _b[0], setDirty = _b[1]
+      var _a = useState(props.value || ''), val = _a[0], setVal = _a[1]
+      var _b = useState(false), dirty = _b[0], setDirty = _b[1]
+      var _m = useState(null), models = _m[0], setModels = _m[1]
+      // 下拉列出当前网关可用模型（host list-models RPC）；枚举失败降级为文本输入
+      useEffect(function () {
+        var cancelled = false
+        rpc('list-models').then(function (r) { if (!cancelled && r && r.ok && Array.isArray(r.models) && r.models.length) setModels(r.models) }).catch(function () {})
+        return function () { cancelled = true }
+      }, [])
       useEffect(function () { setVal(props.value || ''); setDirty(false) }, [props.value])
-      function save() { setDirty(false); rpc('set-board-config', { key: 'verifierModel', value: val.trim() }).then(fetchTasks).catch(function () {}) }
+      function save() { setDirty(false); rpc('set-board-config', { key: 'verifierModel', value: (val || '').trim() }).then(fetchTasks).catch(function () {}) }
+      function pick(v) { setVal(v); setDirty(false); rpc('set-board-config', { key: 'verifierModel', value: v }).then(fetchTasks).catch(function () {}) }
+      if (models) {
+        return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, 'V模型',
+          React.createElement('select', { value: val, onChange: function (e) { pick(e.target.value) }, title: 'Verifier 异构审查模型（空=继承父级）', style: { width: 150, padding: '0px 4px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
+            React.createElement('option', { value: '' }, '继承父级'),
+            models.map(function (m) { return React.createElement('option', { key: m.id, value: m.id }, m.name + ' (' + m.provider + ')') })))
+      }
+      // 降级：文本输入（模型枚举不可用时）
       return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, 'V模型',
         React.createElement('input', { value: val, onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== (props.value || '')) }, onBlur: function () { if (dirty) save() }, onKeyDown: function (e) { if (e.key === 'Enter') save() }, placeholder: '空=同父级', style: { width: 110, padding: '0px 4px', fontSize: 9, border: '1px solid ' + (dirty ? C.brand : C.border), borderRadius: 2, background: C.card, color: C.text } }),
         dirty ? React.createElement('button', { onClick: save, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: '#fff', cursor: 'pointer', lineHeight: '14px', fontWeight: 600 } }, '✓') : null)

@@ -644,6 +644,19 @@ export function apply(ctx) {
       }
       return result
     } }))
+    // 枚举当前网关可用模型（供 Verifier 模型下拉选择）：llm.listProviders + listModels
+    handle('list-models', async function () {
+      var llm = ctx.get('llm'); if (!llm) return { ok: false, error: 'llm service unavailable' }
+      var providers = llm.listProviders()
+      var out = []
+      for (var i = 0; i < providers.length; i++) {
+        try {
+          var models = await llm.listModels(providers[i].id)
+          for (var j = 0; j < models.length; j++) out.push({ id: providers[i].id + '/' + models[j].id, name: models[j].name || models[j].id, provider: providers[i].name || providers[i].id })
+        } catch (_) { /* 某 provider 枚举失败不阻塞整体 */ }
+      }
+      return { ok: true, models: out }
+    })
     handle('set-board-config', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { if (args.key === 'minWorkers') d.minWorkers = Math.max(0, Math.min(10, args.value || 0)); else if (args.key === 'maxWorkers') d.maxWorkers = Math.max(1, Math.min(10, args.value || 3)); else if (args.key === 'minVerifiers') d.minVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; return { ok: true } }) })
     handle('create-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { if (args.id && d.tasks.find(function (x) { return x.id === args.id })) return { ok: false, error: 'duplicate id' }; if (args.dependsOn && args.dependsOn.length) { var derr = validateDeps(d, args.id || '(pending)', args.dependsOn); if (derr) return { ok: false, error: derr } }; var now = new Date().toISOString(); var t = { id: args.id || ('task-' + Date.now().toString(36)), title: args.title || 'Untitled', description: args.description || '', status: args.draft ? 'draft' : 'pending', priority: args.priority || 'medium', tags: args.tags || [], parentId: args.parentId || null, subtaskStrategy: null, assignMode: 'auto', assignee: null, context: { files: [], docs: [], instructions: args.instructions || '', relatedTasks: [], prerequisites: '' }, acceptance: args.acceptance || '', dependsOn: args.dependsOn || [], pipeline: args.pipeline || '', claimedBy: null, claimedAt: null, createdAt: now, resolvedAt: null, verifiedAt: null, verifiedBy: null, archivedAt: null, resolution: null, messages: [], history: [{ from: 'created', to: args.draft ? 'draft' : 'pending', timestamp: now, actor: actor, note: args.draft ? 'created as draft' : 'created' }] }; if (!t.pipeline) { t.pipeline = classifyPipeline(t); t.pipelineAuto = true }; d.tasks.push(t); return { ok: true, task: t } }) })
     handle('list-children', async function (args) { var sid = rpcSessionId(args); var subs = ctx.subagents; if (!subs) return { ok: true, children: [] }; try { var list = await subs.listChildren(sid); var children = (list || []).map(function (c) { return { id: String(c.sessionId || c.id || ''), label: String(c.label || c.title || c.mode || '') } }).filter(function (c) { return c.id.length > 0 }); return { ok: true, children: children } } catch (e) { return { ok: true, children: [], error: String(e) } } })
@@ -715,5 +728,5 @@ export function apply(ctx) {
       },
     })
 
-    console.log('[task-board] v69 loaded (verifierModel default = inherit parent; model circuit breaker for UNKNOWN_MODEL)')
+    console.log('[task-board] v70 loaded (verifier model dropdown via llm.listProviders/listModels)')
 }
