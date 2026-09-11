@@ -90,6 +90,7 @@ function apply(ctx) {
       if (from === to) return
       var ok = function () { fetchTasks() }; var fail = function () { fetchTasks() }
       if (to === 'pending' && from === 'draft') rpc('update-task', { taskId: taskId, publish: true }).then(ok).catch(fail)
+      else if (to === 'pending' && from === 'blocked') rpc('update-task', { taskId: taskId, resetToPending: true }).then(ok).catch(fail) // 阻塞任务拖回待办=重新投放
       else if (to === 'in-progress' && (from === 'pending' || from === 'blocked')) rpc('claim-task', { taskId: taskId }).then(ok).catch(fail)
       else if (to === 'verifying' && from === 'in-progress') { var res = window.prompt('提交验证 — 解决说明（必填）：'); if (res) rpc('resolve-task', { taskId: taskId, status: 'verifying', resolution: res }).then(ok).catch(fail) }
       else if (to === 'resolved' && from === 'verifying') rpc('verify-task', { taskId: taskId, verdict: 'approved' }).then(ok).catch(fail)
