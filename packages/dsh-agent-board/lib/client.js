@@ -1,6 +1,6 @@
 /* global window, document, fetch, getComputedStyle, MutationObserver, ResizeObserver */
 // dsh-agent-board — Browser 侧 bundle（CJS 工厂，供 dsh web 客户端 ModuleLoader 注入）。
-// 由 scripts/build-pkg.cjs 从 client-v30.js 机械转换生成；不要手改本文件。
+// 本文件即源码，直接维护（v68 起：变形层已拆除，不再从其他文件生成）。
 window.__ModuleLoader__.load({
   id: "dsh-agent-board",
   factory: (require) => {

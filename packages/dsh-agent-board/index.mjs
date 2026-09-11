@@ -1,5 +1,5 @@
 // dsh-agent-board — Agent 任务看板（host 端）
-// 由 scripts/build-pkg.cjs 从 host-v30.js 机械转换生成；不要手改本文件。
+// 本文件即源码，直接维护（v68 起：变形层已拆除，不再从其他文件生成）。
 //
 // 零外部依赖：link: 安装的包从真实路径解析，裸 import '@deepseek-ai/dsh-tools'
 // 会解析失败（ERR_MODULE_NOT_FOUND）。defineTool 本体只是 校验+包装 出
@@ -97,8 +97,7 @@ export function apply(ctx) {
     // 便捷：串行的 读→mutate→写。mutate(d) 返回值作为结果；mutate 返回 null/undefined 则不写
     function mutateLocked(sid, mutate) { return withLock(sid, async function () { var d = await rt(sid); var r = await mutate(d); if (r !== null && r !== undefined) { await wt(sid, d); return r } return r }) }
     function jo() { return { schema: { type: 'object', additionalProperties: true }, render: function (a, v) { return [{ type: 'text', text: JSON.stringify(v, null, 2) }] } } }
-    function getFirstRootAgent() { var s = ctx.agents; if (!s) return undefined; var r = s.roots(); if (r.length > 0) return r[0]; var a = s.list(); return a.length > 0 ? a[0] : undefined }
-    // 按会话找 root agent（静态插件挂 host 层后多会话共存，不能再"取第一个"——会把 worker 挂到别的会话上）
+    // 按会话找 root agent（静态插件挂 host 层后多会话共存，不能"取第一个"——会把 worker 挂到别的会话上）
     function rootForSession(sid) { var s = ctx.agents; if (!s) return undefined; var r = s.roots(); for (var i = 0; i < r.length; i++) { if (String(r[i].id) === sid) return r[i] } return undefined }
     function makeSignal() { try { return new AbortController().signal } catch (_) { return { aborted: false, addEventListener: function () {}, removeEventListener: function () {} } } }
     function makeMsg(text) { return { id: 'm' + Date.now() + Math.random().toString(36).slice(2, 6), role: 'user', content: [{ type: 'text', text: text }], source: { kind: 'user' } } }
@@ -710,5 +709,5 @@ export function apply(ctx) {
       },
     })
 
-    console.log('[task-board] v67 loaded (hard exec-block removed; team mode = prompt guidance only)')
+    console.log('[task-board] v68 loaded (single-source: package files are the source, no transform layer)')
 }

@@ -14,15 +14,11 @@
 ```sh
 # 1. 克隆本仓库
 git clone https://github.com/PPawnsir/task-board-plugin.git
-cd task-board-plugin
 
-# 2. 构建静态包（从双端源码生成 packages/dsh-agent-board）
-node scripts/build-pkg.cjs
-
-# 3. 安装到 dsh web profile
+# 2. 安装到 dsh web profile（无需构建，包内文件即源码）
 dsh plugin --profile web add <本仓库绝对路径>/packages/dsh-agent-board
 
-# 4. 重启 dsh 生效
+# 3. 重启 dsh 生效
 dsh --profile web
 ```
 
@@ -44,8 +40,7 @@ curl -X POST http://127.0.0.1:3080/dsh-agent-board \
 
 ```sh
 git pull
-node scripts/build-pkg.cjs   # 重新生成包（link: 安装即时生效）
-# 重启 dsh
+# 重启 dsh（link: 安装指向本仓库，无需重装）
 ```
 
 ### 卸载
@@ -92,9 +87,9 @@ draft → pending → in-progress → verifying → resolved → archived
 ### Team 模式
 
 开启后（👥 Team 开关）：
-- 主窗口的直接执行工具（write/edit/pwsh）被硬拦截，所有改动必须走看板
-- 池中子 Agent 不受影响，读类和 task_* 工具不受阻
-- Worker 歧义自动上报主窗口聊天流
+- 主窗口 system prompt 注入派发引导（提示词层面建议实质性改动走看板，不硬拦截）
+- Worker 歧义自动上报主窗口聊天流，裁决回流原 Worker（保有上下文）
+- 池任务完成/阻塞时主窗口收到回执通知（长程任务不失联）
 
 ## 13 个 Agent 工具
 
@@ -107,16 +102,19 @@ draft → pending → in-progress → verifying → resolved → archived
 ## 仓库结构
 
 ```
-├── host-v30.js / client-v30.js   # 双端源码（单一事实来源）
-├── scripts/build-pkg.cjs         # 构建脚本：源码 → 静态 Bundle（带计数断言）
-├── packages/dsh-agent-board/     # 生成的可安装包（勿手改，由构建脚本生成）
+└── packages/dsh-agent-board/     # 插件全部源码（直接维护，无构建步骤）
 │   ├── index.mjs                 #   host 端（13 工具 + RPC 路由）
-│   └── lib/client.js             #   client 端（ModuleLoader 包装）
+│   ├── lib/client.js             #   client 端（ModuleLoader 包装）
+│   ├── package.json              #   dsh.bundle.patch + dsh.client 元数据
+│   └── cordis.patch.yml          #   bundle 挂载行
 └── docs/
     ├── PRD.md                    # 产品需求文档
     ├── PACKAGING.md              # 打包/安装踩坑记录（link 依赖、单例隔离等）
     └── REGRESSION-v59.md         # 端到端回归测试记录
 ```
+
+> v68 起拆除了"动态源码 → 静态包"的转换层（build-pkg.cjs）：插件已稳定，
+> 双形态维护的复杂度大于收益，包内文件即唯一源码，改完重启 dsh 即生效。
 
 ## 文档
 

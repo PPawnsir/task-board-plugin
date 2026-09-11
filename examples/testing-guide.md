@@ -39,7 +39,7 @@
 对话中输入：task_list
 ```
 
-期望返回 JSON 包含 `boardMode`、`poolStatus`（workers/verifiers 数组）。若报工具不存在，说明插件未运行——需通过 cordis_define + cordis_run 重新加载（源码见 `host-v30.js` / `client-v30.js`）。
+期望返回 JSON 包含 `boardMode`、`poolStatus`（workers/verifiers 数组）。若报工具不存在，说明插件未挂载——静态安装后需重启 dsh（源码即 `packages/dsh-agent-board/`）。
 
 ### 1.2 打开看板 UI
 

@@ -13,7 +13,7 @@
 | host API | `harness.defineTool` / `harness.registerTool` / `harness.handle` | `ctx.tools.register` / `ctx.webServer.register` |
 | client API | 全局 `React` + `host.call()` | `require('react')` + `fetch()` 走 webServer 路由 |
 
-**关键**：动态转静态不是"保存一下"，两端 API 都要机械转换。本仓库用 `scripts/build-pkg.cjs` 自动完成（带计数断言，源文件结构变了会直接报错而不是生成坏包）。
+**关键**：动态转静态不是"保存一下"，两端 API 都要机械转换。本仓库迁移期曾用 `scripts/build-pkg.cjs` 自动完成（带计数断言）；插件稳定后于 v68 拆除转换层，包内文件即唯一源码。本文档的坑仍然有效——它们发生在 API 与装载层，与是否有转换层无关。
 
 ## 2. 打包结构（必备四件）
 
@@ -53,7 +53,7 @@ package.json 最小模板：
 
 **原因**：`dsh plugin add <本地路径>` 产生的是 `link:` 软链。Node ESM 从包的**真实路径**（源码目录）向上找 node_modules，不会用 profile 的 node_modules。pnpm 复制安装的包（如 dsh-chat-import）靠 `.pnpm` 结构解析 peer 依赖，软链包享受不到。
 
-**修法**：Bundle 包**零外部运行时依赖**。`@deepseek-ai/dsh-tools` 的 `defineTool` 只是"校验+包装出 `{name, description, parameters, output, execute}` 普通对象"，20 行内联等价实现即可（见 build-pkg.cjs 头部注释）。真要 import 就用 npm 发布安装，不要 link。
+**修法**：Bundle 包**零外部运行时依赖**。`@deepseek-ai/dsh-tools` 的 `defineTool` 只是"校验+包装出 `{name, description, parameters, output, execute}` 普通对象"，20 行内联等价实现即可（见 index.mjs 头部注释）。真要 import 就用 npm 发布安装，不要 link。
 
 ### 坑 2：var 只提升声明不提升赋值
 
@@ -98,18 +98,17 @@ package.json 最小模板：
 
 ## 5. 安装与验证流程
 
-```sh
-# 1. 构建（源码改动后必跑）
-node scripts/build-pkg.cjs
+> v68 起拆除了转换层（build-pkg.cjs），包内文件即源码。以下为当前流程。
 
-# 2. 语法检查
+```sh
+# 1. 改完语法检查
 node --check packages/dsh-agent-board/index.mjs
 node --check packages/dsh-agent-board/lib/client.js
 
-# 3. 安装（link: 软链，之后改源码只需重跑步骤 1，无需重装）
-dsh plugin --profile web add D:/deepseek-work/task-board-plugin/packages/dsh-agent-board
+# 2. 安装（link: 软链，之后改源码只需重启，无需重装）
+dsh plugin --profile web add <repo>/packages/dsh-agent-board
 
-# 4. 重启生效
+# 3. 重启生效
 dsh --profile web
 ```
 
