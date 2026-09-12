@@ -95,7 +95,10 @@ export function apply(ctx) {
     var fileLocks = {}
     function withLock(sid, fn) { var prev = fileLocks[sid] || Promise.resolve(); var p = prev.then(function () { return fn() }); fileLocks[sid] = p.catch(function () {}); return p }
     // 便捷：串行的 读→mutate→写。mutate(d) 返回值作为结果；mutate 返回 null/undefined 则不写
-    function mutateLocked(sid, mutate) { return withLock(sid, async function () { var d = await rt(sid); var r = await mutate(d); if (r !== null && r !== undefined) { await wt(sid, d); return r } return r }) }
+    // 写成功后异步触发一次 poolCycle（派发/回收反应快），按会话去抖避免连环触发
+    var cyclePending = {}
+    function kickCycle(sid) { if (cyclePending[sid]) return; cyclePending[sid] = true; var tm = ctx.timer; var go = function () { cyclePending[sid] = false; poolCycle(sid).catch(function () {}) }; if (tm) tm.timeout(50).then(go); else Promise.resolve().then(go) }
+    function mutateLocked(sid, mutate, skipKick) { return withLock(sid, async function () { var d = await rt(sid); var r = await mutate(d); if (r !== null && r !== undefined) { await wt(sid, d); if (!skipKick) kickCycle(sid); return r } return r }) }
     function jo() { return { schema: { type: 'object', additionalProperties: true }, render: function (a, v) { return [{ type: 'text', text: JSON.stringify(v, null, 2) }] } } }
     // 按会话找 root agent（静态插件挂 host 层后多会话共存，不能"取第一个"——会把 worker 挂到别的会话上）
     function rootForSession(sid) { var s = ctx.agents; if (!s) return undefined; var r = s.roots(); for (var i = 0; i < r.length; i++) { if (String(r[i].id) === sid) return r[i] } return undefined }
@@ -417,6 +420,7 @@ export function apply(ctx) {
       }
 
       // 阶段2（持锁）：重新读文件，孤儿回收 + claim 分配 + 池状态，一次原子写
+      // skipKick=true：poolCycle 自身写盘不再触发 kickCycle（否则 poolCycle→kick→poolCycle 无限循环）
       var workerAssignments = []
       var verifierAssignments = []
       var result = await mutateLocked(sid, function (d) {
@@ -457,7 +461,7 @@ export function apply(ctx) {
         if (typeof d.verifierModel !== 'string') d.verifierModel = '' // v69 起默认空=继承父级模型（环境无关，异构审查需在 ⚙️ 里显式配置本网关可用的模型）
         if (info.length > 0) d.dispatchInfo = info.join('; ')
         return d // 始终写（池状态刷新）
-      })
+      }, true) // skipKick：poolCycle 自写不触发 kickCycle（防无限循环）
 
       // 阶段3（锁外）：入队驱动
       workerAssignments.forEach(function (a) { enqueue(sid, a.w, { taskId: a.t.id, kind: 'work', prompt: '请完成以下任务：\n\ntaskId: ' + a.t.id + '\n任务: ' + a.t.title + '\n描述: ' + (a.t.description || '') + '\n指引: ' + (a.t.context && a.t.context.instructions || '') + (a.t.acceptance ? '\n硬性验收脚本: ' + a.t.acceptance + '\n（必须实际运行该命令并在自测情况中粘贴真实输出；未通过不得上报完成）' : '') + '\n\n完成后调用 board_report（kind=complete, taskId=' + a.t.id + '）上报；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况）。' }) })
@@ -504,7 +508,9 @@ export function apply(ctx) {
     ctx.tools.register(defineTool({ name: 'task_create', description: '创建新任务到当前会话看板。acceptance 可选：硬性验收脚本命令（如 "node --test src/x.test.js"），Worker 必须实际运行、Verifier 必须独立复跑。dependsOn 可选：依赖任务 id 数组，依赖全部完成后才会被派发。pipeline 可选：full(默认,工作+验证)/work(只做不验)/direct(不进池，主窗口直接处理)。', parameters: { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' }, priority: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] }, tags: { type: 'array', items: { type: 'string' } }, parentId: { type: 'string' }, instructions: { type: 'string' }, acceptance: { type: 'string' }, dependsOn: { type: 'array', items: { type: 'string' } }, pipeline: { type: 'string', enum: ['full', 'work', 'direct'] }, draft: { type: 'boolean', description: 'true 创建为草稿（不派发不可领取），补全信息后用 task_update publish=true 发布' } }, required: ['title'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { if (args.id && d.tasks.find(function (x) { return x.id === args.id })) return { ok: false, error: 'duplicate id: ' + args.id }; if (args.dependsOn && args.dependsOn.length) { var derr = validateDeps(d, args.id || '(pending)', args.dependsOn); if (derr) return { ok: false, error: derr } }; var now = new Date().toISOString(); var t = { id: args.id || ('task-' + Date.now().toString(36)), title: args.title, description: args.description || '', status: args.draft ? 'draft' : 'pending', priority: args.priority || 'medium', tags: args.tags || [], parentId: args.parentId || null, subtaskStrategy: null, assignMode: 'auto', assignee: null, context: { files: [], docs: [], instructions: args.instructions || '', relatedTasks: [], prerequisites: '' }, acceptance: args.acceptance || '', dependsOn: args.dependsOn || [], pipeline: args.pipeline || '', claimedBy: null, claimedAt: null, createdAt: now, resolvedAt: null, verifiedAt: null, verifiedBy: null, archivedAt: null, resolution: null, messages: [], history: [{ from: 'created', to: args.draft ? 'draft' : 'pending', timestamp: now, actor: actor, note: args.draft ? 'created as draft' : 'created' }] }; if (!t.pipeline) t.pipeline = classifyPipeline(t); t.pipelineAuto = !args.pipeline; d.tasks.push(t); return { ok: true, task: t } }) } }))
 
     // ===== RPC =====
-    handle('get-tasks', async function (args) { var sid = rpcSessionId(args); var d = await poolCycle(sid); d.sessionId = sid; var __ag = ctx.agents; d.isRoot = true; if (__ag) { var __roots = __ag.roots(); var __rids = []; for (var __i = 0; __i < __roots.length; __i++) __rids.push(String(__roots[__i].id)); d.isRoot = __rids.indexOf(sid) >= 0 } return d })
+    // get-tasks 是纯读路径（rt 只读文件）——poolCycle 由 15s 心跳 + 写入后 kickCycle 驱动，
+    // 客户端 3s 轮询不再触发池计算/写盘（之前每轮询一次就 poolCycle+写盘一次，切会话时多会话轮询挤在文件锁上）
+    handle('get-tasks', async function (args) { var sid = rpcSessionId(args); var d = await rt(sid); d.sessionId = sid; var __ag = ctx.agents; d.isRoot = true; if (__ag) { var __roots = __ag.roots(); var __rids = []; for (var __i = 0; __i < __roots.length; __i++) __rids.push(String(__roots[__i].id)); d.isRoot = __rids.indexOf(sid) >= 0 } return d })
     handle('claim-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; var err = claimCheck(d, t, actor); if (err) return { ok: false, error: err }; claimApply(d, t, actor, 'manual claim via board'); return { ok: true, task: t } }) })
     handle('resolve-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'in-progress') return { ok: false, error: 'not in-progress' }; return resolveApply(d, t, actor, args.status, args.resolution, args.resolution || args.status) }) })
     handle('verify-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'verifying') return { ok: false, error: 'not verifying' }; return verifyApply(d, t, actor, args.verdict, args.comment) }) })
@@ -728,5 +734,5 @@ export function apply(ctx) {
       },
     })
 
-    console.log('[task-board] v70 loaded (verifier model dropdown via llm.listProviders/listModels)')
+    console.log('[task-board] v71 loaded (get-tasks pure-read; poolCycle driven by heartbeat+kickCycle; layout observer debounced)')
 }

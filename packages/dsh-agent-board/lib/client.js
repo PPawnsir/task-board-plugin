@@ -78,8 +78,12 @@ function apply(ctx) {
       return { sidebar: 280, details: 0 }
     }
     function syncLayout() { var o = readLayoutOffsets(); if (o.sidebar !== state.layoutLeft || o.details !== state.layoutRight) { state.layoutLeft = o.sidebar; state.layoutRight = o.details; notify() } }
-    try { var ro = new ResizeObserver(function () { syncLayout() }); ro.observe(document.body); ctx.effect(function () { return function () { ro.disconnect() } }) } catch (_) {}
-    try { var mo = new MutationObserver(function () { syncLayout() }); mo.observe(document.body, { attributes: true, attributeFilter: ['style'], subtree: true }); ctx.effect(function () { return function () { mo.disconnect() } }) } catch (_) {}
+    // 去抖：切会话时 body 子树 style 大面积变动会触发回调风暴，300ms 合并一次
+    var layoutTimer = null
+    function syncLayoutDebounced() { if (layoutTimer) return; layoutTimer = setTimeout(function () { layoutTimer = null; syncLayout() }, 300) }
+    ctx.effect(function () { return function () { if (layoutTimer) { clearTimeout(layoutTimer); layoutTimer = null } } })
+    try { var ro = new ResizeObserver(function () { syncLayoutDebounced() }); ro.observe(document.body); ctx.effect(function () { return function () { ro.disconnect() } }) } catch (_) {}
+    try { var mo = new MutationObserver(function () { syncLayoutDebounced() }); mo.observe(document.body, { attributes: true, attributeFilter: ['style'], subtree: true }); ctx.effect(function () { return function () { mo.disconnect() } }) } catch (_) {}
     syncLayout()
     function ago(iso) { if (!iso) return ''; var ms = Date.now() - new Date(iso).getTime(); if (ms < 60000) return '刚刚'; if (ms < 3600000) return Math.floor(ms / 60000) + ' 分钟前'; if (ms < 86400000) return Math.floor(ms / 3600000) + ' 小时前'; return Math.floor(ms / 86400000) + ' 天前' }
     function fmtTime(iso) { if (!iso) return '-'; try { return new Date(iso).toLocaleString() } catch (_) { return iso } }
