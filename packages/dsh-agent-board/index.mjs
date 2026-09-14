@@ -88,7 +88,7 @@ export function apply(ctx) {
       if (/文档|调研|整理|总结|报告|指南|白皮书|readme|分析文/.test(text)) return 'work'
       return 'full'
     }
-    function seed(sid) { return { version: 10, ownerSession: sid, boardMode: 'auto', teamMode: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, verifierModel: '', poolRoster: { nextW: 1, nextV: 1, members: [] }, tasks: [] } }
+    function seed(sid) { return { version: 11, ownerSession: sid, boardMode: 'auto', teamMode: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, verifierModel: '', tasks: [] } }
     async function rt(sid) { try { var t = await fs.resolve(fileFor(sid)); var r = await fs.readText(t); var d = JSON.parse(r); if (vt(d) && d.ownerSession === sid) { teamModeCache[sid] = !!d.teamMode; return d }; return seed(sid) } catch (_) { return seed(sid) } }
     async function wt(sid, d) { var c = JSON.stringify(d, null, 2); try { var t = await fs.resolve(fileFor(sid)); await fs.writeText(t, c) } catch (e) { console.error('[task-board] write:', String(e)); throw e } }
     // 每会话一条 promise 链，串行化所有 读-改-写，消除并发写竞争
@@ -104,10 +104,6 @@ export function apply(ctx) {
     function rootForSession(sid) { var s = ctx.agents; if (!s) return undefined; var r = s.roots(); for (var i = 0; i < r.length; i++) { if (String(r[i].id) === sid) return r[i] } return undefined }
     function makeSignal() { try { return new AbortController().signal } catch (_) { return { aborted: false, addEventListener: function () {}, removeEventListener: function () {} } } }
     function makeMsg(text) { return { id: 'm' + Date.now() + Math.random().toString(36).slice(2, 6), role: 'user', content: [{ type: 'text', text: text }], source: { kind: 'user' } } }
-    // readOutput: 从尾部取最后一条含文本的 assistant/message，且 turn 必须 >= minTurn（排除 seed 与旧 turn——子 agent 会话携带主会话历史 seed）
-    function readOutput(agent, minTurn) { var evts = agent.session.events; for (var i = evts.length - 1; i >= 0; i--) { var e = evts[i]; if (e.type === 'assistant/message' && e.data && e.data.message && e.data.message.content) { if (minTurn != null && typeof e.data.turn === 'number' && e.data.turn < minTurn) continue; var c = e.data.message.content; if (typeof c === 'string') return c; if (Array.isArray(c)) { var ts = []; for (var j = 0; j < c.length; j++) { if (c[j] && c[j].type === 'text' && c[j].text) ts.push(c[j].text) } if (ts.length > 0) return ts.join('\n') } } } return '' }
-    // 当前最大 turn 号（用于 readOutput 的 minTurn 下限）
-    function maxTurn(agent) { var evts = agent.session.events; var m = -1; for (var i = evts.length - 1; i >= 0; i--) { var e = evts[i]; if (e.data && typeof e.data.turn === 'number' && e.data.turn > m) m = e.data.turn } return m }
     // parseSections: 解析 ## 分段输出为结构化字段（容错：无分段时返回空对象，调用方降级）
     function parseSections(text) {
       var out = {}
@@ -138,124 +134,154 @@ export function apply(ctx) {
     function resolveApply(d, t, sid, status, resolution, note) { var ps = t.status; if (status === 'verifying' && t.pipeline && t.pipeline !== 'full') { status = 'resolved' } t.status = status; t.resolution = resolution || null; t.resolvedAt = new Date().toISOString(); ah(t, ps, status, sid, note); var r = { ok: true, task: t }; if (status === 'verifying' && isb(t)) { var s = gsb(t.parentId, d.tasks); if (s.every(function (x) { return x.status === 'resolved' || x.id === t.id })) { var p = gpt(t, d.tasks); if (p && p.status === 'in-progress') { p.status = 'verifying'; p.resolvedAt = new Date().toISOString(); p.resolution = 'all subtasks done'; ah(p, 'in-progress', 'verifying', 'system', 'auto'); r.parentUpdated = true } } }; return r }
     function verifyApply(d, t, sid, verdict, comment) { var ps = t.status; if (verdict === 'approved') { t.status = 'resolved'; t.verifiedAt = new Date().toISOString(); t.verifiedBy = sid; ah(t, ps, 'resolved', sid, 'approved' + (comment ? ': ' + comment : '')) } else { t.status = 'in-progress'; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'in-progress', sid, 'rejected' + (comment ? ': ' + comment : '')) }; var r = { ok: true, task: t }; if (verdict === 'approved' && isb(t)) { var p = checkParentAuto(d, t); if (p) { r.parentUpdated = true } }; return r }
 
-    // ===== 生产者-消费者池（每个 agent 一个串行任务队列，消除 taskId 竞争）=====
-    // 池按会话分桶：静态插件挂 host 层是进程单例，多会话共用一个 pool 会跨会话串台
-    // （worker 的 parent 挂错会话 → 工具 resolveRoot 到别的看板 → "幽灵指派" not found）
-    var pools = {}
-    function poolFor(sid) { if (!pools[sid]) pools[sid] = { workers: {}, verifiers: {}, nextW: 1, nextV: 1 }; return pools[sid] }
-    // 模型熔断：带覆盖模型的 agent 若 init turn 即死（如 UNKNOWN_MODEL——模型在当前网关没配置），
-    // 记入坏名单，该会话后续 spawn 不再带此模型（回退父级），避免死亡循环
+    // ===== 一次性派发引擎（v74 去池化重写）=====
+    // 每个任务 spawn 一个独立一次性子代理：上下文由看板通过 prompt 全量注入（任务描述/指引/验收脚本/过程记录），
+    // 优先选择不继承父会话历史的 provider（inheritsParentContext === false），工作结束 run.result 结算后即 dispose 销毁。
+    // 无常驻池、无队列、无名册——彻底消除幽灵指派/身份错乱/spawn 死亡循环整族问题。
+    var activeRuns = {} // sid -> { taskId: { run, role, taskId, startedAt, model } }
+    var dispatchedEver = {} // sid -> { runId: true }（回执判定：区分派发执行 vs 主窗口手动）
+    function runsFor(sid) { if (!activeRuns[sid]) activeRuns[sid] = {}; return activeRuns[sid] }
+    function isDispatched(sid, id) { return !!(id && dispatchedEver[sid] && dispatchedEver[sid][id]) }
+    // 模型熔断：带覆盖模型的 run 若立即失败（如 UNKNOWN_MODEL——模型在当前网关没配置），记入坏名单回退父级
     var badModels = {}
     function modelKey(sid, model) { return sid + '|' + model }
 
-    async function spawnAgent(sid, role, num, modelOverride) {
+    function pickProvider() {
+      var subagents = ctx.subagents; if (!subagents) return null
+      var names = subagents.list(); if (!names.length) return null
+      for (var i = 0; i < names.length; i++) { try { var p = subagents.getProvider(names[i]); if (p && p.inheritsParentContext === false) return names[i] } catch (_) {} }
+      return names[0]
+    }
+
+    // 过程记录注入：驳回/裁决/干预历史随 prompt 带给一次性子代理（它没有会话记忆，全靠这次注入）
+    function histNotes(t) { return (t.history || []).filter(function (h) { return h.note && (/歧义|裁决|驳回|干预|rejected/i.test(h.note)) }).map(function (h) { return '- [' + h.timestamp + '] ' + String(h.note).slice(0, 300) }).join('\n') }
+
+    function buildWorkerPrompt(t) {
+      var notes = histNotes(t)
+      return '你是一个一次性任务执行 Worker。完成下面这个任务，完成后本会话即销毁。\n\ntaskId: ' + t.id + '\n任务: ' + t.title + '\n描述: ' + (t.description || '') + '\n指引: ' + ((t.context && t.context.instructions) || '') + (t.acceptance ? '\n硬性验收脚本: ' + t.acceptance + '\n（必须实际运行该命令并在自测情况中粘贴真实输出；未通过不得上报完成）' : '') + (notes ? '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，请务必遵循最新裁决方向）：\n' + notes : '') + '\n\n完成契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + t.id + '，summary=开发描述/changes=改动清单/selfTest=自测情况）；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况）。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate, taskId=' + t.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测。上报歧义后直接结束本轮——裁决后会有新 Worker 带着裁决答案接手。'
+    }
+    function buildVerifierPrompt(t) {
+      var notes = histNotes(t)
+      return '你是一个一次性任务审核 Verifier。审查下面这个任务的完成质量，给出结论后本会话即销毁。\n\ntaskId: ' + t.id + '\n任务: ' + t.title + '\n描述: ' + (t.description || '').slice(0, 500) + '\n完成说明: ' + (t.resolution || '(无)') + '\n交付物: ' + (t.deliverable ? ('开发描述: ' + (t.deliverable.summary || '') + '\n改动清单: ' + (t.deliverable.changes || '') + '\n自测情况: ' + (t.deliverable.selfTest || '')) : '(无)').slice(0, 1500) + (t.acceptance ? '\n硬性验收脚本: ' + t.acceptance + '\n（必须独立复跑该命令并把真实输出贴进核对项；脚本失败必须 REJECTED）' : '') + (notes ? '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，若有）：\n' + notes + '\n注意：若过程记录显示主窗口已裁决改变任务方向，以裁决后的方向为验收标准。' : '') + '\n\n结论契约（双模，工具优先）：\n1. 优先调用 board_verdict 工具（taskId=' + t.id + ', verdict=approved/rejected, summary=测试概要, checks=逐条核对证据含行号）。\n2. 工具不可用则首行 APPROVED: <结论> 或 REJECTED: <结论>，然后 ## 测试概要 / ## 核对项 分段。'
+    }
+
+    async function spawnOneShot(sid, t, role) {
       var subagents = ctx.subagents; if (!subagents) return null
       var parent = rootForSession(sid); if (!parent) { console.error('[task-board] no root agent for session ' + sid + ', skip spawn'); return null }
-      if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited for ' + sid + ', using parent model'); modelOverride = undefined }
-      var providers = subagents.list(); if (!providers.length) return null
-      var prompt = role === 'worker'
-        ? '你是一个任务执行 Worker #' + num + '。当收到任务时，阅读任务描述并完成它。\n\n重要契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete，填 summary=开发描述/changes=改动清单/selfTest=自测情况）；若工具不可用，则按分段格式文本输出（## 开发描述 / ## 改动清单 / ## 自测情况）。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate，填 question）；若工具不可用，输出以 [ESCALATE] 开头的说明。不要猜测。\n3. 任务消息中会给出 taskId，上报时原样携带。\n4. 等待接收任务分配。'
-        : '你是一个任务审核 Verifier #' + num + '。当收到审核请求时，评估任务完成质量。\n\n契约（双模，工具优先）：\n1. 优先调用 board_verdict 工具（verdict=approved/rejected，summary=测试概要，checks=逐条核对证据含行号）。\n2. 若工具不可用：首行 APPROVED: <结论> 或 REJECTED: <结论>，然后 ## 测试概要 / ## 核对项 分段。\n3. 任务消息中会给出 taskId，上报时原样携带。\n等待接收审核请求。'
-      try {
-        // #17 verifier 异构化：用不同模型审查避免同源盲点；失败回退父级模型
-        // prompt 必须是 ContentBlock[]（dsh-subagent 类型定义），裸字符串会让 LLM 序列化 content.map 崩溃（init turn 必挂）
-        var startReq = { label: role + '-' + num, prompt: [{ type: 'text', text: prompt }], parent: parent, signal: makeSignal() }
-        if (modelOverride && typeof modelOverride === 'string') startReq.agentOptions = { model: modelOverride }
-        var run
-        try { run = await subagents.start(providers[0], startReq) } catch (e) {
-          if (!startReq.agentOptions) throw e
-          console.error('[task-board] model override failed, fallback to parent model:', String(e))
-          delete startReq.agentOptions
-          run = await subagents.start(providers[0], startReq)
-        }
-        // running 初始置为 init 哨兵：init turn 未完成前 pump 不派发任务（否则 whenIdle 会提前 resolve 在 init turn 上，读到 seed 旧消息）
-        var agent = { id: String(run.id), num: num, role: role, run: run, agent: run.localAgent, busy: false, taskId: null, eventBoundary: 0, dead: false, tasksCompleted: 0, queue: [], running: { init: true }, model: (modelOverride && role === 'verifier') ? modelOverride : '' }
-        // 熔断钩子：init turn 失败且带模型覆盖 → 该模型进坏名单（UNKNOWN_MODEL 发生在首 turn 运行时，start() 的 try/catch 接不住）
-        function markDead(e) { agent.dead = true; agent.running = null; if (agent.model && agent.tasksCompleted === 0) { badModels[modelKey(sid, agent.model)] = true; console.error('[task-board] model circuited: ' + agent.model + ' (' + String(e) + '), future spawns use parent model') } }
-        run.result.then(function () { agent.eventBoundary = agent.agent.session.events.length; agent.running = null; agent.busy = false; pump(sid, agent) }).catch(markDead)
-        withTimeout(run.result, 30000, 'init-' + role + '-' + num).catch(markDead)
-        return agent
-      } catch (e) { console.error('[task-board] spawn ' + role + ' failed:', String(e)); return null }
+      var providerName = pickProvider(); if (!providerName) { console.error('[task-board] no subagent provider'); return null }
+      var modelOverride = ''
+      if (role === 'verifier') { var dd = await rt(sid); modelOverride = (typeof dd.verifierModel === 'string' && dd.verifierModel.trim()) ? dd.verifierModel.trim() : ''; if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited, using parent model'); modelOverride = '' } }
+      var req = { label: role + ':' + t.id, prompt: [{ type: 'text', text: role === 'worker' ? buildWorkerPrompt(t) : buildVerifierPrompt(t) }], parent: parent, signal: makeSignal() }
+      if (modelOverride) req.agentOptions = { model: modelOverride }
+      var run
+      try { run = await subagents.start(providerName, req) } catch (e) {
+        if (modelOverride) { console.error('[task-board] model override failed, fallback to parent model:', String(e)); delete req.agentOptions; try { run = await subagents.start(providerName, req) } catch (e2) { console.error('[task-board] spawn ' + role + ' failed:', String(e2)); return null } }
+        else { console.error('[task-board] spawn ' + role + ' failed:', String(e)); return null }
+      }
+      var rec = { run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride }
+      runsFor(sid)[t.id] = rec
+      if (!dispatchedEver[sid]) dispatchedEver[sid] = {}
+      dispatchedEver[sid][String(run.id)] = true
+      // 30min 硬超时（一次性 run 没有看门狗，挂死不能白占并发位）→ 走失败重试路径
+      withTimeout(run.result, 1800000, role + ':' + t.id).then(function (res) { settleRun(sid, rec, res, null) }).catch(function (e) { settleRun(sid, rec, null, e) })
+      return rec
     }
 
-    // enqueue: 把任务放进 agent 队列（worker: claim 已在 poolCycle 的 d 里完成；retry: 任务已是 in-progress）
-    function enqueue(sid, a, item) { a.queue.push(item); pump(sid, a) }
+    // run 结算：保证 dispose；工具通道（board_report/board_verdict）已推进状态的话文本路径跳过
+    async function settleRun(sid, rec, res, err) {
+      if (runsFor(sid)[rec.taskId] !== rec) return // 已被 terminate 等路径处理
+      delete runsFor(sid)[rec.taskId]
+      try { await rec.run.dispose() } catch (_) {}
+      var output = ''
+      if (res && res.output) { var parts = []; for (var i = 0; i < res.output.length; i++) { var b = res.output[i]; if (b && b.type === 'text' && b.text) parts.push(b.text) } output = parts.join('\n') }
+      var failed = !!err || (res && res.stopReason && res.stopReason !== 'completed')
+      var errText = err ? String(err) : (res && (res.diagnostic || res.stopReason) || '')
+      if (rec.role === 'worker') settleWorker(sid, rec, output, failed, errText)
+      else settleVerifier(sid, rec, output, failed, errText)
+    }
 
-    // pump: 串行驱动 —— 空闲且有队列则取下一个执行
-    function pump(sid, a) {
-      if (a.dead || a.running || a.queue.length === 0) return
-      var item = a.queue.shift()
-      a.running = item; a.busy = true; a.taskId = item.taskId; a.suspect = false
-      a.eventBoundary = a.agent.session.events.length
-      item.minTurn = maxTurn(a.agent) + 1 // 任务 turn 必然 > 当前最大 turn（followup 开新 turn），readOutput 据此排除 seed/旧 turn
-      item.startedAt = Date.now()
-      item.lastEventCount = a.eventBoundary
-      a.agent.followup(makeMsg(item.prompt))
-      var label = (a.role === 'worker' ? 'worker-' : 'verifier-') + a.num
-      // 看门狗：30s 间隔检查事件流增量；运行 >300s 且停滞 >60s → suspect 报警（不杀，裁决权交给主窗口/用户）
-      var tm = ctx.timer
-      var watchdog = tm ? tm.interval(function () {
-        if (a.dead || a.running !== item) return
-        var now = Date.now()
-        var cur = a.agent.session.events.length
-        if (cur > item.lastEventCount) { item.lastEventCount = cur; item.lastGrowthAt = now }
-        var elapsed = now - item.startedAt
-        var silentFor = now - (item.lastGrowthAt || item.startedAt)
-        if (!a.suspect && elapsed > 300000 && silentFor > 60000) markSuspect(sid, a, item, elapsed, silentFor)
-      }, 30000) : null
-      a.agent.whenIdle().then(function () {
-        if (watchdog) watchdog()
-        if (a.role === 'worker') onWorkerDone(sid, a, item); else onVerifierDone(sid, a, item)
-      }).catch(function (e) {
-        if (watchdog) watchdog()
-        if (a.role === 'worker') onWorkerError(sid, a, item, e); else onVerifierError(sid, a, item, e)
+    async function settleWorker(sid, rec, output, failed, errText) {
+      var result = await mutateLocked(sid, function (d) {
+        var t = d.tasks.find(function (x) { return x.id === rec.taskId })
+        if (!t) return null
+        // 工具通道已处理（board_report 已推进到 verifying/resolved 或挂了 escalation）→ 只收尾
+        if (t.status !== 'in-progress' || t.escalation) return { task: t, already: true }
+        if (failed) {
+          t.retryCount = (t.retryCount || 0) + 1
+          if (t.retryCount >= 3) { var ps = t.status; t.status = 'blocked'; ah(t, ps, 'blocked', String(rec.run.id), 'worker 失败 x' + t.retryCount + '（' + String(errText).slice(0, 120) + '），待人工介入'); return { task: t, blocked: true } }
+          var ps2 = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, ps2, 'pending', String(rec.run.id), 'worker 失败（' + String(errText).slice(0, 80) + '），重新排队 (' + t.retryCount + '/3)')
+          return { task: t, retry: true }
+        }
+        if (/\[ESCALATE\]/i.test(output || '')) {
+          t.escalation = { question: output.slice(0, 2000), at: new Date().toISOString(), by: String(rec.run.id) }
+          if (!Array.isArray(t.messages)) t.messages = []
+          t.messages.push({ kind: 'escalation', text: output.slice(0, 4000), at: t.escalation.at, by: String(rec.run.id) })
+          ah(t, 'in-progress', 'in-progress', String(rec.run.id), 'worker 上报歧义（文本通道），待主窗口裁决')
+          return { task: t, escalated: true }
+        }
+        // 文本降级路径：分段格式上报
+        var secs = parseSections(output)
+        delete t.retryCount; delete t.stuckSince
+        t.deliverable = { summary: secs.summary || output.slice(0, 600), changes: secs.changes || '', selfTest: secs.selfTest || '', at: new Date().toISOString(), by: String(rec.run.id) }
+        resolveApply(d, t, String(rec.run.id), 'verifying', output || 'Worker 完成', 'worker 文本上报完成')
+        return { task: t }
       })
+      if (!result) return
+      if (result.escalated) maybeNotify(sid, result.task)
+      if (result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved')
+      if (result.blocked) notifyTaskDone(sid, result.task, 'blocked')
+      kickCycle(sid) // 结算后立刻补派
     }
 
-    // suspect 报警：标记卡死，Team 模式通知主窗口，自动模式靠看板 UI
-    function markSuspect(sid, a, item, elapsed, silentFor) {
-      a.suspect = true
-      var label = (a.role === 'worker' ? 'worker-' : 'verifier-') + a.num
-      var mins = Math.floor(elapsed / 60000), silentMins = Math.floor(silentFor / 60000)
-      console.error('[task-board] ' + label + ' suspect on ' + item.taskId + ': running ' + mins + 'min, silent ' + silentMins + 'min')
-      mutateLocked(sid, function (d) {
-        var t = d.tasks.find(function (x) { return x.id === item.taskId })
-        if (t && (t.status === 'in-progress' || t.status === 'verifying')) {
-          t.stuckSince = new Date().toISOString()
-          ah(t, t.status, t.status, 'system', label + ' 疑似卡死：运行 ' + mins + ' 分钟，事件流停滞 ' + silentMins + ' 分钟')
+    async function settleVerifier(sid, rec, output, failed, errText) {
+      var result = await mutateLocked(sid, function (d) {
+        var t = d.tasks.find(function (x) { return x.id === rec.taskId })
+        if (!t) return null
+        if (t.status !== 'verifying' || t.escalation) return { task: t, already: true } // 工具通道已处理
+        var trimmed = (output || '').trim()
+        var vm = trimmed.match(/^[ \t>*#\-\s]*(APPROVED|REJECTED)\b/im)
+        if (failed || !vm) {
+          // 失败/空输出/无法判定：verifyRetries 计数，>=3 转人工验收（deliverable 已完成，是 verifier 故障不是任务故障）
+          if (failed && rec.model) { badModels[modelKey(sid, rec.model)] = true }
+          t.verifyRetries = (t.verifyRetries || 0) + 1
+          if (t.verifyRetries >= 3) { t.escalation = { question: 'Verifier 连续 ' + t.verifyRetries + ' 次未能给出有效结论（' + (failed ? String(errText).slice(0, 150) : '输出格式异常') + '）。交付物已完成，请人工验收：看板详情页直接通过/驳回，或 task_verify 裁决。', at: new Date().toISOString(), by: 'system' }; ah(t, 'verifying', 'verifying', 'system', 'verifier 故障，转人工验收'); return { task: t, escalated: true } }
+          ah(t, 'verifying', 'verifying', 'system', 'verifier 未给出有效结论，重新排队审查 (' + t.verifyRetries + '/3)')
+          return { task: t, retry: true }
         }
-        return { teamMode: !!d.teamMode, task: t }
-      }).then(function (r) {
-        if (r && r.teamMode) {
-          var root = rootForSession(sid)
-          if (root) { try { root.followup(makeMsg('⚠️ [任务看板] 池中 Agent 疑似卡死，请裁决：\n\n任务: ' + item.taskId + '\nAgent: ' + label + '\n已运行 ' + mins + ' 分钟，事件流停滞 ' + silentMins + ' 分钟\n\n可查看其会话后用 task_terminate 终止重派，或 task_intervene 指导，或忽略继续观察。')) } catch (_) {} }
+        var approved = vm[1].toUpperCase() === 'APPROVED'
+        var vsecs = parseSections(trimmed)
+        delete t.stuckSince; delete t.verifyRetries
+        t.verification = { verdict: approved ? 'approved' : 'rejected', summary: vsecs.verifySummary || trimmed.slice(0, 600), checks: vsecs.checks || '', at: new Date().toISOString(), by: String(rec.run.id) }
+        verifyApply(d, t, String(rec.run.id), approved ? 'approved' : 'rejected', trimmed.slice(0, 200))
+        if (!approved) {
+          t.rejectCount = (t.rejectCount || 0) + 1
+          if (t.rejectCount >= 3) { t.status = 'blocked'; ah(t, 'in-progress', 'blocked', 'system', 'verifier 驳回 x' + t.rejectCount + '，待人工裁决') }
+          else { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', '驳回重派：新 Worker 将携带驳回原因继续') }
         }
-      }).catch(function () {})
+        return { task: t, approved: approved }
+      })
+      if (!result) return
+      if (result.escalated) maybeNotify(sid, result.task)
+      if (result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved')
+      if (result.task && result.task.status === 'blocked') notifyTaskDone(sid, result.task, 'blocked')
+      kickCycle(sid)
     }
 
-    function finishTurn(sid, a) {
-      a.running = null; a.busy = false; a.taskId = null
-      a.tasksCompleted++; a.eventBoundary = a.agent.session.events.length
-      pump(sid, a) // 继续队列中的下一个
-    }
-
-    // 歧义上报聊天通知：仅 Team 模式推送到主窗口聊天流；自动模式靠看板面板 3s 轮询自动弹开（聊天通知是冗余噪音，且 followup 排队语义导致延迟到达）
+    // 歧义上报聊天通知：仅 Team 模式推送到主窗口聊天流；自动模式靠看板面板 3s 轮询自动弹开（聊天通知是冗余噪音）
     function notifyMainWindow(sid, t, question) {
       var root = rootForSession(sid)
       if (!root) return
-      try { root.followup(makeMsg('⚠️ [任务看板] Worker 上报歧义，等待裁决：\n\n任务: ' + t.title + ' (' + t.id + ')\nWorker: ' + t.claimedBy + '\n\n疑问:\n' + question.slice(0, 1500) + '\n\n请在看板详情页裁决，或直接回复指示（我会通过 resolve-escalation 转达给 Worker）。')) } catch (e) { console.error('[task-board] escalate notify failed:', String(e)) }
+      try { root.followup(makeMsg('⚠️ [任务看板] Worker 上报歧义，等待裁决：\n\n任务: ' + t.title + ' (' + t.id + ')\n\n疑问:\n' + question.slice(0, 1500) + '\n\n请在看板详情页裁决，或直接回复指示（我会通过 resolve-escalation 转达给接手的 Worker）。')) } catch (e) { console.error('[task-board] escalate notify failed:', String(e)) }
     }
-    // 从 mutateLocked 结果中读 teamMode，决定是否推聊天通知
     function maybeNotify(sid, task) { if (task && task.escalation) { rt(sid).then(function (d) { if (d.teamMode) notifyMainWindow(sid, task, task.escalation.question) }).catch(function () {}) } }
 
-    // ===== 任务回执通知（v66 引入，v72 改批量聚合）：池执行的任务在 完成/阻塞 时通知主窗口 =====
-    // 只通知池派发执行的任务（claimedBy 是池成员），主窗口自己手动处理的任务不回执（自己干的自己知道）。
+    // ===== 任务回执通知（批量聚合 + 空闲门控）：派发执行的任务在 完成/阻塞 时通知主窗口 =====
+    // 只通知派发执行的任务（isDispatched），主窗口自己手动处理的任务不回执（自己干的自己知道）。
     // 批量聚合：任务多时每任务一条 followup 会把主窗口 turn 队列打满（用户输入排队等回执处理完才刷新），
-    // 改为 45s 窗口（或满 5 条）聚合为一条摘要。
-    function isPoolMember(sid, id) { if (!id) return false; var p = poolFor(sid); return !!(p.workers[id] || p.verifiers[id]) }
+    // 改为 45s 窗口（或满 5 条）聚合为一条摘要；发送前等主窗口空闲，不打断对话。
     var receiptBuf = {}
     function notifyTaskDone(sid, t, kind) {
-      if (!t || !isPoolMember(sid, t.claimedBy)) return
+      if (!t || !isDispatched(sid, t.claimedBy)) return
       var buf = receiptBuf[sid] || (receiptBuf[sid] = { items: [], timer: null })
       var lastNote = (t.history && t.history.length) ? String(t.history[t.history.length - 1].note || '') : ''
       buf.items.push({ kind: kind, title: t.title, id: t.id, summary: (t.deliverable && t.deliverable.summary) || '', note: lastNote })
@@ -284,8 +310,6 @@ export function apply(ctx) {
       }
       lines.push('', '可用 task_list 查看全部；阻塞项可在看板拖回待办重新投放。')
       var text = lines.join('\n')
-      // v73 空闲门控：回执等主窗口当前 turn 结束再发，不再插队打断对话
-      // （之前直接 followup：任务多时回执 turn 连绵不断，用户消息排队到回执处理完才回显）
       function send() { try { root.followup(makeMsg(text)) } catch (e) { console.error('[task-board] receipt flush failed:', String(e)) } }
       if (typeof root.whenIdle === 'function') {
         var waited = withTimeout(root.whenIdle(), 300000, 'receipt-idle-wait') // 最多等 5 分钟，超时也发（不能丢回执）
@@ -293,216 +317,68 @@ export function apply(ctx) {
       } else send()
     }
 
-    function onWorkerDone(sid, w, item) {
-      var output = readOutput(w.agent, item.minTurn)
-      var escalated = /\[ESCALATE\]/i.test(output || '')
-      var secs = escalated ? {} : parseSections(output)
-      mutateLocked(sid, function (d) {
-        var t = d.tasks.find(function (x) { return x.id === item.taskId })
-        if (t && t.status === 'in-progress' && t.claimedBy === w.id) {
-          if (t.escalation) { delete t.stuckSince; return { task: t, escalated: false } } // board_report 工具已上报并通知，跳过文本路径
-          if (escalated) {
-            // 歧义上报：任务保持 in-progress，标记 escalation，不进 verifying
-            t.escalation = { question: output.slice(0, 2000), at: new Date().toISOString(), by: 'worker-' + w.num }
-            if (!Array.isArray(t.messages)) t.messages = []
-            t.messages.push({ kind: 'escalation', text: output.slice(0, 4000), at: t.escalation.at, by: 'worker-' + w.num })
-            ah(t, 'in-progress', 'in-progress', w.id, 'worker-' + w.num + ' 上报歧义，待主窗口裁决')
-            return { task: t, escalated: true }
-          }
-          delete t.escalation
-          delete t.stuckSince // 正常完成清除卡死标记
-          delete t.retryCount // v72：成功完成清零超时重试计数（负载高时网关超时是常态，不应跨任务累积成 blocked）
-          t.deliverable = { summary: secs.summary || output.slice(0, 600), changes: secs.changes || '', selfTest: secs.selfTest || '', at: new Date().toISOString(), by: 'worker-' + w.num }
-          resolveApply(d, t, w.id, 'verifying', output || 'Worker 完成', 'worker-' + w.num + (item.kind === 'retry' ? ' retry' : '') + ' completed')
-          return { task: t, escalated: false }
-        }
-        return null // 状态不符不写文件
-      }).then(function (r) {
-        if (r && r.escalated) maybeNotify(sid, r.task)
-        if (r && r.task && r.task.status === 'resolved') notifyTaskDone(sid, r.task, 'resolved') // work/direct 档直接完成
-        finishTurn(sid, w)
-      }).catch(function () { finishTurn(sid, w) })
-    }
-
-    function onWorkerError(sid, w, item, err) {
-      var isTimeout = /timeout/.test(String(err))
-      mutateLocked(sid, function (d) {
-        var t = d.tasks.find(function (x) { return x.id === item.taskId })
-        if (t && (t.status === 'in-progress' || t.status === 'blocked') && t.claimedBy === w.id) {
-          if (isTimeout) {
-            // 超时：清 claimedBy 回 pending 重试，retryCount>=3 才转 blocked 待人工
-            t.retryCount = (t.retryCount || 0) + 1
-            if (t.retryCount >= 3) { var ps = t.status; t.status = 'blocked'; ah(t, ps, 'blocked', w.id, 'worker-' + w.num + ' timeout x' + t.retryCount + '，待人工介入') }
-            else { var ps2 = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, ps2, 'pending', w.id, 'worker-' + w.num + ' timeout，重新排队 (' + t.retryCount + '/3)') }
-          } else { resolveApply(d, t, w.id, 'blocked', String(err), 'worker-' + w.num + ' error') }
-          return t
-        }
-        return null
-      }).then(function (t) { if (t && t.status === 'blocked') notifyTaskDone(sid, t, 'blocked') }).catch(function () {})
-      w.running = null; w.busy = false; w.taskId = null; w.dead = true
-    }
-
-    function onVerifierDone(sid, v, item) {
-      var output = readOutput(v.agent, item.minTurn)
-      var trimmed = (output || '').trim()
-      if (!trimmed) {
-        // 空输出 = 读取失败（不是驳回）：任务保持 verifying，verifyRetries 计数；v73 起 ≥3 次转人工验收（escalation）而非 blocked——deliverable 已完成，是 verifier 故障，不该误标阻塞
-        console.error('[task-board] verifier-' + v.num + ' empty output on ' + item.taskId)
-        mutateLocked(sid, function (d) {
-          var t = d.tasks.find(function (x) { return x.id === item.taskId })
-          if (t && t.status === 'verifying') {
-            t.verifyRetries = (t.verifyRetries || 0) + 1
-            if (t.verifyRetries >= 3 && !t.escalation) { t.escalation = { question: 'Verifier 连续 ' + t.verifyRetries + ' 次无法产出有效结论（空输出/格式异常），可能是 verifier 模型故障。交付物已完成，请人工验收：看板详情页直接通过/驳回，或 task_verify 裁决。', at: new Date().toISOString(), by: 'system' }; ah(t, 'verifying', 'verifying', 'system', 'verifier 故障，转人工验收') }
-            else if (!t.escalation) { ah(t, 'verifying', 'verifying', 'system', 'verifier-' + v.num + ' 输出读取失败，重新排队审查 (' + t.verifyRetries + '/3)') }
-            return t
-          }
-          return null
-        }).then(function (t) { if (t && t.escalation) maybeNotify(sid, t); finishTurn(sid, v) }).catch(function () { finishTurn(sid, v) })
-        return
-      }
-      // verdict 解析：行首锚定 APPROVED/REJECTED 标记（输出中提到历史驳回字眼不应误判）。null = 无法判定 → 走重试而非驳回
-      var vm = trimmed.match(/^[ \t>*#\-\s]*(APPROVED|REJECTED)\b/im)
-      if (!vm) {
-        console.error('[task-board] verifier-' + v.num + ' unclear verdict on ' + item.taskId + ': ' + trimmed.slice(0, 120))
-        mutateLocked(sid, function (d) {
-          var t = d.tasks.find(function (x) { return x.id === item.taskId })
-          if (t && t.status === 'verifying') {
-            t.verifyRetries = (t.verifyRetries || 0) + 1
-            if (t.verifyRetries >= 3 && !t.escalation) { t.escalation = { question: 'Verifier 连续 ' + t.verifyRetries + ' 次无法判定格式（非 APPROVED/REJECTED 输出），可能是 verifier 模型故障。交付物已完成，请人工验收：看板详情页直接通过/驳回，或 task_verify 裁决。', at: new Date().toISOString(), by: 'system' }; ah(t, 'verifying', 'verifying', 'system', 'verifier 判定故障，转人工验收') }
-            else if (!t.escalation) { ah(t, 'verifying', 'verifying', 'system', 'verifier-' + v.num + ' 判定格式不明，重新排队审查 (' + t.verifyRetries + '/3)') }
-            return t
-          }
-          return null
-        }).then(function (t) { if (t && t.escalation) maybeNotify(sid, t); finishTurn(sid, v) }).catch(function () { finishTurn(sid, v) })
-        return
-      }
-      var approved = vm[1].toUpperCase() === 'APPROVED'
-      var vsecs = parseSections(trimmed)
-      mutateLocked(sid, function (d) {
-        var t = d.tasks.find(function (x) { return x.id === item.taskId })
-        if (t && t.status === 'verifying') {
-          delete t.stuckSince // 审查正常产出，清除卡死标记
-          delete t.verifyRetries // v72：成功解析后清零读取失败计数（偶发失败不应跨任务累积成 blocked）
-          t.verification = { verdict: approved ? 'approved' : 'rejected', summary: vsecs.verifySummary || trimmed.slice(0, 600), checks: vsecs.checks || '', at: new Date().toISOString(), by: 'verifier-' + v.num }
-          verifyApply(d, t, 'verifier-' + v.num, approved ? 'approved' : 'rejected', trimmed.slice(0, 200))
-          if (!approved) {
-            // 真实驳回预算：3 次后转 blocked 待人工裁决（不再自动重试）
-            t.rejectCount = (t.rejectCount || 0) + 1
-            if (t.rejectCount >= 3) { t.status = 'blocked'; ah(t, 'in-progress', 'blocked', 'system', 'verifier 驳回 x' + t.rejectCount + '，待人工裁决') }
-          }
-          return t
-        }
-        return null
-      }).then(function (t) {
-        // 回执：approved→resolved 通知完成；blocked（驳回超预算）通知阻塞
-        if (t && t.status === 'resolved') notifyTaskDone(sid, t, 'resolved')
-        if (t && t.status === 'blocked') notifyTaskDone(sid, t, 'blocked')
-        // 驳回且未超预算 → 修正任务入队原 worker（锁外 enqueue，避免嵌套锁）
-        if (t && !approved && t.claimedBy && (t.rejectCount || 0) < 3) {
-          var w = poolFor(sid).workers[t.claimedBy]
-          if (w && !w.dead) { enqueue(sid, w, { taskId: t.id, kind: 'retry', prompt: '你之前提交的任务被驳回了。\n\ntaskId: ' + t.id + '\n任务: ' + t.title + '\n驳回原因: ' + trimmed.slice(0, 300) + '\n\n请修正后重新调用 board_report（kind=complete, taskId=' + t.id + '）上报；工具不可用则按分段格式输出。' }) }
-        }
-        finishTurn(sid, v)
-      }).catch(function () { finishTurn(sid, v) })
-    }
-
-    function onVerifierError(sid, v, item, err) {
-      // verifier 超时/错误：任务保持 verifying，等下一个 verifier 审查（不直接驳回）
-      console.error('[task-board] verifier-' + v.num + ' error on ' + item.taskId + ':', String(err))
-      v.running = null; v.busy = false; v.taskId = null; v.dead = true
-    }
-
+    // ===== 派发周期（15s 心跳 + 写入后 kickCycle 触发）=====
     async function poolCycle(sid) {
       var info = []
-
-      // 阶段0（无锁）：清理死亡 agent
-      Object.keys(poolFor(sid).workers).forEach(function (id) { if (poolFor(sid).workers[id].dead) { try { poolFor(sid).workers[id].run.dispose() } catch (_) {} delete poolFor(sid).workers[id] } })
-      Object.keys(poolFor(sid).verifiers).forEach(function (id) { if (poolFor(sid).verifiers[id].dead) { try { poolFor(sid).verifiers[id].run.dispose() } catch (_) {} delete poolFor(sid).verifiers[id] } })
-
-      // 阶段1（无锁）：快照读，决定伸缩目标；spawn 是慢操作，不能持锁
+      var runs = runsFor(sid)
       var snap = await rt(sid)
-      // #7 名册恢复（必须在 spawn 前）：插件重启后编号计数从文件续上
-      if (snap.poolRoster && typeof snap.poolRoster === 'object') { poolFor(sid).nextW = Math.max(poolFor(sid).nextW, snap.poolRoster.nextW || 1); poolFor(sid).nextV = Math.max(poolFor(sid).nextV, snap.poolRoster.nextV || 1) }
-      // 空闲快进：无活跃任务且池为空 → 不写盘直接返回（心跳每 15s 跑一次，不能每次都写文件）
+      var activeW = 0, activeV = 0
+      Object.keys(runs).forEach(function (k) { if (runs[k].role === 'worker') activeW++; else activeV++ })
+      // 空闲快进：无活跃任务且无活跃 run → 不写盘直接返回（心跳每 15s 跑一次，不能每次都写文件）
       var hasActive = snap.tasks.some(function (t) { return t.status === 'pending' || t.status === 'verifying' || t.status === 'in-progress' })
-      if (!hasActive && Object.keys(poolFor(sid).workers).length === 0 && Object.keys(poolFor(sid).verifiers).length === 0) { snap.poolStatus = { workers: [], verifiers: [] }; return snap }
+      if (!hasActive && activeW + activeV === 0) { snap.poolStatus = { workers: [], verifiers: [] }; return snap }
       var c = cfg(snap)
-      var snapPending = snap.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && t.assignMode !== 'manual' })
-      var snapVerifying = snap.tasks.filter(function (t) { return t.status === 'verifying' })
       var isAuto = (snap.boardMode || 'auto') === 'auto'
-      if (isAuto) {
-        // suspect Agent 不占扩缩容名额（池自动补位，卡死的由人裁决处置）
-        var activeW = Object.values(poolFor(sid).workers).filter(function (w) { return !w.suspect }).length
-        var activeV = Object.values(poolFor(sid).verifiers).filter(function (v) { return !v.suspect }).length
-        var targetW = Math.max(c.minWorkers, Math.min(c.maxWorkers, Math.max(Math.ceil(snapPending.length / 2), snapPending.length > 0 ? 1 : 0)))
-        while (activeW < targetW) { var w = await spawnAgent(sid, 'worker', poolFor(sid).nextW++); if (!w) break; poolFor(sid).workers[w.id] = w; activeW++; info.push('spawn worker-' + w.num) }
-        if (activeW > targetW && snapPending.length === 0) { var idle = Object.values(poolFor(sid).workers).filter(function (w) { return !w.busy }); var excess = activeW - targetW; for (var i = 0; i < Math.min(excess, idle.length); i++) { try { idle[i].run.dispose() } catch (_) {} delete poolFor(sid).workers[idle[i].id]; info.push('dispose worker-' + idle[i].num) } }
-        var targetV = Math.max(c.minVerifiers, Math.min(c.maxVerifiers, snapVerifying.length))
-        var vModel = (typeof snap.verifierModel === 'string' && snap.verifierModel.trim()) ? snap.verifierModel.trim() : ''
-        while (activeV < targetV) { var v = await spawnAgent(sid, 'verifier', poolFor(sid).nextV++, vModel || undefined); if (!v) break; poolFor(sid).verifiers[v.id] = v; activeV++; info.push('spawn verifier-' + v.num + (v.model ? '(' + v.model + ')' : '')) }
-        if (activeV > targetV && snapVerifying.length === 0) { var idleV = Object.values(poolFor(sid).verifiers).filter(function (v) { return !v.busy }); var excessV = activeV - targetV; for (var j = 0; j < Math.min(excessV, idleV.length); j++) { try { idleV[j].run.dispose() } catch (_) {} delete poolFor(sid).verifiers[idleV[j].id]; info.push('dispose verifier-' + idleV[j].num) } }
-      }
 
-      // 阶段2（持锁）：重新读文件，孤儿回收 + claim 分配 + 池状态，一次原子写
-      // skipKick=true：poolCycle 自身写盘不再触发 kickCycle（否则 poolCycle→kick→poolCycle 无限循环）
-      var workerAssignments = []
-      var verifierAssignments = []
+      // 持锁：孤儿回收 + 占位 claim（防并发 cycle 重复派发）+ 池状态快照，一次原子写
+      var toSpawn = []
       var result = await mutateLocked(sid, function (d) {
-        var cc = cfg(d)
-        if ((d.boardMode || 'auto') === 'auto') {
-          // 孤儿回收：in-progress 且 claimedBy 不在当前池中、超过 2 分钟 → 回收为 pending
-          var poolIds = Object.keys(poolFor(sid).workers).concat(Object.keys(poolFor(sid).verifiers))
-          var nowMs = Date.now()
+        if (isAuto) {
+          var now = Date.now()
+          // 孤儿回收：in-progress 且 claimedBy 非主会话、无活跃 run、无 escalation、超 2 分钟 → 回 pending
           d.tasks.forEach(function (t) {
-            if (t.status === 'in-progress' && t.claimedBy && t.claimedBy !== sid && poolIds.indexOf(t.claimedBy) < 0) {
-              var age = nowMs - new Date(t.claimedAt || 0).getTime()
-              if (age > 120000) { ah(t, 'in-progress', 'pending', 'system', 'orphan recovered (worker gone)'); t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; info.push('recover orphan ' + t.id) }
+            if (t.status === 'in-progress' && t.claimedBy && t.claimedBy !== d.ownerSession && !runs[t.id] && !t.escalation) {
+              var age = now - new Date(t.claimedAt || 0).getTime()
+              if (age > 120000) { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', '执行 run 已结束/丢失，回收重新排队'); info.push('reclaim ' + t.id) }
             }
           })
-          var prioRank = { critical: 4, high: 3, medium: 2, low: 1 }
-          // #18 依赖永久阻断：依赖被取消 → 依赖方转 blocked 待人工裁决（只标一次）
-          d.tasks.forEach(function (t) {
-            if (t.status === 'pending' && depsCancelled(d, t)) { t.status = 'blocked'; ah(t, 'pending', 'blocked', 'system', '依赖任务已取消，永远无法满足'); info.push('dep-blocked ' + t.id) }
-          })
-          // #18+#19 派发门槛：依赖全满足 且 非 direct 档（direct 由主窗口直接处理，不进池）
-          var pendingTasks = d.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && t.assignMode !== 'manual' && t.pipeline !== 'direct' && depsSatisfied(d, t) })
-            .sort(function (a, b) { var p = (prioRank[b.priority] || 2) - (prioRank[a.priority] || 2); return p !== 0 ? p : (a.createdAt || '').localeCompare(b.createdAt || '') }) // #5 优先级调度
-          // v72 防止同一 verifying 任务被多个 verifier 并行审查：两个结论赛跑，reject 计数双倍累积 → 莫名 blocked
-          var verifierBusyTaskIds = {}
-          Object.values(poolFor(sid).verifiers).forEach(function (v) { if (v.busy && v.taskId) verifierBusyTaskIds[v.taskId] = true })
-          var verifyingTasks = d.tasks.filter(function (t) { return t.status === 'verifying' && (!t.pipeline || t.pipeline === 'full') && !verifierBusyTaskIds[t.id] && !t.escalation }) // #19 只有 full 档才分配 verifier；v72 排除忙中 verifier 任务（防重派双计数）；v73 排除已升级人工验收的（不再自动派审）
-          var idleW = Object.values(poolFor(sid).workers).filter(function (w) { return !w.busy && !w.dead })
-          for (var k = 0; k < Math.min(idleW.length, pendingTasks.length); k++) { var wk = idleW[k], tk = pendingTasks[k]; wk.busy = true; wk.taskId = tk.id; claimApply(d, tk, wk.id, 'pool-worker-' + wk.num); workerAssignments.push({ w: wk, t: tk }); info.push('assign ' + tk.id + ' → worker-' + wk.num) }
-          var idleV2 = Object.values(poolFor(sid).verifiers).filter(function (v) { return !v.busy && !v.dead })
-          for (var l = 0; l < Math.min(idleV2.length, verifyingTasks.length); l++) { var vf = idleV2[l], tv = verifyingTasks[l]; vf.busy = true; vf.taskId = tv.id; verifierAssignments.push({ v: vf, t: tv }); info.push('verify ' + tv.id + ' → verifier-' + vf.num) }
+          var capW = Math.max(0, c.maxWorkers - activeW)
+          if (capW > 0) {
+            var pendings = d.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && t.assignMode !== 'manual' && t.pipeline !== 'direct' && depsSatisfied(d, t) && !t.escalation })
+              .sort(function (a, b) { var p = (prioRank[b.priority] || 2) - (prioRank[a.priority] || 2); return p !== 0 ? p : (a.createdAt || '').localeCompare(b.createdAt || '') })
+            for (var i = 0; i < Math.min(capW, pendings.length); i++) { claimApply(d, pendings[i], 'spawn-pending', 'dispatch'); toSpawn.push({ role: 'worker', t: pendings[i] }); info.push('dispatch ' + pendings[i].id) }
+          }
+          var capV = Math.max(0, c.maxVerifiers - activeV)
+          if (capV > 0) {
+            var verifs = d.tasks.filter(function (t) { return t.status === 'verifying' && (!t.pipeline || t.pipeline === 'full') && !t.escalation && !runs[t.id] })
+            for (var j = 0; j < Math.min(capV, verifs.length); j++) { toSpawn.push({ role: 'verifier', t: verifs[j] }); info.push('verify ' + verifs[j].id) }
+          }
         }
-        d.poolStatus = { workers: Object.values(poolFor(sid).workers).map(function (w) { return { id: w.id, num: w.num, busy: w.busy, taskId: w.taskId, done: w.tasksCompleted, queueLen: w.queue.length, suspect: !!w.suspect } }), verifiers: Object.values(poolFor(sid).verifiers).map(function (v) { return { id: v.id, num: v.num, busy: v.busy, taskId: v.taskId, done: v.tasksCompleted, queueLen: v.queue.length, suspect: !!v.suspect, model: v.model || '' } }) }
-        // #7 池名册持久化：成员 done 累计随文件落盘（计数恢复已在阶段1完成）
-        var roster = d.poolRoster && typeof d.poolRoster === 'object' ? d.poolRoster : { nextW: 1, nextV: 1, members: [] }
-        var memberMap = {}
-        ;(roster.members || []).forEach(function (m) { memberMap[m.role + '-' + m.num] = m })
-        d.poolStatus.workers.forEach(function (w) { var k = 'worker-' + w.num; var prev = memberMap[k]; memberMap[k] = { role: 'worker', num: w.num, done: Math.max(w.done, prev ? prev.done || 0 : 0), lastId: w.id, lastSeen: new Date().toISOString() } })
-        d.poolStatus.verifiers.forEach(function (v) { var k = 'verifier-' + v.num; var prev = memberMap[k]; memberMap[k] = { role: 'verifier', num: v.num, done: Math.max(v.done, prev ? prev.done || 0 : 0), lastId: v.id, lastSeen: new Date().toISOString() } })
-        d.poolRoster = { nextW: poolFor(sid).nextW, nextV: poolFor(sid).nextV, members: Object.values(memberMap) }
-        d.minWorkers = cc.minWorkers; d.maxWorkers = cc.maxWorkers; d.minVerifiers = cc.minVerifiers; d.maxVerifiers = cc.maxVerifiers
-        if (typeof d.verifierModel !== 'string') d.verifierModel = '' // v69 起默认空=继承父级模型（环境无关，异构审查需在 ⚙️ 里显式配置本网关可用的模型）
+        // UI 池状态：来自活跃 run（一次性模型：没有成员名册，只有在跑的任务）
+        d.poolStatus = { workers: [], verifiers: [] }
+        Object.keys(runs).forEach(function (k) { var rc = runs[k]; d.poolStatus[rc.role === 'worker' ? 'workers' : 'verifiers'].push({ id: k, num: '-', busy: true, taskId: rc.taskId, runId: String(rc.run.id), done: 0, queueLen: 0, suspect: false, model: rc.model || '' }) })
         if (info.length > 0) d.dispatchInfo = info.join('; ')
-        return d // 始终写（池状态刷新）
+        return d
       }, true) // skipKick：poolCycle 自写不触发 kickCycle（防无限循环）
 
-      // 阶段3（锁外）：入队驱动
-      workerAssignments.forEach(function (a) { enqueue(sid, a.w, { taskId: a.t.id, kind: 'work', prompt: '请完成以下任务：\n\ntaskId: ' + a.t.id + '\n任务: ' + a.t.title + '\n描述: ' + (a.t.description || '') + '\n指引: ' + (a.t.context && a.t.context.instructions || '') + (a.t.acceptance ? '\n硬性验收脚本: ' + a.t.acceptance + '\n（必须实际运行该命令并在自测情况中粘贴真实输出；未通过不得上报完成）' : '') + '\n\n完成后调用 board_report（kind=complete, taskId=' + a.t.id + '）上报；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况）。' }) })
-      // verify prompt 携带 上报/裁决/驳回 历史，让 verifier 感知歧义已被主窗口处理（否则会把"按裁决产出"误判为"绕过任务"）
-      verifierAssignments.forEach(function (a) {
-        var histNotes = (a.t.history || []).filter(function (h) { return h.note && (/歧义|裁决|驳回|干预|rejected/i.test(h.note)) }).map(function (h) { return '- [' + h.timestamp + '] ' + h.note.slice(0, 300) }).join('\n')
-        enqueue(sid, a.v, { taskId: a.t.id, kind: 'verify', prompt: '请审查以下任务完成质量：\n\ntaskId: ' + a.t.id + '\n任务: ' + a.t.title + '\n描述: ' + (a.t.description || '').slice(0, 500) + '\n完成说明: ' + (a.t.resolution || '(无)') + (a.t.acceptance ? '\n硬性验收脚本: ' + a.t.acceptance + '\n（必须独立复跑该命令并把真实输出贴进核对项；脚本失败必须 REJECTED）' : '') + (histNotes ? '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，若有）：\n' + histNotes + '\n\n注意：若过程记录显示主窗口已裁决改变任务方向，请以裁决后的方向为验收标准。' : '') + '\n\n完成后调用 board_verdict（taskId=' + a.t.id + '）提交结论；工具不可用则首行 APPROVED:/REJECTED: + ## 测试概要 / ## 核对项 分段输出。' })
-      })
+      // 锁外 spawn（慢操作）；占位 claim 已保证不会被别的 cycle 重复派发
+      for (var k = 0; k < toSpawn.length; k++) {
+        var sp = toSpawn[k]
+        var rec = await spawnOneShot(sid, sp.t, sp.role)
+        if (rec) {
+          // claim 占位换成真实 run id
+          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t) { if (sp.role === 'worker' && t.claimedBy === 'spawn-pending') t.claimedBy = String(rec.run.id) }; return t }, true)
+        } else if (sp.role === 'worker') {
+          // spawn 失败 → 回 pending（verifier spawn 失败无需处理，下轮 cycle 会重试）
+          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t && t.status === 'in-progress' && t.claimedBy === 'spawn-pending') { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', 'spawn 失败，回收重新排队') }; return t }, true)
+        }
+      }
       return result
     }
 
-    // 插件停止时清理池
-    ctx.effect(function () { return function () { Object.keys(pools).forEach(function (psid) { var pp = pools[psid]; Object.values(pp.workers).forEach(function (w) { try { w.run.dispose() } catch (_) {} }); Object.values(pp.verifiers).forEach(function (v) { try { v.run.dispose() } catch (_) {} }) }); pools = {} } })
-    // Host 侧调度心跳：每 15s 对所有已知会话跑 poolCycle（客户端轮询只是触发器之一，面板关闭/后台节流时池照常运转）
+    // 插件停止时清理所有活跃 run
+    ctx.effect(function () { return function () { Object.keys(activeRuns).forEach(function (psid) { var rr = activeRuns[psid]; Object.keys(rr).forEach(function (k) { try { rr[k].run.dispose() } catch (_) {} }) }); activeRuns = {} } })
+    // Host 侧调度心跳：每 15s 对所有已知会话跑 poolCycle（客户端轮询只是触发器之一，面板关闭/后台节流时照常运转）
     ;(function () { var tm = ctx.timer; if (!tm) return; var disposeTick = tm.interval(function () { Object.keys(knownSessions).forEach(function (sid) { poolCycle(sid).catch(function () {}) }) }, 15000); ctx.effect(function () { return disposeTick }) })()
 
     // ===== Team 模式提示词引导（v65）：teamMode 开启时往主窗口 agent 的 system prompt 注入看板派发引导 =====
@@ -545,7 +421,8 @@ export function apply(ctx) {
     handle('update-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (args.title !== undefined) t.title = args.title; if (args.description !== undefined) t.description = args.description; if (args.priority !== undefined) t.priority = args.priority; if (args.assignMode !== undefined) t.assignMode = args.assignMode; if (args.assignee !== undefined) t.assignee = args.assignee || null; if (args.dependsOn !== undefined) { var derr = validateDeps(d, t.id, args.dependsOn); if (derr) return { ok: false, error: derr }; t.dependsOn = args.dependsOn } if (args.pipeline !== undefined) { t.pipeline = args.pipeline; t.pipelineAuto = false } if (args.publish) { if (t.status !== 'draft') return { ok: false, error: 'not a draft' }; t.status = 'pending'; ah(t, 'draft', 'pending', actor, 'published') } if (args.resetToPending) { var ps = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'pending', actor, 'reset to pending after edit') }; return { ok: true, task: t } }) })
     handle('set-board-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.boardMode = args.mode === 'manual' ? 'manual' : 'auto'; return { ok: true, boardMode: d.boardMode } }) })
     handle('set-team-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.teamMode = !!args.enabled; return { ok: true, teamMode: d.teamMode } }) })
-    // 裁决回流：用户/主 Agent 裁决后，答案入队原 Worker（同一 Worker 保有上下文）
+    // 裁决回流（v74 一次性模型）：原 Worker 已结束，答案写入 history 后任务回 pending，
+    // 下个派发周期 spawn 新 Worker，裁决内容随 prompt 注入（histNotes 匹配"裁决"）
     async function doResolveEscalation(sid, actor, taskId, answer) {
       var result = await mutateLocked(sid, function (d) {
         var t = d.tasks.find(function (x) { return x.id === taskId })
@@ -554,67 +431,41 @@ export function apply(ctx) {
         delete t.escalation
         if (!Array.isArray(t.messages)) t.messages = []
         t.messages.push({ kind: 'arbitration', text: answer || '', at: new Date().toISOString(), by: actor })
-        ah(t, 'in-progress', 'in-progress', actor, '主窗口裁决: ' + (answer || '').slice(0, 200))
+        ah(t, t.status, t.status, actor, '主窗口裁决: ' + (answer || '').slice(0, 200))
+        // in-progress 的歧义任务：回 pending 重派（新 Worker 带裁决上下文）；verifying 的 verifier 故障升级：保持待审，下轮派新 verifier
+        if (t.status === 'in-progress') { var ps = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, ps, 'pending', 'system', '带裁决重新排队') }
         return { ok: true, task: t, answer: answer || '' }
       })
-      if (result && result.ok) {
-        var w = result.task.claimedBy && poolFor(sid).workers[result.task.claimedBy]
-        if (w && !w.dead) {
-          enqueue(sid, w, { taskId: result.task.id, kind: 'arbitrated', prompt: '你在任务 "' + result.task.title + '" (taskId: ' + result.task.id + ') 中上报了疑问，主窗口已裁决：\n\n' + result.answer + '\n\n请按裁决继续完成，然后调用 board_report（kind=complete, taskId=' + result.task.id + '）上报；工具不可用则按分段格式输出。' })
-        } else {
-          // 原 worker 不在：回 pending 让池重新分配（裁决内容已入 history）
-          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === taskId }); if (t && t.status === 'in-progress') { var ps = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, ps, 'pending', 'system', '原 worker 已释放，带裁决重新排队') }; return t })
-        }
-      }
       return result
     }
-    // 高优介入：消息 unshift 到目标 Agent 队首，当前 turn 结束后优先处理
+    // 高优介入（v74）：有活跃 run 则直接 followup 进其会话；无则只记录 history（下次派发随 prompt 注入）
     async function doIntervene(sid, actor, taskId, msg) {
       if (!(msg || '').trim()) return { ok: false, error: 'message required' }
-      var target = null
-      Object.values(poolFor(sid).workers).forEach(function (w) { if (w.taskId === taskId && !w.dead) target = w })
-      if (!target) Object.values(poolFor(sid).verifiers).forEach(function (v) { if (v.taskId === taskId && !v.dead) target = v })
-      if (!target) {
-        var d = await rt(sid)
-        var t = d.tasks.find(function (x) { return x.id === taskId })
-        if (t && t.claimedBy && poolFor(sid).workers[t.claimedBy] && !poolFor(sid).workers[t.claimedBy].dead) target = poolFor(sid).workers[t.claimedBy]
+      var rec = runsFor(sid)[taskId]
+      var delivered = false
+      if (rec && rec.run && rec.run.localAgent) {
+        try { rec.run.localAgent.followup(makeMsg('[高优先级干预] 来自主窗口/用户的指令：\n\n' + msg + '\n\n请优先响应此指令，然后继续当前任务。')); delivered = true } catch (_) {}
       }
-      if (!target) return { ok: false, error: 'no live agent for task' }
-      target.queue.unshift({ taskId: taskId, kind: 'intervene', prompt: '[高优先级干预] 来自主窗口/用户的指令：\n\n' + msg + '\n\n请优先响应此指令，然后继续当前任务。' })
-      pump(sid, target)
-      await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === taskId }); if (t) { if (!Array.isArray(t.messages)) t.messages = []; t.messages.push({ kind: 'intervention', text: msg, at: new Date().toISOString(), by: actor }); ah(t, t.status, t.status, actor, '高优介入: ' + msg.slice(0, 200)) }; return t })
-      return { ok: true, agent: target.id, queued: true }
+      await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === taskId }); if (t) { if (!Array.isArray(t.messages)) t.messages = []; t.messages.push({ kind: 'intervention', text: msg, at: new Date().toISOString(), by: actor }); ah(t, t.status, t.status, actor, '高优干预: ' + msg.slice(0, 200) + (delivered ? '' : '（无活跃 run，随下次派发注入）')) }; return t })
+      return { ok: true, delivered: delivered }
     }
-    // 终止执行某任务的池中 Agent：dispose 并回 pending（verifying 则保持待审，由新 verifier 接手）
+    // 终止执行某任务的 run：dispose 并回 pending（verifying 则保持待审，由新 verifier 接手）
     async function doTerminate(sid, actor, taskId) {
-      var target = null, role = null
-      Object.values(poolFor(sid).workers).forEach(function (w) { if (w.taskId === taskId && !w.dead) { target = w; role = 'worker' } })
-      if (!target) Object.values(poolFor(sid).verifiers).forEach(function (v) { if (v.taskId === taskId && !v.dead) { target = v; role = 'verifier' } })
-      if (!target) {
-        var d = await rt(sid)
-        var t = d.tasks.find(function (x) { return x.id === taskId })
-        if (t && t.claimedBy && poolFor(sid).workers[t.claimedBy] && !poolFor(sid).workers[t.claimedBy].dead) { target = poolFor(sid).workers[t.claimedBy]; role = 'worker' }
-      }
-      if (!target) return { ok: false, error: 'no live agent for task' }
-      target.dead = true
-      try { target.run.dispose() } catch (_) {}
-      var label = role + '-' + target.num
+      var rec = runsFor(sid)[taskId]
+      var label = 'no-active-run'
+      if (rec) { delete runsFor(sid)[taskId]; label = rec.role + ':' + taskId; try { await rec.run.dispose() } catch (_) {} }
       await mutateLocked(sid, function (d) {
         var t = d.tasks.find(function (x) { return x.id === taskId })
         if (!t) return null
         delete t.stuckSince
-        if (t.status === 'in-progress') { var ps = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, ps, 'pending', actor, '手动终止 ' + label + '，任务重新排队') }
-        else if (t.status === 'verifying') { ah(t, 'verifying', 'verifying', actor, '手动终止 ' + label + '，等待新 verifier 接手') }
+        if (t.status === 'in-progress') { var ps = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, ps, 'pending', actor, '手动终止，任务重新排队') }
+        else if (t.status === 'verifying') { ah(t, 'verifying', 'verifying', actor, '手动终止审查，等待新 verifier 接手') }
         return t
       })
       return { ok: true, terminated: label }
     }
-    // 继续等待：清除卡死标记，重置该 agent 的计时
+    // 继续等待：清除卡死标记
     async function doDismiss(sid, actor, taskId) {
-      var target = null
-      Object.values(poolFor(sid).workers).forEach(function (w) { if (w.taskId === taskId && !w.dead) target = w })
-      if (!target) Object.values(poolFor(sid).verifiers).forEach(function (v) { if (v.taskId === taskId && !v.dead) target = v })
-      if (target) { target.suspect = false; if (target.running) { target.running.startedAt = Date.now(); target.running.lastGrowthAt = Date.now() } }
       await mutateLocked(sid, function (d) {
         var t = d.tasks.find(function (x) { return x.id === taskId })
         if (t) { delete t.stuckSince; ah(t, t.status, t.status, actor, '清除卡死标记，继续观察') }
@@ -674,9 +525,10 @@ export function apply(ctx) {
         if (result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved')
         if (result.task.status === 'blocked') notifyTaskDone(sid, result.task, 'blocked')
       }
-      if (result && result.ok && !approved) {
-        var t = result.task
-        if (t.claimedBy && (t.rejectCount || 0) < 3) { var w = poolFor(sid).workers[t.claimedBy]; if (w && !w.dead) { enqueue(sid, w, { taskId: t.id, kind: 'retry', prompt: '你之前提交的任务被驳回了。\n\n任务: ' + t.title + '\n驳回原因: ' + ((args.summary || '') + ' ' + (args.checks || '')).slice(0, 300) + '\n\n请修正后重新调用 board_report 上报。' }) } }
+      if (result && result.ok && !approved && result.task) {
+        // v74 一次性模型：原 Worker 已销毁，驳回任务回 pending 重派新 Worker（驳回原因在 history，随 prompt 注入）
+        var bt = result.task
+        if ((bt.rejectCount || 0) < 3) { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === bt.id }); if (t2 && t2.status === 'in-progress') { t2.status = 'pending'; t2.claimedBy = null; t2.claimedAt = null; ah(t2, 'in-progress', 'pending', 'system', '驳回重派：新 Worker 将携带驳回原因继续') }; return t2 }) }
       }
       return result
     } }))
@@ -764,5 +616,5 @@ export function apply(ctx) {
       },
     })
 
-    console.log('[task-board] v73 loaded (receipts idle-gated via whenIdle; verifier failure escalates to human review instead of false blocked)')
+    console.log('[task-board] v74 loaded (pool removed: one-shot dispatch, context injected per task, dispose on settle)')
 }

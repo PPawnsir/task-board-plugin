@@ -202,10 +202,10 @@ function apply(ctx) {
       return React.createElement('span', { ref: ref, style: { position: 'relative', display: 'inline-flex' } },
         React.createElement('button', { onClick: function () { setOpen(!open) }, title: '池配置', style: { fontSize: 12, padding: '3px 8px', border: '1px solid ' + (open ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: open ? C.nested : 'transparent', color: C.text2 } }, '⚙️'),
         open ? React.createElement('div', { style: { position: 'absolute', top: '100%', right: 0, marginTop: 4, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 10, whiteSpace: 'nowrap' } },
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 5 } }, '池配置（最小/最大并发）'),
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 5 } }, '并发上限（一次性派发，用完即销毁）'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
-            React.createElement(PoolCfg, { label: 'W-', cfgKey: 'minWorkers', value: props.minW }), React.createElement(PoolCfg, { label: 'W+', cfgKey: 'maxWorkers', value: props.maxW }),
-            React.createElement(PoolCfg, { label: 'V-', cfgKey: 'minVerifiers', value: props.minV }), React.createElement(PoolCfg, { label: 'V+', cfgKey: 'maxVerifiers', value: props.maxV })),
+            React.createElement(PoolCfg, { label: 'W并发', cfgKey: 'maxWorkers', value: props.maxW }),
+            React.createElement(PoolCfg, { label: 'V并发', cfgKey: 'maxVerifiers', value: props.maxV })),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
             React.createElement(ModelCfg, { value: props.verifierModel }),
             React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Verifier 异构审查）'))) : null)
@@ -275,18 +275,18 @@ function apply(ctx) {
     }
     function TeamView() {
       var ps = state.poolStatus || { workers: [], verifiers: [] }
+      // v74 一次性模型：每个活跃卡片 = 一个在跑的 run（随任务结算销毁），没有常驻成员
       function memberCard(m, role) {
         var isW = role === 'worker'
         var curTask = m.taskId ? getTask(m.taskId) : null
-        return React.createElement('div', { key: m.id, style: { minWidth: 170, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, borderTop: '3px solid ' + (m.busy ? (isW ? C.brand : C.warn) : C.border) } },
+        return React.createElement('div', { key: m.id, style: { minWidth: 170, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, borderTop: '3px solid ' + (isW ? C.brand : C.warn) } },
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 } },
             React.createElement('span', { style: { fontSize: 14 } }, isW ? '⚡' : '🔍'),
-            React.createElement('span', { style: { fontSize: 12, fontWeight: 700, color: C.text } }, (isW ? 'Worker' : 'Verifier') + ' #' + m.num),
-            React.createElement('span', { style: { marginLeft: 'auto', fontSize: 9, padding: '1px 6px', borderRadius: 3, background: m.suspect ? C.err : (m.busy ? C.brand : C.nested), color: (m.suspect || m.busy) ? '#fff' : C.text2 } }, m.suspect ? '⏱ 卡死' : (m.busy ? '忙碌' : '空闲'))),
+            React.createElement('span', { style: { fontSize: 12, fontWeight: 700, color: C.text } }, (isW ? 'Worker' : 'Verifier') + ' · 执行中'),
+            React.createElement('span', { style: { marginLeft: 'auto', fontSize: 9, padding: '1px 6px', borderRadius: 3, background: C.brand, color: '#fff' } }, '忙碌')),
           m.model ? React.createElement('div', { style: { fontSize: 9, color: C.warn, marginBottom: 3 }, title: '异构模型审查' }, '🧬 ' + m.model) : null,
-          React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 3 } }, '已完成 ' + (m.done || 0) + ' · 队列 ' + (m.queueLen || 0)),
-          curTask ? React.createElement('div', { onClick: function () { state.detailId = curTask.id; state.view = 'board'; notify() }, style: { fontSize: 10, color: C.brand, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: curTask.title }, '→ ' + curTask.title) : React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '待命中'),
-          React.createElement('div', { style: { marginTop: 4 } }, React.createElement(ActorLink, { id: m.id })))
+          curTask ? React.createElement('div', { onClick: function () { state.detailId = curTask.id; state.view = 'board'; notify() }, style: { fontSize: 10, color: C.brand, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: curTask.title }, '→ ' + curTask.title) : React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '→ ' + m.taskId),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3 }, title: '一次性子代理会话' }, '会话 ' + String(m.runId || '').slice(0, 8) + '…（用完即销毁）'))
       }
       var ws = ps.workers || [], vs = ps.verifiers || []
       return React.createElement('div', null,
