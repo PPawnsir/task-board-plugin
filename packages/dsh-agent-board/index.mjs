@@ -248,27 +248,42 @@ export function apply(ctx) {
     // 从 mutateLocked 结果中读 teamMode，决定是否推聊天通知
     function maybeNotify(sid, task) { if (task && task.escalation) { rt(sid).then(function (d) { if (d.teamMode) notifyMainWindow(sid, task, task.escalation.question) }).catch(function () {}) } }
 
-    // ===== 任务回执通知（v66）：池执行的任务在 完成/阻塞 时通知主窗口 =====
+    // ===== 任务回执通知（v66 引入，v72 改批量聚合）：池执行的任务在 完成/阻塞 时通知主窗口 =====
     // 只通知池派发执行的任务（claimedBy 是池成员），主窗口自己手动处理的任务不回执（自己干的自己知道）。
-    // followup 是队列语义：主窗口忙时排队，闲时送达——正好是长程任务的期望行为。
+    // 批量聚合：任务多时每任务一条 followup 会把主窗口 turn 队列打满（用户输入排队等回执处理完才刷新），
+    // 改为 45s 窗口（或满 5 条）聚合为一条摘要。
     function isPoolMember(sid, id) { if (!id) return false; var p = poolFor(sid); return !!(p.workers[id] || p.verifiers[id]) }
+    var receiptBuf = {}
     function notifyTaskDone(sid, t, kind) {
       if (!t || !isPoolMember(sid, t.claimedBy)) return
-      var root = rootForSession(sid)
-      if (!root) return
-      var lines
-      if (kind === 'resolved') {
-        lines = ['✅ [任务看板] 任务已完成', '', '任务: ' + t.title + ' (' + t.id + ')']
-        if (t.deliverable && t.deliverable.summary) lines.push('开发描述: ' + t.deliverable.summary.slice(0, 400))
-        if (t.verification && t.verification.verdict) lines.push('验收: ' + (t.verification.verdict === 'approved' ? '通过' : '驳回') + (t.verification.summary ? ' — ' + t.verification.summary.slice(0, 200) : ''))
-        lines.push('', '可在看板查看详情或归档；依赖它的任务已自动进入派发。')
-      } else {
-        lines = ['🛑 [任务看板] 任务被阻塞，需要关注', '', '任务: ' + t.title + ' (' + t.id + ')']
-        var lastNote = (t.history && t.history.length) ? t.history[t.history.length - 1].note : ''
-        if (lastNote) lines.push('原因: ' + String(lastNote).slice(0, 300))
-        lines.push('', '可用 task_intervene 指导、task_terminate 终止重派，或在看板详情页处理。')
+      var buf = receiptBuf[sid] || (receiptBuf[sid] = { items: [], timer: null })
+      var lastNote = (t.history && t.history.length) ? String(t.history[t.history.length - 1].note || '') : ''
+      buf.items.push({ kind: kind, title: t.title, id: t.id, summary: (t.deliverable && t.deliverable.summary) || '', note: lastNote })
+      if (buf.items.length >= 5) { flushReceipts(sid); return }
+      if (!buf.timer) {
+        var tm = ctx.timer
+        if (tm) { var captured = buf; buf.timer = tm.timeout(45000).then(function () { if (receiptBuf[sid] === captured) flushReceipts(sid) }).catch(function () {}) }
+        else flushReceipts(sid)
       }
-      try { root.followup(makeMsg(lines.join('\n'))) } catch (e) { console.error('[task-board] done-notify failed:', String(e)) }
+    }
+    function flushReceipts(sid) {
+      var buf = receiptBuf[sid]; if (!buf) return
+      receiptBuf[sid] = null
+      if (!buf.items.length) return
+      var root = rootForSession(sid); if (!root) return
+      var done = [], blocked = []
+      for (var i = 0; i < buf.items.length; i++) { (buf.items[i].kind === 'resolved' ? done : blocked).push(buf.items[i]) }
+      var lines = ['📋 [任务看板] 回执摘要（' + buf.items.length + ' 条）', '']
+      if (done.length) {
+        lines.push('✅ 完成 ' + done.length + ' 个：')
+        for (var j = 0; j < done.length && j < 8; j++) lines.push('  · ' + done[j].title + ' (' + done[j].id + ')' + (done[j].summary ? ' — ' + done[j].summary.slice(0, 120) : ''))
+      }
+      if (blocked.length) {
+        lines.push('🛑 阻塞 ' + blocked.length + ' 个（需关注）：')
+        for (var k = 0; k < blocked.length && k < 8; k++) lines.push('  · ' + blocked[k].title + ' (' + blocked[k].id + ')' + (blocked[k].note ? ' — ' + blocked[k].note.slice(0, 150) : ''))
+      }
+      lines.push('', '可用 task_list 查看全部；阻塞项可在看板拖回待办重新投放。')
+      try { root.followup(makeMsg(lines.join('\n'))) } catch (e) { console.error('[task-board] receipt flush failed:', String(e)) }
     }
 
     function onWorkerDone(sid, w, item) {
@@ -289,6 +304,7 @@ export function apply(ctx) {
           }
           delete t.escalation
           delete t.stuckSince // 正常完成清除卡死标记
+          delete t.retryCount // v72：成功完成清零超时重试计数（负载高时网关超时是常态，不应跨任务累积成 blocked）
           t.deliverable = { summary: secs.summary || output.slice(0, 600), changes: secs.changes || '', selfTest: secs.selfTest || '', at: new Date().toISOString(), by: 'worker-' + w.num }
           resolveApply(d, t, w.id, 'verifying', output || 'Worker 完成', 'worker-' + w.num + (item.kind === 'retry' ? ' retry' : '') + ' completed')
           return { task: t, escalated: false }
@@ -359,6 +375,7 @@ export function apply(ctx) {
         var t = d.tasks.find(function (x) { return x.id === item.taskId })
         if (t && t.status === 'verifying') {
           delete t.stuckSince // 审查正常产出，清除卡死标记
+          delete t.verifyRetries // v72：成功解析后清零读取失败计数（偶发失败不应跨任务累积成 blocked）
           t.verification = { verdict: approved ? 'approved' : 'rejected', summary: vsecs.verifySummary || trimmed.slice(0, 600), checks: vsecs.checks || '', at: new Date().toISOString(), by: 'verifier-' + v.num }
           verifyApply(d, t, 'verifier-' + v.num, approved ? 'approved' : 'rejected', trimmed.slice(0, 200))
           if (!approved) {
@@ -443,7 +460,10 @@ export function apply(ctx) {
           // #18+#19 派发门槛：依赖全满足 且 非 direct 档（direct 由主窗口直接处理，不进池）
           var pendingTasks = d.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && t.assignMode !== 'manual' && t.pipeline !== 'direct' && depsSatisfied(d, t) })
             .sort(function (a, b) { var p = (prioRank[b.priority] || 2) - (prioRank[a.priority] || 2); return p !== 0 ? p : (a.createdAt || '').localeCompare(b.createdAt || '') }) // #5 优先级调度
-          var verifyingTasks = d.tasks.filter(function (t) { return t.status === 'verifying' && (!t.pipeline || t.pipeline === 'full') }) // #19 只有 full 档才分配 verifier
+          // v72 防止同一 verifying 任务被多个 verifier 并行审查：两个结论赛跑，reject 计数双倍累积 → 莫名 blocked
+          var verifierBusyTaskIds = {}
+          Object.values(poolFor(sid).verifiers).forEach(function (v) { if (v.busy && v.taskId) verifierBusyTaskIds[v.taskId] = true })
+          var verifyingTasks = d.tasks.filter(function (t) { return t.status === 'verifying' && (!t.pipeline || t.pipeline === 'full') && !verifierBusyTaskIds[t.id] }) // #19 只有 full 档才分配 verifier；v72 排除已派给忙中 verifier 的任务（防重派双倍计数 reject）
           var idleW = Object.values(poolFor(sid).workers).filter(function (w) { return !w.busy && !w.dead })
           for (var k = 0; k < Math.min(idleW.length, pendingTasks.length); k++) { var wk = idleW[k], tk = pendingTasks[k]; wk.busy = true; wk.taskId = tk.id; claimApply(d, tk, wk.id, 'pool-worker-' + wk.num); workerAssignments.push({ w: wk, t: tk }); info.push('assign ' + tk.id + ' → worker-' + wk.num) }
           var idleV2 = Object.values(poolFor(sid).verifiers).filter(function (v) { return !v.busy && !v.dead })
@@ -619,6 +639,8 @@ export function apply(ctx) {
           return { ok: true, escalated: true, task: t }
         }
         delete t.escalation
+        delete t.retryCount // v72：成功完成清零超时重试计数（工具直报路径）
+        delete t.stuckSince
         t.deliverable = { summary: args.summary || '', changes: args.changes || '', selfTest: args.selfTest || '', at: new Date().toISOString(), by: actor }
         var r = resolveApply(d, t, actor, 'verifying', (args.summary || '') + (args.selfTest ? '\n\n自测: ' + args.selfTest.slice(0, 300) : ''), 'worker 工具上报完成')
         r.ok = true; r.task = t
@@ -734,5 +756,5 @@ export function apply(ctx) {
       },
     })
 
-    console.log('[task-board] v71 loaded (get-tasks pure-read; poolCycle driven by heartbeat+kickCycle; layout observer debounced)')
+    console.log('[task-board] v72 loaded (receipt batching; verifier double-assign guard; retry counters reset on success)')
 }
