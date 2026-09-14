@@ -5,6 +5,9 @@
 // 会解析失败（ERR_MODULE_NOT_FOUND）。defineTool 本体只是 校验+包装 出
 // {name, description, parameters, output, execute} 普通对象，这里内联等价实现。
 // parameters 已是完整 JSON Schema，原样透传；output 透传 schema+render。
+import * as core from './lib/core.mjs'
+const { ah, isb, gsb, gpt, vt, validateDeps, depsSatisfied, depsCancelled, classifyPipeline, seed, cfg, claimCheck, claimApply, checkParentAuto, resolveApply, verifyApply, parseSections, parseVerdict, isEscalation, outputText, histNotes, buildWorkerPrompt, buildVerifierPrompt, pickDispatch, isOrphan, PRIO_RANK } = core
+
 function defineTool(options) {
   var userExecute = options.execute
   var userRender = options.output && options.output.render
@@ -28,8 +31,6 @@ export function apply(ctx) {
     // RPC handlers 表必须在最前面初始化：后面的 handle(...) 调用依赖它（var 只提升声明不提升赋值）
     var handlers = {}
     function handle(method, fn) { handlers[method] = fn }
-    const MAX_CLAIMED = 3
-    const CLAIMABLE = ['pending', 'blocked']
 
     // ===== 工具函数 =====
     function getActorId() { const a = ctx.agents; if (a) { const i = a.currentInitiator(); if (i) return String(i.id) } return 'unknown' }
@@ -43,52 +44,6 @@ export function apply(ctx) {
     var teamModeCache = {}
     function fileFor(sid) { return '.dsh/tasks-' + sid + '.json' }
     function vt(d) { return d && typeof d === 'object' && Array.isArray(d.tasks) }
-    function ah(t, f, to, ac, n) { if (!Array.isArray(t.history)) t.history = []; t.history.push({ from: f, to: to, timestamp: new Date().toISOString(), actor: ac, note: n || '' }) }
-    function isb(t) { return t.parentId != null }
-    function gsb(p, a) { return a.filter(function (x) { return x.parentId === p }) }
-    function gpt(t, a) { return isb(t) ? a.find(function (x) { return x.id === t.parentId }) : undefined }
-    // #18 依赖校验：存在性 + 自引用 + DFS 环检测（返回错误消息或 null）
-    function validateDeps(d, taskId, deps) {
-      if (!Array.isArray(deps)) return 'dependsOn must be array'
-      for (var i = 0; i < deps.length; i++) {
-        var dep = deps[i]
-        if (dep === taskId) return 'self-dependency: ' + dep
-        if (!d.tasks.find(function (x) { return x.id === dep })) return 'dependency not found: ' + dep
-      }
-      // 环检测：从每个依赖出发沿 dependsOn 链游走，若能回到 taskId 则成环
-      var target = taskId
-      var visited = {}
-      function reaches(cur) {
-        if (cur === target) return true
-        if (visited[cur]) return false
-        visited[cur] = true
-        var ct = d.tasks.find(function (x) { return x.id === cur })
-        var cd = (ct && Array.isArray(ct.dependsOn)) ? ct.dependsOn : []
-        for (var k = 0; k < cd.length; k++) { if (reaches(cd[k])) return true }
-        return false
-      }
-      for (var j = 0; j < deps.length; j++) { if (reaches(deps[j])) return 'circular dependency via: ' + deps[j] }
-      return null
-    }
-    // #18 依赖是否全部满足（resolved/archived 视为满足）
-    function depsSatisfied(d, t) {
-      if (!Array.isArray(t.dependsOn) || t.dependsOn.length === 0) return true
-      return t.dependsOn.every(function (id) { var x = d.tasks.find(function (y) { return y.id === id }); return x && (x.status === 'resolved' || x.status === 'archived') })
-    }
-    // #18 依赖是否被永久阻断（依赖已 cancelled → 依赖方永远无法满足）
-    function depsCancelled(d, t) {
-      if (!Array.isArray(t.dependsOn) || t.dependsOn.length === 0) return false
-      return t.dependsOn.some(function (id) { var x = d.tasks.find(function (y) { return y.id === id }); return x && x.status === 'cancelled' })
-    }
-    // #19 管线分类：规则先行，兜底 full（宁严勿漏）
-    function classifyPipeline(t) {
-      if (t.acceptance && String(t.acceptance).trim()) return 'full'
-      var text = ((t.title || '') + ' ' + (t.description || '')).toLowerCase()
-      if (/解释|为什么|是什么|区别|对比|说明一下|是什么意思|how to|what is|why /.test(text)) return 'direct'
-      if (/文档|调研|整理|总结|报告|指南|白皮书|readme|分析文/.test(text)) return 'work'
-      return 'full'
-    }
-    function seed(sid) { return { version: 11, ownerSession: sid, boardMode: 'auto', teamMode: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, verifierModel: '', tasks: [] } }
     async function rt(sid) { try { var t = await fs.resolve(fileFor(sid)); var r = await fs.readText(t); var d = JSON.parse(r); if (vt(d) && d.ownerSession === sid) { teamModeCache[sid] = !!d.teamMode; return d }; return seed(sid) } catch (_) { return seed(sid) } }
     async function wt(sid, d) { var c = JSON.stringify(d, null, 2); try { var t = await fs.resolve(fileFor(sid)); await fs.writeText(t, c) } catch (e) { console.error('[task-board] write:', String(e)); throw e } }
     // 每会话一条 promise 链，串行化所有 读-改-写，消除并发写竞争
@@ -104,36 +59,11 @@ export function apply(ctx) {
     function rootForSession(sid) { var s = ctx.agents; if (!s) return undefined; var r = s.roots(); for (var i = 0; i < r.length; i++) { if (String(r[i].id) === sid) return r[i] } return undefined }
     function makeSignal() { try { return new AbortController().signal } catch (_) { return { aborted: false, addEventListener: function () {}, removeEventListener: function () {} } } }
     function makeMsg(text) { return { id: 'm' + Date.now() + Math.random().toString(36).slice(2, 6), role: 'user', content: [{ type: 'text', text: text }], source: { kind: 'user' } } }
-    // parseSections: 解析 ## 分段输出为结构化字段（容错：无分段时返回空对象，调用方降级）
-    function parseSections(text) {
-      var out = {}
-      if (!text) return out
-      var re = /^##\s+(.+?)\s*$/gm, m, matches = []
-      while ((m = re.exec(text))) matches.push({ title: m[1], idx: m.index, end: m.index + m[0].length })
-      for (var i = 0; i < matches.length; i++) {
-        var body = text.slice(matches[i].end, i + 1 < matches.length ? matches[i + 1].idx : text.length).trim()
-        var title = matches[i].title
-        if (/开发描述/.test(title)) out.summary = body
-        else if (/改动/.test(title)) out.changes = body
-        else if (/自测/.test(title)) out.selfTest = body
-        else if (/测试概要|验证概要|审查概要/.test(title)) out.verifySummary = body
-        else if (/核对项|核验项|检查项/.test(title)) out.checks = body
-      }
-      return out
-    }
-    // 超时保护：whenIdle 卡住时超时标记 dead
+    // 超时保护：run 挂死时走失败重试路径
     function withTimeout(promise, ms, label) { var timer = ctx.timer; if (!timer) return promise; return Promise.race([promise, timer.timeout(ms).then(function () { throw new Error(label + ' timeout ' + ms + 'ms') })]) }
 
-    // ===== 配置 =====
-    function cfg(d) { return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)) } }
 
-    // ===== 状态流转 =====
-    function claimCheck(d, t, sid) { if (CLAIMABLE.indexOf(t.status) < 0) return 'cannot claim in ' + t.status; if (t.claimedBy && t.claimedBy !== sid && t.status === 'in-progress') return 'claimed by ' + t.claimedBy; if (d.boardMode === 'manual' || t.assignMode === 'manual') { if (t.assignee && t.assignee !== sid) return 'assigned to ' + t.assignee }; if (isb(t)) { var p = gpt(t, d.tasks); if (!p) return 'parent not found'; if (p.status !== 'in-progress' && p.status !== 'verifying') return 'parent not in-progress' }; var mc = d.tasks.filter(function (x) { return x.claimedBy === sid && (x.status === 'in-progress' || x.status === 'verifying') && !isb(x) }); if (!isb(t) && mc.length >= MAX_CLAIMED) return 'max ' + MAX_CLAIMED + ' active'; return null }
-    function claimApply(d, t, sid, note) { var ps = t.status; t.status = 'in-progress'; t.claimedBy = sid; t.claimedAt = new Date().toISOString(); ah(t, ps, 'in-progress', sid, note) }
-    function checkParentAuto(d, t) { if (!isb(t)) return null; var p = gpt(t, d.tasks); if (!p || p.status !== 'in-progress') return null; var s = gsb(p.id, d.tasks); if (s.every(function (x) { return x.status === 'resolved' })) { p.status = 'verifying'; p.resolvedAt = new Date().toISOString(); p.resolution = 'all subtasks resolved'; ah(p, 'in-progress', 'verifying', 'system', 'auto: all subtasks resolved'); return p }; return null }
-    function resolveApply(d, t, sid, status, resolution, note) { var ps = t.status; if (status === 'verifying' && t.pipeline && t.pipeline !== 'full') { status = 'resolved' } t.status = status; t.resolution = resolution || null; t.resolvedAt = new Date().toISOString(); ah(t, ps, status, sid, note); var r = { ok: true, task: t }; if (status === 'verifying' && isb(t)) { var s = gsb(t.parentId, d.tasks); if (s.every(function (x) { return x.status === 'resolved' || x.id === t.id })) { var p = gpt(t, d.tasks); if (p && p.status === 'in-progress') { p.status = 'verifying'; p.resolvedAt = new Date().toISOString(); p.resolution = 'all subtasks done'; ah(p, 'in-progress', 'verifying', 'system', 'auto'); r.parentUpdated = true } } }; return r }
-    function verifyApply(d, t, sid, verdict, comment) { var ps = t.status; if (verdict === 'approved') { t.status = 'resolved'; t.verifiedAt = new Date().toISOString(); t.verifiedBy = sid; ah(t, ps, 'resolved', sid, 'approved' + (comment ? ': ' + comment : '')) } else { t.status = 'in-progress'; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'in-progress', sid, 'rejected' + (comment ? ': ' + comment : '')) }; var r = { ok: true, task: t }; if (verdict === 'approved' && isb(t)) { var p = checkParentAuto(d, t); if (p) { r.parentUpdated = true } }; return r }
-
+    // ===== 状态流转（已抽取到 lib/core.mjs）=====
     // ===== 一次性派发引擎（v74 去池化重写）=====
     // 每个任务 spawn 一个独立一次性子代理：上下文由看板通过 prompt 全量注入（任务描述/指引/验收脚本/过程记录），
     // 优先选择不继承父会话历史的 provider（inheritsParentContext === false），工作结束 run.result 结算后即 dispose 销毁。
@@ -151,18 +81,6 @@ export function apply(ctx) {
       var names = subagents.list(); if (!names.length) return null
       for (var i = 0; i < names.length; i++) { try { var p = subagents.getProvider(names[i]); if (p && p.inheritsParentContext === false) return names[i] } catch (_) {} }
       return names[0]
-    }
-
-    // 过程记录注入：驳回/裁决/干预历史随 prompt 带给一次性子代理（它没有会话记忆，全靠这次注入）
-    function histNotes(t) { return (t.history || []).filter(function (h) { return h.note && (/歧义|裁决|驳回|干预|rejected/i.test(h.note)) }).map(function (h) { return '- [' + h.timestamp + '] ' + String(h.note).slice(0, 300) }).join('\n') }
-
-    function buildWorkerPrompt(t) {
-      var notes = histNotes(t)
-      return '你是一个一次性任务执行 Worker。完成下面这个任务，完成后本会话即销毁。\n\ntaskId: ' + t.id + '\n任务: ' + t.title + '\n描述: ' + (t.description || '') + '\n指引: ' + ((t.context && t.context.instructions) || '') + (t.acceptance ? '\n硬性验收脚本: ' + t.acceptance + '\n（必须实际运行该命令并在自测情况中粘贴真实输出；未通过不得上报完成）' : '') + (notes ? '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，请务必遵循最新裁决方向）：\n' + notes : '') + '\n\n完成契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + t.id + '，summary=开发描述/changes=改动清单/selfTest=自测情况）；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况）。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate, taskId=' + t.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测。上报歧义后直接结束本轮——裁决后会有新 Worker 带着裁决答案接手。'
-    }
-    function buildVerifierPrompt(t) {
-      var notes = histNotes(t)
-      return '你是一个一次性任务审核 Verifier。审查下面这个任务的完成质量，给出结论后本会话即销毁。\n\ntaskId: ' + t.id + '\n任务: ' + t.title + '\n描述: ' + (t.description || '').slice(0, 500) + '\n完成说明: ' + (t.resolution || '(无)') + '\n交付物: ' + (t.deliverable ? ('开发描述: ' + (t.deliverable.summary || '') + '\n改动清单: ' + (t.deliverable.changes || '') + '\n自测情况: ' + (t.deliverable.selfTest || '')) : '(无)').slice(0, 1500) + (t.acceptance ? '\n硬性验收脚本: ' + t.acceptance + '\n（必须独立复跑该命令并把真实输出贴进核对项；脚本失败必须 REJECTED）' : '') + (notes ? '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，若有）：\n' + notes + '\n注意：若过程记录显示主窗口已裁决改变任务方向，以裁决后的方向为验收标准。' : '') + '\n\n结论契约（双模，工具优先）：\n1. 优先调用 board_verdict 工具（taskId=' + t.id + ', verdict=approved/rejected, summary=测试概要, checks=逐条核对证据含行号）。\n2. 工具不可用则首行 APPROVED: <结论> 或 REJECTED: <结论>，然后 ## 测试概要 / ## 核对项 分段。'
     }
 
     async function spawnOneShot(sid, t, role) {
@@ -335,24 +253,13 @@ export function apply(ctx) {
       var result = await mutateLocked(sid, function (d) {
         if (isAuto) {
           var now = Date.now()
-          // 孤儿回收：in-progress 且 claimedBy 非主会话、无活跃 run、无 escalation、超 2 分钟 → 回 pending
+          // 孤儿回收（core.isOrphan）：in-progress 且 claimedBy 非主会话、无活跃 run、无 escalation、超 2 分钟 → 回 pending
           d.tasks.forEach(function (t) {
-            if (t.status === 'in-progress' && t.claimedBy && t.claimedBy !== d.ownerSession && !runs[t.id] && !t.escalation) {
-              var age = now - new Date(t.claimedAt || 0).getTime()
-              if (age > 120000) { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', '执行 run 已结束/丢失，回收重新排队'); info.push('reclaim ' + t.id) }
-            }
+            if (isOrphan(d, t, runs, now)) { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', '执行 run 已结束/丢失，回收重新排队'); info.push('reclaim ' + t.id) }
           })
-          var capW = Math.max(0, c.maxWorkers - activeW)
-          if (capW > 0) {
-            var pendings = d.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && t.assignMode !== 'manual' && t.pipeline !== 'direct' && depsSatisfied(d, t) && !t.escalation })
-              .sort(function (a, b) { var p = (prioRank[b.priority] || 2) - (prioRank[a.priority] || 2); return p !== 0 ? p : (a.createdAt || '').localeCompare(b.createdAt || '') })
-            for (var i = 0; i < Math.min(capW, pendings.length); i++) { claimApply(d, pendings[i], 'spawn-pending', 'dispatch'); toSpawn.push({ role: 'worker', t: pendings[i] }); info.push('dispatch ' + pendings[i].id) }
-          }
-          var capV = Math.max(0, c.maxVerifiers - activeV)
-          if (capV > 0) {
-            var verifs = d.tasks.filter(function (t) { return t.status === 'verifying' && (!t.pipeline || t.pipeline === 'full') && !t.escalation && !runs[t.id] })
-            for (var j = 0; j < Math.min(capV, verifs.length); j++) { toSpawn.push({ role: 'verifier', t: verifs[j] }); info.push('verify ' + verifs[j].id) }
-          }
+          var picked = pickDispatch(d, Math.max(0, c.maxWorkers - activeW), Math.max(0, c.maxVerifiers - activeV), null)
+          picked.pendings.forEach(function (t) { claimApply(d, t, 'spawn-pending', 'dispatch'); toSpawn.push({ role: 'worker', t: t }); info.push('dispatch ' + t.id) })
+          picked.verifs.forEach(function (t) { toSpawn.push({ role: 'verifier', t: t }); info.push('verify ' + t.id) })
         }
         // UI 池状态：来自活跃 run（一次性模型：没有成员名册，只有在跑的任务）
         d.poolStatus = { workers: [], verifiers: [] }

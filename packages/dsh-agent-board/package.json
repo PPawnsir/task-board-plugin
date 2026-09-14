@@ -5,6 +5,9 @@
   "private": true,
   "type": "module",
   "main": "./index.mjs",
+  "scripts": {
+    "test": "node --test test/"
+  },
   "exports": {
     ".": "./index.mjs",
     "./client": "./lib/client.js",
@@ -24,6 +27,7 @@
   },
   "files": [
     "index.mjs",
+    "lib/core.mjs",
     "lib/client.js",
     "cordis.patch.yml",
     "README.md"

@@ -1,0 +1,205 @@
+// dsh-agent-board 纯逻辑单元测试 — node --test packages/dsh-agent-board/test/
+// 覆盖：状态机流转 / 依赖校验与环检测 / 管线分类 / 输出解析 / prompt 构建 / 派发决策 / 孤儿回收
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import * as core from '../lib/core.mjs'
+
+function mkTask(over) { return Object.assign({ id: 't1', title: 'T', description: '', status: 'pending', priority: 'medium', tags: [], parentId: null, assignMode: 'auto', assignee: null, context: { instructions: '' }, acceptance: '', dependsOn: [], pipeline: 'full', claimedBy: null, claimedAt: null, createdAt: '2026-01-01T00:00:00Z', resolvedAt: null, history: [], messages: [] }, over || {}) }
+function mkBoard(tasks) { return { version: 11, ownerSession: 's1', boardMode: 'auto', tasks: tasks || [] } }
+
+// ===== 状态机 =====
+test('claimApply: pending → in-progress，记 history', () => {
+  const t = mkTask(); const d = mkBoard([t])
+  core.claimApply(d, t, 'actor1', 'test')
+  assert.equal(t.status, 'in-progress'); assert.equal(t.claimedBy, 'actor1')
+  assert.equal(t.history.length, 1); assert.equal(t.history[0].to, 'in-progress')
+})
+
+test('claimCheck: 非可认领状态拒绝', () => {
+  const t = mkTask({ status: 'verifying' }); const d = mkBoard([t])
+  assert.match(core.claimCheck(d, t, 'a'), /cannot claim/)
+})
+
+test('claimCheck: 已被他人认领拒绝（in-progress 首先被 CLAIMABLE 拦住）', () => {
+  const t = mkTask({ status: 'in-progress', claimedBy: 'other' }); const d = mkBoard([t])
+  assert.match(core.claimCheck(d, t, 'a'), /cannot claim/) // CLAIMABLE 只含 pending/blocked，in-progress 先被拦
+  // claimedBy 分支的实际生效场景：blocked 状态被他人认领后重派
+  const t2 = mkTask({ status: 'blocked', claimedBy: 'other' }); const d2 = mkBoard([t2])
+  assert.equal(core.claimCheck(d2, t2, 'a'), null) // blocked 可重派（claimedBy 分支只在 in-progress 才有意义）
+})
+
+test('claimCheck: 手动模式+指定 assignee 拒绝他人', () => {
+  const t = mkTask({ assignMode: 'manual', assignee: 'bob' }); const d = mkBoard([t])
+  assert.match(core.claimCheck(d, t, 'alice'), /assigned to bob/)
+  assert.equal(core.claimCheck(d, t, 'bob'), null)
+})
+
+test('claimCheck: 超过 MAX_CLAIMED 拒绝', () => {
+  const mine = [1, 2, 3].map(i => mkTask({ id: 'm' + i, status: 'in-progress', claimedBy: 'me' }))
+  const t = mkTask({ id: 'new' }); const d = mkBoard(mine.concat([t]))
+  assert.match(core.claimCheck(d, t, 'me'), /max 3 active/)
+})
+
+test('resolveApply: full 档 → verifying；work/direct 档 → 直接 resolved', () => {
+  const tf = mkTask({ pipeline: 'full' }); core.resolveApply(mkBoard([tf]), tf, 'w', 'verifying', 'done')
+  assert.equal(tf.status, 'verifying')
+  const tw = mkTask({ pipeline: 'work' }); core.resolveApply(mkBoard([tw]), tw, 'w', 'verifying', 'done')
+  assert.equal(tw.status, 'resolved')
+})
+
+test('verifyApply: approved → resolved；rejected → 回 in-progress', () => {
+  const t = mkTask({ status: 'verifying' }); core.verifyApply(mkBoard([t]), t, 'v', 'approved', 'ok')
+  assert.equal(t.status, 'resolved'); assert.ok(t.verifiedAt)
+  const t2 = mkTask({ status: 'verifying' }); core.verifyApply(mkBoard([t2]), t2, 'v', 'rejected', 'bad')
+  assert.equal(t2.status, 'in-progress'); assert.equal(t2.resolution, null)
+})
+
+test('子任务全 resolved → 父任务自动 verifying', () => {
+  const p = mkTask({ id: 'p', status: 'in-progress' })
+  const c1 = mkTask({ id: 'c1', parentId: 'p', status: 'verifying' })
+  const c2 = mkTask({ id: 'c2', parentId: 'p', status: 'resolved' })
+  const d = mkBoard([p, c1, c2])
+  const r = core.verifyApply(d, c1, 'v', 'approved')
+  assert.equal(r.parentUpdated, true); assert.equal(p.status, 'verifying')
+})
+
+// ===== 依赖 =====
+test('validateDeps: 自引用/不存在/成环 全拒绝', () => {
+  const a = mkTask({ id: 'a' }); const b = mkTask({ id: 'b', dependsOn: ['a'] })
+  const d = mkBoard([a, b])
+  assert.match(core.validateDeps(d, 'a', ['a']), /self-dependency/)
+  assert.match(core.validateDeps(d, 'a', ['ghost']), /not found/)
+  // a 依赖 b，b 已依赖 a → 成环
+  const d2 = mkBoard([mkTask({ id: 'a', dependsOn: ['b'] }), mkTask({ id: 'b', dependsOn: ['a'] })])
+  assert.match(core.validateDeps(d2, 'a', ['b']), /circular/)
+})
+
+test('depsSatisfied: resolved/archived 算满足，其余不算', () => {
+  const dep = mkTask({ id: 'dep', status: 'resolved' })
+  const t = mkTask({ dependsOn: ['dep'] }); const d = mkBoard([dep, t])
+  assert.equal(core.depsSatisfied(d, t), true)
+  dep.status = 'in-progress'
+  assert.equal(core.depsSatisfied(d, t), false)
+  dep.status = 'archived'
+  assert.equal(core.depsSatisfied(d, t), true)
+})
+
+test('depsCancelled: 依赖被取消 → true', () => {
+  const dep = mkTask({ id: 'dep', status: 'cancelled' })
+  const t = mkTask({ dependsOn: ['dep'] })
+  assert.equal(core.depsCancelled(mkBoard([dep, t]), t), true)
+})
+
+// ===== 管线分类 =====
+test('classifyPipeline: 验收脚本→full；问答→direct；文档→work；兜底 full', () => {
+  assert.equal(core.classifyPipeline(mkTask({ acceptance: 'npm test' })), 'full')
+  assert.equal(core.classifyPipeline(mkTask({ title: '解释一下这个函数' })), 'direct')
+  assert.equal(core.classifyPipeline(mkTask({ title: '整理 API 文档' })), 'work')
+  assert.equal(core.classifyPipeline(mkTask({ title: '实现登录功能' })), 'full')
+})
+
+// ===== 输出解析 =====
+test('parseSections: 分段解析', () => {
+  const out = core.parseSections('前言\n## 开发描述\n做了 A\n## 改动清单\n改了 x.js\n## 自测情况\nnpm test pass')
+  assert.equal(out.summary, '做了 A'); assert.equal(out.changes, '改了 x.js'); assert.equal(out.selfTest, 'npm test pass')
+  assert.deepEqual(core.parseSections(''), {})
+  assert.deepEqual(core.parseSections('没有分段的纯文本'), {})
+})
+
+test('parseVerdict: 行首锚定，历史提及不误判', () => {
+  assert.equal(core.parseVerdict('APPROVED: 通过'), 'APPROVED')
+  assert.equal(core.parseVerdict('REJECTED: 不达标'), 'REJECTED')
+  assert.equal(core.parseVerdict('> APPROVED\n引用块里的也算'), 'APPROVED') // 引用块前缀允许
+  assert.equal(core.parseVerdict('上次被 REJECTED 了，这次我觉得行'), null) // 非行首锚定 → 不误判
+  assert.equal(core.parseVerdict(''), null)
+})
+
+test('isEscalation: [ESCALATE] 标记', () => {
+  assert.equal(core.isEscalation('[ESCALATE] 缺少需求'), true)
+  assert.equal(core.isEscalation('正常完成'), false)
+})
+
+test('outputText: ContentBlock[] 提取文本', () => {
+  assert.equal(core.outputText({ output: [{ type: 'text', text: 'a' }, { type: 'image' }, { type: 'text', text: 'b' }] }), 'a\nb')
+  assert.equal(core.outputText(null), '')
+  assert.equal(core.outputText({}), '')
+})
+
+// ===== prompt 构建 =====
+test('buildWorkerPrompt: 注入 taskId/描述/验收脚本/过程记录', () => {
+  const t = mkTask({ id: 'tx', description: '做个功能', acceptance: 'npm test', history: [{ note: '驳回: 缺测试', timestamp: '2026-01-01' }] })
+  const p = core.buildWorkerPrompt(t)
+  assert.match(p, /taskId: tx/); assert.match(p, /做个功能/); assert.match(p, /npm test/); assert.match(p, /驳回: 缺测试/); assert.match(p, /board_report/)
+})
+
+test('buildVerifierPrompt: 注入交付物 + 验收脚本', () => {
+  const t = mkTask({ id: 'tx', acceptance: 'npm test', deliverable: { summary: '做完了', changes: 'x.js', selfTest: 'pass' } })
+  const p = core.buildVerifierPrompt(t)
+  assert.match(p, /做完了/); assert.match(p, /npm test/); assert.match(p, /board_verdict/)
+})
+
+// ===== 派发决策 =====
+test('pickDispatch: 优先级排序 + 并发上限 + 排除项', () => {
+  const tasks = [
+    mkTask({ id: 'lo', priority: 'low', createdAt: '2026-01-02' }),
+    mkTask({ id: 'hi', priority: 'critical', createdAt: '2026-01-03' }),
+    mkTask({ id: 'claimed', claimedBy: 'someone' }),
+    mkTask({ id: 'manual', assignMode: 'manual' }),
+    mkTask({ id: 'direct', pipeline: 'direct' }),
+    mkTask({ id: 'esc', escalation: { question: 'q' } }),
+  ]
+  const d = mkBoard(tasks)
+  const r = core.pickDispatch(d, 3, 0, null)
+  assert.deepEqual(r.pendings.map(t => t.id), ['hi', 'lo']) // critical 优先，claimed/manual/direct/escalation 全排除
+  assert.equal(r.verifs.length, 0) // capV=0
+  const r2 = core.pickDispatch(d, 1, 0, null)
+  assert.equal(r2.pendings.length, 1) // cap 生效
+})
+
+test('pickDispatch: 依赖未满足不派发', () => {
+  const dep = mkTask({ id: 'dep', status: 'in-progress' })
+  const t = mkTask({ id: 'w8', dependsOn: ['dep'] })
+  const r = core.pickDispatch(mkBoard([dep, t]), 5, 0, null)
+  assert.equal(r.pendings.length, 0)
+  dep.status = 'resolved'
+  const r2 = core.pickDispatch(mkBoard([dep, t]), 5, 0, null)
+  assert.equal(r2.pendings.length, 1)
+})
+
+test('pickDispatch: verifying 只派 full 档，排除 escalation 和忙中', () => {
+  const tasks = [
+    mkTask({ id: 'vf', status: 'verifying', pipeline: 'full' }),
+    mkTask({ id: 'vw', status: 'verifying', pipeline: 'work' }),
+    mkTask({ id: 've', status: 'verifying', pipeline: 'full', escalation: { question: 'q' } }),
+    mkTask({ id: 'vb', status: 'verifying', pipeline: 'full' }),
+  ]
+  const r = core.pickDispatch(mkBoard(tasks), 0, 5, { vb: true })
+  assert.deepEqual(r.verifs.map(t => t.id), ['vf']) // work 档不派审、escalation 不派、忙中不派
+})
+
+// ===== 孤儿回收 =====
+test('isOrphan: 认领者非主会话 + 无活跃 run + 超 2 分钟', () => {
+  const old = new Date(Date.now() - 200000).toISOString()
+  const t = mkTask({ status: 'in-progress', claimedBy: 'run-123', claimedAt: old })
+  const d = mkBoard([t])
+  assert.equal(core.isOrphan(d, t, {}, Date.now()), true)
+  assert.equal(core.isOrphan(d, t, { t1: {} }, Date.now()), false) // 有活跃 run
+  t.claimedBy = 's1' // 主会话自己认领的
+  assert.equal(core.isOrphan(d, t, {}, Date.now()), false)
+  t.claimedBy = 'run-123'; t.escalation = { question: 'q' }
+  assert.equal(core.isOrphan(d, t, {}, Date.now()), false) // 待裁决的不回收
+  delete t.escalation; t.claimedAt = new Date().toISOString()
+  assert.equal(core.isOrphan(d, t, {}, Date.now()), false) // 刚认领不超 2 分钟
+})
+
+// ===== 种子与配置 =====
+test('seed: 初始看板结构', () => {
+  const d = core.seed('s1')
+  assert.equal(d.ownerSession, 's1'); assert.equal(d.boardMode, 'auto'); assert.deepEqual(d.tasks, [])
+  assert.ok(core.vt(d))
+})
+
+test('cfg: 边界夹紧', () => {
+  const c = core.cfg({ minWorkers: -1, maxWorkers: 99, minVerifiers: 99, maxVerifiers: -1 })
+  assert.equal(c.minWorkers, 0); assert.equal(c.maxWorkers, 10); assert.equal(c.minVerifiers, 5); assert.equal(c.maxVerifiers, 0)
+})

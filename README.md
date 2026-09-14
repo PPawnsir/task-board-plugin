@@ -103,8 +103,10 @@ draft → pending → in-progress → verifying → resolved → archived
 
 ```
 └── packages/dsh-agent-board/     # 插件全部源码（直接维护，无构建步骤）
-│   ├── index.mjs                 #   host 端（13 工具 + RPC 路由）
+│   ├── index.mjs                 #   host 端：IO 编排（工具/RPC/派发引擎接线）
+│   ├── lib/core.mjs              #   纯逻辑核心：状态机/依赖/分类/prompt/解析（无 IO，可单测）
 │   ├── lib/client.js             #   client 端（ModuleLoader 包装）
+│   ├── test/core.test.mjs        #   单元测试（node --test，24 例）
 │   ├── package.json              #   dsh.bundle.patch + dsh.client 元数据
 │   └── cordis.patch.yml          #   bundle 挂载行
 └── docs/
@@ -115,6 +117,9 @@ draft → pending → in-progress → verifying → resolved → archived
 
 > v68 起拆除了"动态源码 → 静态包"的转换层（build-pkg.cjs）：插件已稳定，
 > 双形态维护的复杂度大于收益，包内文件即唯一源码，改完重启 dsh 即生效。
+>
+> v74 起纯逻辑抽到 `lib/core.mjs`，跑 `node --test packages/dsh-agent-board/test/`
+> 即可验证状态机/依赖/派发决策，不用重启 dsh 人肉回归。
 
 ## 文档
 
