@@ -283,7 +283,14 @@ export function apply(ctx) {
         for (var k = 0; k < blocked.length && k < 8; k++) lines.push('  · ' + blocked[k].title + ' (' + blocked[k].id + ')' + (blocked[k].note ? ' — ' + blocked[k].note.slice(0, 150) : ''))
       }
       lines.push('', '可用 task_list 查看全部；阻塞项可在看板拖回待办重新投放。')
-      try { root.followup(makeMsg(lines.join('\n'))) } catch (e) { console.error('[task-board] receipt flush failed:', String(e)) }
+      var text = lines.join('\n')
+      // v73 空闲门控：回执等主窗口当前 turn 结束再发，不再插队打断对话
+      // （之前直接 followup：任务多时回执 turn 连绵不断，用户消息排队到回执处理完才回显）
+      function send() { try { root.followup(makeMsg(text)) } catch (e) { console.error('[task-board] receipt flush failed:', String(e)) } }
+      if (typeof root.whenIdle === 'function') {
+        var waited = withTimeout(root.whenIdle(), 300000, 'receipt-idle-wait') // 最多等 5 分钟，超时也发（不能丢回执）
+        Promise.resolve(waited).then(send).catch(send)
+      } else send()
     }
 
     function onWorkerDone(sid, w, item) {
@@ -339,18 +346,18 @@ export function apply(ctx) {
       var output = readOutput(v.agent, item.minTurn)
       var trimmed = (output || '').trim()
       if (!trimmed) {
-        // 空输出 = 读取失败（不是驳回）：任务保持 verifying，verifyRetries 计数，>=3 转 blocked 待人工
+        // 空输出 = 读取失败（不是驳回）：任务保持 verifying，verifyRetries 计数；v73 起 ≥3 次转人工验收（escalation）而非 blocked——deliverable 已完成，是 verifier 故障，不该误标阻塞
         console.error('[task-board] verifier-' + v.num + ' empty output on ' + item.taskId)
         mutateLocked(sid, function (d) {
           var t = d.tasks.find(function (x) { return x.id === item.taskId })
           if (t && t.status === 'verifying') {
             t.verifyRetries = (t.verifyRetries || 0) + 1
-            if (t.verifyRetries >= 3) { var ps = t.status; t.status = 'blocked'; ah(t, ps, 'blocked', 'system', 'verifier 连续 ' + t.verifyRetries + ' 次读取失败，待人工介入') }
-            else { ah(t, 'verifying', 'verifying', 'system', 'verifier-' + v.num + ' 输出读取失败，重新排队审查 (' + t.verifyRetries + '/3)') }
+            if (t.verifyRetries >= 3 && !t.escalation) { t.escalation = { question: 'Verifier 连续 ' + t.verifyRetries + ' 次无法产出有效结论（空输出/格式异常），可能是 verifier 模型故障。交付物已完成，请人工验收：看板详情页直接通过/驳回，或 task_verify 裁决。', at: new Date().toISOString(), by: 'system' }; ah(t, 'verifying', 'verifying', 'system', 'verifier 故障，转人工验收') }
+            else if (!t.escalation) { ah(t, 'verifying', 'verifying', 'system', 'verifier-' + v.num + ' 输出读取失败，重新排队审查 (' + t.verifyRetries + '/3)') }
             return t
           }
           return null
-        }).then(function () { finishTurn(sid, v) }).catch(function () { finishTurn(sid, v) })
+        }).then(function (t) { if (t && t.escalation) maybeNotify(sid, t); finishTurn(sid, v) }).catch(function () { finishTurn(sid, v) })
         return
       }
       // verdict 解析：行首锚定 APPROVED/REJECTED 标记（输出中提到历史驳回字眼不应误判）。null = 无法判定 → 走重试而非驳回
@@ -361,12 +368,12 @@ export function apply(ctx) {
           var t = d.tasks.find(function (x) { return x.id === item.taskId })
           if (t && t.status === 'verifying') {
             t.verifyRetries = (t.verifyRetries || 0) + 1
-            if (t.verifyRetries >= 3) { var ps = t.status; t.status = 'blocked'; ah(t, ps, 'blocked', 'system', 'verifier 连续 ' + t.verifyRetries + ' 次无法判定，待人工介入') }
-            else { ah(t, 'verifying', 'verifying', 'system', 'verifier-' + v.num + ' 判定格式不明，重新排队审查 (' + t.verifyRetries + '/3)') }
+            if (t.verifyRetries >= 3 && !t.escalation) { t.escalation = { question: 'Verifier 连续 ' + t.verifyRetries + ' 次无法判定格式（非 APPROVED/REJECTED 输出），可能是 verifier 模型故障。交付物已完成，请人工验收：看板详情页直接通过/驳回，或 task_verify 裁决。', at: new Date().toISOString(), by: 'system' }; ah(t, 'verifying', 'verifying', 'system', 'verifier 判定故障，转人工验收') }
+            else if (!t.escalation) { ah(t, 'verifying', 'verifying', 'system', 'verifier-' + v.num + ' 判定格式不明，重新排队审查 (' + t.verifyRetries + '/3)') }
             return t
           }
           return null
-        }).then(function () { finishTurn(sid, v) }).catch(function () { finishTurn(sid, v) })
+        }).then(function (t) { if (t && t.escalation) maybeNotify(sid, t); finishTurn(sid, v) }).catch(function () { finishTurn(sid, v) })
         return
       }
       var approved = vm[1].toUpperCase() === 'APPROVED'
@@ -463,7 +470,7 @@ export function apply(ctx) {
           // v72 防止同一 verifying 任务被多个 verifier 并行审查：两个结论赛跑，reject 计数双倍累积 → 莫名 blocked
           var verifierBusyTaskIds = {}
           Object.values(poolFor(sid).verifiers).forEach(function (v) { if (v.busy && v.taskId) verifierBusyTaskIds[v.taskId] = true })
-          var verifyingTasks = d.tasks.filter(function (t) { return t.status === 'verifying' && (!t.pipeline || t.pipeline === 'full') && !verifierBusyTaskIds[t.id] }) // #19 只有 full 档才分配 verifier；v72 排除已派给忙中 verifier 的任务（防重派双倍计数 reject）
+          var verifyingTasks = d.tasks.filter(function (t) { return t.status === 'verifying' && (!t.pipeline || t.pipeline === 'full') && !verifierBusyTaskIds[t.id] && !t.escalation }) // #19 只有 full 档才分配 verifier；v72 排除忙中 verifier 任务（防重派双计数）；v73 排除已升级人工验收的（不再自动派审）
           var idleW = Object.values(poolFor(sid).workers).filter(function (w) { return !w.busy && !w.dead })
           for (var k = 0; k < Math.min(idleW.length, pendingTasks.length); k++) { var wk = idleW[k], tk = pendingTasks[k]; wk.busy = true; wk.taskId = tk.id; claimApply(d, tk, wk.id, 'pool-worker-' + wk.num); workerAssignments.push({ w: wk, t: tk }); info.push('assign ' + tk.id + ' → worker-' + wk.num) }
           var idleV2 = Object.values(poolFor(sid).verifiers).filter(function (v) { return !v.busy && !v.dead })
@@ -533,7 +540,7 @@ export function apply(ctx) {
     handle('get-tasks', async function (args) { var sid = rpcSessionId(args); var d = await rt(sid); d.sessionId = sid; var __ag = ctx.agents; d.isRoot = true; if (__ag) { var __roots = __ag.roots(); var __rids = []; for (var __i = 0; __i < __roots.length; __i++) __rids.push(String(__roots[__i].id)); d.isRoot = __rids.indexOf(sid) >= 0 } return d })
     handle('claim-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; var err = claimCheck(d, t, actor); if (err) return { ok: false, error: err }; claimApply(d, t, actor, 'manual claim via board'); return { ok: true, task: t } }) })
     handle('resolve-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'in-progress') return { ok: false, error: 'not in-progress' }; return resolveApply(d, t, actor, args.status, args.resolution, args.resolution || args.status) }) })
-    handle('verify-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'verifying') return { ok: false, error: 'not verifying' }; return verifyApply(d, t, actor, args.verdict, args.comment) }) })
+    handle('verify-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'verifying') return { ok: false, error: 'not verifying' }; delete t.escalation; delete t.verifyRetries; return verifyApply(d, t, actor, args.verdict, args.comment) }) })
     handle('archive-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var a = d.tasks; var t = a.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'resolved' && t.status !== 'cancelled') return { ok: false, error: 'cannot archive' }; var ps = t.status; t.status = 'archived'; t.archivedAt = new Date().toISOString(); ah(t, ps, 'archived', actor, 'manual archive'); var ca = 0; gsb(t.id, a).forEach(function (c) { if (c.status !== 'archived') { ah(c, c.status, 'archived', actor, 'cascade'); c.status = 'archived'; c.archivedAt = new Date().toISOString(); ca++ } }); var r = { ok: true, task: t }; if (ca) r.childrenArchived = ca; return r }) })
     handle('update-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (args.title !== undefined) t.title = args.title; if (args.description !== undefined) t.description = args.description; if (args.priority !== undefined) t.priority = args.priority; if (args.assignMode !== undefined) t.assignMode = args.assignMode; if (args.assignee !== undefined) t.assignee = args.assignee || null; if (args.dependsOn !== undefined) { var derr = validateDeps(d, t.id, args.dependsOn); if (derr) return { ok: false, error: derr }; t.dependsOn = args.dependsOn } if (args.pipeline !== undefined) { t.pipeline = args.pipeline; t.pipelineAuto = false } if (args.publish) { if (t.status !== 'draft') return { ok: false, error: 'not a draft' }; t.status = 'pending'; ah(t, 'draft', 'pending', actor, 'published') } if (args.resetToPending) { var ps = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'pending', actor, 'reset to pending after edit') }; return { ok: true, task: t } }) })
     handle('set-board-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.boardMode = args.mode === 'manual' ? 'manual' : 'auto'; return { ok: true, boardMode: d.boardMode } }) })
@@ -657,6 +664,7 @@ export function apply(ctx) {
         var t = d.tasks.find(function (x) { return x.id === args.taskId })
         if (!t) return { ok: false, error: 'not found' }
         if (t.status !== 'verifying') return { ok: false, error: 'not verifying (状态: ' + t.status + ')' }
+        delete t.escalation; delete t.verifyRetries // verifier 恢复产出：清人工验收标记
         t.verification = { verdict: args.verdict, summary: args.summary || '', checks: args.checks || '', at: new Date().toISOString(), by: actor }
         verifyApply(d, t, actor, args.verdict, (args.summary || '').slice(0, 200))
         if (!approved) { t.rejectCount = (t.rejectCount || 0) + 1; if (t.rejectCount >= 3) { t.status = 'blocked'; ah(t, 'in-progress', 'blocked', 'system', 'verifier 驳回 x' + t.rejectCount + '，待人工裁决') } }
@@ -756,5 +764,5 @@ export function apply(ctx) {
       },
     })
 
-    console.log('[task-board] v72 loaded (receipt batching; verifier double-assign guard; retry counters reset on success)')
+    console.log('[task-board] v73 loaded (receipts idle-gated via whenIdle; verifier failure escalates to human review instead of false blocked)')
 }
