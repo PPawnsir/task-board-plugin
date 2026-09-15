@@ -19,7 +19,7 @@ function apply(ctx) {
     var statusLabels = { draft: '草稿', pending: '待办', 'in-progress': '进行中', verifying: '验证中', resolved: '已完成', blocked: '阻塞', cancelled: '已取消', archived: '已归档' }
     var statusColors = { draft: C.text2, pending: C.text2, 'in-progress': C.brand, verifying: C.warn, resolved: C.ok, blocked: C.err, archived: C.text2 }
     var COLUMNS = ['draft', 'pending', 'in-progress', 'verifying', 'resolved', 'blocked']
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, verifierModel: '', isRoot: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, archSort: 'time-desc' }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', isRoot: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, archSort: 'time-desc' }
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
       var onKey = function (e) {
@@ -51,6 +51,7 @@ function apply(ctx) {
         state.minVerifiers = (d && d.minVerifiers) || 0
         state.maxVerifiers = (d && d.maxVerifiers) || 2
         state.verifierModel = (d && d.verifierModel) || ''
+        state.workerModel = (d && d.workerModel) || ''
         state.poolStatus = (d && d.poolStatus) || null
         state.isRoot = !d || d.isRoot !== false
         if (state.isRoot === false && state.open) { state.open = false; state.detailId = null } // 子代理会话：强制收起看板
@@ -184,6 +185,8 @@ function apply(ctx) {
       var _a = useState(props.value || ''), val = _a[0], setVal = _a[1]
       var _b = useState(false), dirty = _b[0], setDirty = _b[1]
       var _m = useState(null), models = _m[0], setModels = _m[1]
+      var cfgKey = props.cfgKey || 'verifierModel'
+      var label = props.label || 'V模型'
       // 下拉列出当前网关可用模型（host list-models RPC）；枚举失败降级为文本输入
       useEffect(function () {
         var cancelled = false
@@ -191,16 +194,16 @@ function apply(ctx) {
         return function () { cancelled = true }
       }, [])
       useEffect(function () { setVal(props.value || ''); setDirty(false) }, [props.value])
-      function save() { setDirty(false); rpc('set-board-config', { key: 'verifierModel', value: (val || '').trim() }).then(fetchTasks).catch(function () {}) }
-      function pick(v) { setVal(v); setDirty(false); rpc('set-board-config', { key: 'verifierModel', value: v }).then(fetchTasks).catch(function () {}) }
+      function save() { setDirty(false); rpc('set-board-config', { key: cfgKey, value: (val || '').trim() }).then(fetchTasks).catch(function () {}) }
+      function pick(v) { setVal(v); setDirty(false); rpc('set-board-config', { key: cfgKey, value: v }).then(fetchTasks).catch(function () {}) }
       if (models) {
-        return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, 'V模型',
-          React.createElement('select', { value: val, onChange: function (e) { pick(e.target.value) }, title: 'Verifier 异构审查模型（空=继承父级）', style: { width: 150, padding: '0px 4px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
+        return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, label,
+          React.createElement('select', { value: val, onChange: function (e) { pick(e.target.value) }, title: label + '（空=继承父级）', style: { width: 150, padding: '0px 4px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
             React.createElement('option', { value: '' }, '继承父级'),
             models.map(function (m) { return React.createElement('option', { key: m.id, value: m.id }, m.name + ' (' + m.provider + ')') })))
       }
       // 降级：文本输入（模型枚举不可用时）
-      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, 'V模型',
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, label,
         React.createElement('input', { value: val, onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== (props.value || '')) }, onBlur: function () { if (dirty) save() }, onKeyDown: function (e) { if (e.key === 'Enter') save() }, placeholder: '空=同父级', style: { width: 110, padding: '0px 4px', fontSize: 9, border: '1px solid ' + (dirty ? C.brand : C.border), borderRadius: 2, background: C.card, color: C.text } }),
         dirty ? React.createElement('button', { onClick: save, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: '#fff', cursor: 'pointer', lineHeight: '14px', fontWeight: 600 } }, '✓') : null)
     }
@@ -216,8 +219,11 @@ function apply(ctx) {
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
             React.createElement(PoolCfg, { label: 'W并发', cfgKey: 'maxWorkers', value: props.maxW }),
             React.createElement(PoolCfg, { label: 'V并发', cfgKey: 'maxVerifiers', value: props.maxV })),
+          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
+            React.createElement(ModelCfg, { label: 'W模型', cfgKey: 'workerModel', value: props.workerModel }),
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Worker 执行模型）')),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-            React.createElement(ModelCfg, { value: props.verifierModel }),
+            React.createElement(ModelCfg, { label: 'V模型', cfgKey: 'verifierModel', value: props.verifierModel }),
             React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Verifier 异构审查）'))) : null)
     }
     // #13 筛选：文本（标题/描述/ID）+ 优先级多选 + 标签
@@ -398,9 +404,9 @@ function apply(ctx) {
     function TopPanel() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
       var _a = useState(state.open), open = _a[0], setOpen = _a[1]; var _b = useState(state.tasks), tasks = _b[0], setTasksState = _b[1]; var _c = useState(state.boardMode), mode = _c[0], setModeState = _c[1]; var _d = useState(state.detailId), detailId = _d[0], setDetailId = _d[1]; var _e = useState(false), showArchived = _e[0], setShowArchived = _e[1]; var _f = useState(state.dragOver), dragOver = _f[0], setDragOver = _f[1]; var _g = useState(state.dispatchInfo), dispatchInfo = _g[0], setDispatchInfo = _g[1]; var _j = useState(state.view), view = _j[0], setViewState = _j[1]; var _k = useState(state.layoutLeft), layL = _k[0], setLayL = _k[1]; var _l = useState(state.layoutRight), layR = _l[0], setLayR = _l[1]
-      var _m = useState(state.minWorkers), minW = _m[0], setMinW = _m[1]; var _n = useState(state.maxWorkers), maxW = _n[0], setMaxW = _n[1]; var _o = useState(state.minVerifiers), minV = _o[0], setMinV = _o[1]; var _p = useState(state.maxVerifiers), maxV = _p[0], setMaxV = _p[1]
+      var _m = useState(state.minWorkers), minW = _m[0], setMinW = _m[1]; var _n = useState(state.maxWorkers), maxW = _n[0], setMaxW = _n[1]; var _o = useState(state.minVerifiers), minV = _o[0], setMinV = _o[1]; var _p = useState(state.maxVerifiers), maxV = _p[0], setMaxV = _p[1]; var _wm = useState(state.workerModel), workerModel = _wm[0], setWorkerModel = _wm[1]; var _vm = useState(state.verifierModel), verifierModel = _vm[0], setVerifierModel = _vm[1]
       var _q = useState(state.teamMode), teamMode = _q[0], setTeamMode = _q[1]
-      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setTeamMode(state.teamMode) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
+      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!open) return null
       if (state.isRoot === false) return null // 子代理会话不渲染看板面板
       var active = tasks.filter(function (t) { return t.status !== 'archived' }); var archived = tasks.filter(function (t) { return t.status === 'archived' })
@@ -425,7 +431,7 @@ function apply(ctx) {
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', borderBottom: '1px solid ' + C.border, flexShrink: 0, flexWrap: 'wrap', gap: 4 } },
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, React.createElement('span', { style: { fontWeight: 600, fontSize: 13, color: C.text } }, '📋 任务看板'), React.createElement(ViewTab, null), React.createElement(PoolStatus, null)),
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' } },
-            React.createElement(PoolCfgPopover, { minW: minW, maxW: maxW, minV: minV, maxV: maxV, verifierModel: state.verifierModel }),
+            React.createElement(PoolCfgPopover, { minW: minW, maxW: maxW, minV: minV, maxV: maxV, workerModel: workerModel, verifierModel: verifierModel }),
             dispatchInfo ? React.createElement('span', { style: { fontSize: 9, color: C.brand, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: dispatchInfo }, dispatchInfo) : null,
             React.createElement('button', { onClick: function () { state.selectMode = !state.selectMode; if (!state.selectMode) state.selected = {}; notify() }, title: '多选批量操作', style: { fontSize: 11, padding: '3px 8px', border: '1px solid ' + (state.selectMode ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: state.selectMode ? C.brand : 'transparent', color: state.selectMode ? '#fff' : C.text2 } }, '☑ 多选'),
             React.createElement(TeamSwitch, { on: teamMode }),
