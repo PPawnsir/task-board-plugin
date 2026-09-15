@@ -316,7 +316,7 @@ export function apply(ctx) {
           // 之前缺这行守卫 → Worker 也收到"请用 task_create 派发任务"→ Worker 误认自己是主窗口。
           if (aid !== sid) return ''
           if (!teamModeCache[sid]) return ''
-          return '【任务看板 Team 模式已开启】\n本会话的任务看板处于 Team 模式。请遵循以下工作方式：\n1. 涉及代码改动、文件创建、命令执行等实质性工作时，优先用 task_create 提交为看板任务（由一次性 Worker/Verifier 子代理执行与验收），不要自己直接动手实现。\n2. 你仍保有全部工具能力——调研、读代码、讨论方案、回答问题时直接进行，无需提交任务。\n3. Worker 上报歧义时会通过 task_arbitrate 等待你裁决，请及时响应。\n4. 任务尽量一次写清 description/dependsOn/acceptance；需要分步建设的用 task_create draft:true 先建草稿，补全后 publish。'
+          return '【任务看板 Team 模式已开启】\n本会话的任务看板处于 Team 模式。请遵循以下工作方式：\n1. 涉及代码改动、文件创建、命令执行等实质性工作时，优先用 task_create 提交为看板任务（由一次性 Worker/Verifier 子代理执行与验收），不要自己直接动手实现。\n2. 你仍保有全部工具能力——调研、读代码、讨论方案、回答问题时直接进行，无需提交任务。\n3. 创建任务时，务必在 description 里写清子代理需要的上下文：涉及哪些文件（路径）、相关代码的约束/约定、前置条件等。子代理是全新会话、无你的会话记忆，如果上下文不够，子代理需要从零开始自行调研，效率会大打折扣甚至跑偏方向。\n4. Worker 上报歧义时会通过 task_arbitrate 等待你裁决，请及时响应。驳回重派时同样：新 Worker 没有上一轮的记忆，驳回原因会在 prompt 里，但额外上下文需你在 description 里补上。\n5. 任务尽量一次写清 description/dependsOn/acceptance；需要分步建设的用 task_create draft:true 先建草稿，补全后 publish。'
         },
       })
       ctx.effect(function () { return disposeSection })
