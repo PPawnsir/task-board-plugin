@@ -93,7 +93,13 @@ export function apply(ctx) {
       if (role === 'verifier') { var dd = await rt(sid); modelOverride = (typeof dd.verifierModel === 'string' && dd.verifierModel.trim()) ? dd.verifierModel.trim() : ''; if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited, using parent model'); modelOverride = '' } }
       else if (role === 'worker') { var dw = await rt(sid); modelOverride = (typeof dw.workerModel === 'string' && dw.workerModel.trim()) ? dw.workerModel.trim() : ''; if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited, using parent model'); modelOverride = '' } }
       var req = { label: role + ':' + t.id, prompt: [{ type: 'text', text: role === 'worker' ? buildWorkerPrompt(t) : buildVerifierPrompt(t) }], parent: parent, signal: makeSignal() }
-      if (modelOverride) req.agentOptions = { model: modelOverride }
+      if (modelOverride) {
+        // list-models 返回的 id 是 "provider/model" 复合格式（如 "cmss/zhanlu/glm-5.2"），
+        // 但 AgentOptions 的 provider 和 model 是分开的——整串塞进 model 会报 UNKNOWN_MODEL
+        var slash = modelOverride.indexOf('/')
+        if (slash > 0) req.agentOptions = { provider: modelOverride.slice(0, slash), model: modelOverride.slice(slash + 1) }
+        else req.agentOptions = { model: modelOverride }
+      }
       var run
       try { run = await subagents.start(providerName, req) } catch (e) {
         if (modelOverride) { console.error('[task-board] model override failed, fallback to parent model:', String(e)); delete req.agentOptions; try { run = await subagents.start(providerName, req) } catch (e2) { console.error('[task-board] spawn ' + role + ' failed:', String(e2)); return null } }
