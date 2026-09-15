@@ -132,10 +132,22 @@ test('buildWorkerPrompt: 注入 taskId/描述/验收脚本/过程记录', () => 
   assert.match(p, /taskId: tx/); assert.match(p, /做个功能/); assert.match(p, /npm test/); assert.match(p, /驳回: 缺测试/); assert.match(p, /board_report/)
 })
 
-test('buildVerifierPrompt: 注入交付物 + 验收脚本', () => {
-  const t = mkTask({ id: 'tx', acceptance: 'npm test', deliverable: { summary: '做完了', changes: 'x.js', selfTest: 'pass' } })
+test('buildWorkerPrompt: 注入 context 全字段（files/docs/relatedTasks/prerequisites）', () => {
+  const t = mkTask({ id: 'ctx', context: { instructions: '看 README', files: ['src/x.js', 'README.md'], docs: ['设计文档'], relatedTasks: ['task-a'], prerequisites: 'Node 22+' } })
+  const p = core.buildWorkerPrompt(t)
+  assert.match(p, /看 README/); assert.match(p, /src\/x\.js/); assert.match(p, /README\.md/); assert.match(p, /设计文档/); assert.match(p, /task-a/); assert.match(p, /Node 22\+/)
+})
+
+test('buildWorkerPrompt: 注入 messages（裁决答案/干预指令/歧义原文）', () => {
+  const t = mkTask({ id: 'msg', messages: [{ kind: 'arbitration', text: '用方案B', at: '2026-01-01', by: 'main' }, { kind: 'intervention', text: '注意边界', at: '2026-01-02', by: 'main' }] })
+  const p = core.buildWorkerPrompt(t)
+  assert.match(p, /用方案B/); assert.match(p, /注意边界/); assert.match(p, /arbitration/); assert.match(p, /intervention/)
+})
+
+test('buildVerifierPrompt: 注入交付物 + 验收脚本 + context + messages', () => {
+  const t = mkTask({ id: 'tx', acceptance: 'npm test', deliverable: { summary: '做完了', changes: 'x.js', selfTest: 'pass' }, context: { instructions: '按设计', files: ['d.ts'] }, messages: [{ kind: 'arbitration', text: '方案B', at: '2026-01-01', by: 'main' }] })
   const p = core.buildVerifierPrompt(t)
-  assert.match(p, /做完了/); assert.match(p, /npm test/); assert.match(p, /board_verdict/)
+  assert.match(p, /做完了/); assert.match(p, /npm test/); assert.match(p, /board_verdict/); assert.match(p, /按设计/); assert.match(p, /d\.ts/); assert.match(p, /方案B/)
 })
 
 // ===== 派发决策 =====

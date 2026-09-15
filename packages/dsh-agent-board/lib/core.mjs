@@ -95,15 +95,47 @@ export function isEscalation(output) { return /\[ESCALATE\]/i.test(output || '')
 export function outputText(res) { if (!res || !res.output) return ''; var parts = []; for (var i = 0; i < res.output.length; i++) { var b = res.output[i]; if (b && b.type === 'text' && b.text) parts.push(b.text) } return parts.join('\n') }
 
 // ===== 一次性子代理 prompt 构建（上下文全量注入——子代理无会话记忆）=====
-// 过程记录注入：驳回/裁决/干预历史随 prompt 带给一次性子代理
+// 过程记录注入：驳回/裁决/干预历史 + messages（裁决答案/干预指令/歧义原文）随 prompt 带给一次性子代理
 export function histNotes(t) { return (t.history || []).filter(function (h) { return h.note && (/歧义|裁决|驳回|干预|rejected/i.test(h.note)) }).map(function (h) { return '- [' + h.timestamp + '] ' + String(h.note).slice(0, 300) }).join('\n') }
+export function buildMessages(t) {
+  if (!Array.isArray(t.messages) || t.messages.length === 0) return ''
+  return t.messages.map(function (m) { return '### [' + (m.kind || 'note') + '] (' + (m.at || '') + ' by ' + (m.by || '') + ')\n' + String(m.text || '').slice(0, 2000) }).join('\n\n')
+}
+export function buildContext(t) {
+  var c = t.context || {}
+  var parts = []
+  if (c.instructions) parts.push('指引: ' + c.instructions)
+  if (c.prerequisites) parts.push('前提条件: ' + c.prerequisites)
+  if (Array.isArray(c.files) && c.files.length) parts.push('相关文件: ' + c.files.join(', '))
+  if (Array.isArray(c.docs) && c.docs.length) parts.push('相关文档: ' + c.docs.join(', '))
+  if (Array.isArray(c.relatedTasks) && c.relatedTasks.length) parts.push('关联任务: ' + c.relatedTasks.join(', '))
+  return parts.length ? parts.join('\n') : ''
+}
 export function buildWorkerPrompt(t) {
+  var ctxStr = buildContext(t)
   var notes = histNotes(t)
-  return '你是一个一次性任务执行 Worker。完成下面这个任务，完成后本会话即销毁。\n\ntaskId: ' + t.id + '\n任务: ' + t.title + '\n描述: ' + (t.description || '') + '\n指引: ' + ((t.context && t.context.instructions) || '') + (t.acceptance ? '\n硬性验收脚本: ' + t.acceptance + '\n（必须实际运行该命令并在自测情况中粘贴真实输出；未通过不得上报完成）' : '') + (notes ? '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，请务必遵循最新裁决方向）：\n' + notes : '') + '\n\n完成契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + t.id + '，summary=开发描述/changes=改动清单/selfTest=自测情况）；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况）。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate, taskId=' + t.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测。上报歧义后直接结束本轮——裁决后会有新 Worker 带着裁决答案接手。'
+  var msgs = buildMessages(t)
+  var p = '你是一个一次性任务执行 Worker。完成下面这个任务，完成后本会话即销毁。\n\ntaskId: ' + t.id + '\n任务: ' + t.title + '\n描述: ' + (t.description || '')
+  if (ctxStr) p += '\n' + ctxStr
+  if (t.acceptance) p += '\n硬性验收脚本: ' + t.acceptance + '\n（必须实际运行该命令并在自测情况中粘贴真实输出；未通过不得上报完成）'
+  if (notes) p += '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，请务必遵循最新裁决方向）：\n' + notes
+  if (msgs) p += '\n\n该任务的详细消息（裁决答案/干预指令/歧义原文等，请务必遵循）：\n' + msgs
+  p += '\n\n完成契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + t.id + '，summary=开发描述/changes=改动清单/selfTest=自测情况）；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况）。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate, taskId=' + t.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测。上报歧义后直接结束本轮——裁决后会有新 Worker 带着裁决答案接手。'
+  return p
 }
 export function buildVerifierPrompt(t) {
+  var ctxStr = buildContext(t)
   var notes = histNotes(t)
-  return '你是一个一次性任务审核 Verifier。审查下面这个任务的完成质量，给出结论后本会话即销毁。\n\ntaskId: ' + t.id + '\n任务: ' + t.title + '\n描述: ' + (t.description || '').slice(0, 500) + '\n完成说明: ' + (t.resolution || '(无)') + '\n交付物: ' + (t.deliverable ? ('开发描述: ' + (t.deliverable.summary || '') + '\n改动清单: ' + (t.deliverable.changes || '') + '\n自测情况: ' + (t.deliverable.selfTest || '')) : '(无)').slice(0, 1500) + (t.acceptance ? '\n硬性验收脚本: ' + t.acceptance + '\n（必须独立复跑该命令并把真实输出贴进核对项；脚本失败必须 REJECTED）' : '') + (notes ? '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，若有）：\n' + notes + '\n注意：若过程记录显示主窗口已裁决改变任务方向，以裁决后的方向为验收标准。' : '') + '\n\n结论契约（双模，工具优先）：\n1. 优先调用 board_verdict 工具（taskId=' + t.id + ', verdict=approved/rejected, summary=测试概要, checks=逐条核对证据含行号）。\n2. 工具不可用则首行 APPROVED: <结论> 或 REJECTED: <结论>，然后 ## 测试概要 / ## 核对项 分段。'
+  var msgs = buildMessages(t)
+  var p = '你是一个一次性任务审核 Verifier。审查下面这个任务的完成质量，给出结论后本会话即销毁。\n\ntaskId: ' + t.id + '\n任务: ' + t.title + '\n描述: ' + (t.description || '').slice(0, 500)
+  p += '\n完成说明: ' + (t.resolution || '(无)')
+  p += '\n交付物: ' + (t.deliverable ? ('开发描述: ' + (t.deliverable.summary || '') + '\n改动清单: ' + (t.deliverable.changes || '') + '\n自测情况: ' + (t.deliverable.selfTest || '')) : '(无)').slice(0, 1500)
+  if (ctxStr) p += '\n' + ctxStr
+  if (t.acceptance) p += '\n硬性验收脚本: ' + t.acceptance + '\n（必须独立复跑该命令并把真实输出贴进核对项；脚本失败必须 REJECTED）'
+  if (notes) p += '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，若有）：\n' + notes + '\n注意：若过程记录显示主窗口已裁决改变任务方向，以裁决后的方向为验收标准。'
+  if (msgs) p += '\n\n该任务的详细消息（裁决答案/干预指令/歧义原文等）：\n' + msgs
+  p += '\n\n结论契约（双模，工具优先）：\n1. 优先调用 board_verdict 工具（taskId=' + t.id + ', verdict=approved/rejected, summary=测试概要, checks=逐条核对证据含行号）。\n2. 工具不可用则首行 APPROVED: <结论> 或 REJECTED: <结论>，然后 ## 测试概要 / ## 核对项 分段。'
+  return p
 }
 
 // ===== 派发决策（纯函数版，poolCycle 持锁段调用）=====
