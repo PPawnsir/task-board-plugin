@@ -203,3 +203,34 @@ test('cfg: 边界夹紧', () => {
   const c = core.cfg({ minWorkers: -1, maxWorkers: 99, minVerifiers: 99, maxVerifiers: -1 })
   assert.equal(c.minWorkers, 0); assert.equal(c.maxWorkers, 10); assert.equal(c.minVerifiers, 5); assert.equal(c.maxVerifiers, 0)
 })
+
+// ===== 回归：PRIO_RANK 使用一致性 =====
+test('PRIO_RANK: 与 pickDispatch 排序一致', () => {
+  // PRIO_RANK 必须有 4 档，且值与 pickDispatch 的 sort 逻辑一致
+  assert.equal(core.PRIO_RANK.critical, 4); assert.equal(core.PRIO_RANK.high, 3)
+  assert.equal(core.PRIO_RANK.medium, 2); assert.equal(core.PRIO_RANK.low, 1)
+  // pickDispatch 优先级排序验证（已在前面测过，这里确认 PRIO_RANK 可用）
+  const d = mkBoard([mkTask({ id: 'lo', priority: 'low' }), mkTask({ id: 'hi', priority: 'critical' })])
+  const r = core.pickDispatch(d, 5, 0, null)
+  assert.equal(r.pendings[0].id, 'hi') // critical 排前面
+})
+
+// ===== 回归：outputText 对各种 SubagentResult 形态 =====
+test('outputText: 各种 ContentBlock 形态', () => {
+  assert.equal(core.outputText({ output: [{ type: 'text', text: 'hello' }] }), 'hello')
+  assert.equal(core.outputText({ output: [] }), '')
+  assert.equal(core.outputText({ output: [{ type: 'tool_use' }] }), '') // 无 text block
+  assert.equal(core.outputText({ stopReason: 'completed' }), '') // 无 output 字段
+  assert.equal(core.outputText(undefined), '')
+  assert.equal(core.outputText(null), '')
+})
+
+// ===== 回归：isOrphan 边界 =====
+test('isOrphan: cancelled 状态不回收（不在 in-progress）', () => {
+  const t = mkTask({ status: 'cancelled', claimedBy: 'run-x', claimedAt: new Date(Date.now() - 999999).toISOString() })
+  assert.equal(core.isOrphan(mkBoard([t]), t, {}, Date.now()), false)
+})
+test('isOrphan: 刚 claim 的（<2min）不回收', () => {
+  const t = mkTask({ status: 'in-progress', claimedBy: 'run-x', claimedAt: new Date().toISOString() })
+  assert.equal(core.isOrphan(mkBoard([t]), t, {}, Date.now()), false)
+})

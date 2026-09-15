@@ -34,16 +34,16 @@ export function apply(ctx) {
 
     // ===== 工具函数 =====
     function getActorId() { const a = ctx.agents; if (a) { const i = a.currentInitiator(); if (i) return String(i.id) } return 'unknown' }
-    function resolveRoot(sid) { const agentsSvc = ctx.agents; if (!agentsSvc) return sid; var cur = sid; var roots = agentsSvc.roots(); var rids = []; for (var i = 0; i < roots.length; i++) rids.push(String(roots[i].id)); if (rids.indexOf(cur) >= 0) return cur; var all = agentsSvc.list(); var g = 0; while (g++ < 20) { var o = null; for (var j = 0; j < all.length; j++) { if (agentsSvc.isOwnedBy(cur, all[j])) { o = all[j]; break } }; if (!o) break; cur = String(o.id); if (rids.indexOf(cur) >= 0) return cur }; return cur }
+    function resolveRoot(sid) { const agentsSvc = ctx.agents; if (!agentsSvc) return sid; var cur = sid; var roots = agentsSvc.roots(); var rids = []; for (var i = 0; i < roots.length; i++) rids.push(String(roots[i].id)); if (rids.indexOf(cur) >= 0) return cur; var all = agentsSvc.list(); var visited = {}; while (!visited[cur]) { visited[cur] = true; var o = null; for (var j = 0; j < all.length; j++) { if (agentsSvc.isOwnedBy(cur, all[j])) { o = all[j]; break } }; if (!o) break; cur = String(o.id); if (rids.indexOf(cur) >= 0) return cur }; return cur }
     function toolSessionId() { var sid = resolveRoot(getActorId()); touchSession(sid); return sid }
     function rpcSessionId(args) { var sid = (args && typeof args.sessionId === 'string' && args.sessionId.length > 0) ? args.sessionId : resolveRoot(getActorId()); touchSession(sid); return sid }
     // 已知会话集合：心跳驱动这些会话的 poolCycle（摆脱对客户端轮询的依赖）
+    // 带 TTL 淘汰：>30 分钟无活跃的会话从心跳中移除，避免长期运行后空转 poolCycle
     var knownSessions = {}
     function touchSession(sid) { if (sid && typeof sid === 'string' && sid !== 'unknown') knownSessions[sid] = Date.now() }
     // teamMode 缓存：由 rt() 同步，供 systemPrompt 动态引导段读取（v65）
     var teamModeCache = {}
     function fileFor(sid) { return '.dsh/tasks-' + sid + '.json' }
-    function vt(d) { return d && typeof d === 'object' && Array.isArray(d.tasks) }
     async function rt(sid) { try { var t = await fs.resolve(fileFor(sid)); var r = await fs.readText(t); var d = JSON.parse(r); if (vt(d) && d.ownerSession === sid) { teamModeCache[sid] = !!d.teamMode; return d }; return seed(sid) } catch (_) { return seed(sid) } }
     async function wt(sid, d) { var c = JSON.stringify(d, null, 2); try { var t = await fs.resolve(fileFor(sid)); await fs.writeText(t, c) } catch (e) { console.error('[task-board] write:', String(e)); throw e } }
     // 每会话一条 promise 链，串行化所有 读-改-写，消除并发写竞争
@@ -76,11 +76,13 @@ export function apply(ctx) {
     var badModels = {}
     function modelKey(sid, model) { return sid + '|' + model }
 
+    var _cachedProvider = null
     function pickProvider() {
+      if (_cachedProvider) return _cachedProvider
       var subagents = ctx.subagents; if (!subagents) return null
       var names = subagents.list(); if (!names.length) return null
-      for (var i = 0; i < names.length; i++) { try { var p = subagents.getProvider(names[i]); if (p && p.inheritsParentContext === false) return names[i] } catch (_) {} }
-      return names[0]
+      for (var i = 0; i < names.length; i++) { try { var p = subagents.getProvider(names[i]); if (p && p.inheritsParentContext === false) { _cachedProvider = names[i]; return _cachedProvider } } catch (_) {} }
+      _cachedProvider = names[0]; return _cachedProvider
     }
 
     async function spawnOneShot(sid, t, role) {
@@ -110,12 +112,13 @@ export function apply(ctx) {
       if (runsFor(sid)[rec.taskId] !== rec) return // 已被 terminate 等路径处理
       delete runsFor(sid)[rec.taskId]
       try { await rec.run.dispose() } catch (_) {}
-      var output = ''
-      if (res && res.output) { var parts = []; for (var i = 0; i < res.output.length; i++) { var b = res.output[i]; if (b && b.type === 'text' && b.text) parts.push(b.text) } output = parts.join('\n') }
+      var output = outputText(res)
       var failed = !!err || (res && res.stopReason && res.stopReason !== 'completed')
       var errText = err ? String(err) : (res && (res.diagnostic || res.stopReason) || '')
-      if (rec.role === 'worker') settleWorker(sid, rec, output, failed, errText)
-      else settleVerifier(sid, rec, output, failed, errText)
+      try {
+        if (rec.role === 'worker') await settleWorker(sid, rec, output, failed, errText)
+        else await settleVerifier(sid, rec, output, failed, errText)
+      } catch (e) { console.error('[task-board] settle ' + rec.role + ' failed (task ' + rec.taskId + '):', String(e)) }
     }
 
     async function settleWorker(sid, rec, output, failed, errText) {
@@ -286,7 +289,7 @@ export function apply(ctx) {
     // 插件停止时清理所有活跃 run
     ctx.effect(function () { return function () { Object.keys(activeRuns).forEach(function (psid) { var rr = activeRuns[psid]; Object.keys(rr).forEach(function (k) { try { rr[k].run.dispose() } catch (_) {} }) }); activeRuns = {} } })
     // Host 侧调度心跳：每 15s 对所有已知会话跑 poolCycle（客户端轮询只是触发器之一，面板关闭/后台节流时照常运转）
-    ;(function () { var tm = ctx.timer; if (!tm) return; var disposeTick = tm.interval(function () { Object.keys(knownSessions).forEach(function (sid) { poolCycle(sid).catch(function () {}) }) }, 15000); ctx.effect(function () { return disposeTick }) })()
+    ;(function () { var tm = ctx.timer; if (!tm) return; var disposeTick = tm.interval(function () { var cutoff = Date.now() - 1800000; Object.keys(knownSessions).forEach(function (sid) { if (knownSessions[sid] < cutoff) delete knownSessions[sid]; else poolCycle(sid).catch(function () {}) }) }, 15000); ctx.effect(function () { return disposeTick }) })()
 
     // ===== Team 模式提示词引导（v65）：teamMode 开启时往主窗口 agent 的 system prompt 注入看板派发引导 =====
     // 用动态 section（text 函数每次组装求值）：开启时注入，关闭时返回空串不落盘。
@@ -299,16 +302,21 @@ export function apply(ctx) {
         text: function (assembleCtx) {
           var agent = assembleCtx && assembleCtx.agent
           if (!agent) return ''
-          var sid = resolveRoot(String(agent.id || ''))
+          var aid = String(agent.id || '')
+          var sid = resolveRoot(aid)
+          // P0 修复：只对 root agent 自身注入。Worker/Verifier 的 resolveRoot 也会返回主会话 sid，
+          // 但 agent.id !== sid 说明是子代理——子代理有自己的 prompt 契约，不需要"你是主窗口"引导。
+          // 之前缺这行守卫 → Worker 也收到"请用 task_create 派发任务"→ Worker 误认自己是主窗口。
+          if (aid !== sid) return ''
           if (!teamModeCache[sid]) return ''
-          return '【任务看板 Team 模式已开启】\n本会话的任务看板处于 Team 模式。请遵循以下工作方式：\n1. 涉及代码改动、文件创建、命令执行等实质性工作时，优先用 task_create 提交为看板任务（由常驻 Worker/Verifier 池执行与验收），不要自己直接动手实现。\n2. 你仍保有全部工具能力——调研、读代码、讨论方案、回答问题时直接进行，无需提交任务。\n3. Worker 上报歧义时会通过 task_arbitrate 等待你裁决，请及时响应。\n4. 任务尽量一次写清 description/dependsOn/acceptance；需要分步建设的用 task_create draft:true 先建草稿，补全后 publish。'
+          return '【任务看板 Team 模式已开启】\n本会话的任务看板处于 Team 模式。请遵循以下工作方式：\n1. 涉及代码改动、文件创建、命令执行等实质性工作时，优先用 task_create 提交为看板任务（由一次性 Worker/Verifier 子代理执行与验收），不要自己直接动手实现。\n2. 你仍保有全部工具能力——调研、读代码、讨论方案、回答问题时直接进行，无需提交任务。\n3. Worker 上报歧义时会通过 task_arbitrate 等待你裁决，请及时响应。\n4. 任务尽量一次写清 description/dependsOn/acceptance；需要分步建设的用 task_create draft:true 先建草稿，补全后 publish。'
         },
       })
       ctx.effect(function () { return disposeSection })
     }
 
     // ===== Tools =====
-    ctx.tools.register(defineTool({ name: 'task_list', description: '列出当前会话任务。', parameters: { type: 'object', properties: { status: { type: 'string', enum: ['pending', 'in-progress', 'verifying', 'resolved', 'blocked', 'cancelled'] }, priority: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] }, tag: { type: 'string' }, parentId: { type: 'string' }, includeArchived: { type: 'boolean' }, limit: { type: 'number' } }, required: [] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var d = await rt(sid); var a = d.tasks; var ts = a; if (!args.includeArchived) ts = ts.filter(function (x) { return x.status !== 'archived' }); if (args.status) ts = ts.filter(function (x) { return x.status === args.status }); if (args.priority) ts = ts.filter(function (x) { return x.priority === args.priority }); if (args.tag) ts = ts.filter(function (x) { return (x.tags || []).indexOf(args.tag) >= 0 }); if (args.parentId === 'null') ts = ts.filter(function (x) { return !isb(x) }); else if (args.parentId) ts = ts.filter(function (x) { return x.parentId === args.parentId }); var po = { critical: 4, high: 3, medium: 2, low: 1 }; ts.sort(function (a, b) { var dd = (po[b.priority] || 0) - (po[a.priority] || 0); return dd !== 0 ? dd : (a.createdAt || '').localeCompare(b.createdAt || '') }); var lim = Math.min(args.limit || 20, 100); var res = ts.slice(0, lim).map(function (x) { var e = Object.assign({}, x); if (isb(x)) { var p = gpt(x, a); if (p) e.parentSummary = { id: p.id, title: p.title, status: p.status } }; var ch = gsb(x.id, a); if (ch.length) { e.subtaskCount = ch.length; e.subtaskResolved = ch.filter(function (y) { return y.status === 'resolved' }).length }; return e }); var out = { tasks: res, total: ts.length, session: sid, actor: getActorId(), boardMode: d.boardMode || 'auto', teamMode: !!d.teamMode, poolStatus: d.poolStatus }; if (d.teamMode) out.teamHint = 'Team 模式已开启：实质性改动请优先 task_create 提交看板由池执行；调研/读取/讨论可直接进行；Worker 歧义会上报等你裁决。'; return out } }))
+    ctx.tools.register(defineTool({ name: 'task_list', description: '列出当前会话任务。', parameters: { type: 'object', properties: { status: { type: 'string', enum: ['pending', 'in-progress', 'verifying', 'resolved', 'blocked', 'cancelled'] }, priority: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] }, tag: { type: 'string' }, parentId: { type: 'string' }, includeArchived: { type: 'boolean' }, limit: { type: 'number' } }, required: [] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var d = await rt(sid); var a = d.tasks; var ts = a; if (!args.includeArchived) ts = ts.filter(function (x) { return x.status !== 'archived' }); if (args.status) ts = ts.filter(function (x) { return x.status === args.status }); if (args.priority) ts = ts.filter(function (x) { return x.priority === args.priority }); if (args.tag) ts = ts.filter(function (x) { return (x.tags || []).indexOf(args.tag) >= 0 }); if (args.parentId === 'null') ts = ts.filter(function (x) { return !isb(x) }); else if (args.parentId) ts = ts.filter(function (x) { return x.parentId === args.parentId }); var po = PRIO_RANK; ts.sort(function (a, b) { var dd = (po[b.priority] || 0) - (po[a.priority] || 0); return dd !== 0 ? dd : (a.createdAt || '').localeCompare(b.createdAt || '') }); var lim = Math.min(args.limit || 20, 100); var res = ts.slice(0, lim).map(function (x) { var e = Object.assign({}, x); if (isb(x)) { var p = gpt(x, a); if (p) e.parentSummary = { id: p.id, title: p.title, status: p.status } }; var ch = gsb(x.id, a); if (ch.length) { e.subtaskCount = ch.length; e.subtaskResolved = ch.filter(function (y) { return y.status === 'resolved' }).length }; return e }); var out = { tasks: res, total: ts.length, session: sid, actor: getActorId(), boardMode: d.boardMode || 'auto', teamMode: !!d.teamMode, poolStatus: d.poolStatus }; if (d.teamMode) out.teamHint = 'Team 模式已开启：实质性改动请优先 task_create 提交看板由池执行；调研/读取/讨论可直接进行；Worker 歧义会上报等你裁决。'; return out } }))
     ctx.tools.register(defineTool({ name: 'task_context', description: '获取任务完整上下文。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, expandFiles: { type: 'boolean' }, includeParent: { type: 'boolean' }, includeSubtasks: { type: 'boolean' } }, required: ['taskId'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var d = await rt(sid); var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found: ' + args.taskId }; return { ok: true, context: { task: t, inheritedContext: t.context || {} } } } }))
     ctx.tools.register(defineTool({ name: 'task_claim', description: '领取待办任务→in-progress。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, reason: { type: 'string' } }, required: ['taskId'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; var err = claimCheck(d, t, actor); if (err) return { ok: false, error: err }; claimApply(d, t, actor, args.reason || 'claimed'); return { ok: true, task: t, context: { task: t, inheritedContext: t.context || {} } } }) } }))
     ctx.tools.register(defineTool({ name: 'task_resolve', description: '提交验证(verifying)或阻塞(blocked)。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, status: { type: 'string', enum: ['verifying', 'blocked'] }, resolution: { type: 'string' } }, required: ['taskId', 'status'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'in-progress') return { ok: false, error: 'not in-progress' }; if (t.claimedBy !== actor) return { ok: false, error: 'not claimed by you' }; if (args.status === 'verifying' && !args.resolution) return { ok: false, error: 'resolution required' }; return resolveApply(d, t, actor, args.status, args.resolution, args.resolution || args.status) }) } }))
@@ -433,9 +441,9 @@ export function apply(ctx) {
         if (result.task.status === 'blocked') notifyTaskDone(sid, result.task, 'blocked')
       }
       if (result && result.ok && !approved && result.task) {
-        // v74 一次性模型：原 Worker 已销毁，驳回任务回 pending 重派新 Worker（驳回原因在 history，随 prompt 注入）
+        // v74 一次性模型：原 Worker 已销毁，驳回任务回 pending 重派新 Worker（驳回原因已在 verifyApply 的 history 里，随 prompt 注入）
         var bt = result.task
-        if ((bt.rejectCount || 0) < 3) { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === bt.id }); if (t2 && t2.status === 'in-progress') { t2.status = 'pending'; t2.claimedBy = null; t2.claimedAt = null; ah(t2, 'in-progress', 'pending', 'system', '驳回重派：新 Worker 将携带驳回原因继续') }; return t2 }) }
+        if ((bt.rejectCount || 0) < 3) { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === bt.id }); if (t2 && t2.status === 'in-progress') { t2.status = 'pending'; t2.claimedBy = null; t2.claimedAt = null }; return t2 }, true) }
       }
       return result
     } }))
@@ -452,7 +460,7 @@ export function apply(ctx) {
       }
       return { ok: true, models: out }
     })
-    handle('set-board-config', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { if (args.key === 'minWorkers') d.minWorkers = Math.max(0, Math.min(10, args.value || 0)); else if (args.key === 'maxWorkers') d.maxWorkers = Math.max(1, Math.min(10, args.value || 3)); else if (args.key === 'minVerifiers') d.minVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; return { ok: true } }) })
+    handle('set-board-config', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { if (args.key === 'maxWorkers') d.maxWorkers = Math.max(1, Math.min(10, args.value || 3)); else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; return { ok: true } }) })
     handle('create-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { if (args.id && d.tasks.find(function (x) { return x.id === args.id })) return { ok: false, error: 'duplicate id' }; if (args.dependsOn && args.dependsOn.length) { var derr = validateDeps(d, args.id || '(pending)', args.dependsOn); if (derr) return { ok: false, error: derr } }; var now = new Date().toISOString(); var t = { id: args.id || ('task-' + Date.now().toString(36)), title: args.title || 'Untitled', description: args.description || '', status: args.draft ? 'draft' : 'pending', priority: args.priority || 'medium', tags: args.tags || [], parentId: args.parentId || null, subtaskStrategy: null, assignMode: 'auto', assignee: null, context: { files: [], docs: [], instructions: args.instructions || '', relatedTasks: [], prerequisites: '' }, acceptance: args.acceptance || '', dependsOn: args.dependsOn || [], pipeline: args.pipeline || '', claimedBy: null, claimedAt: null, createdAt: now, resolvedAt: null, verifiedAt: null, verifiedBy: null, archivedAt: null, resolution: null, messages: [], history: [{ from: 'created', to: args.draft ? 'draft' : 'pending', timestamp: now, actor: actor, note: args.draft ? 'created as draft' : 'created' }] }; if (!t.pipeline) { t.pipeline = classifyPipeline(t); t.pipelineAuto = true }; d.tasks.push(t); return { ok: true, task: t } }) })
     handle('list-children', async function (args) { var sid = rpcSessionId(args); var subs = ctx.subagents; if (!subs) return { ok: true, children: [] }; try { var list = await subs.listChildren(sid); var children = (list || []).map(function (c) { return { id: String(c.sessionId || c.id || ''), label: String(c.label || c.title || c.mode || '') } }).filter(function (c) { return c.id.length > 0 }); return { ok: true, children: children } } catch (e) { return { ok: true, children: [], error: String(e) } } })
     // ===== #14 批量操作：archive（仅 resolved/cancelled）/ set-priority（全部）=====

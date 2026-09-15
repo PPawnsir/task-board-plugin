@@ -64,7 +64,17 @@ function apply(ctx) {
     }
     function fetchChildren() { if (!state.sessionId) return; rpc('list-children').then(function (d) { state.children = (d && d.children) || []; notify() }).catch(function () {}) }
     var __timer = ctx.get('timer')
-    if (__timer) ctx.effect(function () { return __timer.interval(fetchTasks, 3000) })
+    // 轮询自适应：有活跃任务/面板打开时 3s 快速刷新；空闲时 15s 降频（减少无谓 RPC）
+    if (__timer) ctx.effect(function () {
+      function poll() {
+        var hasActive = state.tasks.some(function (t) { return t.status === 'pending' || t.status === 'in-progress' || t.status === 'verifying' || t.escalation })
+        fetchTasks()
+        var next = (hasActive || state.open) ? 3000 : 15000
+        __timer.timeout(next).then(poll).catch(function () {})
+      }
+      __timer.timeout(0).then(poll).catch(function () {})
+      return function () {}
+    })
     function readLayoutOffsets() {
       try {
         var frames = document.querySelectorAll('[data-sidebar-collapsed], [data-details-collapsed]')
