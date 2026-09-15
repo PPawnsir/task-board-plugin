@@ -342,7 +342,6 @@ function apply(ctx) {
       if (!task) { state.detailId = null; return React.createElement('div', { style: { padding: 20, color: C.text2 } }, '任务不存在') }
       function doAction(fn) { fn().then(fetchTasks).catch(function () {}) }
       function saveEdit() { setSaving(true); rpc('update-task', { taskId: task.id, title: editTitle, description: editDesc, resetToPending: true }).then(function () { setSaving(false); fetchTasks() }).catch(function () { setSaving(false) }) }
-      function assignTo(childId) { rpc('update-task', { taskId: task.id, assignMode: 'manual', assignee: childId }).then(fetchTasks).catch(function () {}) }
       function jumpToAgent() { if (sessionsSvc && task.claimedBy) sessionsSvc.open(task.claimedBy) }
       function submitArbitration() { if (!arbAnswer.trim()) return; rpc('resolve-escalation', { taskId: task.id, answer: arbAnswer }).then(function (r) { setActionMsg(r && r.ok ? '✅ 裁决已转达给 Worker' : '⚠️ ' + ((r && r.error) || '失败')); setArbAnswer(''); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) }) }
       function doTerminate() { rpc('terminate-agent', { taskId: task.id }).then(function (r) { setActionMsg(r && r.ok ? '⏹ 已终止 ' + (r.terminated || '') + '，任务重新排队' : '⚠️ ' + ((r && r.error) || '无活动 Agent')); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) }) }
@@ -398,8 +397,7 @@ function apply(ctx) {
           React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.warn, marginBottom: 4 } }, '⚡ 高优先级介入（插入执行 Agent 队首）'),
           React.createElement('div', { style: { display: 'flex', gap: 4 } },
             React.createElement('input', { value: interveneMsg, onChange: function (e) { setInterveneMsg(e.target.value) }, onKeyDown: function (e) { if (e.key === 'Enter') submitIntervene() }, placeholder: '给执行中的 Agent 下达高优指令…', style: { flex: 1, fontSize: 11, padding: '4px 8px', border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text } }),
-            React.createElement('button', { onClick: submitIntervene, disabled: !interveneMsg.trim(), style: { fontSize: 11, padding: '4px 10px', border: 'none', borderRadius: 4, background: C.warn, color: '#fff', cursor: 'pointer', fontWeight: 600 } }, '介入'))) : null,
-        mode === 'manual' ? React.createElement('div', { style: { marginTop: 8 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 3 } }, '派发给子 Agent'), React.createElement('select', { value: task.assignee || '', onChange: function (e) { assignTo(e.target.value || null) }, style: { width: '100%', fontSize: 11, padding: '4px 6px', border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text } }, React.createElement('option', { value: '' }, '— 未指派 —'), state.children.map(function (c) { return React.createElement('option', { key: c.id, value: c.id }, (c.label || c.id).slice(0, 40)) }))) : null)
+            React.createElement('button', { onClick: submitIntervene, disabled: !interveneMsg.trim(), style: { fontSize: 11, padding: '4px 10px', border: 'none', borderRadius: 4, background: C.warn, color: '#fff', cursor: 'pointer', fontWeight: 600 } }, '介入'))) : null)
     }
     function TopPanel() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
