@@ -195,13 +195,13 @@ export function apply(ctx) {
       kickCycle(sid)
     }
 
-    // 歧义上报聊天通知：仅 Team 模式推送到主窗口聊天流；自动模式靠看板面板 3s 轮询自动弹开（聊天通知是冗余噪音）
+    // 歧义上报通知：任何模式都通知主窗口（escalation 需要人工裁决，不能静默吞掉）
     function notifyMainWindow(sid, t, question) {
       var root = rootForSession(sid)
       if (!root) return
-      try { root.followup(makeMsg('⚠️ [任务看板] Worker 上报歧义，等待裁决：\n\n任务: ' + t.title + ' (' + t.id + ')\n\n疑问:\n' + question.slice(0, 1500) + '\n\n请在看板详情页裁决，或直接回复指示（我会通过 resolve-escalation 转达给接手的 Worker）。')) } catch (e) { console.error('[task-board] escalate notify failed:', String(e)) }
+      try { root.followup(makeMsg('⚠️ [任务看板] Worker 上报歧义，等待裁决：\n\n任务: ' + t.title + ' (' + t.id + ')\n\n疑问:\n' + question.slice(0, 1500) + '\n\n请在看板详情页裁决，或直接回复指示。裁决后会有新 Worker 带着裁决答案接手。')) } catch (e) { console.error('[task-board] escalate notify failed:', String(e)) }
     }
-    function maybeNotify(sid, task) { if (task && task.escalation) { rt(sid).then(function (d) { if (d.teamMode) notifyMainWindow(sid, task, task.escalation.question) }).catch(function () {}) } }
+    function maybeNotify(sid, task) { if (task && task.escalation) { notifyMainWindow(sid, task, task.escalation.question) } }
 
     // ===== 任务回执通知（批量聚合 + 空闲门控）：派发执行的任务在 完成/阻塞 时通知主窗口 =====
     // 只通知派发执行的任务（isDispatched），主窗口自己手动处理的任务不回执（自己干的自己知道）。
@@ -259,18 +259,18 @@ export function apply(ctx) {
       var isAuto = (snap.boardMode || 'auto') === 'auto'
 
       // 持锁：孤儿回收 + 占位 claim（防并发 cycle 重复派发）+ 池状态快照，一次原子写
+      // 孤儿回收 + verifier 派发在两种模式都跑；worker 派发仅 auto 模式（manual 模式主窗口自己做）
       var toSpawn = []
       var result = await mutateLocked(sid, function (d) {
-        if (isAuto) {
-          var now = Date.now()
-          // 孤儿回收（core.isOrphan）：in-progress 且 claimedBy 非主会话、无活跃 run、无 escalation、超 2 分钟 → 回 pending
-          d.tasks.forEach(function (t) {
-            if (isOrphan(d, t, runs, now)) { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', '执行 run 已结束/丢失，回收重新排队'); info.push('reclaim ' + t.id) }
-          })
-          var picked = pickDispatch(d, Math.max(0, c.maxWorkers - activeW), Math.max(0, c.maxVerifiers - activeV), null)
-          picked.pendings.forEach(function (t) { claimApply(d, t, 'spawn-pending', 'dispatch'); toSpawn.push({ role: 'worker', t: t }); info.push('dispatch ' + t.id) })
-          picked.verifs.forEach(function (t) { toSpawn.push({ role: 'verifier', t: t }); info.push('verify ' + t.id) })
-        }
+        var now = Date.now()
+        d.tasks.forEach(function (t) {
+          if (isOrphan(d, t, runs, now)) { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', '执行 run 已结束/丢失，回收重新排队'); info.push('reclaim ' + t.id) }
+        })
+        // worker 派发仅 auto；verifier 派发两种模式都跑（manual 模式主窗口 claim 做完的 full 档任务需要验收）
+        var capW = isAuto ? Math.max(0, c.maxWorkers - activeW) : 0
+        var picked = pickDispatch(d, capW, Math.max(0, c.maxVerifiers - activeV), null)
+        picked.pendings.forEach(function (t) { claimApply(d, t, 'spawn-pending', 'dispatch'); toSpawn.push({ role: 'worker', t: t }); info.push('dispatch ' + t.id) })
+        picked.verifs.forEach(function (t) { toSpawn.push({ role: 'verifier', t: t }); info.push('verify ' + t.id) })
         // UI 池状态：来自活跃 run（一次性模型：没有成员名册，只有在跑的任务）
         d.poolStatus = { workers: [], verifiers: [] }
         Object.keys(runs).forEach(function (k) { var rc = runs[k]; d.poolStatus[rc.role === 'worker' ? 'workers' : 'verifiers'].push({ id: k, num: '-', busy: true, taskId: rc.taskId, runId: String(rc.run.id), done: 0, queueLen: 0, suspect: false, model: rc.model || '' }) })
@@ -341,8 +341,8 @@ export function apply(ctx) {
     handle('verify-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'verifying') return { ok: false, error: 'not verifying' }; delete t.escalation; delete t.verifyRetries; return verifyApply(d, t, actor, args.verdict, args.comment) }) })
     handle('archive-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var a = d.tasks; var t = a.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'resolved' && t.status !== 'cancelled') return { ok: false, error: 'cannot archive' }; var ps = t.status; t.status = 'archived'; t.archivedAt = new Date().toISOString(); ah(t, ps, 'archived', actor, 'manual archive'); var ca = 0; gsb(t.id, a).forEach(function (c) { if (c.status !== 'archived') { ah(c, c.status, 'archived', actor, 'cascade'); c.status = 'archived'; c.archivedAt = new Date().toISOString(); ca++ } }); var r = { ok: true, task: t }; if (ca) r.childrenArchived = ca; return r }) })
     handle('update-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (args.title !== undefined) t.title = args.title; if (args.description !== undefined) t.description = args.description; if (args.priority !== undefined) t.priority = args.priority; if (args.assignMode !== undefined) t.assignMode = args.assignMode; if (args.assignee !== undefined) t.assignee = args.assignee || null; if (args.dependsOn !== undefined) { var derr = validateDeps(d, t.id, args.dependsOn); if (derr) return { ok: false, error: derr }; t.dependsOn = args.dependsOn } if (args.pipeline !== undefined) { t.pipeline = args.pipeline; t.pipelineAuto = false } if (args.publish) { if (t.status !== 'draft') return { ok: false, error: 'not a draft' }; t.status = 'pending'; ah(t, 'draft', 'pending', actor, 'published') } if (args.resetToPending) { var ps = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'pending', actor, 'reset to pending after edit') }; return { ok: true, task: t } }) })
-    handle('set-board-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.boardMode = args.mode === 'manual' ? 'manual' : 'auto'; return { ok: true, boardMode: d.boardMode } }) })
-    handle('set-team-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.teamMode = !!args.enabled; return { ok: true, teamMode: d.teamMode } }) })
+    handle('set-board-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.boardMode = args.mode === 'manual' ? 'manual' : 'auto'; if (d.boardMode === 'manual' && d.teamMode) { d.teamMode = false; teamModeCache[sid] = false }; return { ok: true, boardMode: d.boardMode, teamMode: !!d.teamMode } }) })
+    handle('set-team-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.teamMode = !!args.enabled; if (d.teamMode) d.boardMode = 'auto'; teamModeCache[sid] = d.teamMode; return { ok: true, teamMode: d.teamMode, boardMode: d.boardMode } }) })
     // 裁决回流（v74 一次性模型）：原 Worker 已结束，答案写入 history 后任务回 pending，
     // 下个派发周期 spawn 新 Worker，裁决内容随 prompt 注入（histNotes 匹配"裁决"）
     async function doResolveEscalation(sid, actor, taskId, answer) {
@@ -398,6 +398,30 @@ export function apply(ctx) {
     handle('terminate-agent', async function (args) { return doTerminate(rpcSessionId(args), getActorId(), args.taskId) })
     handle('dismiss-suspect', async function (args) { return doDismiss(rpcSessionId(args), getActorId(), args.taskId) })
     ctx.tools.register(defineTool({ name: 'task_terminate', description: 'Team 模式：终止执行某任务的池中 Agent（卡死/跑偏时）。in-progress 任务回 pending 重派，verifying 由新 verifier 接手。', parameters: { type: 'object', properties: { taskId: { type: 'string' } }, required: ['taskId'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; return doTerminate(toolSessionId(), getActorId(), args.taskId) } }))
+    // 手动触发单任务派发（manual 模式下"派发给 Worker"按钮，或 auto 模式手动补派）
+    handle('dispatch-task', async function (args) {
+      var sid = rpcSessionId(args)
+      var role = args.role === 'verifier' ? 'verifier' : 'worker'
+      var claimed = await mutateLocked(sid, function (d) {
+        var t = d.tasks.find(function (x) { return x.id === args.taskId })
+        if (!t) return { ok: false, error: 'not found' }
+        if (role === 'worker') { if (t.status !== 'pending') return { ok: false, error: 'not pending (状态: ' + t.status + ')' }; if (t.claimedBy) return { ok: false, error: 'already claimed' }; claimApply(d, t, 'spawn-pending', 'manual dispatch') }
+        else { if (t.status !== 'verifying') return { ok: false, error: 'not verifying (状态: ' + t.status + ')' }; if (t.escalation) return { ok: false, error: 'escalated, 待裁决' } }
+        return { ok: true }
+      })
+      if (!claimed || !claimed.ok) return claimed
+      var d = await rt(sid)
+      var t = d.tasks.find(function (x) { return x.id === args.taskId })
+      if (!t) return { ok: false, error: 'task disappeared' }
+      var rec = await spawnOneShot(sid, t, role)
+      if (rec) {
+        if (role === 'worker') { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === args.taskId }); if (t2 && t2.claimedBy === 'spawn-pending') t2.claimedBy = String(rec.run.id); return t2 }, true) }
+        return { ok: true, runId: String(rec.run.id) }
+      }
+      // spawn 失败 → 回退
+      if (role === 'worker') { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === args.taskId }); if (t2 && t2.status === 'in-progress' && t2.claimedBy === 'spawn-pending') { t2.status = 'pending'; t2.claimedBy = null; t2.claimedAt = null; ah(t2, 'in-progress', 'pending', 'system', 'spawn 失败') }; return t2 }, true) }
+      return { ok: false, error: 'spawn failed' }
+    })
     handle('resolve-escalation', async function (args) { return doResolveEscalation(rpcSessionId(args), getActorId(), args.taskId, args.answer) })
     handle('intervene-agent', async function (args) { return doIntervene(rpcSessionId(args), getActorId(), args.taskId, args.message) })
     // 主 Agent 工具版（Team 模式下主 Agent 通过工具裁决/介入）
