@@ -155,6 +155,8 @@ export function apply(ctx) {
         return { task: t }
       })
       if (!result) return
+      // already=true：工具通道（board_report）已推进状态并已发回执/歧义通知，settle 只负责 dispose，不再重复通知
+      if (result.already) return
       if (result.escalated) maybeNotify(sid, result.task)
       if (result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved')
       if (result.blocked) notifyTaskDone(sid, result.task, 'blocked')
@@ -189,6 +191,8 @@ export function apply(ctx) {
         return { task: t, approved: approved }
       })
       if (!result) return
+      // already=true：工具通道（board_verdict）已推进状态并已发回执，settle 只负责 dispose，不再重复通知
+      if (result.already) return
       if (result.escalated) maybeNotify(sid, result.task)
       if (result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved')
       if (result.task && result.task.status === 'blocked') notifyTaskDone(sid, result.task, 'blocked')
