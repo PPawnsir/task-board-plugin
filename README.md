@@ -1,5 +1,8 @@
 # Task Board Plugin for DeepSeek Harness
 
+[![npm](https://img.shields.io/npm/v/dsh-agent-board)](https://www.npmjs.com/package/dsh-agent-board)
+[![license](https://img.shields.io/npm/l/dsh-agent-board)](https://github.com/PPawnsir/task-board-plugin/blob/main/LICENSE)
+
 智能看板插件 — Agent 自主任务驱动开发：看板管理 + 一次性 Worker/Verifier 派发 + 依赖调度 + Team 模式。
 
 ## 安装
@@ -9,17 +12,22 @@
 - DeepSeek Harness（dsh）已安装并能正常启动：`dsh --profile web`
 - Node.js ≥ 22（与 dsh 运行时一致）
 
-### 安装步骤
+### 从插件市场安装（推荐）
+
+已发布至 npm 官方 registry（[dsh-agent-board](https://www.npmjs.com/package/dsh-agent-board)）：
 
 ```sh
-# 1. 克隆本仓库
-git clone https://github.com/PPawnsir/task-board-plugin.git
-
-# 2. 安装到 dsh web profile（无需构建，包内文件即源码）
-dsh plugin --profile web add <本仓库绝对路径>/packages/dsh-agent-board
-
-# 3. 重启 dsh 生效
+dsh plugin --profile web add dsh-agent-board
+# 重启 dsh 生效
 dsh --profile web
+```
+
+### 从源码安装（开发/调试）
+
+```sh
+git clone https://github.com/PPawnsir/task-board-plugin.git
+dsh plugin --profile web add <本仓库绝对路径>/packages/dsh-agent-board
+# 重启 dsh
 ```
 
 ### 验证安装
@@ -39,8 +47,11 @@ curl -X POST http://127.0.0.1:3080/dsh-agent-board \
 ### 升级
 
 ```sh
+# 市场版
+dsh plugin --profile web add dsh-agent-board@latest
+# 源码版
 git pull
-# 重启 dsh（link: 安装指向本仓库，无需重装）
+# 两者都需重启 dsh
 ```
 
 ### 卸载
@@ -145,6 +156,17 @@ Team 模式开启时强制自动派发（防止"引导派发 + 手动模式"死�
 - [docs/PACKAGING.md](docs/PACKAGING.md) — 正式安装（Bundle 打包）注意事项
 - [docs/icon-style-guide.md](docs/icon-style-guide.md) — 图标规范
 - [docs/REGRESSION-v59.md](docs/REGRESSION-v59.md) — 回归测试说明
+
+## 发布新版本（维护者）
+
+```sh
+cd packages/dsh-agent-board
+npm version patch        # 或 minor / major
+npm publish              # prepublishOnly 门禁自动跑：语法检查 ×3 + 30 例单测，挂了拒发
+```
+
+> 需已 `npm login --registry=https://registry.npmjs.org`（或使用 bypass-2FA 的 direct-capable token）。
+> 注意本机 npm 默认源若指向 npmmirror 镜像，发布时必须显式 `--registry=https://registry.npmjs.org`。
 
 ## License
 
