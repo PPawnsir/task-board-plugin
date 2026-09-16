@@ -28,8 +28,140 @@ function apply(ctx) {
         ['path', { d: 'M12 16h4' }],
         ['path', { d: 'M8 11h.01' }],
         ['path', { d: 'M8 16h.01' }]
+      ],
+      'bar-chart-3': [
+        ['path', { d: 'M3 3v18h18' }],
+        ['path', { d: 'M18 17V9' }],
+        ['path', { d: 'M13 17V5' }],
+        ['path', { d: 'M8 17v-3' }]
+      ],
+      'alert-triangle': [
+        ['path', { d: 'm21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3' }],
+        ['path', { d: 'M12 9v4' }],
+        ['path', { d: 'M12 17h.01' }]
+      ],
+      'zap': [
+        ['polygon', { points: '13 2 3 14 12 14 11 22 21 10 12 10 13 2' }]
+      ],
+      'check': [
+        ['path', { d: 'M20 6 9 17l-5-5' }]
+      ],
+      'check-circle': [
+        ['circle', { cx: 12, cy: 12, r: 10 }],
+        ['path', { d: 'm9 12 2 2 4-4' }]
+      ],
+      'x-circle': [
+        ['circle', { cx: 12, cy: 12, r: 10 }],
+        ['path', { d: 'm15 9-6 6' }],
+        ['path', { d: 'm9 9 6 6' }]
+      ],
+      'x': [
+        ['path', { d: 'M18 6 6 18' }],
+        ['path', { d: 'm6 6 12 12' }]
+      ],
+      'refresh-cw': [
+        ['path', { d: 'M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8' }],
+        ['path', { d: 'M21 3v5h-5' }],
+        ['path', { d: 'M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16' }],
+        ['path', { d: 'M8 16H3v5' }]
+      ],
+      'save': [
+        ['path', { d: 'M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z' }],
+        ['path', { d: 'M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7' }],
+        ['path', { d: 'M7 3v4a1 1 0 0 0 1 1h7' }]
+      ],
+      'archive': [
+        ['rect', { width: 20, height: 5, x: 2, y: 3, rx: 1 }],
+        ['path', { d: 'M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8' }],
+        ['path', { d: 'M10 12h4' }]
+      ],
+      'package': [
+        ['path', { d: 'M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z' }],
+        ['path', { d: 'M12 22V12' }],
+        ['path', { d: 'm3.3 7 7.703 4.734a2 2 0 0 0 1.994 0L20.7 7' }],
+        ['path', { d: 'm7.5 4.27 9 5.15' }]
+      ],
+      'clipboard-check': [
+        ['rect', { width: 8, height: 4, x: 8, y: 2, rx: 1, ry: 1 }],
+        ['path', { d: 'M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2' }],
+        ['path', { d: 'm9 14 2 2 4-4' }]
+      ],
+      'clipboard-x': [
+        ['rect', { width: 8, height: 4, x: 8, y: 2, rx: 1, ry: 1 }],
+        ['path', { d: 'M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2' }],
+        ['path', { d: 'm15 11-6 6' }],
+        ['path', { d: 'm9 11 6 6' }]
+      ],
+      'scale': [
+        ['path', { d: 'm16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z' }],
+        ['path', { d: 'm2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z' }],
+        ['path', { d: 'M7 21h10' }],
+        ['path', { d: 'M12 3v18' }],
+        ['path', { d: 'M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2' }]
+      ],
+      'users': [
+        ['path', { d: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2' }],
+        ['circle', { cx: 9, cy: 7, r: 4 }],
+        ['path', { d: 'M22 21v-2a4 4 0 0 0-3-3.87' }],
+        ['path', { d: 'M16 3.13a4 4 0 0 1 0 7.75' }]
+      ],
+      'bot': [
+        ['path', { d: 'M12 8V4H8' }],
+        ['rect', { width: 16, height: 12, x: 4, y: 8, rx: 2 }],
+        ['path', { d: 'M2 14h2' }],
+        ['path', { d: 'M20 14h2' }],
+        ['path', { d: 'M15 13v2' }],
+        ['path', { d: 'M9 13v2' }]
+      ],
+      'user': [
+        ['path', { d: 'M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2' }],
+        ['circle', { cx: 12, cy: 7, r: 4 }]
+      ],
+      'chevron-down': [
+        ['path', { d: 'm6 9 6 6 6-6' }]
+      ],
+      'chevron-right': [
+        ['path', { d: 'm9 18 6-6-6-6' }]
+      ],
+      'settings': [
+        ['path', { d: 'M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z' }],
+        ['circle', { cx: 12, cy: 12, r: 3 }]
+      ],
+      'rocket': [
+        ['path', { d: 'M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z' }],
+        ['path', { d: 'm12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z' }],
+        ['path', { d: 'M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0' }],
+        ['path', { d: 'M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5' }]
+      ],
+      'flask-conical': [
+        ['path', { d: 'M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2' }],
+        ['path', { d: 'M8.5 2h7' }],
+        ['path', { d: 'M7 16h10' }]
+      ],
+      'file-text': [
+        ['path', { d: 'M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z' }],
+        ['path', { d: 'M14 2v4a2 2 0 0 0 2 2h4' }],
+        ['path', { d: 'M16 13H8' }],
+        ['path', { d: 'M16 17H8' }],
+        ['path', { d: 'M10 9H8' }]
+      ],
+      'message-square': [
+        ['path', { d: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z' }]
+      ],
+      'square-check-big': [
+        ['path', { d: 'M21 10.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.5' }],
+        ['path', { d: 'm9 11 3 3L22 4' }]
+      ],
+      'square': [
+        ['rect', { width: 18, height: 18, x: 3, y: 3, rx: 2 }]
+      ],
+      'stop-circle': [
+        ['circle', { cx: 12, cy: 12, r: 10 }],
+        ['rect', { width: 6, height: 6, x: 9, y: 9 }]
       ]
     }
+    // 图标+文字内联组合的快捷渲染
+    function icText(name, size, text) { return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic(name, size), text) }
     function ic(name, size) {
       var def = ICONS[name]
       if (!def) return null
@@ -175,12 +307,12 @@ function apply(ctx) {
       useEffect(function () { if (props && props.sessionId) { var sid = String(props.sessionId); if (state.sessionId !== sid) { state.sessionId = sid; fetchTasks(); fetchChildren() } } }, [props && props.sessionId])
       useEffect(function () { function update() { var n = 0, e = 0; for (var i = 0; i < state.tasks.length; i++) { if (state.tasks[i].status === 'pending') n++; if (state.tasks[i].escalation) e++ }; setPendingCount(n); setEscCount(e); setIsOpen(state.open); setIsRoot(state.isRoot) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!isRoot) return null // 子代理会话不显示看板入口
-      return React.createElement('button', { onClick: function () { state.open = !state.open; notify() }, title: '任务看板' + (pendingCount > 0 ? '（' + pendingCount + ' 待办）' : '') + (escCount > 0 ? '（' + escCount + ' 待裁决）' : ''), style: { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', border: '1px solid ' + (escCount > 0 ? C.err : C.border), borderRadius: 6, background: isOpen ? C.nested : 'transparent', color: C.text, cursor: 'pointer', fontSize: 12 } }, React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center' } }, ic('clipboard-list', 14)), React.createElement('span', null, '看板'), escCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.err, color: '#fff', fontSize: 10, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', animation: 'tskb-pulse 1s ease-in-out infinite' }, title: escCount + ' 个任务待裁决' }, '⚠' + escCount) : null, pendingCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.brand, color: '#fff', fontSize: 10, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' } }, String(pendingCount)) : null)
+      return React.createElement('button', { onClick: function () { state.open = !state.open; notify() }, title: '智能看板' + (pendingCount > 0 ? '（' + pendingCount + ' 待办）' : '') + (escCount > 0 ? '（' + escCount + ' 待裁决）' : ''), style: { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', border: '1px solid ' + (escCount > 0 ? C.err : C.border), borderRadius: 6, background: isOpen ? C.nested : 'transparent', color: C.text, cursor: 'pointer', fontSize: 12 } }, React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center' } }, ic('clipboard-list', 14)), React.createElement('span', null, '智能看板'), escCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.err, color: '#fff', fontSize: 10, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 1, animation: 'tskb-pulse 1s ease-in-out infinite' }, title: escCount + ' 个任务待裁决' }, ic('alert-triangle', 10), escCount) : null, pendingCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.brand, color: '#fff', fontSize: 10, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' } }, String(pendingCount)) : null)
     }
-    function ModeSwitch(props) { var mode = props.mode; var teamOn = props.teamOn; function pick(m) { if (teamOn && m === 'manual') return; rpc('set-board-mode', { mode: m }).then(fetchTasks).catch(function () {}) } var btnBase = { fontSize: 12, padding: '4px 14px', border: 'none', cursor: 'pointer', fontWeight: 500, flex: 1, textAlign: 'center', borderRadius: 6, transition: 'all .15s' }; var manDis = teamOn; return React.createElement('div', { style: { display: 'inline-flex', borderRadius: 8, border: '1px solid ' + C.border, overflow: 'hidden', background: C.card } }, React.createElement('button', { onClick: function () { pick('auto') }, style: Object.assign({}, btnBase, mode === 'auto' ? { background: C.brand, color: '#fff' } : { background: 'transparent', color: C.text2 }) }, '🤖 自动'), React.createElement('button', { onClick: function () { pick('manual') }, disabled: manDis, title: manDis ? 'Team 模式开启时不可切换到手动' : '', style: Object.assign({}, btnBase, mode === 'manual' ? { background: C.brand, color: '#fff' } : { background: 'transparent', color: manDis ? C.text2 + '88' : C.text2 }, manDis ? { cursor: 'not-allowed', opacity: 0.5 } : {}) }, '👤 手动')) }
-    function TeamSwitch(props) { var on = props.on; function toggle() { rpc('set-team-mode', { enabled: !on }).then(fetchTasks).catch(function () {}) } return React.createElement('button', { onClick: toggle, title: on ? 'Team 模式已开启：任务走看板派发，Worker 歧义自动上报主窗口裁决（不拦截主窗口编辑）' : '开启 Team 模式：任务全走看板，Worker 歧义上报主窗口裁决', style: { fontSize: 12, padding: '4px 10px', border: '1px solid ' + (on ? C.brand : C.border), borderRadius: 8, cursor: 'pointer', fontWeight: 500, background: on ? C.brand : 'transparent', color: on ? '#fff' : C.text2, transition: 'all .15s' } }, '👥 Team' + (on ? ' ON' : '')) }
-    function ViewTab() { var btnBase = { fontSize: 11, padding: '3px 10px', border: 'none', cursor: 'pointer', fontWeight: 500, borderRadius: 5, transition: 'all .15s' }; return React.createElement('div', { style: { display: 'inline-flex', borderRadius: 6, border: '1px solid ' + C.border, overflow: 'hidden', background: C.card } }, React.createElement('button', { onClick: function () { state.view = 'board'; notify() }, style: Object.assign({}, btnBase, state.view === 'board' ? { background: C.brand, color: '#fff' } : { background: 'transparent', color: C.text2 }) }, React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('clipboard-list', 12), '看板')), React.createElement('button', { onClick: function () { state.view = 'team'; notify() }, style: Object.assign({}, btnBase, state.view === 'team' ? { background: C.brand, color: '#fff' } : { background: 'transparent', color: C.text2 }) }, '👥 团队'), React.createElement('button', { onClick: function () { state.view = 'dashboard'; notify() }, style: Object.assign({}, btnBase, state.view === 'dashboard' ? { background: C.brand, color: '#fff' } : { background: 'transparent', color: C.text2 }) }, '📊 仪表盘')) }
-    function PoolCfg(props) { var _R = React; var useState = _R.useState, useEffect = _R.useEffect; var _a = useState(String(props.value)), val = _a[0], setVal = _a[1]; var _b = useState(false), dirty = _b[0], setDirty = _b[1]; useEffect(function () { setVal(String(props.value)); setDirty(false) }, [props.value]); function commit(v) { var n = parseInt(v, 10); if (!isNaN(n) && n >= 0 && n <= 10) { setVal(String(n)); setDirty(false); rpc('set-board-config', { key: props.cfgKey, value: n }).then(fetchTasks).catch(function () {}) } } function step(d) { var n = parseInt(val, 10) || 0; commit(String(Math.max(0, Math.min(10, n + d)))) } var miniBtn = { fontSize: 9, padding: '0px 4px', border: '1px solid ' + C.border, borderRadius: 2, background: C.nested, color: C.text2, cursor: 'pointer', lineHeight: '14px' }; return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 1, fontSize: 9, color: C.text2 } }, props.label, React.createElement('button', { onClick: function () { step(-1) }, title: '减 1', style: miniBtn }, '−'), React.createElement('input', { value: val, onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== String(props.value)) }, onBlur: function () { if (dirty) commit(val) }, onKeyDown: function (e) { if (e.key === 'Enter') commit(val) }, style: { width: 22, padding: '0px 2px', fontSize: 9, textAlign: 'center', border: '1px solid ' + (dirty ? C.brand : C.border), borderRadius: 2, background: C.card, color: C.text } }), React.createElement('button', { onClick: function () { step(1) }, title: '加 1', style: miniBtn }, '＋'), dirty ? React.createElement('button', { onClick: function () { commit(val) }, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: '#fff', cursor: 'pointer', lineHeight: '14px', fontWeight: 600 } }, '✓') : null) }
+    function ModeSwitch(props) { var mode = props.mode; var teamOn = props.teamOn; function pick(m) { if (teamOn && m === 'manual') return; rpc('set-board-mode', { mode: m }).then(fetchTasks).catch(function () {}) } var btnBase = { fontSize: 12, padding: '4px 14px', border: 'none', cursor: 'pointer', fontWeight: 500, flex: 1, textAlign: 'center', borderRadius: 6, transition: 'all .15s' }; var manDis = teamOn; return React.createElement('div', { style: { display: 'inline-flex', borderRadius: 8, border: '1px solid ' + C.border, overflow: 'hidden', background: C.card } }, React.createElement('button', { onClick: function () { pick('auto') }, style: Object.assign({}, btnBase, mode === 'auto' ? { background: C.brand, color: '#fff' } : { background: 'transparent', color: C.text2 }) }, icText('bot', 12, '自动')), React.createElement('button', { onClick: function () { pick('manual') }, disabled: manDis, title: manDis ? 'Team 模式开启时不可切换到手动' : '', style: Object.assign({}, btnBase, mode === 'manual' ? { background: C.brand, color: '#fff' } : { background: 'transparent', color: manDis ? C.text2 + '88' : C.text2 }, manDis ? { cursor: 'not-allowed', opacity: 0.5 } : {}) }, icText('user', 12, '手动'))) }
+    function TeamSwitch(props) { var on = props.on; function toggle() { rpc('set-team-mode', { enabled: !on }).then(fetchTasks).catch(function () {}) } return React.createElement('button', { onClick: toggle, title: on ? 'Team 模式已开启：任务走看板派发，Worker 歧义自动上报主窗口裁决（不拦截主窗口编辑）' : '开启 Team 模式：任务全走看板，Worker 歧义上报主窗口裁决', style: { fontSize: 12, padding: '4px 10px', border: '1px solid ' + (on ? C.brand : C.border), borderRadius: 8, cursor: 'pointer', fontWeight: 500, background: on ? C.brand : 'transparent', color: on ? '#fff' : C.text2, transition: 'all .15s' } }, icText('users', 12, 'Team' + (on ? ' ON' : ''))) }
+    function ViewTab() { var btnBase = { fontSize: 11, padding: '3px 10px', border: 'none', cursor: 'pointer', fontWeight: 500, borderRadius: 5, transition: 'all .15s' }; return React.createElement('div', { style: { display: 'inline-flex', borderRadius: 6, border: '1px solid ' + C.border, overflow: 'hidden', background: C.card } }, React.createElement('button', { onClick: function () { state.view = 'board'; notify() }, style: Object.assign({}, btnBase, state.view === 'board' ? { background: C.brand, color: '#fff' } : { background: 'transparent', color: C.text2 }) }, React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('clipboard-list', 12), '看板')), React.createElement('button', { onClick: function () { state.view = 'team'; notify() }, style: Object.assign({}, btnBase, state.view === 'team' ? { background: C.brand, color: '#fff' } : { background: 'transparent', color: C.text2 }) }, icText('users', 12, '团队')), React.createElement('button', { onClick: function () { state.view = 'dashboard'; notify() }, style: Object.assign({}, btnBase, state.view === 'dashboard' ? { background: C.brand, color: '#fff' } : { background: 'transparent', color: C.text2 }) }, icText('bar-chart-3', 12, '仪表盘'))) }
+    function PoolCfg(props) { var _R = React; var useState = _R.useState, useEffect = _R.useEffect; var _a = useState(String(props.value)), val = _a[0], setVal = _a[1]; var _b = useState(false), dirty = _b[0], setDirty = _b[1]; useEffect(function () { setVal(String(props.value)); setDirty(false) }, [props.value]); function commit(v) { var n = parseInt(v, 10); if (!isNaN(n) && n >= 0 && n <= 10) { setVal(String(n)); setDirty(false); rpc('set-board-config', { key: props.cfgKey, value: n }).then(fetchTasks).catch(function () {}) } } function step(d) { var n = parseInt(val, 10) || 0; commit(String(Math.max(0, Math.min(10, n + d)))) } var miniBtn = { fontSize: 9, padding: '0px 4px', border: '1px solid ' + C.border, borderRadius: 2, background: C.nested, color: C.text2, cursor: 'pointer', lineHeight: '14px' }; return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 1, fontSize: 9, color: C.text2 } }, props.label, React.createElement('button', { onClick: function () { step(-1) }, title: '减 1', style: miniBtn }, '−'), React.createElement('input', { value: val, onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== String(props.value)) }, onBlur: function () { if (dirty) commit(val) }, onKeyDown: function (e) { if (e.key === 'Enter') commit(val) }, style: { width: 22, padding: '0px 2px', fontSize: 9, textAlign: 'center', border: '1px solid ' + (dirty ? C.brand : C.border), borderRadius: 2, background: C.card, color: C.text } }), React.createElement('button', { onClick: function () { step(1) }, title: '加 1', style: miniBtn }, '＋'), dirty ? React.createElement('button', { onClick: function () { commit(val) }, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: '#fff', cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null) }
     function PoolStatus() {
       var ps = state.poolStatus
       if (!ps) return null
@@ -189,8 +321,8 @@ function apply(ctx) {
       var vActive = (ps.verifiers || []).filter(function (v) { return v.busy }).length
       var vTotal = (ps.verifiers || []).length
       return React.createElement('span', { style: { fontSize: 9, color: C.text2, display: 'inline-flex', gap: 4, alignItems: 'center' } },
-        React.createElement('span', { title: 'Worker 池' }, '⚡' + wActive + '/' + wTotal),
-        React.createElement('span', { title: 'Verifier 池' }, '✓' + vActive + '/' + vTotal))
+        React.createElement('span', { title: 'Worker 池', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('zap', 10), wActive + '/' + wTotal),
+        React.createElement('span', { title: 'Verifier 池', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('check', 10), vActive + '/' + vTotal))
     }
     // #11 头部减负：池配置收纳进 ⚙️ 弹出层（含 #17 verifier 异构模型设置）
     function ModelCfg(props) {
@@ -218,7 +350,7 @@ function apply(ctx) {
       // 降级：文本输入（模型枚举不可用时）
       return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, label,
         React.createElement('input', { value: val, onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== (props.value || '')) }, onBlur: function () { if (dirty) save() }, onKeyDown: function (e) { if (e.key === 'Enter') save() }, placeholder: '空=同父级', style: { width: 110, padding: '0px 4px', fontSize: 9, border: '1px solid ' + (dirty ? C.brand : C.border), borderRadius: 2, background: C.card, color: C.text } }),
-        dirty ? React.createElement('button', { onClick: save, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: '#fff', cursor: 'pointer', lineHeight: '14px', fontWeight: 600 } }, '✓') : null)
+        dirty ? React.createElement('button', { onClick: save, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: '#fff', cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
     }
     function PoolCfgPopover(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect, useRef = _R.useRef
@@ -226,7 +358,7 @@ function apply(ctx) {
       var ref = useRef(null)
       useEffect(function () { if (!open) return; function onDown(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }; document.addEventListener('mousedown', onDown); return function () { document.removeEventListener('mousedown', onDown) } }, [open])
       return React.createElement('span', { ref: ref, style: { position: 'relative', display: 'inline-flex' } },
-        React.createElement('button', { onClick: function () { setOpen(!open) }, title: '池配置', style: { fontSize: 12, padding: '3px 8px', border: '1px solid ' + (open ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: open ? C.nested : 'transparent', color: C.text2 } }, '⚙️'),
+        React.createElement('button', { onClick: function () { setOpen(!open) }, title: '池配置', style: { fontSize: 12, padding: '3px 8px', border: '1px solid ' + (open ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: open ? C.nested : 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('settings', 13)),
         open ? React.createElement('div', { style: { position: 'absolute', top: '100%', right: 0, marginTop: 4, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 10, whiteSpace: 'nowrap' } },
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 5 } }, '并发上限（一次性派发，用完即销毁）'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
@@ -251,7 +383,7 @@ function apply(ctx) {
     // #18 依赖未满足判断（依赖不存在视为阻塞——创建时已校验，防御性兜底）
     function depsBlocked(t) { if (!Array.isArray(t.dependsOn) || t.dependsOn.length === 0) return false; return t.dependsOn.some(function (id) { var d = getTask(id); return !d || (d.status !== 'resolved' && d.status !== 'archived') }) }
     // #19 管线档位元数据
-    var pipeMeta = { full: { icon: '🧪', label: '全流程（执行+验证）' }, work: { icon: '📝', label: '免验证（只做不验）' }, direct: { icon: '💬', label: '主窗口直接处理' } }
+    var pipeMeta = { full: { icon: 'flask-conical', label: '全流程（执行+验证）' }, work: { icon: 'file-text', label: '免验证（只做不验）' }, direct: { icon: 'message-square', label: '主窗口直接处理' } }
     function pipeOf(t) { return pipeMeta[t.pipeline] || pipeMeta.full }
     // #14 批量操作条（#16 带一步撤销：快照操作前的 priority/status）
     function BatchBar() {
@@ -266,7 +398,7 @@ function apply(ctx) {
       var btn = { fontSize: 10, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', fontWeight: 600 }
       return React.createElement('div', { style: { position: 'sticky', bottom: 0, display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', marginTop: 8, background: C.nested, border: '1px solid ' + C.border, borderRadius: 6 } },
         React.createElement('span', { style: { fontSize: 11, color: C.text, fontWeight: 600 } }, '已选 ' + cnt + ' 项'),
-        React.createElement('button', { onClick: function () { run('archive') }, disabled: cnt === 0, style: Object.assign({}, btn, { background: C.text2, color: '#fff' }) }, '📦 批量归档'),
+        React.createElement('button', { onClick: function () { run('archive') }, disabled: cnt === 0, style: Object.assign({}, btn, { background: C.text2, color: '#fff', display: 'inline-flex', alignItems: 'center', gap: 3 }) }, ic('archive', 11), '批量归档'),
         ['critical', 'high', 'medium', 'low'].map(function (p) { return React.createElement('button', { key: p, onClick: function () { run('set-priority', p) }, disabled: cnt === 0, style: Object.assign({}, btn, { background: prioColor[p], color: '#fff' }) }, prioLabel[p]) }),
         undo ? React.createElement('button', { onClick: doUndo, title: '撤销最近一次批量操作', style: Object.assign({}, btn, { background: C.brand, color: '#fff' }) }, '↩️ 撤销') : null,
         msg ? React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, msg) : null,
@@ -285,20 +417,20 @@ function apply(ctx) {
         React.createElement('input', { value: q, onChange: function (e) { setQ2(e.target.value) }, placeholder: '🔍 搜索标题/描述/ID…', style: { flex: '0 1 200px', fontSize: 11, padding: '3px 8px', border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text } }),
         ['critical', 'high', 'medium', 'low'].map(function (p) { var on = fp.indexOf(p) >= 0; return React.createElement('button', { key: p, onClick: function () { togglePrio(p) }, style: Object.assign({}, chipBase, on ? { background: prioColor[p], color: '#fff', borderColor: prioColor[p] } : {}) }, prioLabel[p]) }),
         allTags().length > 0 ? React.createElement('select', { value: ft, onChange: function (e) { state.filterTag = e.target.value; notify() }, style: { fontSize: 10, padding: '2px 4px', border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text } }, React.createElement('option', { value: '' }, '🏷 全部标签'), allTags().map(function (g) { return React.createElement('option', { key: g, value: g }, g) })) : null,
-        hasFilter ? React.createElement('button', { onClick: clearAll, style: { fontSize: 10, padding: '2px 8px', borderRadius: 10, border: 'none', background: C.nested, color: C.text2, cursor: 'pointer' } }, '✕ 清除') : null)
+        hasFilter ? React.createElement('button', { onClick: clearAll, style: { fontSize: 10, padding: '2px 8px', borderRadius: 10, border: 'none', background: C.nested, color: C.text2, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('x', 9), '清除') : null)
     }
-    function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); return React.createElement('div', { draggable: !state.selectMode, onDragStart: function (e) { onDragStart(e, t) }, onDragEnd: onDragEnd, onClick: function () { if (state.selectMode) { if (state.selected[t.id]) delete state.selected[t.id]; else state.selected[t.id] = true; notify() } else { state.detailId = t.id; notify() } }, style: { border: '1px solid ' + (sel ? C.brand : (t.escalation ? C.err : (critGlow ? C.err : C.border))), borderRadius: 6, padding: '6px 8px', marginBottom: 6, background: sel ? C.nested : C.card, borderLeft: '3px solid ' + (t.escalation ? C.err : pc), cursor: state.selectMode ? 'pointer' : 'grab', fontSize: 12, opacity: dragging ? 0.4 : (depBlock ? 0.65 : 1), transition: 'opacity .15s', animation: critGlow ? 'tskb-crit 2s ease-in-out infinite' : 'none' } }, React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 4 } }, state.selectMode ? React.createElement('span', { style: { fontSize: 12, color: sel ? C.brand : C.text2, flexShrink: 0, marginTop: 1 } }, sel ? '☑' : '☐') : null, React.createElement('div', { style: { fontWeight: 600, color: C.text, marginBottom: 2, wordBreak: 'break-word', flex: 1 } }, t.title), React.createElement('span', { style: { fontSize: 10, flexShrink: 0, marginTop: 1 }, title: pm.label }, pm.icon), React.createElement('span', { style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: pc, color: '#fff', flexShrink: 0, marginTop: 1 } }, prioLabel[t.priority] || '中')), t.escalation ? React.createElement('div', { style: { fontSize: 10, color: C.err, fontWeight: 600, marginBottom: 2 } }, '⚠️ 待裁决 — 点击查看疑问') : null, depBlock ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 2 } }, '⛓ 被 ' + t.dependsOn.filter(function (id) { var d = getTask(id); return !d || (d.status !== 'resolved' && d.status !== 'archived') }).length + ' 个依赖阻塞') : null, t.stuckSince ? React.createElement('div', { style: { fontSize: 10, color: C.warn, fontWeight: 600, marginBottom: 2, animation: 'tskb-pulse 1.5s ease-in-out infinite' } }, '⏱ 疑似卡死 · ' + ago(t.stuckSince) + ' — 点击处理') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, t.status === 'in-progress' && t.claimedBy ? '⚡ ' + shortId(t.claimedBy) : '', t.assignee ? ' 👤→' + shortId(t.assignee) : '', ' ' + ago(t.createdAt)), t.status === 'verifying' && preview ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '📝 ' + preview) : null) }
+    function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); return React.createElement('div', { draggable: !state.selectMode, onDragStart: function (e) { onDragStart(e, t) }, onDragEnd: onDragEnd, onClick: function () { if (state.selectMode) { if (state.selected[t.id]) delete state.selected[t.id]; else state.selected[t.id] = true; notify() } else { state.detailId = t.id; notify() } }, style: { border: '1px solid ' + (sel ? C.brand : (t.escalation ? C.err : (critGlow ? C.err : C.border))), borderRadius: 6, padding: '6px 8px', marginBottom: 6, background: sel ? C.nested : C.card, borderLeft: '3px solid ' + (t.escalation ? C.err : pc), cursor: state.selectMode ? 'pointer' : 'grab', fontSize: 12, opacity: dragging ? 0.4 : (depBlock ? 0.65 : 1), transition: 'opacity .15s', animation: critGlow ? 'tskb-crit 2s ease-in-out infinite' : 'none' } }, React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 4 } }, state.selectMode ? React.createElement('span', { style: { color: sel ? C.brand : C.text2, flexShrink: 0, marginTop: 1, display: 'inline-flex' } }, ic(sel ? 'square-check-big' : 'square', 12)) : null, React.createElement('div', { style: { fontWeight: 600, color: C.text, marginBottom: 2, wordBreak: 'break-word', flex: 1 } }, t.title), React.createElement('span', { style: { flexShrink: 0, marginTop: 1, display: 'inline-flex', color: C.text2 }, title: pm.label }, ic(pm.icon, 10)), React.createElement('span', { style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: pc, color: '#fff', flexShrink: 0, marginTop: 1 } }, prioLabel[t.priority] || '中')), t.escalation ? React.createElement('div', { style: { fontSize: 10, color: C.err, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 3 } }, ic('alert-triangle', 10), '待裁决 — 点击查看疑问') : null, depBlock ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 2 } }, '⛓ 被 ' + t.dependsOn.filter(function (id) { var d = getTask(id); return !d || (d.status !== 'resolved' && d.status !== 'archived') }).length + ' 个依赖阻塞') : null, t.stuckSince ? React.createElement('div', { style: { fontSize: 10, color: C.warn, fontWeight: 600, marginBottom: 2, animation: 'tskb-pulse 1.5s ease-in-out infinite' } }, '⏱ 疑似卡死 · ' + ago(t.stuckSince) + ' — 点击处理') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, t.status === 'in-progress' && t.claimedBy ? '⚡ ' + shortId(t.claimedBy) : '', t.assignee ? ' 👤→' + shortId(t.assignee) : '', ' ' + ago(t.createdAt)), t.status === 'verifying' && preview ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '📝 ' + preview) : null) }
     function ActorLink(props) { var id = props.id; if (!id || id === 'system' || id === 'unknown' || id === 'auto-dispatch') return React.createElement('span', { style: { color: C.text2 } }, id || '-'); return React.createElement('span', { onClick: function (e) { e.stopPropagation(); jumpTo(id) }, style: { color: C.brand, cursor: 'pointer', textDecoration: 'underline' }, title: '跳转到 ' + id }, shortId(id)) }
     function MsgThread(props) {
       var msgs = props.messages || []
       if (msgs.length === 0) return null
-      var kindStyle = { escalation: { color: C.err, label: '⚠️ Worker 上报' }, arbitration: { color: C.brand, label: '⚖️ 主窗口裁决' }, intervention: { color: C.warn, label: '⚡ 高优介入' } }
+      var kindStyle = { escalation: { color: C.err, label: 'Worker 上报', icon: 'alert-triangle' }, arbitration: { color: C.brand, label: '主窗口裁决', icon: 'scale' }, intervention: { color: C.warn, label: '高优介入', icon: 'zap' } }
       return React.createElement('div', { style: { marginBottom: 8 } },
         React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 3 } }, '裁决对话 (' + msgs.length + ')'),
         msgs.map(function (m, i) {
           var ks = kindStyle[m.kind] || { color: C.text2, label: m.kind }
           return React.createElement('div', { key: i, style: { marginBottom: 4, padding: '5px 8px', borderLeft: '2px solid ' + ks.color, background: C.nested, borderRadius: 4 } },
-            React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: ks.color, marginBottom: 2 } }, ks.label + ' · ' + (m.by || '') + ' · ' + ago(m.at)),
+            React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: ks.color, marginBottom: 2, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic(ks.icon, 10), ks.label + ' · ' + (m.by || '') + ' · ' + ago(m.at)),
             React.createElement('div', { style: { fontSize: 10, color: C.text, whiteSpace: 'pre-wrap', maxHeight: 140, overflowY: 'auto' } }, m.text))
         }))
     }
@@ -310,7 +442,7 @@ function apply(ctx) {
         var curTask = m.taskId ? getTask(m.taskId) : null
         return React.createElement('div', { key: m.id, style: { minWidth: 170, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, borderTop: '3px solid ' + (isW ? C.brand : C.warn) } },
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 } },
-            React.createElement('span', { style: { fontSize: 14 } }, isW ? '⚡' : '🔍'),
+            React.createElement('span', { style: { display: 'inline-flex', color: isW ? C.brand : C.warn } }, ic(isW ? 'zap' : 'clipboard-check', 13)),
             React.createElement('span', { style: { fontSize: 12, fontWeight: 700, color: C.text } }, (isW ? 'Worker' : 'Verifier') + ' · 执行中'),
             React.createElement('span', { style: { marginLeft: 'auto', fontSize: 9, padding: '1px 6px', borderRadius: 3, background: C.brand, color: '#fff' } }, '忙碌')),
           m.model ? React.createElement('div', { style: { fontSize: 9, color: C.warn, marginBottom: 3 }, title: '异构模型审查' }, '🧬 ' + m.model) : null,
@@ -319,9 +451,9 @@ function apply(ctx) {
       }
       var ws = ps.workers || [], vs = ps.verifiers || []
       return React.createElement('div', null,
-        React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 6 } }, '⚡ Worker 池 (' + ws.length + ')'),
+        React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('zap', 12), 'Worker 池 (' + ws.length + ')'),
         ws.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 10 } }, '暂无 Worker（有待办任务时自动扩容）') : React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 } }, ws.map(function (m) { return memberCard(m, 'worker') })),
-        React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 6 } }, '🔍 Verifier 池 (' + vs.length + ')'),
+        React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('clipboard-check', 12), 'Verifier 池 (' + vs.length + ')'),
         vs.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无 Verifier（有验证中任务时自动扩容）') : React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } }, vs.map(function (m) { return memberCard(m, 'verifier') })))
     }
     // #18 依赖管理区块：列出依赖（状态+跳转+移除）+ 添加依赖下拉
@@ -340,7 +472,7 @@ function apply(ctx) {
           return React.createElement('div', { key: id, style: { display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3, fontSize: 10 } },
             React.createElement('span', { style: { padding: '0 5px', borderRadius: 3, fontSize: 9, background: satisfied ? C.ok : (statusColors[dt && dt.status] || C.text2), color: '#fff', flexShrink: 0 } }, dt ? (statusLabels[dt.status] || dt.status) : '不存在'),
             React.createElement('span', { onClick: function () { if (dt) { state.detailId = id; notify() } }, style: { color: dt ? C.brand : C.text2, cursor: dt ? 'pointer' : 'default', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }, title: id }, dt ? dt.title : id),
-            React.createElement('span', { onClick: function () { saveDeps(deps.filter(function (x) { return x !== id })) }, title: '移除依赖', style: { cursor: 'pointer', color: C.text2, flexShrink: 0 } }, '✕'))
+            React.createElement('span', { onClick: function () { saveDeps(deps.filter(function (x) { return x !== id })) }, title: '移除依赖', style: { cursor: 'pointer', color: C.text2, flexShrink: 0, display: 'inline-flex' } }, ic('x', 10)))
         }),
         candidates.length > 0 ? React.createElement('select', { value: '', onChange: function (e) { if (e.target.value) saveDeps(deps.concat([e.target.value])) }, style: { width: '100%', fontSize: 10, padding: '2px 4px', marginTop: 2, border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text } },
           React.createElement('option', { value: '' }, '＋ 添加依赖…'),
@@ -364,19 +496,19 @@ function apply(ctx) {
       var canIntervene = task.status === 'in-progress' || task.status === 'verifying'
       return React.createElement('div', { style: { padding: '4px 2px' } },
         React.createElement('div', { onClick: function () { state.detailId = null; notify() }, style: { fontSize: 11, color: C.brand, cursor: 'pointer', marginBottom: 8 } }, '← 返回看板'),
-        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 } }, React.createElement('span', { style: { fontSize: 10, padding: '1px 6px', borderRadius: 3, background: prioColor[task.priority] || prioColor.low, color: '#fff' } }, prioLabel[task.priority] || '中'), React.createElement('span', { style: { fontSize: 11, padding: '1px 8px', borderRadius: 3, background: C.nested, color: C.text } }, statusLabels[task.status] || task.status), React.createElement('select', { value: task.pipeline || 'full', onChange: function (e) { rpc('update-task', { taskId: task.id, pipeline: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '管线档位', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'full' }, '🧪 全流程'), React.createElement('option', { value: 'work' }, '📝 免验证'), React.createElement('option', { value: 'direct' }, '💬 主窗口处理')), task.pipelineAuto ? React.createElement('span', { style: { fontSize: 9, color: C.text2 }, title: '由规则自动分类，可手动覆盖' }, 'auto') : null, isManual ? React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '👤 手动派发') : null),
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 } }, React.createElement('span', { style: { fontSize: 10, padding: '1px 6px', borderRadius: 3, background: prioColor[task.priority] || prioColor.low, color: '#fff' } }, prioLabel[task.priority] || '中'), React.createElement('span', { style: { fontSize: 11, padding: '1px 8px', borderRadius: 3, background: C.nested, color: C.text } }, statusLabels[task.status] || task.status), React.createElement('select', { value: task.pipeline || 'full', onChange: function (e) { rpc('update-task', { taskId: task.id, pipeline: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '管线档位', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'full' }, '全流程（执行+验证）'), React.createElement('option', { value: 'work' }, '免验证（只做不验）'), React.createElement('option', { value: 'direct' }, '主窗口处理')), task.pipelineAuto ? React.createElement('span', { style: { fontSize: 9, color: C.text2 }, title: '由规则自动分类，可手动覆盖' }, 'auto') : null, isManual ? React.createElement('span', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('user', 10), '手动派发') : null),
         task.escalation ? React.createElement('div', { style: { marginBottom: 8, padding: '8px 10px', border: '1px solid ' + C.err, borderRadius: 6, background: 'color-mix(in srgb, ' + C.err + ' 8%, transparent)' } },
-          React.createElement('div', { style: { fontSize: 12, fontWeight: 700, color: C.err, marginBottom: 4 } }, '⚠️ Worker 上报歧义 — 等待主窗口裁决'),
+          React.createElement('div', { style: { fontSize: 12, fontWeight: 700, color: C.err, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('alert-triangle', 13), 'Worker 上报歧义 — 等待主窗口裁决'),
           React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, whiteSpace: 'pre-wrap', maxHeight: 160, overflowY: 'auto' } }, task.escalation.question),
           React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, '上报于 ' + ago(task.escalation.at) + ' · ' + (task.escalation.by || '')),
           React.createElement('textarea', { value: arbAnswer, onChange: function (e) { setArbAnswer(e.target.value) }, rows: 2, placeholder: '输入裁决指示，将直接转达给原 Worker（保有上下文）…', style: { width: '100%', fontSize: 11, padding: '5px 8px', marginBottom: 4, border: '1px solid ' + C.err, borderRadius: 4, background: C.card, color: C.text, resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit' } }),
-          React.createElement('button', { onClick: submitArbitration, disabled: !arbAnswer.trim(), style: { fontSize: 11, padding: '4px 12px', border: 'none', borderRadius: 4, background: C.err, color: '#fff', cursor: 'pointer', fontWeight: 600 } }, '⚖️ 提交裁决')) : null,
+          React.createElement('button', { onClick: submitArbitration, disabled: !arbAnswer.trim(), style: { fontSize: 11, padding: '4px 12px', border: 'none', borderRadius: 4, background: C.err, color: '#fff', cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('scale', 12), '提交裁决')) : null,
         actionMsg ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6 } }, actionMsg) : null,
         task.stuckSince ? React.createElement('div', { style: { marginBottom: 8, padding: '8px 10px', border: '1px solid ' + C.warn, borderRadius: 6, background: 'color-mix(in srgb, ' + C.warn + ' 8%, transparent)' } },
-          React.createElement('div', { style: { fontSize: 12, fontWeight: 700, color: C.warn, marginBottom: 4 } }, '⏱ 执行 Agent 疑似卡死'),
+          React.createElement('div', { style: { fontSize: 12, fontWeight: 700, color: C.warn, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('alert-triangle', 13), '执行 Agent 疑似卡死'),
           React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6 } }, '标记于 ' + ago(task.stuckSince) + '（运行超 5 分钟且事件流停滞超 1 分钟）。你可以查看其会话后决定：'),
           React.createElement('div', { style: { display: 'flex', gap: 6 } },
-            React.createElement('button', { onClick: doTerminate, style: { fontSize: 11, padding: '4px 12px', border: 'none', borderRadius: 4, background: C.err, color: '#fff', cursor: 'pointer', fontWeight: 600 } }, '⏹ 终止任务（重新排队）'),
+            React.createElement('button', { onClick: doTerminate, style: { fontSize: 11, padding: '4px 12px', border: 'none', borderRadius: 4, background: C.err, color: '#fff', cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('stop-circle', 12), '终止任务（重新排队）'),
             React.createElement('button', { onClick: doDismiss, style: { fontSize: 11, padding: '4px 12px', border: '1px solid ' + C.border, borderRadius: 4, background: 'transparent', color: C.text2, cursor: 'pointer' } }, '继续观察'),
             canJump ? React.createElement('button', { onClick: jumpToAgent, style: { fontSize: 11, padding: '4px 12px', border: '1px solid ' + C.brand, borderRadius: 4, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '→ 查看会话') : null)) : null,
         React.createElement('input', { value: editTitle, onChange: function (e) { setEditTitle(e.target.value) }, style: { width: '100%', fontSize: 13, fontWeight: 600, padding: '4px 6px', marginBottom: 6, border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text, boxSizing: 'border-box' } }),
@@ -385,31 +517,31 @@ function apply(ctx) {
         React.createElement('textarea', { value: editDesc, onChange: function (e) { setEditDesc(e.target.value) }, rows: 3, style: { width: '100%', fontSize: 12, padding: '6px 8px', marginBottom: 6, border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text, resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit' } }),
         task.context && task.context.instructions ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6, padding: '4px 6px', background: C.nested, borderRadius: 4 } }, '指引: ' + task.context.instructions) : null,
         React.createElement(DepsSection, { task: task }),
-        task.acceptance ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, padding: '5px 8px', background: C.nested, borderRadius: 4, borderLeft: '2px solid ' + C.ok, fontFamily: 'monospace' } }, '🧪 硬性验收: ' + task.acceptance) : null,
+        task.acceptance ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, padding: '5px 8px', background: C.nested, borderRadius: 4, borderLeft: '2px solid ' + C.ok, fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 4 } }, ic('flask-conical', 11), '硬性验收: ' + task.acceptance) : null,
         task.resolution ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, padding: '5px 8px', background: C.nested, borderRadius: 4, borderLeft: '2px solid ' + C.warn, maxHeight: 120, overflowY: 'auto', whiteSpace: 'pre-wrap' } }, '📝 ' + task.resolution) : null,
         task.deliverable ? React.createElement('div', { style: { marginBottom: 8, padding: '6px 8px', border: '1px solid ' + C.border, borderRadius: 6, background: C.card } },
-          React.createElement('div', { style: { fontSize: 11, fontWeight: 700, color: C.brand, marginBottom: 4 } }, '📦 交付报告 · ' + (task.deliverable.by || '') + ' · ' + ago(task.deliverable.at)),
+          React.createElement('div', { style: { fontSize: 11, fontWeight: 700, color: C.brand, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('package', 12), '交付报告 · ' + (task.deliverable.by || '') + ' · ' + ago(task.deliverable.at)),
           React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 4, whiteSpace: 'pre-wrap' } }, task.deliverable.summary || '(无开发描述)'),
           task.deliverable.changes ? React.createElement('div', { style: { marginTop: 4 } }, React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '改动清单'), React.createElement('div', { style: { fontSize: 10, color: C.text2, whiteSpace: 'pre-wrap', maxHeight: 100, overflowY: 'auto' } }, task.deliverable.changes)) : null,
           task.deliverable.selfTest ? React.createElement('div', { style: { marginTop: 4 } }, React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '自测情况'), React.createElement('div', { style: { fontSize: 10, color: C.text2, whiteSpace: 'pre-wrap', maxHeight: 100, overflowY: 'auto' } }, task.deliverable.selfTest)) : null) : null,
         task.verification ? React.createElement('div', { style: { marginBottom: 8, padding: '6px 8px', border: '1px solid ' + (task.verification.verdict === 'approved' ? C.ok : C.err), borderRadius: 6, background: C.card } },
-          React.createElement('div', { style: { fontSize: 11, fontWeight: 700, color: task.verification.verdict === 'approved' ? C.ok : C.err, marginBottom: 4 } }, (task.verification.verdict === 'approved' ? '🔍 验收通过' : '🔍 验收驳回') + ' · ' + (task.verification.by || '') + ' · ' + ago(task.verification.at)),
+          React.createElement('div', { style: { fontSize: 11, fontWeight: 700, color: task.verification.verdict === 'approved' ? C.ok : C.err, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic(task.verification.verdict === 'approved' ? 'clipboard-check' : 'clipboard-x', 12), (task.verification.verdict === 'approved' ? '验收通过' : '验收驳回') + ' · ' + (task.verification.by || '') + ' · ' + ago(task.verification.at)),
           React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 4, whiteSpace: 'pre-wrap' } }, task.verification.summary || '(无测试概要)'),
           task.verification.checks ? React.createElement('div', { style: { marginTop: 4 } }, React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '核对项'), React.createElement('div', { style: { fontSize: 10, color: C.text2, whiteSpace: 'pre-wrap', maxHeight: 120, overflowY: 'auto' } }, task.verification.checks)) : null) : null,
         React.createElement(MsgThread, { messages: task.messages }),
         Array.isArray(task.history) && task.history.length > 0 ? React.createElement('div', { style: { marginBottom: 8 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 3 } }, '流转轨迹'), React.createElement('div', { style: { fontSize: 10, color: C.text2, padding: '4px 6px', background: C.nested, borderRadius: 4 } }, task.history.map(function (h, i) { return React.createElement('div', { key: i, style: { marginBottom: 2 } }, React.createElement('span', { style: { color: C.brand } }, statusLabels[h.to] || h.to), ' · ' + ago(h.timestamp) + ' · ', React.createElement(ActorLink, { id: h.actor }), h.note ? ' · ' + h.note : '') }))) : null,
         React.createElement('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6 } },
-          React.createElement('button', { onClick: saveEdit, disabled: saving, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.brand, color: '#fff', cursor: 'pointer' } }, saving ? '保存中…' : '💾 保存并重置'),
-          task.status === 'draft' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('update-task', { taskId: task.id, publish: true }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.ok, color: '#fff', cursor: 'pointer', fontWeight: 600 } }, '🚀 发布（进入派发池）') : null,
+          React.createElement('button', { onClick: saveEdit, disabled: saving, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.brand, color: '#fff', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, saving ? '保存中…' : [ic('save', 10), ' 保存并重置']),
+          task.status === 'draft' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('update-task', { taskId: task.id, publish: true }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.ok, color: '#fff', cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('rocket', 10), '发布（进入派发池）') : null,
           (task.status === 'pending' || task.status === 'blocked') ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('claim-task', { taskId: task.id }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.brand, color: '#fff', cursor: 'pointer' } }, '领取') : null,
-          task.status === 'pending' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('dispatch-task', { taskId: task.id, role: 'worker' }) }) }, title: '手动派发给一次性 Worker 子代理', style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.warn, color: '#fff', cursor: 'pointer', fontWeight: 600 } }, '⚡ 派发') : null,
-          task.status === 'verifying' && !task.escalation ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('dispatch-task', { taskId: task.id, role: 'verifier' }) }) }, title: '手动派发给一次性 Verifier 子代理', style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.warn, color: '#fff', cursor: 'pointer', fontWeight: 600 } }, '⚡ 派发验收') : null,
-          task.status === 'verifying' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'approved' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.ok, color: '#fff', cursor: 'pointer' } }, '✓ 通过') : null,
-          task.status === 'verifying' ? React.createElement('button', { onClick: function () { var r = window.prompt('驳回原因：'); doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'rejected', comment: r || '' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.err, color: '#fff', cursor: 'pointer' } }, '✗ 驳回') : null,
-          task.status === 'resolved' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('archive-task', { taskId: task.id }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.text2, color: '#fff', cursor: 'pointer' } }, '📦 归档') : null,
+          task.status === 'pending' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('dispatch-task', { taskId: task.id, role: 'worker' }) }) }, title: '手动派发给一次性 Worker 子代理', style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.warn, color: '#fff', cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('zap', 10), '派发') : null,
+          task.status === 'verifying' && !task.escalation ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('dispatch-task', { taskId: task.id, role: 'verifier' }) }) }, title: '手动派发给一次性 Verifier 子代理', style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.warn, color: '#fff', cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('zap', 10), '派发验收') : null,
+          task.status === 'verifying' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'approved' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.ok, color: '#fff', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('check-circle', 10), '通过') : null,
+          task.status === 'verifying' ? React.createElement('button', { onClick: function () { var r = window.prompt('驳回原因：'); doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'rejected', comment: r || '' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.err, color: '#fff', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('x-circle', 10), '驳回') : null,
+          task.status === 'resolved' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('archive-task', { taskId: task.id }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.text2, color: '#fff', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('archive', 10), '归档') : null,
           canJump ? React.createElement('button', { onClick: jumpToAgent, style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '→ 跳转执行会话') : null),
         canIntervene ? React.createElement('div', { style: { marginTop: 8, padding: '6px 8px', border: '1px dashed ' + C.warn, borderRadius: 6 } },
-          React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.warn, marginBottom: 4 } }, '⚡ 高优先级介入（插入执行 Agent 队首）'),
+          React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.warn, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('zap', 11), '高优先级介入（插入执行 Agent 队首）'),
           React.createElement('div', { style: { display: 'flex', gap: 4 } },
             React.createElement('input', { value: interveneMsg, onChange: function (e) { setInterveneMsg(e.target.value) }, onKeyDown: function (e) { if (e.key === 'Enter') submitIntervene() }, placeholder: '给执行中的 Agent 下达高优指令…', style: { flex: 1, fontSize: 11, padding: '4px 8px', border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text } }),
             React.createElement('button', { onClick: submitIntervene, disabled: !interveneMsg.trim(), style: { fontSize: 11, padding: '4px 10px', border: 'none', borderRadius: 4, background: C.warn, color: '#fff', cursor: 'pointer', fontWeight: 600 } }, '介入'))) : null)
@@ -438,19 +570,19 @@ function apply(ctx) {
           var ta = a.archivedAt || a.resolvedAt || a.createdAt || '', tb = b.archivedAt || b.resolvedAt || b.createdAt || ''
           return state.archSort === 'time-asc' ? ta.localeCompare(tb) : tb.localeCompare(ta)
         })
-        content = React.createElement('div', null, React.createElement(FilterBar, null), hasFilter && active.length === 0 && archived.length === 0 ? React.createElement('div', { style: { textAlign: 'center', padding: 16, color: C.text2, fontSize: 11 } }, '无匹配任务') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, state.selectMode ? '多选模式：点击卡片勾选，底部批量操作' : '提示：拖拽卡片到目标列即可流转状态'), React.createElement('div', { style: { display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4 } }, cols), archived.length > 0 ? React.createElement('div', { style: { marginTop: 4 } }, React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, React.createElement('div', { onClick: function () { setShowArchived(!showArchived) }, style: { fontSize: 11, color: C.text2, cursor: 'pointer', userSelect: 'none' } }, (showArchived ? '▼' : '▶') + ' 已归档 (' + archived.length + ')'), showArchived ? React.createElement('select', { value: state.archSort, onChange: function (e) { state.archSort = e.target.value; notify() }, title: '归档排序', style: { fontSize: 9, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'time-desc' }, '最新在前'), React.createElement('option', { value: 'time-asc' }, '最早在前'), React.createElement('option', { value: 'title' }, '按标题')) : null), showArchived ? React.createElement('div', { style: { maxHeight: '32vh', overflowY: 'auto', marginTop: 4, paddingRight: 2 } }, archSorted.map(function (t) { return React.createElement(Card, { key: t.id, task: t }) })) : null) : null, React.createElement(BatchBar, null))
+        content = React.createElement('div', null, React.createElement(FilterBar, null), hasFilter && active.length === 0 && archived.length === 0 ? React.createElement('div', { style: { textAlign: 'center', padding: 16, color: C.text2, fontSize: 11 } }, '无匹配任务') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, state.selectMode ? '多选模式：点击卡片勾选，底部批量操作' : '提示：拖拽卡片到目标列即可流转状态'), React.createElement('div', { style: { display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4 } }, cols), archived.length > 0 ? React.createElement('div', { style: { marginTop: 4 } }, React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, React.createElement('div', { onClick: function () { setShowArchived(!showArchived) }, style: { fontSize: 11, color: C.text2, cursor: 'pointer', userSelect: 'none', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic(showArchived ? 'chevron-down' : 'chevron-right', 11), '已归档 (' + archived.length + ')'), showArchived ? React.createElement('select', { value: state.archSort, onChange: function (e) { state.archSort = e.target.value; notify() }, title: '归档排序', style: { fontSize: 9, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'time-desc' }, '最新在前'), React.createElement('option', { value: 'time-asc' }, '最早在前'), React.createElement('option', { value: 'title' }, '按标题')) : null), showArchived ? React.createElement('div', { style: { maxHeight: '32vh', overflowY: 'auto', marginTop: 4, paddingRight: 2 } }, archSorted.map(function (t) { return React.createElement(Card, { key: t.id, task: t }) })) : null) : null, React.createElement(BatchBar, null))
       }
       return React.createElement('div', { style: { position: 'fixed', top: 44, left: (layL + 8) + 'px', right: (layR + 8) + 'px', maxHeight: '60vh', zIndex: 900, background: C.bg, border: '1px solid ' + C.border, borderRadius: '0 0 10px 10px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', display: 'flex', flexDirection: 'column', overflow: 'hidden' } },
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', borderBottom: '1px solid ' + C.border, flexShrink: 0, flexWrap: 'wrap', gap: 4 } },
-          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, React.createElement('span', { style: { fontWeight: 600, fontSize: 13, color: C.text, display: 'inline-flex', alignItems: 'center', gap: 5 } }, ic('clipboard-list', 15), '任务看板'), React.createElement(ViewTab, null), React.createElement(PoolStatus, null)),
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, React.createElement('span', { style: { fontWeight: 600, fontSize: 13, color: C.text, display: 'inline-flex', alignItems: 'center', gap: 5 } }, ic('clipboard-list', 15), '智能看板'), React.createElement(ViewTab, null), React.createElement(PoolStatus, null)),
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' } },
             React.createElement(PoolCfgPopover, { minW: minW, maxW: maxW, minV: minV, maxV: maxV, workerModel: workerModel, verifierModel: verifierModel }),
             dispatchInfo ? React.createElement('span', { style: { fontSize: 9, color: C.brand, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: dispatchInfo }, dispatchInfo) : null,
-            React.createElement('button', { onClick: function () { state.selectMode = !state.selectMode; if (!state.selectMode) state.selected = {}; notify() }, title: '多选批量操作', style: { fontSize: 11, padding: '3px 8px', border: '1px solid ' + (state.selectMode ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: state.selectMode ? C.brand : 'transparent', color: state.selectMode ? '#fff' : C.text2 } }, '☑ 多选'),
+            React.createElement('button', { onClick: function () { state.selectMode = !state.selectMode; if (!state.selectMode) state.selected = {}; notify() }, title: '多选批量操作', style: { fontSize: 11, padding: '3px 8px', border: '1px solid ' + (state.selectMode ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: state.selectMode ? C.brand : 'transparent', color: state.selectMode ? '#fff' : C.text2, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('square-check-big', 11), '多选'),
             React.createElement(TeamSwitch, { on: teamMode }),
             React.createElement(ModeSwitch, { mode: mode, teamOn: teamMode }),
-            React.createElement('button', { onClick: function () { fetchTasks(); fetchChildren() }, title: '刷新', style: { border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 12, color: C.text2 } }, '🔄'),
-            React.createElement('button', { onClick: function () { state.open = false; state.detailId = null; notify() }, title: '关闭', style: { border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 14, color: C.text2 } }, '✕'))),
+            React.createElement('button', { onClick: function () { fetchTasks(); fetchChildren() }, title: '刷新', style: { border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 12, color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('refresh-cw', 13)),
+            React.createElement('button', { onClick: function () { state.open = false; state.detailId = null; notify() }, title: '关闭', style: { border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 14, color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('x', 14)))),
         React.createElement('div', { style: { flex: 1, overflowY: 'auto', padding: '10px 12px' } }, tasks.length === 0 ? React.createElement('div', { style: { textAlign: 'center', padding: 24, color: C.text2, fontSize: 12 } }, '🎉 暂无任务') : content))
     }
     slots.inject('conversation.session.header.actions', function () { return slots.register({ name: 'conversation.session.header.actions', id: 'task-board-btn', label: '任务看板', order: 30 }, function (props) { return React.createElement(BoardButton, props) }) })
