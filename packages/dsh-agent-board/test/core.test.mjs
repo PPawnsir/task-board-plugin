@@ -154,6 +154,33 @@ test('buildVerifierPrompt: 注入交付物 + 验收脚本 + messages', () => {
   assert.match(p, /做完了/); assert.match(p, /npm test/); assert.match(p, /board_verdict/); assert.match(p, /方案B/)
 })
 
+// ===== 预研文件段（主窗口选择性注入，host 读盘后传入）=====
+test('buildContextPackSection: 空清单返回空串', () => {
+  assert.equal(core.buildContextPackSection([]), '')
+  assert.equal(core.buildContextPackSection(null), '')
+  assert.equal(core.buildContextPackSection(undefined), '')
+})
+
+test('buildContextPackSection: 文件内容 + 截断标记', () => {
+  const s = core.buildContextPackSection([
+    { path: 'src/a.ts', content: 'const x = 1', truncated: false },
+    { path: 'docs/b.md', content: '说明', truncated: true },
+  ])
+  assert.match(s, /主窗口预研文件/); assert.match(s, /不要重复读取/)
+  assert.match(s, /### src\/a\.ts/); assert.match(s, /const x = 1/)
+  assert.match(s, /### docs\/b\.md（截断）/); assert.match(s, /说明/)
+})
+
+test('buildWorkerPrompt/buildVerifierPrompt: 注入预研文件段', () => {
+  const pack = core.buildContextPackSection([{ path: 'src/x.js', content: 'hello', truncated: false }])
+  const t = mkTask({ id: 'pk' })
+  assert.match(core.buildWorkerPrompt(t, pack), /### src\/x\.js/)
+  assert.match(core.buildWorkerPrompt(t, pack), /hello/)
+  assert.match(core.buildVerifierPrompt(t, pack), /### src\/x\.js/)
+  // 不传 pack 时不出现该段
+  assert.doesNotMatch(core.buildWorkerPrompt(t), /主窗口预研文件/)
+})
+
 // ===== 派发决策 =====
 test('pickDispatch: 优先级排序 + 并发上限 + 排除项', () => {
   const tasks = [

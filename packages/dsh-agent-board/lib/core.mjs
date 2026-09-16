@@ -101,7 +101,17 @@ export function buildMessages(t) {
   if (!Array.isArray(t.messages) || t.messages.length === 0) return ''
   return t.messages.map(function (m) { return '### [' + (m.kind || 'note') + '] (' + (m.at || '') + ' by ' + (m.by || '') + ')\n' + String(m.text || '').slice(0, 2000) }).join('\n\n')
 }
-export function buildWorkerPrompt(t) {
+// 主窗口预研文件段：主 agent 在调研时读过的文件，由 host 从磁盘读内容后传入（core 保持纯函数不碰 IO）
+export function buildContextPackSection(files) {
+  if (!Array.isArray(files) || files.length === 0) return ''
+  var parts = ['主窗口预研文件（主窗口创建任务前已读过以下内容，直接使用，不要重复读取；标"截断"的内容可按需补读）：']
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i]
+    parts.push('### ' + f.path + (f.truncated ? '（截断）' : '') + '\n' + f.content)
+  }
+  return parts.join('\n\n')
+}
+export function buildWorkerPrompt(t, pack) {
   var notes = histNotes(t)
   var msgs = buildMessages(t)
   var p = '你是一个一次性任务执行 Worker。完成下面这个任务，完成后本会话即销毁。\n\ntaskId: ' + t.id + '\n任务: ' + t.title + '\n描述: ' + (t.description || '')
@@ -109,10 +119,11 @@ export function buildWorkerPrompt(t) {
   if (t.acceptance) p += '\n硬性验收脚本: ' + t.acceptance + '\n（必须实际运行该命令并在自测情况中粘贴真实输出；未通过不得上报完成）'
   if (notes) p += '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，请务必遵循最新裁决方向）：\n' + notes
   if (msgs) p += '\n\n该任务的详细消息（裁决答案/干预指令/歧义原文等，请务必遵循）：\n' + msgs
+  if (pack) p += '\n\n' + pack
   p += '\n\n完成契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + t.id + '，summary=开发描述/changes=改动清单/selfTest=自测情况）；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况）。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate, taskId=' + t.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测。上报歧义后直接结束本轮——裁决后会有新 Worker 带着裁决答案接手。'
   return p
 }
-export function buildVerifierPrompt(t) {
+export function buildVerifierPrompt(t, pack) {
   var notes = histNotes(t)
   var msgs = buildMessages(t)
   var p = '你是一个一次性任务审核 Verifier。审查下面这个任务的完成质量，给出结论后本会话即销毁。\n\ntaskId: ' + t.id + '\n任务: ' + t.title + '\n描述: ' + (t.description || '').slice(0, 500)
@@ -122,6 +133,7 @@ export function buildVerifierPrompt(t) {
   if (t.acceptance) p += '\n硬性验收脚本: ' + t.acceptance + '\n（必须独立复跑该命令并把真实输出贴进核对项；脚本失败必须 REJECTED）'
   if (notes) p += '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，若有）：\n' + notes + '\n注意：若过程记录显示主窗口已裁决改变任务方向，以裁决后的方向为验收标准。'
   if (msgs) p += '\n\n该任务的详细消息（裁决答案/干预指令/歧义原文等）：\n' + msgs
+  if (pack) p += '\n\n' + pack
   p += '\n\n结论契约（双模，工具优先）：\n1. 优先调用 board_verdict 工具（taskId=' + t.id + ', verdict=approved/rejected, summary=测试概要, checks=逐条核对证据含行号）。\n2. 工具不可用则首行 APPROVED: <结论> 或 REJECTED: <结论>，然后 ## 测试概要 / ## 核对项 分段。'
   return p
 }
