@@ -5,9 +5,13 @@ name: Publish to npm
 # （npm granular access token：bypass 2FA + direct publish 权限）。
 
 on:
+  # 路径 1：命令行推 tag（git push --follow-tags）
   push:
     tags:
       - 'v*'
+  # 路径 2：GitHub 网页 Draft a new release（页面建的 tag 触发的是 release 事件，不是 push）
+  release:
+    types: [published]
 
 jobs:
   publish:

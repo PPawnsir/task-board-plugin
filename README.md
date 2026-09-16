@@ -159,15 +159,24 @@ Team 模式开启时强制自动派发（防止"引导派发 + 手动模式"死�
 
 ## 发布新版本（维护者）
 
-tag 驱动，GitHub Actions 自动发布到 npm（`.github/workflows/publish.yml`）：
+tag 驱动，GitHub Actions 自动发布到 npm（`.github/workflows/publish.yml`）。两种打 tag 方式都支持：
+
+**方式 1：命令行**
 
 ```sh
 cd packages/dsh-agent-board
-npm version patch          # 或 minor / major——会改动 package.json 并打本地 git tag
-git push --follow-tags     # tag 推送触发流水线：版本一致性校验 → 语法+单测门禁 → npm publish
+npm version patch          # 或 minor / major——改 package.json
+git add -A && git commit -m 'release: vX.Y.Z' && git tag vX.Y.Z
+git push --follow-tags     # tag 推送触发流水线
 ```
 
-- 流水线会拒绝与 tag 不一致的 `package.json` version（如 tag `v1.0.1` 但包里是 `1.0.0`）
+**方式 2：GitHub 网页（Releases 页）**
+
+1. 先把 `packages/dsh-agent-board/package.json` 的 `version` 改成目标版本并合入 main（网页直接编辑即可）
+2. 仓库页 → **Releases** → **Draft a new release** → **Choose a tag** → 输入 `vX.Y.Z` 选 **Create new tag**（target 选 main）
+3. 点 **Publish release** —— 触发发布流水线
+
+- 流水线会拒绝与 tag 不一致的 `package.json` version（如 tag `v1.0.1` 但包里是 `1.0.0`），防止版本错位
 - 需在仓库 **Settings → Secrets and variables → Actions** 配置 `NPM_TOKEN`
   （npm granular access token：bypass 2FA + direct publish）
 - 日常 push / PR 有 `test.yml` 跑语法检查 + 30 例单测
