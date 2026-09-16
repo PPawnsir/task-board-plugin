@@ -34,7 +34,22 @@ export function apply(ctx) {
 
     // ===== 工具函数 =====
     function getActorId() { const a = ctx.agents; if (a) { const i = a.currentInitiator(); if (i) return String(i.id) } return 'unknown' }
-    function resolveRoot(sid) { const agentsSvc = ctx.agents; if (!agentsSvc) return sid; var cur = sid; var roots = agentsSvc.roots(); var rids = []; for (var i = 0; i < roots.length; i++) rids.push(String(roots[i].id)); if (rids.indexOf(cur) >= 0) return cur; var all = agentsSvc.list(); var visited = {}; while (!visited[cur]) { visited[cur] = true; var o = null; for (var j = 0; j < all.length; j++) { if (agentsSvc.isOwnedBy(cur, all[j])) { o = all[j]; break } }; if (!o) break; cur = String(o.id); if (rids.indexOf(cur) >= 0) return cur }; return cur }
+    // resolveRoot 是同步热点（每个工具守卫/RPC/prompt 组装都调），agent 注册表可能有几百个子代理，
+    // 每次调用 roots()+list()+全表 isOwnedBy 扫描会反复卡宿主事件循环 → memoize 10s TTL。
+    // 父子归属在一个 agent 存活期内不变，10s 过期窗口足够安全。
+    var _rootCache = {}
+    function resolveRootUncached(sid) { const agentsSvc = ctx.agents; if (!agentsSvc) return sid; var cur = sid; var roots = agentsSvc.roots(); var rids = []; for (var i = 0; i < roots.length; i++) rids.push(String(roots[i].id)); if (rids.indexOf(cur) >= 0) return cur; var all = agentsSvc.list(); var visited = {}; while (!visited[cur]) { visited[cur] = true; var o = null; for (var j = 0; j < all.length; j++) { if (agentsSvc.isOwnedBy(cur, all[j])) { o = all[j]; break } }; if (!o) break; cur = String(o.id); if (rids.indexOf(cur) >= 0) return cur }; return cur }
+    function resolveRoot(sid) {
+      var now = Date.now()
+      var c = _rootCache[sid]
+      if (c && now - c.at < 10000) return c.root
+      var r = resolveRootUncached(sid)
+      // 缓存上限：超 512 个 key 时清掉过期项，防长进程累积
+      var keys = Object.keys(_rootCache)
+      if (keys.length > 512) { for (var i = 0; i < keys.length; i++) { if (now - _rootCache[keys[i]].at >= 10000) delete _rootCache[keys[i]] } }
+      _rootCache[sid] = { root: r, at: now }
+      return r
+    }
     function toolSessionId() { var sid = resolveRoot(getActorId()); touchSession(sid); return sid }
     function rpcSessionId(args) { var sid = (args && typeof args.sessionId === 'string' && args.sessionId.length > 0) ? args.sessionId : resolveRoot(getActorId()); touchSession(sid); return sid }
     // 已知会话集合：心跳驱动这些会话的 poolCycle（摆脱对客户端轮询的依赖）
@@ -313,13 +328,11 @@ export function apply(ctx) {
         text: function (assembleCtx) {
           var agent = assembleCtx && assembleCtx.agent
           if (!agent) return ''
-          var aid = String(agent.id || '')
-          var sid = resolveRoot(aid)
-          // P0 修复：只对 root agent 自身注入。Worker/Verifier 的 resolveRoot 也会返回主会话 sid，
-          // 但 agent.id !== sid 说明是子代理——子代理有自己的 prompt 契约，不需要"你是主窗口"引导。
-          // 之前缺这行守卫 → Worker 也收到"请用 task_create 派发任务"→ Worker 误认自己是主窗口。
-          if (aid !== sid) return ''
-          if (!teamModeCache[sid]) return ''
+          // O(1) 快路径：root agent 的 id 就是其会话 id（Agent.id === SessionId），
+          // teamModeCache 按会话 id 键——Worker/Verifier 自己的会话 id 不在缓存里，天然不会误注入。
+          // 不能走 resolveRoot：该函数在每个 agent 每次 prompt 组装时同步执行，
+          // resolveRoot 全表扫 agent 注册表会把宿主事件循环卡死（曾导致全局界面卡顿、用户消息延迟渲染）。
+          if (!teamModeCache[String(agent.id)]) return ''
           return '【任务看板 Team 模式已开启】\n本会话的任务看板处于 Team 模式。请遵循以下工作方式：\n1. 涉及代码改动、文件创建、命令执行等实质性工作时，优先用 task_create 提交为看板任务（由一次性 Worker/Verifier 子代理执行与验收），不要自己直接动手实现。\n2. 你仍保有全部工具能力——调研、读代码、讨论方案、回答问题时直接进行，无需提交任务。\n3. 创建任务时，务必在 description 里写清子代理需要的上下文：涉及哪些文件（路径）、相关代码的约束/约定、前置条件等。子代理是全新会话、无你的会话记忆，如果上下文不够，子代理需要从零开始自行调研，效率会大打折扣甚至跑偏方向。\n4. Worker 上报歧义时会通过 task_arbitrate 等待你裁决，请及时响应。驳回重派时同样：新 Worker 没有上一轮的记忆，驳回原因会在 prompt 里，但额外上下文需你在 description 里补上。\n5. 创建多个相互关联的任务时，必须「先草稿后发布」：所有任务先用 task_create draft:true 建为草稿（草稿不会被派发领取），等全部任务创建完成、dependsOn 依赖关系都写好后，再逐个 task_update publish=true 统一发布。严禁直接创建 pending 任务再后补依赖——依赖还没写入，后向任务就会被 Worker 提前领走。'
         },
       })
