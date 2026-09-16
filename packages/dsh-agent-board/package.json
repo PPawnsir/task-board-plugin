@@ -1,12 +1,12 @@
 {
   "name": "dsh-agent-board",
-  "description": "Agent 任务看板：任务卡片 + 常驻 Worker/Verifier 池 + 流水线分档 + 依赖调度 + Team 模式（歧义上报主窗口裁决）",
+  "description": "DeepSeek Harness 智能看板：任务卡片 + 一次性 Worker/Verifier 派发 + 依赖调度 + 管线分档 + Team 模式（歧义上报主窗口裁决）",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
   "main": "./index.mjs",
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/core.test.mjs",
+    "prepublishOnly": "node --check index.mjs && node --check lib/client.js && node --check lib/core.mjs && npm test"
   },
   "exports": {
     ".": "./index.mjs",
@@ -30,7 +30,28 @@
     "lib/core.mjs",
     "lib/client.js",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "test/"
   ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "task-board",
+    "kanban",
+    "agent",
+    "subagent",
+    "task-dispatch"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PPawnsir/task-board-plugin.git",
+    "directory": "packages/dsh-agent-board"
+  },
+  "homepage": "https://github.com/PPawnsir/task-board-plugin#readme",
+  "bugs": "https://github.com/PPawnsir/task-board-plugin/issues",
+  "engines": {
+    "node": ">=22"
+  },
   "license": "MIT"
 }
