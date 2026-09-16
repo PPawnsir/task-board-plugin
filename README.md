@@ -159,14 +159,19 @@ Team 模式开启时强制自动派发（防止"引导派发 + 手动模式"死�
 
 ## 发布新版本（维护者）
 
+tag 驱动，GitHub Actions 自动发布到 npm（`.github/workflows/publish.yml`）：
+
 ```sh
 cd packages/dsh-agent-board
-npm version patch        # 或 minor / major
-npm publish              # prepublishOnly 门禁自动跑：语法检查 ×3 + 30 例单测，挂了拒发
+npm version patch          # 或 minor / major——会改动 package.json 并打本地 git tag
+git push --follow-tags     # tag 推送触发流水线：版本一致性校验 → 语法+单测门禁 → npm publish
 ```
 
-> 需已 `npm login --registry=https://registry.npmjs.org`（或使用 bypass-2FA 的 direct-capable token）。
-> 注意本机 npm 默认源若指向 npmmirror 镜像，发布时必须显式 `--registry=https://registry.npmjs.org`。
+- 流水线会拒绝与 tag 不一致的 `package.json` version（如 tag `v1.0.1` 但包里是 `1.0.0`）
+- 需在仓库 **Settings → Secrets and variables → Actions** 配置 `NPM_TOKEN`
+  （npm granular access token：bypass 2FA + direct publish）
+- 日常 push / PR 有 `test.yml` 跑语法检查 + 30 例单测
+- 本地手动发布仍然可用：`npm publish --registry=https://registry.npmjs.org`（本机默认源是镜像时必须显式指定）
 
 ## License
 

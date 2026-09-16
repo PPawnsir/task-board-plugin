@@ -1,0 +1,28 @@
+name: Test
+
+# 每次 push / PR 跑纯逻辑单测 + 双端语法检查（node --test，无需 dsh 环境）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 语法检查
+        run: |
+          node --check packages/dsh-agent-board/index.mjs
+          node --check packages/dsh-agent-board/lib/client.js
+          node --check packages/dsh-agent-board/lib/core.mjs
+
+      - name: 单元测试
+        working-directory: packages/dsh-agent-board
+        run: npm test
