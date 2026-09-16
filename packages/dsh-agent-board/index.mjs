@@ -227,8 +227,19 @@ export function apply(ctx) {
     // 批量聚合：任务多时每任务一条 followup 会把主窗口 turn 队列打满（用户输入排队等回执处理完才刷新），
     // 改为 45s 窗口（或满 5 条）聚合为一条摘要；发送前等主窗口空闲，不打断对话。
     var receiptBuf = {}
+    // 回执幂等去重表：key = 任务id + 类别 + 完成事件指纹（deliverable/verification/resolvedAt/末条history 时间戳）。
+    // 同一完成事件被任何路径（工具直报/run 结算/未来回归）重复通知时指纹一致 → 吞掉；
+    // 驳回后重做完成 → 时间戳全换新 → 指纹不同 → 正常回执。
+    var receiptedKeys = {}
     function notifyTaskDone(sid, t, kind) {
       if (!t || !isDispatched(sid, t.claimedBy)) return
+      var lastHist = (t.history && t.history.length) ? String(t.history[t.history.length - 1].timestamp || '') : ''
+      var stamp = [kind, (t.deliverable && t.deliverable.at) || '', (t.verification && t.verification.at) || '', t.resolvedAt || '', lastHist].join('|')
+      var key = t.id + ':' + stamp
+      if (receiptedKeys[key]) return
+      var rkeys = Object.keys(receiptedKeys)
+      if (rkeys.length > 512) { var rnow = Date.now(); for (var ri = 0; ri < rkeys.length; ri++) { if (rnow - receiptedKeys[rkeys[ri]] > 3600000) delete receiptedKeys[rkeys[ri]] } }
+      receiptedKeys[key] = Date.now()
       var buf = receiptBuf[sid] || (receiptBuf[sid] = { items: [], timer: null })
       var lastNote = (t.history && t.history.length) ? String(t.history[t.history.length - 1].note || '') : ''
       buf.items.push({ kind: kind, title: t.title, id: t.id, summary: (t.deliverable && t.deliverable.summary) || '', note: lastNote })
