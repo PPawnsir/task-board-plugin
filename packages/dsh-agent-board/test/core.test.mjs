@@ -240,6 +240,20 @@ test('seed: 初始看板结构', () => {
   const d = core.seed('s1')
   assert.equal(d.ownerSession, 's1'); assert.equal(d.boardMode, 'auto'); assert.deepEqual(d.tasks, [])
   assert.ok(core.vt(d))
+  // poolStatus 必须存在——task_list 工具输出它，undefined 会被 lossless-JSON 校验拒
+  assert.deepEqual(d.poolStatus, { workers: [], verifiers: [] })
+})
+
+test('normalizeBoard: 旧文件补 poolStatus', () => {
+  const legacy = { tasks: [] }
+  const d = core.normalizeBoard(legacy)
+  assert.deepEqual(d.poolStatus, { workers: [], verifiers: [] })
+  // 已有合法 poolStatus 不动
+  const ok = { tasks: [], poolStatus: { workers: [{ id: 'w1' }], verifiers: [] } }
+  assert.equal(core.normalizeBoard(ok).poolStatus.workers[0].id, 'w1')
+  // 残缺的 poolStatus（缺 verifiers 数组）也修复
+  const broken = { tasks: [], poolStatus: { workers: [] } }
+  assert.deepEqual(core.normalizeBoard(broken).poolStatus, { workers: [], verifiers: [] })
 })
 
 test('cfg: 边界夹紧', () => {
