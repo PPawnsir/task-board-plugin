@@ -124,6 +124,11 @@ export function apply(ctx) {
       return buildContextPackSection(out)
     }
 
+    // 预研文件注入通道：内容不混进 user prompt，而是通过 systemPrompt.context 以「上下文注入」
+    // 区块呈现（与 skill-catalog 等系统注入同形态）。spawn 成功后按子代理会话 id 缓存，
+    // 子代理每次组装 prompt 时由 contextProvider 按 agent.id 命中返回；settle 时清理。
+    var packByChild = {}
+
     async function spawnOneShot(sid, t, role) {
       var subagents = ctx.subagents; if (!subagents) return null
       var parent = rootForSession(sid); if (!parent) { console.error('[task-board] no root agent for session ' + sid + ', skip spawn'); return null }
@@ -133,7 +138,9 @@ export function apply(ctx) {
       else if (role === 'worker') { var dw = await rt(sid); modelOverride = (typeof dw.workerModel === 'string' && dw.workerModel.trim()) ? dw.workerModel.trim() : ''; if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited, using parent model'); modelOverride = '' } }
       var pack = ''
       try { pack = await readContextPack(t) } catch (e) { console.error('[task-board] context pack read failed:', String(e)) }
-      var req = { label: role + ':' + t.id, prompt: [{ type: 'text', text: role === 'worker' ? buildWorkerPrompt(t, pack) : buildVerifierPrompt(t, pack) }], parent: parent, signal: makeSignal() }
+      // user prompt 只留一行指引，内容走上下文注入区块
+      var packNote = pack ? '本任务附带主窗口预研文件，已通过「上下文注入」区提供（含文件完整内容），直接基于其内容工作，不要重复读取这些文件。' : ''
+      var req = { label: role + ':' + t.id, prompt: [{ type: 'text', text: role === 'worker' ? buildWorkerPrompt(t, packNote) : buildVerifierPrompt(t, packNote) }], parent: parent, signal: makeSignal() }
       if (modelOverride) {
         // list-models 返回的 id 是 "provider/model" 复合格式（如 "cmss/zhanlu/glm-5.2"），
         // 但 AgentOptions 的 provider 和 model 是分开的——整串塞进 model 会报 UNKNOWN_MODEL
@@ -148,6 +155,7 @@ export function apply(ctx) {
       }
       var rec = { run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride }
       runsFor(sid)[t.id] = rec
+      if (pack) packByChild[String(run.id)] = pack
       if (!dispatchedEver[sid]) dispatchedEver[sid] = {}
       dispatchedEver[sid][String(run.id)] = true
       // 30min 硬超时（一次性 run 没有看门狗，挂死不能白占并发位）→ 走失败重试路径
@@ -159,6 +167,7 @@ export function apply(ctx) {
     async function settleRun(sid, rec, res, err) {
       if (runsFor(sid)[rec.taskId] !== rec) return // 已被 terminate 等路径处理
       delete runsFor(sid)[rec.taskId]
+      delete packByChild[String(rec.run.id)] // 上下文注入缓存随 run 销毁
       try { await rec.run.dispose() } catch (_) {}
       var output = outputText(res)
       var failed = !!err || (res && res.stopReason && res.stopReason !== 'completed')
@@ -374,6 +383,19 @@ export function apply(ctx) {
         },
       })
       ctx.effect(function () { return disposeSection })
+      // 预研文件上下文注入：Worker/Verifier 的预研文件内容以「上下文注入」区块呈现
+      // （与 skill-catalog 同形态），不混进 user prompt。按子代理会话 id 命中，O(1)，
+      // 其他 agent 组装时零成本返回空串。
+      var disposeCtxPack = sysPrompt.context({
+        name: 'task-board:context-pack',
+        order: 50,
+        text: function (assembleCtx) {
+          var agent = assembleCtx && assembleCtx.agent
+          if (!agent) return ''
+          return packByChild[String(agent.id)] || ''
+        },
+      })
+      ctx.effect(function () { return disposeCtxPack })
     }
 
     // ===== Tools =====

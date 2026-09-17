@@ -181,6 +181,12 @@ test('buildWorkerPrompt/buildVerifierPrompt: 注入预研文件段', () => {
   assert.doesNotMatch(core.buildWorkerPrompt(t), /主窗口预研文件/)
 })
 
+test('buildContextPackSection: {{ }} 插值净化（context 通道严格插值会抛异常）', () => {
+  const s = core.buildContextPackSection([{ path: 'src/tpl.vue', content: '<div>{{ msg }}</div>', truncated: false }])
+  assert.doesNotMatch(s, /\{\{/)          // 不允许残留插值触发器
+  assert.match(s, /\{ \{ msg \}\}/)        // 内容可读性保留
+})
+
 // ===== 派发决策 =====
 test('pickDispatch: 优先级排序 + 并发上限 + 排除项', () => {
   const tasks = [
