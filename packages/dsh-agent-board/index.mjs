@@ -126,9 +126,11 @@ export function apply(ctx) {
     }
 
     // 预研文件注入通道：内容不混进 user prompt，而是通过 systemPrompt.context 以「上下文注入」
-    // 区块呈现（与 skill-catalog 等系统注入同形态）。spawn 成功后按子代理会话 id 缓存，
-    // 子代理每次组装 prompt 时由 contextProvider 按 agent.id 命中返回；settle 时清理。
+    // 区块呈现（与 skill-catalog 等系统注入同形态）。
+    // 首轮竞速：子代理的首次 prompt 组装发生在 subagents.start() 返回之前，packByChild 还没写入
+    // → spawn 前把 pack 放进 pendingPacks，provider 按父子归属（isOwnedBy 父 agent）即时认领。
     var packByChild = {}
+    var pendingPacks = []
 
     async function spawnOneShot(sid, t, role) {
       var subagents = ctx.subagents; if (!subagents) return null
@@ -150,9 +152,13 @@ export function apply(ctx) {
         else req.agentOptions = { model: modelOverride }
       }
       var run
+      var ppEntry = pack ? { pack: pack, parent: parent, at: Date.now() } : null
+      if (ppEntry) pendingPacks.push(ppEntry)
       try { run = await subagents.start(providerName, req) } catch (e) {
         if (modelOverride) { console.error('[task-board] model override failed, fallback to parent model:', String(e)); delete req.agentOptions; try { run = await subagents.start(providerName, req) } catch (e2) { console.error('[task-board] spawn ' + role + ' failed:', String(e2)); return null } }
         else { console.error('[task-board] spawn ' + role + ' failed:', String(e)); return null }
+      } finally {
+        if (ppEntry) { var ppi = pendingPacks.indexOf(ppEntry); if (ppi >= 0) pendingPacks.splice(ppi, 1) }
       }
       var rec = { run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride }
       runsFor(sid)[t.id] = rec
@@ -393,7 +399,19 @@ export function apply(ctx) {
         text: function (assembleCtx) {
           var agent = assembleCtx && assembleCtx.agent
           if (!agent) return ''
-          return packByChild[String(agent.id)] || ''
+          var aid = String(agent.id)
+          var hit = packByChild[aid]
+          if (hit) return hit
+          // 首轮竞速自愈：start() 返回前的首次组装按父子归属从 pendingPacks 认领
+          var agentsSvc = ctx.agents
+          if (!agentsSvc) return ''
+          var now = Date.now()
+          for (var i = pendingPacks.length - 1; i >= 0; i--) {
+            var pp = pendingPacks[i]
+            if (now - pp.at > 60000) { pendingPacks.splice(i, 1); continue }
+            try { if (agentsSvc.isOwnedBy(aid, pp.parent)) { packByChild[aid] = pp.pack; return pp.pack } } catch (_) {}
+          }
+          return ''
         },
       })
       ctx.effect(function () { return disposeCtxPack })
