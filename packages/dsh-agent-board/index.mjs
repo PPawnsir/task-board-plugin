@@ -73,7 +73,10 @@ export function apply(ctx) {
     // 按会话找 root agent（静态插件挂 host 层后多会话共存，不能"取第一个"——会把 worker 挂到别的会话上）
     function rootForSession(sid) { var s = ctx.agents; if (!s) return undefined; var r = s.roots(); for (var i = 0; i < r.length; i++) { if (String(r[i].id) === sid) return r[i] } return undefined }
     function makeSignal() { try { return new AbortController().signal } catch (_) { return { aborted: false, addEventListener: function () {}, removeEventListener: function () {} } } }
-    function makeMsg(text) { return { id: 'm' + Date.now() + Math.random().toString(36).slice(2, 6), role: 'user', content: [{ type: 'text', text: text }], source: { kind: 'user' } } }
+    // makeMsg 支持插件来源标记（参考 dsh-notes 派发模式）：
+    // form 'recall' = 背景回执（召回上下文，非指令）；'notice' = 需注意的通知（带一行 summary）
+    // 不再用 kind:'user'——插件消息不该冒充用户在说话，模型可据 form 正确理解语义
+    function makeMsg(text, form, summary) { var src = { kind: 'plugin', plugin: 'dsh-agent-board' }; if (form) { src.form = form; if (form === 'notice' && summary) src.summary = summary }; return { id: 'm' + Date.now() + Math.random().toString(36).slice(2, 6), role: 'user', content: [{ type: 'text', text: text }], source: src } }
     // 超时保护：run 挂死时走失败重试路径
     function withTimeout(promise, ms, label) { var timer = ctx.timer; if (!timer) return promise; return Promise.race([promise, timer.timeout(ms).then(function () { throw new Error(label + ' timeout ' + ms + 'ms') })]) }
 
@@ -260,7 +263,7 @@ export function apply(ctx) {
     function notifyMainWindow(sid, t, question) {
       var root = rootForSession(sid)
       if (!root) return
-      try { root.followup(makeMsg('⚠️ [任务看板] Worker 上报歧义，等待裁决：\n\n任务: ' + t.title + ' (' + t.id + ')\n\n疑问:\n' + question.slice(0, 1500) + '\n\n请在看板详情页裁决，或直接回复指示。裁决后会有新 Worker 带着裁决答案接手。')) } catch (e) { console.error('[task-board] escalate notify failed:', String(e)) }
+      try { root.followup(makeMsg('⚠️ [任务看板] Worker 上报歧义，等待裁决：\n\n任务: ' + t.title + ' (' + t.id + ')\n\n疑问:\n' + question.slice(0, 1500) + '\n\n请在看板详情页裁决，或直接回复指示。裁决后会有新 Worker 带着裁决答案接手。', 'notice', '任务待裁决: ' + t.title)) } catch (e) { console.error('[task-board] escalate notify failed:', String(e)) }
     }
     function maybeNotify(sid, task) { if (task && task.escalation) { notifyMainWindow(sid, task, task.escalation.question) } }
 
@@ -310,7 +313,7 @@ export function apply(ctx) {
       }
       lines.push('', '可用 task_list 查看全部；阻塞项可在看板拖回待办重新投放。')
       var text = lines.join('\n')
-      function send() { try { root.followup(makeMsg(text)) } catch (e) { console.error('[task-board] receipt flush failed:', String(e)) } }
+      function send() { try { root.followup(makeMsg(text, 'recall')) } catch (e) { console.error('[task-board] receipt flush failed:', String(e)) } }
       if (typeof root.whenIdle === 'function') {
         var waited = withTimeout(root.whenIdle(), 300000, 'receipt-idle-wait') // 最多等 5 分钟，超时也发（不能丢回执）
         Promise.resolve(waited).then(send).catch(send)
@@ -461,7 +464,7 @@ export function apply(ctx) {
       var rec = runsFor(sid)[taskId]
       var delivered = false
       if (rec && rec.run && rec.run.localAgent) {
-        try { rec.run.localAgent.followup(makeMsg('[高优先级干预] 来自主窗口/用户的指令：\n\n' + msg + '\n\n请优先响应此指令，然后继续当前任务。')); delivered = true } catch (_) {}
+        try { rec.run.localAgent.followup(makeMsg('[高优先级干预] 来自主窗口/用户的指令：\n\n' + msg + '\n\n请优先响应此指令，然后继续当前任务。', 'notice', '高优干预: ' + taskId)); delivered = true } catch (_) {}
       }
       await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === taskId }); if (t) { if (!Array.isArray(t.messages)) t.messages = []; t.messages.push({ kind: 'intervention', text: msg, at: new Date().toISOString(), by: actor }); ah(t, t.status, t.status, actor, '高优干预: ' + msg.slice(0, 200) + (delivered ? '' : '（无活跃 run，随下次派发注入）')) }; return t })
       return { ok: true, delivered: delivered }
