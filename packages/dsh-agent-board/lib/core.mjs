@@ -105,18 +105,21 @@ export function buildMessages(t) {
   if (!Array.isArray(t.messages) || t.messages.length === 0) return ''
   return t.messages.map(function (m) { return '### [' + (m.kind || 'note') + '] (' + (m.at || '') + ' by ' + (m.by || '') + ')\n' + String(m.text || '').slice(0, 2000) }).join('\n\n')
 }
-// 主窗口预研文件段：主 agent 在调研时读过的文件，由 host 从磁盘读内容后传入（core 保持纯函数不碰 IO）
-// 注意：systemPrompt context 通道做严格 {{var}} 插值，文件内容里的 {{...}} 会直接抛异常
+// 主窗口预研上下文段：笔记（调研结论/原始需求/思路）+ 文件，由 host 组装后传入（core 保持纯函数不碰 IO）
+// 注意：systemPrompt context 通道做严格 {{var}} 插值，内容里的 {{...}} 会直接抛异常
 // 毁掉子代理的整个 prompt 组装——必须先把 {{ 打断为 { {（肉眼可读，插值器不再触发）。
 function sanitizeCtx(s) { return String(s).replace(/\{\{/g, '{ {') }
-export function buildContextPackSection(files) {
-  if (!Array.isArray(files) || files.length === 0) return ''
-  var parts = ['主窗口预研文件（主窗口创建任务前已读过以下内容，直接使用，不要重复读取；标"截断"的内容可按需补读）：']
-  for (var i = 0; i < files.length; i++) {
-    var f = files[i]
-    parts.push('### ' + sanitizeCtx(f.path) + (f.truncated ? '（截断）' : '') + '\n' + sanitizeCtx(f.content))
+export function buildContextPackSection(files, notes) {
+  var parts = []
+  if (notes && String(notes).trim()) parts.push('### 主窗口调研笔记（结论/思路/原始需求，直接采信）\n' + sanitizeCtx(String(notes)))
+  if (Array.isArray(files) && files.length) {
+    parts.push('主窗口预研文件（主窗口创建任务前已读过以下内容，直接使用，不要重复读取；标"截断"的内容可按需补读）：')
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i]
+      parts.push('### ' + sanitizeCtx(f.path) + (f.truncated ? '（截断）' : '') + '\n' + sanitizeCtx(f.content))
+    }
   }
-  return parts.join('\n\n')
+  return parts.length ? parts.join('\n\n') : ''
 }
 export function buildWorkerPrompt(t, pack) {
   var notes = histNotes(t)

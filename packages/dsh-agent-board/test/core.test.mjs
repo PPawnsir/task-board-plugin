@@ -187,6 +187,21 @@ test('buildContextPackSection: {{ }} 插值净化（context 通道严格插值�
   assert.match(s, /\{ \{ msg \}\}/)        // 内容可读性保留
 })
 
+test('buildContextPackSection: 笔记（思路/原始需求）注入 + 净化', () => {
+  const s = core.buildContextPackSection([{ path: 'a.js', content: 'x', truncated: false }], '用户原话：要做成{{可配置}}的')
+  assert.match(s, /主窗口调研笔记/)
+  assert.match(s, /用户原话：要做成\{ \{可配置\}\}的/)  // 笔记里的 {{}} 也被净化
+  assert.match(s, /### a\.js/)                          // 文件段同时存在
+})
+
+test('buildContextPackSection: 仅笔记无文件也可注入', () => {
+  const s = core.buildContextPackSection([], '思路：先改 A 再改 B')
+  assert.match(s, /主窗口调研笔记/); assert.match(s, /先改 A 再改 B/)
+  assert.doesNotMatch(s, /预研文件/)
+  assert.equal(core.buildContextPackSection([], ''), '')
+  assert.equal(core.buildContextPackSection(null, '  '), '')
+})
+
 // ===== 派发决策 =====
 test('pickDispatch: 优先级排序 + 并发上限 + 排除项', () => {
   const tasks = [
