@@ -6,7 +6,8 @@
   "main": "./index.mjs",
   "scripts": {
     "test": "node --test test/core.test.mjs",
-    "prepublishOnly": "node --check index.mjs && node --check lib/client.js && node --check lib/core.mjs && npm test"
+    "prepublishOnly": "node --check index.mjs && node --check lib/client.js && node --check lib/core.mjs && npm test",
+    "dev": "node scripts/dev-watch.cjs"
   },
   "exports": {
     ".": "./index.mjs",

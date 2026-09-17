@@ -31,4 +31,19 @@ dsh plugin --profile web add dsh-agent-board@latest
 
 - 仓库：<https://github.com/PPawnsir/task-board-plugin>
 - 本包即源码，直接维护（v68 起拆除了动态→静态转换层，v74 起去池化）
-- 单元测试：`npm test`（node --test，30 例纯逻辑用例，无需重启 dsh）
+- 单元测试：`npm test`（node --test，30+ 例纯逻辑用例，无需重启 dsh）
+
+## 开发热循环（免重启 E2E）
+
+host 代码（`index.mjs` / `lib/*.mjs`）改动必须进程重启才能加载，但不必动你正在用的主实例——
+仓库提供一个独立 dev 实例 + 文件监听自动重启方案：
+
+```sh
+npm run dev        # = node scripts/dev-watch.cjs
+# 浏览器打开 http://127.0.0.1:3081（独立 dev profile，不影响主实例）
+```
+
+- 改 host 代码 → 监听器自动重启 dev 实例（约 3-5s）→ 刷新 3081 页面即可验证
+- 改 `lib/client.js` → **不用重启**，浏览器刷新即生效（client 包按请求从磁盘读）
+- dev profile 在 `~/.dsh/profiles/dev`，只挂 base + web-app + 本插件；会话/看板数据与主实例共享 `~/.dsh`，两边互不干扰
+- 官方 `cordis-plugin-hmr` 行在 web 部署里被 `disabled: true`（reload 生命周期未测完），实测对 link: 插件静默无效，故用 watcher 重启替代
