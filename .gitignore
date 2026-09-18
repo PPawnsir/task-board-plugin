@@ -4,3 +4,6 @@ node_modules/
 Thumbs.db
 _line219.txt
 test-tasks.json
+
+# 看板运行时数据（dev 实例 cwd 会落在包目录）
+.dsh/
