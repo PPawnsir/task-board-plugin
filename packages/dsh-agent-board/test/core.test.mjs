@@ -187,6 +187,16 @@ test('buildContextPackSection: {{ }} 插值净化（context 通道严格插值�
   assert.match(s, /\{ \{ msg \}\}/)        // 内容可读性保留
 })
 
+test('buildContextPackSection: 三连花括号（Python f-string）封闭净化', () => {
+  // 真实事故：f"{{{lo}}}" 经 replace(/\{\{/g,'{ {') 变成 "{ {{lo}}}"——替换结果自己又造出 {{
+  const s = core.buildContextPackSection([{ path: 'gen.py', content: 'quant = f"{{{lo}}}" + f"{{{lo},{hi}}}"', truncated: false }])
+  assert.doesNotMatch(s, /\{\{/)           // 净化必须是封闭变换
+  assert.match(s, /\{ \{ \{lo\}\}\}/)      // 可读性保留
+  // 五连括号 + 单括号混合
+  const s2 = core.buildContextPackSection([{ path: 'x', content: 'a{{{{{b}}}}}{c}{{d}}', truncated: false }])
+  assert.doesNotMatch(s2, /\{\{/)
+})
+
 test('buildContextPackSection: 笔记（思路/原始需求）注入 + 净化', () => {
   const s = core.buildContextPackSection([{ path: 'a.js', content: 'x', truncated: false }], '用户原话：要做成{{可配置}}的')
   assert.match(s, /主窗口调研笔记/)

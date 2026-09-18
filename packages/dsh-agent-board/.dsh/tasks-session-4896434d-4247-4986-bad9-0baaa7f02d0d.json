@@ -1,0 +1,332 @@
+{
+  "version": 12,
+  "ownerSession": "session-4896434d-4247-4986-bad9-0baaa7f02d0d",
+  "boardMode": "auto",
+  "teamMode": false,
+  "minWorkers": 1,
+  "maxWorkers": 3,
+  "minVerifiers": 0,
+  "maxVerifiers": 2,
+  "workerModel": "",
+  "verifierModel": "",
+  "poolStatus": {
+    "workers": [],
+    "verifiers": [
+      {
+        "id": "e2e-full",
+        "num": "-",
+        "busy": true,
+        "taskId": "e2e-full",
+        "runId": "151da822-2082-4a29-97d8-34b0fc98f9e7",
+        "done": 0,
+        "queueLen": 0,
+        "suspect": false,
+        "model": ""
+      }
+    ]
+  },
+  "tasks": [
+    {
+      "id": "e2e-probe",
+      "title": "E2E 探测",
+      "description": "probe",
+      "status": "blocked",
+      "priority": "medium",
+      "tags": [],
+      "parentId": null,
+      "subtaskStrategy": null,
+      "assignMode": "auto",
+      "assignee": null,
+      "context": {
+        "files": [],
+        "docs": [],
+        "instructions": "",
+        "notes": "",
+        "relatedTasks": [],
+        "prerequisites": ""
+      },
+      "acceptance": "",
+      "dependsOn": [],
+      "pipeline": "direct",
+      "claimedBy": "unknown",
+      "claimedAt": "2026-09-17T12:29:59.200Z",
+      "createdAt": "2026-09-17T12:29:58.983Z",
+      "resolvedAt": "2026-09-17T12:29:59.225Z",
+      "verifiedAt": null,
+      "verifiedBy": null,
+      "archivedAt": null,
+      "resolution": "probe cleanup",
+      "messages": [],
+      "history": [
+        {
+          "from": "created",
+          "to": "pending",
+          "timestamp": "2026-09-17T12:29:58.983Z",
+          "actor": "unknown",
+          "note": "created"
+        },
+        {
+          "from": "pending",
+          "to": "in-progress",
+          "timestamp": "2026-09-17T12:29:59.045Z",
+          "actor": "spawn-pending",
+          "note": "manual dispatch"
+        },
+        {
+          "from": "in-progress",
+          "to": "pending",
+          "timestamp": "2026-09-17T12:29:59.173Z",
+          "actor": "unknown",
+          "note": "reset to pending after edit"
+        },
+        {
+          "from": "pending",
+          "to": "in-progress",
+          "timestamp": "2026-09-17T12:29:59.200Z",
+          "actor": "unknown",
+          "note": "manual claim via board"
+        },
+        {
+          "from": "in-progress",
+          "to": "blocked",
+          "timestamp": "2026-09-17T12:29:59.225Z",
+          "actor": "unknown",
+          "note": "probe cleanup"
+        }
+      ]
+    },
+    {
+      "id": "e2e-full",
+      "title": "E2E：上下文注入全管线",
+      "description": "只读任务：总结注入文件里 buildContextPackSection 函数的行为（参数、返回值、净化逻辑），不要修改任何文件。",
+      "status": "archived",
+      "priority": "medium",
+      "tags": [],
+      "parentId": null,
+      "subtaskStrategy": null,
+      "assignMode": "auto",
+      "assignee": null,
+      "context": {
+        "files": [
+          "D:\\deepseek-work\\task-board-plugin\\packages\\dsh-agent-board\\lib\\core.mjs"
+        ],
+        "docs": [],
+        "instructions": "",
+        "notes": "调研笔记：该函数是上下文注入段的构建器；注意其中的 {{}} 插值净化逻辑（sanitizeCtx）。",
+        "relatedTasks": [],
+        "prerequisites": ""
+      },
+      "acceptance": "",
+      "dependsOn": [],
+      "pipeline": "full",
+      "claimedBy": "unknown",
+      "claimedAt": "2026-09-17T12:40:01.965Z",
+      "createdAt": "2026-09-17T12:30:40.187Z",
+      "resolvedAt": "2026-09-17T12:40:02.020Z",
+      "verifiedAt": "2026-09-17T12:40:02.077Z",
+      "verifiedBy": "unknown",
+      "archivedAt": "2026-09-17T12:40:02.190Z",
+      "resolution": "cleanup",
+      "messages": [],
+      "history": [
+        {
+          "from": "created",
+          "to": "pending",
+          "timestamp": "2026-09-17T12:30:40.187Z",
+          "actor": "unknown",
+          "note": "created"
+        },
+        {
+          "from": "pending",
+          "to": "in-progress",
+          "timestamp": "2026-09-17T12:30:40.229Z",
+          "actor": "spawn-pending",
+          "note": "manual dispatch"
+        },
+        {
+          "from": "in-progress",
+          "to": "verifying",
+          "timestamp": "2026-09-17T12:31:11.166Z",
+          "actor": "dbcff4ef-d8d7-4b0c-a37a-a6fd659426ff",
+          "note": "worker 工具上报完成"
+        },
+        {
+          "from": "verifying",
+          "to": "in-progress",
+          "timestamp": "2026-09-17T12:32:16.192Z",
+          "actor": "e42d6e02-a7d0-4845-94e3-a9bc9c2c8c9d",
+          "note": "rejected"
+        },
+        {
+          "from": "pending",
+          "to": "in-progress",
+          "timestamp": "2026-09-17T12:32:16.265Z",
+          "actor": "spawn-pending",
+          "note": "dispatch"
+        },
+        {
+          "from": "in-progress",
+          "to": "verifying",
+          "timestamp": "2026-09-17T12:33:09.807Z",
+          "actor": "45d55835-b4c0-4260-b7da-4877fca827f5",
+          "note": "worker 工具上报完成"
+        },
+        {
+          "from": "verifying",
+          "to": "in-progress",
+          "timestamp": "2026-09-17T12:33:39.249Z",
+          "actor": "d7045bdf-03ee-42ca-9852-02b10ac0ed8c",
+          "note": "rejected"
+        },
+        {
+          "from": "pending",
+          "to": "in-progress",
+          "timestamp": "2026-09-17T12:33:39.427Z",
+          "actor": "spawn-pending",
+          "note": "dispatch"
+        },
+        {
+          "from": "in-progress",
+          "to": "pending",
+          "timestamp": "2026-09-17T12:35:48.659Z",
+          "actor": "system",
+          "note": "执行 run 已结束/丢失，回收重新排队"
+        },
+        {
+          "from": "pending",
+          "to": "in-progress",
+          "timestamp": "2026-09-17T12:35:48.660Z",
+          "actor": "spawn-pending",
+          "note": "dispatch"
+        },
+        {
+          "from": "in-progress",
+          "to": "verifying",
+          "timestamp": "2026-09-17T12:37:15.116Z",
+          "actor": "a5c309e7-3f08-46cb-9db1-c9384f364a6b",
+          "note": "worker 工具上报完成"
+        },
+        {
+          "from": "verifying",
+          "to": "in-progress",
+          "timestamp": "2026-09-17T12:37:47.150Z",
+          "actor": "41455202-f94b-4d80-ac8b-41610d6c6d06",
+          "note": "rejected"
+        },
+        {
+          "from": "in-progress",
+          "to": "blocked",
+          "timestamp": "2026-09-17T12:37:47.150Z",
+          "actor": "system",
+          "note": "verifier 驳回 x3，待人工裁决"
+        },
+        {
+          "from": "blocked",
+          "to": "in-progress",
+          "timestamp": "2026-09-17T12:40:01.965Z",
+          "actor": "unknown",
+          "note": "manual claim via board"
+        },
+        {
+          "from": "in-progress",
+          "to": "verifying",
+          "timestamp": "2026-09-17T12:40:02.020Z",
+          "actor": "unknown",
+          "note": "cleanup"
+        },
+        {
+          "from": "verifying",
+          "to": "resolved",
+          "timestamp": "2026-09-17T12:40:02.077Z",
+          "actor": "unknown",
+          "note": "approved"
+        },
+        {
+          "from": "resolved",
+          "to": "archived",
+          "timestamp": "2026-09-17T12:40:02.190Z",
+          "actor": "unknown",
+          "note": "manual archive"
+        }
+      ],
+      "deliverable": {
+        "summary": "",
+        "changes": "",
+        "selfTest": "",
+        "at": "2026-09-17T12:37:15.116Z",
+        "by": "a5c309e7-3f08-46cb-9db1-c9384f364a6b"
+      },
+      "verification": {
+        "verdict": "rejected",
+        "summary": "",
+        "checks": "",
+        "at": "2026-09-17T12:37:47.150Z",
+        "by": "41455202-f94b-4d80-ac8b-41610d6c6d06"
+      },
+      "rejectCount": 3
+    },
+    {
+      "id": "e2e-race2",
+      "title": "首轮注入验证",
+      "description": "只读：说出注入笔记里的暗号是什么。不要改任何文件。",
+      "status": "resolved",
+      "priority": "medium",
+      "tags": [],
+      "parentId": null,
+      "subtaskStrategy": null,
+      "assignMode": "auto",
+      "assignee": null,
+      "context": {
+        "files": [],
+        "docs": [],
+        "instructions": "",
+        "notes": "暗号是：星河战舰。",
+        "relatedTasks": [],
+        "prerequisites": ""
+      },
+      "acceptance": "",
+      "dependsOn": [],
+      "pipeline": "work",
+      "claimedBy": "5cd47283-b98f-4e1f-88d4-1684df822e8e",
+      "claimedAt": "2026-09-17T12:40:02.254Z",
+      "createdAt": "2026-09-17T12:40:02.225Z",
+      "resolvedAt": "2026-09-17T12:40:14.981Z",
+      "verifiedAt": null,
+      "verifiedBy": null,
+      "archivedAt": null,
+      "resolution": null,
+      "messages": [],
+      "history": [
+        {
+          "from": "created",
+          "to": "pending",
+          "timestamp": "2026-09-17T12:40:02.225Z",
+          "actor": "unknown",
+          "note": "created"
+        },
+        {
+          "from": "pending",
+          "to": "in-progress",
+          "timestamp": "2026-09-17T12:40:02.254Z",
+          "actor": "spawn-pending",
+          "note": "manual dispatch"
+        },
+        {
+          "from": "in-progress",
+          "to": "resolved",
+          "timestamp": "2026-09-17T12:40:14.981Z",
+          "actor": "5cd47283-b98f-4e1f-88d4-1684df822e8e",
+          "note": "worker 工具上报完成"
+        }
+      ],
+      "deliverable": {
+        "summary": "",
+        "changes": "",
+        "selfTest": "",
+        "at": "2026-09-17T12:40:14.981Z",
+        "by": "5cd47283-b98f-4e1f-88d4-1684df822e8e"
+      }
+    }
+  ],
+  "dispatchInfo": "verify e2e-full"
+}

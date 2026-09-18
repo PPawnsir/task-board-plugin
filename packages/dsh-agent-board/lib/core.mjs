@@ -107,8 +107,10 @@ export function buildMessages(t) {
 }
 // 主窗口预研上下文段：笔记（调研结论/原始需求/思路）+ 文件，由 host 组装后传入（core 保持纯函数不碰 IO）
 // 注意：systemPrompt context 通道做严格 {{var}} 插值，内容里的 {{...}} 会直接抛异常
-// 毁掉子代理的整个 prompt 组装——必须先把 {{ 打断为 { {（肉眼可读，插值器不再触发）。
-function sanitizeCtx(s) { return String(s).replace(/\{\{/g, '{ {') }
+// 毁掉子代理的整个 prompt 组装——必须把 { 连写整 run 拆开（肉眼可读，插值器不再触发）。
+// 教训：replace(/\{\{/g,'{ {') 是开变换——三连括号 {{{lo}}}（Python f-string）会得到
+// "{ {{lo}}}"，替换结果自己又造出 {{。按"连 { 整 run 拆开"才是封闭变换。
+function sanitizeCtx(s) { return String(s).replace(/\{+/g, function (m) { return m.length === 1 ? m : m.split('').join(' ') }) }
 export function buildContextPackSection(files, notes) {
   var parts = []
   if (notes && String(notes).trim()) parts.push('### 主窗口调研笔记（结论/思路/原始需求，直接采信）\n' + sanitizeCtx(String(notes)))
