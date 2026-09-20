@@ -1,0 +1,6 @@
+release: v1.1.2
+
+声明宿主机要求（市场 contributing.md 规范）：
+- peerDependencies: @deepseek-ai/dsh >=0.1.5-rc.1 <0.2.0-0（含预发布分支，避免
+  node-semver 静默排除 dsh 预发布构建导致 ERESOLVE）+ react >=18
+- README 安装节注明宿主要求

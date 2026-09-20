@@ -14,6 +14,8 @@ DeepSeek Harness 智能看板 — 会话级任务管理 + 一次性 Worker/Verif
 
 ## 安装
 
+> 宿主要求：Node ≥ 22；DSH ≥ `0.1.5-rc.1`（已通过 `peerDependencies` 声明，含预发布分支的版本范围见 package.json）
+
 ```sh
 dsh plugin --profile web add dsh-agent-board
 ```

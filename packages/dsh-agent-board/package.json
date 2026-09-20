@@ -1,7 +1,7 @@
 {
   "name": "dsh-agent-board",
   "description": "DeepSeek Harness 智能看板：任务卡片 + 一次性 Worker/Verifier 派发 + 依赖调度 + 管线分档 + Team 模式（歧义上报主窗口裁决）",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "type": "module",
   "main": "./index.mjs",
   "scripts": {
@@ -53,6 +53,10 @@
   "bugs": "https://github.com/PPawnsir/task-board-plugin/issues",
   "engines": {
     "node": ">=22"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "@deepseek-ai/dsh": ">=0.1.5-rc.1 <0.2.0-0"
   },
   "license": "MIT"
 }
