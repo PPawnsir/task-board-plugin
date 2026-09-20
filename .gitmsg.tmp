@@ -1,6 +1,14 @@
-release: v1.1.2
+test: E2E 用例固化——核心功能点驱动真实实例的可重复验证
 
-声明宿主机要求（市场 contributing.md 规范）：
-- peerDependencies: @deepseek-ai/dsh >=0.1.5-rc.1 <0.2.0-0（含预发布分支，避免
-  node-semver 静默排除 dsh 预发布构建导致 ERESOLVE）+ react >=18
-- README 安装节注明宿主要求
+scripts/e2e.cjs（npm run e2e），5 个场景 21 项断言，全部实测通过：
+- auto-full     非Team自动全流程：创建(full+contextNotes/contextFiles+acceptance)
+                → 自动派发 → Worker → Verifier approved → 产物核验（7 断言）
+- manual-gate   手动门禁：35s 不被抢 + 「派发」按钮流转（3）
+- manual-claim  主窗口领取 → 办理 → resolve/verify（3）
+- manual-pickup 切回自动后积压任务心跳周期内拾取（1）
+- team-flow     Team模式：草稿先行 → 发布 → 依赖门控 → 歧义上报
+                → 主窗口裁决 → 重派完成 → 依赖任务接续（7）
+
+用法：npm run e2e -- --session <会话id> [--base url] [--only team-flow]
+前置：目标会话需在实例 GUI 中打开（子代理 spawn 需要活的 root agent）。
+全部场景自带清理（归档+临时文件删除），退出码 0=全过。

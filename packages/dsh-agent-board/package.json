@@ -7,7 +7,8 @@
   "scripts": {
     "test": "node --test test/core.test.mjs",
     "prepublishOnly": "node --check index.mjs && node --check lib/client.js && node --check lib/core.mjs && npm test",
-    "dev": "node scripts/dev-watch.cjs"
+    "dev": "node scripts/dev-watch.cjs",
+    "e2e": "node scripts/e2e.cjs"
   },
   "exports": {
     ".": "./index.mjs",
