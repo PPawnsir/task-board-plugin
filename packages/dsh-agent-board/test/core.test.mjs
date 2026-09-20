@@ -106,6 +106,12 @@ test('parseSections: 分段解析', () => {
   assert.deepEqual(core.parseSections('没有分段的纯文本'), {})
 })
 
+test('parseSections: diff 概要分段解析（Worker 变更概要 → deliverable.diff）', () => {
+  const s = core.parseSections('## 开发描述\n做了\n## diff 概要\n gen.py | 3 + ++')
+  assert.equal(s.diff, 'gen.py | 3 + ++')
+  assert.equal(s.summary, '做了')
+})
+
 test('parseVerdict: 行首锚定，历史提及不误判', () => {
   assert.equal(core.parseVerdict('APPROVED: 通过'), 'APPROVED')
   assert.equal(core.parseVerdict('REJECTED: 不达标'), 'REJECTED')

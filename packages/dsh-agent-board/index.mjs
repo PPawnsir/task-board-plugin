@@ -6,6 +6,10 @@
 // {name, description, parameters, output, execute} 普通对象，这里内联等价实现。
 // parameters 已是完整 JSON Schema，原样透传；output 透传 schema+render。
 import * as core from './lib/core.mjs'
+import { zstdDecompressSync } from 'node:zlib'
+import os from 'node:os'
+import path from 'node:path'
+import fsNode from 'node:fs'
 const { ah, isb, gsb, gpt, vt, validateDeps, depsSatisfied, depsCancelled, classifyPipeline, seed, normalizeBoard, cfg, claimCheck, claimApply, checkParentAuto, resolveApply, verifyApply, parseSections, parseVerdict, isEscalation, outputText, histNotes, buildContextPackSection, buildWorkerPrompt, buildVerifierPrompt, pickDispatch, isOrphan, PRIO_RANK } = core
 
 function defineTool(options) {
@@ -210,7 +214,7 @@ export function apply(ctx) {
         // 文本降级路径：分段格式上报
         var secs = parseSections(output)
         delete t.retryCount; delete t.stuckSince
-        t.deliverable = { summary: secs.summary || output.slice(0, 600), changes: secs.changes || '', selfTest: secs.selfTest || '', at: new Date().toISOString(), by: String(rec.run.id) }
+        t.deliverable = { summary: secs.summary || output.slice(0, 600), changes: secs.changes || '', selfTest: secs.selfTest || '', diff: (secs.diff || '').slice(0, 4000), at: new Date().toISOString(), by: String(rec.run.id) }
         resolveApply(d, t, String(rec.run.id), 'verifying', output || 'Worker 完成', 'worker 文本上报完成')
         return { task: t }
       })
@@ -232,7 +236,7 @@ export function apply(ctx) {
         var vm = trimmed.match(/^[ \t>*#\-\s]*(APPROVED|REJECTED)\b/im)
         if (failed || !vm) {
           // 失败/空输出/无法判定：verifyRetries 计数，>=3 转人工验收（deliverable 已完成，是 verifier 故障不是任务故障）
-          if (failed && rec.model) { badModels[modelKey(sid, rec.model)] = true }
+          if (failed && rec.model) { badModels[modelKey(sid, rec.model)] = true; pushSysNote(sid, '模型 ' + rec.model + ' 验收连续失败，已熔断回退父级模型') }
           t.verifyRetries = (t.verifyRetries || 0) + 1
           if (t.verifyRetries >= 3) { t.escalation = { question: 'Verifier 连续 ' + t.verifyRetries + ' 次未能给出有效结论（' + (failed ? String(errText).slice(0, 150) : '输出格式异常') + '）。交付物已完成，请人工验收：看板详情页直接通过/驳回，或 task_verify 裁决。', at: new Date().toISOString(), by: 'system' }; ah(t, 'verifying', 'verifying', 'system', 'verifier 故障，转人工验收'); return { task: t, escalated: true } }
           ah(t, 'verifying', 'verifying', 'system', 'verifier 未给出有效结论，重新排队审查 (' + t.verifyRetries + '/3)')
@@ -295,14 +299,23 @@ export function apply(ctx) {
         else flushReceipts(sid)
       }
     }
+    // 系统级异常通知队列（易失，随回执冲刷）：模型熔断/spawn 失败/孤儿回收/看门狗标记
+    var sysNotesBuf = {}
+    function pushSysNote(sid, text) {
+      var arr = (sysNotesBuf[sid] = sysNotesBuf[sid] || [])
+      arr.push({ text: text, at: new Date().toISOString() })
+      if (arr.length > 10) arr.splice(0, arr.length - 10)
+    }
     function flushReceipts(sid) {
-      var buf = receiptBuf[sid]; if (!buf) return
+      var buf = receiptBuf[sid]
+      var notes = sysNotesBuf[sid] || []
+      if ((!buf || !buf.items.length) && !notes.length) return
       receiptBuf[sid] = null
-      if (!buf.items.length) return
+      sysNotesBuf[sid] = []
       var root = rootForSession(sid); if (!root) return
       var done = [], blocked = []
-      for (var i = 0; i < buf.items.length; i++) { (buf.items[i].kind === 'resolved' ? done : blocked).push(buf.items[i]) }
-      var lines = ['📋 [任务看板] 回执摘要（' + buf.items.length + ' 条）', '']
+      if (buf) for (var i = 0; i < buf.items.length; i++) { (buf.items[i].kind === 'resolved' ? done : blocked).push(buf.items[i]) }
+      var lines = [done.length || blocked.length ? '📋 [任务看板] 回执摘要（' + buf.items.length + ' 条）' : '📋 [任务看板] 系统通知', '']
       if (done.length) {
         lines.push('✅ 完成 ' + done.length + ' 个：')
         for (var j = 0; j < done.length && j < 8; j++) lines.push('  · ' + done[j].title + ' (' + done[j].id + ')' + (done[j].summary ? ' — ' + done[j].summary.slice(0, 120) : ''))
@@ -310,6 +323,10 @@ export function apply(ctx) {
       if (blocked.length) {
         lines.push('🛑 阻塞 ' + blocked.length + ' 个（需关注）：')
         for (var k = 0; k < blocked.length && k < 8; k++) lines.push('  · ' + blocked[k].title + ' (' + blocked[k].id + ')' + (blocked[k].note ? ' — ' + blocked[k].note.slice(0, 150) : ''))
+      }
+      if (notes.length) {
+        lines.push('', '⚠️ 系统异常 ' + notes.length + ' 条：')
+        for (var n = 0; n < notes.length && n < 8; n++) lines.push('  · ' + notes[n].text)
       }
       lines.push('', '可用 task_list 查看全部；阻塞项可在看板拖回待办重新投放。')
       var text = lines.join('\n')
@@ -339,7 +356,7 @@ export function apply(ctx) {
       var result = await mutateLocked(sid, function (d) {
         var now = Date.now()
         d.tasks.forEach(function (t) {
-          if (isOrphan(d, t, runs, now)) { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', '执行 run 已结束/丢失，回收重新排队'); info.push('reclaim ' + t.id) }
+          if (isOrphan(d, t, runs, now)) { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', '执行 run 已结束/丢失，回收重新排队'); pushSysNote(sid, '任务「' + t.title + '」执行 run 丢失，已回收重新排队'); info.push('reclaim ' + t.id) }
         })
         // worker 派发仅 auto；verifier 派发两种模式都跑（manual 模式主窗口 claim 做完的 full 档任务需要验收）
         var capW = isAuto ? Math.max(0, c.maxWorkers - activeW) : 0
@@ -363,6 +380,7 @@ export function apply(ctx) {
         } else if (sp.role === 'worker') {
           // spawn 失败 → 回 pending（verifier spawn 失败无需处理，下轮 cycle 会重试）
           await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t && t.status === 'in-progress' && t.claimedBy === 'spawn-pending') { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', 'spawn 失败，回收重新排队') }; return t }, true)
+          pushSysNote(sid, '任务「' + sp.t.title + '」Worker 启动失败，已重新排队')
         }
       }
       return result
@@ -428,6 +446,7 @@ export function apply(ctx) {
     // ===== Tools =====
     ctx.tools.register(defineTool({ name: 'task_list', description: '列出当前会话任务。', parameters: { type: 'object', properties: { status: { type: 'string', enum: ['pending', 'in-progress', 'verifying', 'resolved', 'blocked', 'cancelled'] }, priority: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] }, tag: { type: 'string' }, parentId: { type: 'string' }, includeArchived: { type: 'boolean' }, limit: { type: 'number' } }, required: [] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var d = await rt(sid); var a = d.tasks; var ts = a; if (!args.includeArchived) ts = ts.filter(function (x) { return x.status !== 'archived' }); if (args.status) ts = ts.filter(function (x) { return x.status === args.status }); if (args.priority) ts = ts.filter(function (x) { return x.priority === args.priority }); if (args.tag) ts = ts.filter(function (x) { return (x.tags || []).indexOf(args.tag) >= 0 }); if (args.parentId === 'null') ts = ts.filter(function (x) { return !isb(x) }); else if (args.parentId) ts = ts.filter(function (x) { return x.parentId === args.parentId }); var po = PRIO_RANK; ts.sort(function (a, b) { var dd = (po[b.priority] || 0) - (po[a.priority] || 0); return dd !== 0 ? dd : (a.createdAt || '').localeCompare(b.createdAt || '') }); var lim = Math.min(args.limit || 20, 100); var res = ts.slice(0, lim).map(function (x) { var e = Object.assign({}, x); if (isb(x)) { var p = gpt(x, a); if (p) e.parentSummary = { id: p.id, title: p.title, status: p.status } }; var ch = gsb(x.id, a); if (ch.length) { e.subtaskCount = ch.length; e.subtaskResolved = ch.filter(function (y) { return y.status === 'resolved' }).length }; return e }); var out = { tasks: res, total: ts.length, session: sid, actor: getActorId(), boardMode: d.boardMode || 'auto', teamMode: !!d.teamMode, poolStatus: d.poolStatus }; if (d.teamMode) out.teamHint = 'Team 模式已开启：实质性改动请优先 task_create 提交看板由池执行；调研/读取/讨论可直接进行；Worker 歧义会上报等你裁决。'; return out } }))
     ctx.tools.register(defineTool({ name: 'task_context', description: '获取任务完整上下文。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, expandFiles: { type: 'boolean' }, includeParent: { type: 'boolean' }, includeSubtasks: { type: 'boolean' } }, required: ['taskId'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var d = await rt(sid); var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found: ' + args.taskId }; return { ok: true, context: { task: t, inheritedContext: t.context || {} } } } }))
+    ctx.tools.register(defineTool({ name: 'task_preview_context', description: '派发前上下文预览：预演 task_create 的 contextFiles/contextNotes 将注入给子代理的实际内容（读盘后的最终形态），用于确认材料是否足够。不创建任务。返回 ok=false/empty=true 说明无可注入内容。', parameters: { type: 'object', properties: { contextFiles: { type: 'array', items: { type: 'string' }, description: '预演的文件路径列表' }, contextNotes: { type: 'string', description: '预演的调研笔记' } }, required: [] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var files = Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : []; var notes = typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : ''; if (!files.length && !notes.trim()) return { ok: false, error: 'contextFiles/contextNotes 至少提供一个' }; try { var pack = await readContextPack({ context: { files: files, notes: notes } }); return { ok: true, empty: !pack, pack: pack } } catch (e) { return { ok: false, error: String(e).slice(0, 200) } } } }))
     ctx.tools.register(defineTool({ name: 'task_claim', description: '领取待办任务→in-progress。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, reason: { type: 'string' } }, required: ['taskId'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; var err = claimCheck(d, t, actor); if (err) return { ok: false, error: err }; claimApply(d, t, actor, args.reason || 'claimed'); return { ok: true, task: t, context: { task: t, inheritedContext: t.context || {} } } }) } }))
     ctx.tools.register(defineTool({ name: 'task_resolve', description: '提交验证(verifying)或阻塞(blocked)。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, status: { type: 'string', enum: ['verifying', 'blocked'] }, resolution: { type: 'string' } }, required: ['taskId', 'status'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'in-progress') return { ok: false, error: 'not in-progress' }; if (t.claimedBy !== actor) return { ok: false, error: 'not claimed by you' }; if (args.status === 'verifying' && !args.resolution) return { ok: false, error: 'resolution required' }; return resolveApply(d, t, actor, args.status, args.resolution, args.resolution || args.status) }) } }))
     ctx.tools.register(defineTool({ name: 'task_verify', description: '验收：approved→resolved，rejected→in-progress。子任务全完成父任务自动verifying。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, verdict: { type: 'string', enum: ['approved', 'rejected'] }, comment: { type: 'string' } }, required: ['taskId', 'verdict'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'verifying') return { ok: false, error: 'not verifying' }; return verifyApply(d, t, actor, args.verdict, args.comment) }) } }))
@@ -439,6 +458,70 @@ export function apply(ctx) {
     // get-tasks 是纯读路径（rt 只读文件）——poolCycle 由 15s 心跳 + 写入后 kickCycle 驱动，
     // 客户端 3s 轮询不再触发池计算/写盘（之前每轮询一次就 poolCycle+写盘一次，切会话时多会话轮询挤在文件锁上）
     handle('get-tasks', async function (args) { var sid = rpcSessionId(args); var d = await rt(sid); d.sessionId = sid; var __ag = ctx.agents; d.isRoot = true; if (__ag) { var __roots = __ag.roots(); var __rids = []; for (var __i = 0; __i < __roots.length; __i++) __rids.push(String(__roots[__i].id)); d.isRoot = __rids.indexOf(sid) >= 0 } return d })
+    // 派发前上下文预览：主 agent 用它确认"我将注入给子代理的材料"是否足够（不发任务、不落盘）
+    handle('preview-context', async function (args) {
+      var files = Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : []
+      var notes = typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : ''
+      if (!files.length && !notes.trim()) return { ok: false, error: 'contextFiles/contextNotes 至少提供一个' }
+      var pack = ''
+      try { pack = await readContextPack({ context: { files: files, notes: notes } }) } catch (e) { return { ok: false, error: '读取失败: ' + String(e).slice(0, 120) } }
+      return { ok: true, filesCount: files.length, notesLen: notes.length, pack: pack, empty: !pack }
+    })
+    // 活动心跳：读子代理会话日志的最后一帧，提取最近的动作摘要（卡片/详情页展示"现在跑到哪了"）
+    handle('agent-activity', async function (args) {
+      var sid = rpcSessionId(args)
+      var rec = runsFor(sid)[args.taskId]
+      if (!rec || !rec.run) return { ok: true, activity: null, reason: 'no active run' }
+      var child = String(rec.run.id)
+      try {
+        var boardAbs = await fs.resolve(fileFor(sid))
+        var ws = path.dirname(path.dirname(boardAbs))
+        var bucket = '--' + ws.replace(/[\\/:]/g, '-') + '--'
+        var log = path.join(os.homedir(), '.dsh', 'sessions', bucket, child, 'session.jsonl.zstd')
+        if (!fsNode.existsSync(log)) return { ok: true, activity: null, reason: 'log not found' }
+        var buf = fsNode.readFileSync(log)
+        var MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+        var last = buf.lastIndexOf(MAGIC) // 追加写多帧格式：最新事件在末帧，只解一帧控成本
+        if (last < 0) return { ok: true, activity: null }
+        var text = zstdDecompressSync(buf.subarray(last)).toString('utf8')
+        var lines = text.split('\n').filter(Boolean)
+        var activity = null
+        for (var i = lines.length - 1; i >= 0 && !activity; i--) {
+          try {
+            var e = JSON.parse(lines[i])
+            var dta = e.data || {}
+            if (e.type === 'tool/call' && dta.name) activity = '🔧 ' + dta.name + ' ' + String(dta.arguments || '').replace(/\s+/g, ' ').slice(0, 90)
+            else if (e.type === 'assistant/chunk' && dta.block && dta.block.type === 'text' && dta.block.text && dta.block.text.trim()) activity = '💬 ' + dta.block.text.replace(/\s+/g, ' ').slice(0, 120)
+          } catch (_) {}
+        }
+        return { ok: true, activity: activity }
+      } catch (e) { return { ok: true, activity: null, reason: String(e).slice(0, 80) } }
+    })
+    // 全局多会话总览：聚合本机所有看板的任务计数（只读，供 dashboard 跨会话视图）
+    handle('list-boards', async function (args) {
+      var home = path.join(os.homedir(), '.dsh')
+      var out = []
+      var files
+      try { files = fsNode.readdirSync(home).filter(function (f) { return f.indexOf('tasks-') === 0 && f.slice(-5) === '.json' }) } catch (e) { return { ok: true, boards: [] } }
+      for (var i = 0; i < files.length; i++) {
+        try {
+          var d = JSON.parse(fsNode.readFileSync(path.join(home, files[i]), 'utf8'))
+          if (!vt(d)) continue
+          var counts = { pending: 0, inProgress: 0, verifying: 0, resolved: 0, blocked: 0 }
+          var titles = []
+          var lastTs = ''
+          d.tasks.forEach(function (t) {
+            if (t.status === 'archived') return
+            if (counts[t.status] !== undefined) counts[t.status]++
+            if (t.status === 'in-progress' || t.status === 'verifying' || t.status === 'blocked') titles.push(t.title)
+            ;(t.history || []).forEach(function (h) { if (h.timestamp > lastTs) lastTs = h.timestamp })
+          })
+          out.push({ session: d.ownerSession, boardMode: d.boardMode || 'auto', teamMode: !!d.teamMode, counts: counts, activeTitles: titles.slice(0, 3), lastActivity: lastTs })
+        } catch (_) {}
+      }
+      out.sort(function (a, b) { return (b.lastActivity || '').localeCompare(a.lastActivity || '') })
+      return { ok: true, boards: out }
+    })
     handle('claim-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; var err = claimCheck(d, t, actor); if (err) return { ok: false, error: err }; claimApply(d, t, actor, 'manual claim via board'); return { ok: true, task: t } }) })
     handle('resolve-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'in-progress') return { ok: false, error: 'not in-progress' }; return resolveApply(d, t, actor, args.status, args.resolution, args.resolution || args.status) }) })
     handle('verify-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'verifying') return { ok: false, error: 'not verifying' }; delete t.escalation; delete t.verifyRetries; return verifyApply(d, t, actor, args.verdict, args.comment) }) })
@@ -532,7 +615,7 @@ export function apply(ctx) {
     ctx.tools.register(defineTool({ name: 'task_arbitrate', description: 'Team 模式：裁决 Worker 上报的歧义（escalation）。答案直接转达给原 Worker 继续执行。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, answer: { type: 'string' } }, required: ['taskId', 'answer'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; return doResolveEscalation(toolSessionId(), getActorId(), args.taskId, args.answer) } }))
     ctx.tools.register(defineTool({ name: 'task_intervene', description: 'Team 模式：向执行某任务的池中 Agent 发起高优先级指令（插入其队列头部，当前 turn 结束后优先处理）。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, message: { type: 'string' } }, required: ['taskId', 'message'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; return doIntervene(toolSessionId(), getActorId(), args.taskId, args.message) } }))
     // ===== 池中 Agent 结构化回报工具（双模：工具优先，文本分段为降级路径）=====
-    ctx.tools.register(defineTool({ name: 'board_report', description: '[任务看板 Worker 专用] 上报任务结果。kind=complete 时填 summary/changes/selfTest；kind=escalate 时填 question（歧义上报，等待主窗口裁决）。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, kind: { type: 'string', enum: ['complete', 'escalate'] }, summary: { type: 'string' }, changes: { type: 'string' }, selfTest: { type: 'string' }, question: { type: 'string' } }, required: ['taskId', 'kind'] }, output: jo(), execute: async function (args) {
+    ctx.tools.register(defineTool({ name: 'board_report', description: '[任务看板 Worker 专用] 上报任务结果。kind=complete 时填 summary/changes/selfTest/diffStat（git 仓库内改动附 git diff --stat 概要）；kind=escalate 时填 question（歧义上报，等待主窗口裁决）。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, kind: { type: 'string', enum: ['complete', 'escalate'] }, summary: { type: 'string' }, changes: { type: 'string' }, selfTest: { type: 'string' }, diffStat: { type: 'string', description: '变更概要：git diff --stat（含 git status --short）输出，≤1500 字符' }, question: { type: 'string' } }, required: ['taskId', 'kind'] }, output: jo(), execute: async function (args) {
       var sid = toolSessionId(); var actor = getActorId()
       var result = await mutateLocked(sid, function (d) {
         var t = d.tasks.find(function (x) { return x.id === args.taskId })
@@ -549,7 +632,7 @@ export function apply(ctx) {
         delete t.escalation
         delete t.retryCount // v72：成功完成清零超时重试计数（工具直报路径）
         delete t.stuckSince
-        t.deliverable = { summary: args.summary || '', changes: args.changes || '', selfTest: args.selfTest || '', at: new Date().toISOString(), by: actor }
+        t.deliverable = { summary: args.summary || '', changes: args.changes || '', selfTest: args.selfTest || '', diff: (args.diffStat || '').slice(0, 4000), at: new Date().toISOString(), by: actor }
         var r = resolveApply(d, t, actor, 'verifying', (args.summary || '') + (args.selfTest ? '\n\n自测: ' + args.selfTest.slice(0, 300) : ''), 'worker 工具上报完成')
         r.ok = true; r.task = t
         return r
