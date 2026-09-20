@@ -1,7 +1,0 @@
-release: v1.1.3
-
-- 详情页按角色分离会话跳转：Verifier 派发记录 verifierRun，
-  verifying/resolved 阶段可直达「→ Verifier 会话」回看审查上下文
-- 歧义通知防呆：投递晚于仲裁时提示先核对状态勿重复裁决
-- E2E 用例固化：scripts/e2e.cjs（npm run e2e）5 场景 21 断言
-- README 产品化重写：背景与动机 / 核心机制 / 安装升级

@@ -1,5 +1,11 @@
 # dsh-agent-board
 
+[![npm version](https://img.shields.io/npm/v/dsh-agent-board.svg)](https://www.npmjs.com/package/dsh-agent-board)
+[![npm downloads](https://img.shields.io/npm/dw/dsh-agent-board.svg)](https://www.npmjs.com/package/dsh-agent-board)
+[![node](https://img.shields.io/node/v/dsh-agent-board.svg)](https://www.npmjs.com/package/dsh-agent-board)
+[![license](https://img.shields.io/npm/l/dsh-agent-board.svg)](https://github.com/PPawnsir/task-board-plugin/blob/main/LICENSE)
+![category](https://img.shields.io/badge/awesome--dsh--plugin-workflow-blue)
+
 DeepSeek Harness 智能看板 — 让主窗口把编码工作变成可追踪、可验收、可审计的任务，而不是一段做完就散的对话。
 
 ## 背景与动机

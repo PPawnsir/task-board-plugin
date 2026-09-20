@@ -1,7 +1,10 @@
 # Task Board Plugin for DeepSeek Harness
 
 [![npm](https://img.shields.io/npm/v/dsh-agent-board)](https://www.npmjs.com/package/dsh-agent-board)
+[![npm downloads](https://img.shields.io/npm/dw/dsh-agent-board.svg)](https://www.npmjs.com/package/dsh-agent-board)
+[![node](https://img.shields.io/node/v/dsh-agent-board.svg)](https://www.npmjs.com/package/dsh-agent-board)
 [![license](https://img.shields.io/npm/l/dsh-agent-board)](https://github.com/PPawnsir/task-board-plugin/blob/main/LICENSE)
+![category](https://img.shields.io/badge/awesome--dsh--plugin-workflow-blue)
 
 智能看板插件 — Agent 自主任务驱动开发：看板管理 + 一次性 Worker/Verifier 派发 + 依赖调度 + Team 模式。
 
