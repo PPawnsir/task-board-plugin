@@ -10,6 +10,9 @@ window.__ModuleLoader__.load({
     const React = require('react')
 
 function apply(ctx) {
+    // 硬依赖声明（见文件尾 module.exports）：新版 dsh（0.1.5-rc.2）启动顺序下，
+    // 不声明 inject 时 apply 先于 slots/sessions/timer 服务注册执行，
+    // ctx.get 返回 undefined → 静默退出 → 看板按钮消失。声明后 runner 等服务就绪再 apply。
     var slots = ctx.get('slots')
     if (slots === undefined) return
     var sessionsSvc = ctx.get('sessions')
@@ -591,7 +594,7 @@ function apply(ctx) {
     slots.inject('shell.overlay', function () { return slots.register({ name: 'shell.overlay', id: 'task-board-top-panel' }, function () { return React.createElement(TopPanel) }) })
 }
 
-module.exports = { name: 'dsh-agent-board', apply: apply }
+module.exports = { name: 'dsh-agent-board', inject: ['slots', 'sessions', 'timer'], apply: apply }
 return module.exports
   }
 })
