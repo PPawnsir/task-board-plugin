@@ -358,8 +358,8 @@ export function apply(ctx) {
         var sp = toSpawn[k]
         var rec = await spawnOneShot(sid, sp.t, sp.role)
         if (rec) {
-          // claim 占位换成真实 run id
-          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t) { if (sp.role === 'worker' && t.claimedBy === 'spawn-pending') t.claimedBy = String(rec.run.id) }; return t }, true)
+          // claim 占位换成真实 run id；verifier run 单独记（claimedBy 保留 worker 的，供详情页跳转会话）
+          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t) { if (sp.role === 'worker' && t.claimedBy === 'spawn-pending') t.claimedBy = String(rec.run.id); if (sp.role === 'verifier') t.verifierRun = String(rec.run.id) }; return t }, true)
         } else if (sp.role === 'worker') {
           // spawn 失败 → 回 pending（verifier spawn 失败无需处理，下轮 cycle 会重试）
           await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t && t.status === 'in-progress' && t.claimedBy === 'spawn-pending') { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', 'spawn 失败，回收重新排队') }; return t }, true)
@@ -519,6 +519,7 @@ export function apply(ctx) {
       var rec = await spawnOneShot(sid, t, role)
       if (rec) {
         if (role === 'worker') { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === args.taskId }); if (t2 && t2.claimedBy === 'spawn-pending') t2.claimedBy = String(rec.run.id); return t2 }, true) }
+        if (role === 'verifier') { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === args.taskId }); if (t2) t2.verifierRun = String(rec.run.id); return t2 }, true) }
         return { ok: true, runId: String(rec.run.id) }
       }
       // spawn 失败 → 回退
