@@ -263,7 +263,7 @@ export function apply(ctx) {
     function notifyMainWindow(sid, t, question) {
       var root = rootForSession(sid)
       if (!root) return
-      try { root.followup(makeMsg('⚠️ [任务看板] Worker 上报歧义，等待裁决：\n\n任务: ' + t.title + ' (' + t.id + ')\n\n疑问:\n' + question.slice(0, 1500) + '\n\n请在看板详情页裁决，或直接回复指示。裁决后会有新 Worker 带着裁决答案接手。', 'notice', '任务待裁决: ' + t.title)) } catch (e) { console.error('[task-board] escalate notify failed:', String(e)) }
+      try { root.followup(makeMsg('⚠️ [任务看板] Worker 上报歧义，等待裁决：\n\n任务: ' + t.title + ' (' + t.id + ')\n\n疑问:\n' + question.slice(0, 1500) + '\n\n请在看板详情页裁决，或直接回复指示。裁决后会有新 Worker 带着裁决答案接手。\n\n（若收到时任务已被裁决或归档，说明本通知投递晚于处理——先用 task_list/get-tasks 核对状态，勿重复裁决。）', 'notice', '任务待裁决: ' + t.title)) } catch (e) { console.error('[task-board] escalate notify failed:', String(e)) }
     }
     function maybeNotify(sid, task) { if (task && task.escalation) { notifyMainWindow(sid, task, task.escalation.question) } }
 
