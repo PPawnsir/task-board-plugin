@@ -5,7 +5,7 @@
 //
 // 行为：
 //   - index.mjs / lib/*.mjs 变更（host 逻辑）→ 杀掉 dev 实例重启（约 3-5s）
-//   - lib/client.js 变更 → 不重启，只提示刷新浏览器（modules 按请求从磁盘读，刷新即新）
+//   - lib/client.js 变更 → 同样重启（0.1.5-rc.2 起 client bundle 启动时组合缓存，旧 rev 不更新）
 //   - 防抖 800ms（连续保存合并为一次重启）
 //
 // 为什么不用官方 cordis-plugin-hmr：web 部署的 base composition 把它
@@ -56,10 +56,6 @@ function restart(reason) {
 }
 
 function scheduleRestart(file) {
-  if (/client\.js$/.test(file)) {
-    console.log('[dev-watch] client.js 变更——无需重启，浏览器刷新即生效: ' + file)
-    return
-  }
   clearTimeout(timer)
   timer = setTimeout(() => restart(file), DEBOUNCE_MS)
 }
