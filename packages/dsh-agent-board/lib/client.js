@@ -615,6 +615,10 @@ function apply(ctx) {
         if (!q) return true
         var qq = q.toLowerCase()
         return (t.title || '').toLowerCase().indexOf(qq) >= 0 || (t.id || '').toLowerCase().indexOf(qq) >= 0 || (t.tags || []).join(' ').toLowerCase().indexOf(qq) >= 0
+      }).sort(function (a, b) {
+        // 完成时间最近在前：resolvedAt 优先，回退验收时间/归档时间/最后活动时间
+        function doneTs(t) { return t.resolvedAt || (t.verification && t.verification.at) || t.archivedAt || taskLastTs(t) || '' }
+        return (doneTs(b) || '').localeCompare(doneTs(a) || '')
       })
       function restore(id) { rpc('update-task', { taskId: id, resetToPending: true }).then(function () { fetchArchived(); fetchTasks() }).catch(function () {}) }
       return React.createElement('div', null,
