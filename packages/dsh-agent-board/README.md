@@ -56,5 +56,6 @@ dsh plugin --profile web add dsh-agent-board@latest
 
 - 仓库：<https://github.com/PPawnsir/task-board-plugin>
 - 本包即源码，直接维护（v68 起拆除了动态→静态转换层，v74 起去池化）
-- 单元测试：`npm test`（node --test，38 例纯逻辑用例，无需重启 dsh）
-- 开发热循环：`npm run dev`（独立 dev 实例 + 文件监听自动重启，详见 scripts/dev-watch.cjs 头部说明）
+- 单元测试：`npm test`（node --test，39 例纯逻辑用例）
+- E2E 回归：`npm run e2e -- --session <会话id>`（5 场景 21 断言，驱动真实实例）
+- 改源码后重启 DSH 生效（host）；`lib/client.js` 改动在 dsh ≥0.1.5-rc.2 下同样需重启（client bundle 启动时组合缓存）
