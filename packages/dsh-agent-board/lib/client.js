@@ -121,6 +121,28 @@ function apply(ctx) {
         ['path', { d: 'M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2' }],
         ['circle', { cx: 12, cy: 7, r: 4 }]
       ],
+      'calendar-days': [
+        ['rect', { x: 3, y: 4, width: 18, height: 18, rx: 2 }],
+        ['path', { d: 'M16 2v4M8 2v4M3 10h18' }],
+        ['path', { d: 'M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01' }]
+      ],
+      'chevron-up': [
+        ['path', { d: 'm18 15-6-6-6 6' }]
+      ],
+      'layout-grid': [
+        ['rect', { x: 3, y: 3, width: 7, height: 7, rx: 1 }],
+        ['rect', { x: 14, y: 3, width: 7, height: 7, rx: 1 }],
+        ['rect', { x: 3, y: 14, width: 7, height: 7, rx: 1 }],
+        ['rect', { x: 14, y: 14, width: 7, height: 7, rx: 1 }]
+      ],
+      'activity': [
+        ['path', { d: 'M22 12h-4l-3 9L9 3l-3 9H2' }]
+      ],
+      'file-down': [
+        ['path', { d: 'M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z' }],
+        ['path', { d: 'M14 2v4a2 2 0 0 0 2 2h4' }],
+        ['path', { d: 'M12 18v-6M9 15l3 3 3-3' }]
+      ],
       'chevron-down': [
         ['path', { d: 'm6 9 6 6 6-6' }]
       ],
@@ -177,7 +199,7 @@ function apply(ctx) {
       }, def.map(function (p, i) { return React.createElement(p[0], Object.assign({ key: i }, p[1])) }))
     }
     var COLUMNS = ['draft', 'pending', 'in-progress', 'verifying', 'resolved', 'blocked']
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', isRoot: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, archSort: 'time-desc', activity: {}, archived: [], archQ: '', globalBoards: [] }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', isRoot: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [] }
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
       var onKey = function (e) {
@@ -316,15 +338,76 @@ function apply(ctx) {
     }
     function StatCard(props) { return React.createElement('div', { style: { flex: '1 1 0', minWidth: 80, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, textAlign: 'center' } }, React.createElement('div', { style: { fontSize: 20, fontWeight: 700, color: props.color || C.text } }, String(props.value)), React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 2 } }, props.label)) }
     function BarRow(props) { var pct = props.total > 0 ? (props.count / props.total * 100) : 0; return React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 } }, React.createElement('span', { style: { width: 40, fontSize: 10, color: C.text2, textAlign: 'right', flexShrink: 0 } }, props.label), React.createElement('div', { style: { flex: 1, height: 8, background: C.nested, borderRadius: 4, overflow: 'hidden' } }, React.createElement('div', { style: { height: '100%', width: pct + '%', background: props.color || C.brand, borderRadius: 4, transition: 'width .3s' } })), React.createElement('span', { style: { width: 24, fontSize: 10, color: C.text2, flexShrink: 0 } }, String(props.count))) }
+    // ===== 仪表盘：日期范围筛选（共享给报告与全局总览）=====
+    function tsInRange(iso, from, to) {
+      if (!iso) return false
+      var d = String(iso).slice(0, 10)
+      if (from && d < from) return false
+      if (to && d > to) return false
+      return true
+    }
+    function taskLastTs(t) {
+      var last = t.createdAt || ''
+      ;(t.history || []).forEach(function (h) { if (h.timestamp > last) last = h.timestamp })
+      if (t.deliverable && t.deliverable.at > last) last = t.deliverable.at
+      if (t.verification && t.verification.at > last) last = t.verification.at
+      if (t.archivedAt && t.archivedAt > last) last = t.archivedAt
+      return last
+    }
+    function activeRange() { var f = state.dateRange || {}; return { from: f.from || '', to: f.to || '' } }
+    function rangeLabel() { var r = activeRange(); return !r.from && !r.to ? '全部时间' : (r.from || '…') + ' ~ ' + (r.to || '…') }
+    function RangeFilter() {
+      var _R = React; var useState = _R.useState
+      var _a = useState(state.rfOpen || false), open = _a[0], setOpen = _a[1]
+      var rg = activeRange()
+      function setRange(from, to) { state.dateRange = { from: from, to: to }; notify() }
+      function preset(days) {
+        if (days === 0) { setRange('', ''); return }
+        var to = new Date(); var from = new Date(Date.now() - (days - 1) * 86400000)
+        function fmt(d) { return d.toISOString().slice(0, 10) }
+        setRange(fmt(from), fmt(to))
+      }
+      var headBtn = { fontSize: 11, padding: '3px 10px', border: '1px solid ' + (rg.from || rg.to ? C.brand : C.border), borderRadius: 5, background: (rg.from || rg.to) ? C.nested : C.card, color: (rg.from || rg.to) ? C.brand : C.text2, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }
+      var chip = { fontSize: 10, padding: '2px 8px', border: '1px solid ' + C.border, borderRadius: 10, background: C.card, color: C.text2, cursor: 'pointer' }
+      var dateInput = { fontSize: 11, padding: '2px 6px', border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text }
+      return React.createElement('div', { style: { marginBottom: 10 } },
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+          React.createElement('button', { onClick: function () { state.rfOpen = !open; setOpen(!open) }, style: headBtn },
+            ic('calendar-days', 11),
+            React.createElement('span', null, '统计范围: ' + rangeLabel()),
+            ic(open ? 'chevron-up' : 'chevron-down', 10))),
+        open ? React.createElement('div', { style: { marginTop: 6, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } },
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+            React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '快捷:'),
+            React.createElement('button', { onClick: function () { preset(1) }, style: chip }, '今天'),
+            React.createElement('button', { onClick: function () { preset(7) }, style: chip }, '近 7 天'),
+            React.createElement('button', { onClick: function () { preset(30) }, style: chip }, '近 30 天'),
+            React.createElement('button', { onClick: function () { preset(0) }, style: chip }, '全部'),
+            React.createElement('span', { style: { flex: 1 } }),
+            React.createElement('label', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 4 } }, '开始',
+              React.createElement('input', { type: 'date', value: rg.from, onChange: function (e) { setRange(e.target.value, rg.to) }, style: dateInput })),
+            React.createElement('label', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 4 } }, '截至',
+              React.createElement('input', { type: 'date', value: rg.to, onChange: function (e) { setRange(rg.from, e.target.value) }, style: dateInput })),
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '作用于报告与全局总览')),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 5 } }, '报告统计「时间范围内有活动」的任务；总览只显示范围内有活跃的会话。')) : null)
+    }
     function GlobalBoards() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
       var _a = useState(state.globalBoards), boards = _a[0], setBoards = _a[1]
+      var _b = useState(state.gboOpen || false), open = _b[0], setOpen = _b[1]
       function load() { rpc('list-boards').then(function (r) { var b = (r && r.boards) || []; state.globalBoards = b; setBoards(b) }).catch(function () {}) }
       useEffect(function () { load() }, [])
       if (!boards.length) return null
+      var rg = activeRange()
+      var shown = boards.filter(function (b) { return !rg.from && !rg.to ? true : tsInRange(b.lastActivity, rg.from, rg.to) })
+      var activeN = boards.filter(function (b) { return b.counts.inProgress || b.counts.verifying || b.counts.pending || b.counts.blocked }).length
       return React.createElement('div', { style: { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 } },
-        React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('layout-grid', 11), '全局会话总览（本机所有看板）'),
-        boards.map(function (b, i) {
+        React.createElement('div', { onClick: function () { state.gboOpen = !open; setOpen(!open); if (!open) load() }, style: { fontSize: 11, fontWeight: 600, color: C.text2, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 } },
+          ic('layout-grid', 11),
+          React.createElement('span', null, '全局会话总览（本机 ' + boards.length + ' 个看板 · ' + activeN + ' 个活跃）'),
+          open && (rg.from || rg.to) ? React.createElement('span', { style: { fontSize: 9, color: C.brand } }, '范围: ' + rangeLabel()) : null,
+          React.createElement('span', { style: { marginLeft: 'auto', display: 'inline-flex', color: C.text2 } }, ic(open ? 'chevron-up' : 'chevron-down', 11))),
+        open ? (shown.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2, padding: '6px 0' } }, '时间范围内无活跃会话') : shown.map(function (b, i) {
           var isSelf = b.session === state.sessionId
           return React.createElement('div', { key: i, style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, padding: '3px 0', borderBottom: '1px solid ' + C.nested } },
             React.createElement('span', { onClick: function () { if (!isSelf && sessionsSvc) sessionsSvc.open(b.session) }, style: { color: isSelf ? C.text2 : C.brand, cursor: isSelf ? 'default' : 'pointer', textDecoration: isSelf ? 'none' : 'underline', minWidth: 90 } }, (isSelf ? '★ ' : '') + shortId(b.session)),
@@ -337,20 +420,22 @@ function apply(ctx) {
               !(b.counts.inProgress || b.counts.verifying || b.counts.pending || b.counts.blocked) ? React.createElement('span', { style: { color: C.text2 } }, '空闲') : null),
             b.activeTitles.length ? React.createElement('span', { style: { color: C.text2, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: b.activeTitles.join('；') }, b.activeTitles.join('；')) : null,
             b.lastActivity ? React.createElement('span', { style: { color: C.text2 } }, ago(b.lastActivity)) : null)
-        }))
+        })) : null)
     }
     function buildReport() {
-      var lines = ['# 任务看板报告', '', '生成时间: ' + new Date().toLocaleString(), '模式: ' + (state.teamMode ? 'Team' : (state.boardMode === 'auto' ? '自动' : '手动')), '']
+      var lines = ['# 任务看板报告', '', '生成时间: ' + new Date().toLocaleString(), '模式: ' + (state.teamMode ? 'Team' : (state.boardMode === 'auto' ? '自动' : '手动')), '', '统计范围: ' + rangeLabel()]
       var groups = { inProgress: [], verifying: [], pending: [], blocked: [], resolved: [] }
+      var rg = activeRange()
       state.tasks.forEach(function (t) {
         if (t.status === 'archived') return
+        if ((rg.from || rg.to) && !tsInRange(taskLastTs(t), rg.from, rg.to)) return
         var g = groups[t.status]; if (g) g.push(t)
       })
       if (groups.inProgress.length) { lines.push('## 进行中'); groups.inProgress.forEach(function (t) { lines.push('- ' + t.title + '（' + (t.claimedBy ? shortId(t.claimedBy) : '-') + '）') }); lines.push('') }
       if (groups.verifying.length) { lines.push('## 验证中'); groups.verifying.forEach(function (t) { lines.push('- ' + t.title) }); lines.push('') }
       if (groups.pending.length) { lines.push('## 待办'); groups.pending.forEach(function (t) { lines.push('- ' + t.title + ((t.retryCount || 0) + (t.rejectCount || 0) > 0 ? '（⟳' + ((t.retryCount || 0) + (t.rejectCount || 0)) + '）' : '')) }); lines.push('') }
       if (groups.blocked.length) { lines.push('## 阻塞'); groups.blocked.forEach(function (t) { lines.push('- ' + t.title + (t.escalation ? '（待裁决）' : '')) }); lines.push('') }
-      var done = state.archived.length ? state.archived : state.tasks.filter(function (t) { return t.status === 'resolved' })
+      var doneAll = state.archived.length ? state.archived : state.tasks.filter(function (t) { return t.status === 'resolved' }); var done = doneAll.filter(function (t) { return !(rg.from || rg.to) || tsInRange(taskLastTs(t), rg.from, rg.to) })
       if (done.length) { lines.push('## 已完成（含归档，近 ' + Math.min(done.length, 20) + ' 条）'); done.slice(0, 20).forEach(function (t) { lines.push('- ' + t.title + (t.verification ? '｜验收: ' + t.verification.verdict : '') + (t.deliverable && t.deliverable.summary ? '｜' + t.deliverable.summary.slice(0, 80) : '')) }); lines.push('') }
       return lines.join('\n')
     }
@@ -369,7 +454,7 @@ function apply(ctx) {
     function Dashboard() {
       var stats = computeStats(state.tasks); var statusOrder = ['pending', 'in-progress', 'verifying', 'resolved', 'blocked', 'archived']; var prioOrder = ['critical', 'high', 'medium', 'low']
       return React.createElement('div', null,
-        React.createElement('div', { style: { display: 'flex', justifyContent: 'flex-end', marginBottom: 8 } }, React.createElement(ReportButton)),
+        React.createElement(RangeFilter),
         React.createElement(GlobalBoards),
         React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' } }, React.createElement(StatCard, { label: '总任务', value: stats.total, color: C.text }), React.createElement(StatCard, { label: '待办', value: stats.byStatus['pending'] || 0, color: C.text2 }), React.createElement(StatCard, { label: '进行中', value: stats.byStatus['in-progress'] || 0, color: C.brand }), React.createElement(StatCard, { label: '验证中', value: stats.byStatus['verifying'] || 0, color: C.warn }), React.createElement(StatCard, { label: '已完成', value: stats.byStatus['resolved'] || 0, color: C.ok }), React.createElement(StatCard, { label: '已归档', value: stats.byStatus['archived'] || 0, color: C.text2 })),
         React.createElement('div', { style: { display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' } },
