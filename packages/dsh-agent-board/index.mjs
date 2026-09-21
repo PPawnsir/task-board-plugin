@@ -421,9 +421,8 @@ export function apply(ctx) {
           var agent = assembleCtx && assembleCtx.agent
           if (!agent) return ''
           var aid = String(agent.id)
-          console.error('[task-board][ctxpack] assemble agent=' + aid + ' packKeys=' + Object.keys(packByChild).join(',') + ' pending=' + pendingPacks.length)
           var hit = packByChild[aid]
-          if (hit) { console.error('[task-board][ctxpack] HIT packByChild for ' + aid); return hit }
+          if (hit) return hit
           // 首轮竞速自愈：start() 返回前的首次组装按父子归属从 pendingPacks 认领
           var agentsSvc = ctx.agents
           if (!agentsSvc) return ''
@@ -432,10 +431,8 @@ export function apply(ctx) {
             var pp = pendingPacks[i]
             if (now - pp.at > 60000) { pendingPacks.splice(i, 1); continue }
             try {
-              var owned = agentsSvc.isOwnedBy(aid, pp.parent)
-              console.error('[task-board][ctxpack] isOwnedBy(' + aid + ', parent=' + (pp.parent && pp.parent.id) + ')=' + owned)
-              if (owned) { packByChild[aid] = pp.pack; return pp.pack }
-            } catch (e) { console.error('[task-board][ctxpack] isOwnedBy threw: ' + String(e)) }
+              if (agentsSvc.isOwnedBy(aid, pp.parent)) { packByChild[aid] = pp.pack; return pp.pack }
+            } catch (e) { console.error('[task-board] ctxpack isOwnedBy threw: ' + String(e)) }
           }
           return ''
         },
