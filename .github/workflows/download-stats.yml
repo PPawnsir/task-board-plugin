@@ -1,0 +1,32 @@
+name: Daily download stats
+
+# 每日北京时间 08:30（UTC 00:30）拉取 npm 下载统计，
+# 生成 docs/downloads.md 并自动提交——仓库动态里每天可见，作为日报。
+
+on:
+  schedule:
+    - cron: '30 0 * * *'
+  workflow_dispatch: # 支持手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  stats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 生成下载统计
+        run: node scripts/download-report.mjs
+
+      - name: 提交（有变化才提交）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/downloads.md
+          git diff --cached --quiet || (git commit -m "chore: 每日下载统计更新" && git push)
