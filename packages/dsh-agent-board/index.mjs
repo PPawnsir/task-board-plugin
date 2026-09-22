@@ -64,7 +64,7 @@ export function apply(ctx) {
     var teamModeCache = {}
     function fileFor(sid) { return '.dsh/tasks-' + sid + '.json' }
     async function rt(sid) { try { var t = await fs.resolve(fileFor(sid)); var r = await fs.readText(t); var d = JSON.parse(r); if (vt(d) && d.ownerSession === sid) { teamModeCache[sid] = !!d.teamMode; return normalizeBoard(d) }; return seed(sid) } catch (_) { return seed(sid) } }
-    async function wt(sid, d) { var c = JSON.stringify(d, null, 2); try { var t = await fs.resolve(fileFor(sid)); await fs.writeText(t, c) } catch (e) { console.error('[task-board] write:', String(e)); throw e } }
+    async function wt(sid, d) { var c = JSON.stringify(d); try { var t = await fs.resolve(fileFor(sid)); await fs.writeText(t, c) } catch (e) { console.error('[task-board] write:', String(e)); throw e } }
     // 每会话一条 promise 链，串行化所有 读-改-写，消除并发写竞争
     var fileLocks = {}
     function withLock(sid, fn) { var prev = fileLocks[sid] || Promise.resolve(); var p = prev.then(function () { return fn() }); fileLocks[sid] = p.catch(function () {}); return p }
@@ -486,7 +486,14 @@ export function apply(ctx) {
         var bucket = '--' + ws.replace(/[\\/:]/g, '-') + '--'
         var log = path.join(os.homedir(), '.dsh', 'sessions', bucket, child, 'session.jsonl.zstd')
         if (!fsNode.existsSync(log)) return { ok: true, activity: null, reason: 'log not found' }
-        var buf = fsNode.readFileSync(log)
+        // 只同步读末尾 2MB（日志追加写，末帧必在尾部）——整文件 readFileSync 在大日志上
+        // 会造成数十毫秒级同步 I/O，多任务轮询时叠加成全局卡顿
+        var sz = fsNode.statSync(log).size
+        var TAIL = 2 * 1024 * 1024
+        var start = sz > TAIL ? sz - TAIL : 0
+        var buf = Buffer.alloc(sz - start)
+        var fd = fsNode.openSync(log, 'r')
+        try { fsNode.readSync(fd, buf, 0, buf.length, start) } finally { fsNode.closeSync(fd) }
         var MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
         var last = buf.lastIndexOf(MAGIC) // 追加写多帧格式：最新事件在末帧，只解一帧控成本
         if (last < 0) return { ok: true, activity: null }

@@ -249,7 +249,7 @@ function apply(ctx) {
     function fetchChildren() { if (!state.sessionId) return; var epoch = reqEpoch; rpc('list-children').then(function (d) { if (epoch !== reqEpoch) return; state.children = (d && d.children) || []; notify() }).catch(function () {}) }
     // 活动心跳：对进行中/验收中的任务轮询子代理最近动作（卡片与详情展示"现在跑到哪了"）
     function fetchActivity() {
-      if (!state.sessionId || !state.isRoot) return
+      if (!state.sessionId || !state.isRoot || !state.open) return // 面板关闭时不轮询活动（省同步 I/O）
       var running = state.tasks.filter(function (t) { return t.status === 'in-progress' || t.status === 'verifying' })
       if (!running.length) { if (Object.keys(state.activity).length) { state.activity = {}; notify() } return }
       var pending = running.length
