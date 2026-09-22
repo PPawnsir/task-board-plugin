@@ -106,6 +106,23 @@ test('parseSections: 分段解析', () => {
   assert.deepEqual(core.parseSections('没有分段的纯文本'), {})
 })
 
+test('cfg: 两级超时默认值/夹取/hard≥soft（软超时只提醒，硬超时兜底）', () => {
+  assert.equal(core.cfg({}).softTimeoutMin, 30)
+  assert.equal(core.cfg({}).hardTimeoutMin, 120)
+  assert.equal(core.cfg({ softTimeoutMin: 45, hardTimeoutMin: 240 }).softTimeoutMin, 45)
+  assert.equal(core.cfg({ softTimeoutMin: 0 }).softTimeoutMin, 30) // 0 → 默认
+  assert.equal(core.cfg({ softTimeoutMin: 9999 }).softTimeoutMin, 480) // 上限夹取
+  assert.equal(core.cfg({ hardTimeoutMin: 99999 }).hardTimeoutMin, 1440)
+  // hard 不得低于 soft，避免硬超时早于软提醒触发
+  assert.equal(core.cfg({ softTimeoutMin: 300, hardTimeoutMin: 60 }).hardTimeoutMin, 300)
+})
+
+test('seed: 新看板自带两级超时默认值', () => {
+  const s = core.seed('session-x')
+  assert.equal(s.softTimeoutMin, 30)
+  assert.equal(s.hardTimeoutMin, 120)
+})
+
 test('parseSections: diff 概要分段解析（Worker 变更概要 → deliverable.diff）', () => {
   const s = core.parseSections('## 开发描述\n做了\n## diff 概要\n gen.py | 3 + ++')
   assert.equal(s.diff, 'gen.py | 3 + ++')
