@@ -199,6 +199,7 @@ function apply(ctx) {
       }, def.map(function (p, i) { return React.createElement(p[0], Object.assign({ key: i }, p[1])) }))
     }
     var COLUMNS = ['draft', 'pending', 'in-progress', 'verifying', 'resolved', 'blocked']
+    var reqEpoch = 0 // 会话切换纪元：切会话时自增，旧会话在途响应按纪元丢弃
     var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', isRoot: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [] }
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
@@ -222,7 +223,9 @@ function apply(ctx) {
     function rpc(method, args) { var a = args || {}; a.sessionId = state.sessionId; return fetch('/dsh-agent-board', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ method: method, args: a }) }).then(function (r) { return r.json() }) }
     function fetchTasks() {
       if (!state.sessionId) return
+      var epoch = reqEpoch
       rpc('get-tasks').then(function (d) {
+        if (epoch !== reqEpoch) return // 会话已切换，丢弃过期响应
         state.tasks = (d && d.tasks) || []
         state.boardMode = (d && d.boardMode) || 'auto'
         state.teamMode = !!(d && d.teamMode)
@@ -243,7 +246,7 @@ function apply(ctx) {
         notify()
       }).catch(function () {})
     }
-    function fetchChildren() { if (!state.sessionId) return; rpc('list-children').then(function (d) { state.children = (d && d.children) || []; notify() }).catch(function () {}) }
+    function fetchChildren() { if (!state.sessionId) return; var epoch = reqEpoch; rpc('list-children').then(function (d) { if (epoch !== reqEpoch) return; state.children = (d && d.children) || []; notify() }).catch(function () {}) }
     // 活动心跳：对进行中/验收中的任务轮询子代理最近动作（卡片与详情展示"现在跑到哪了"）
     function fetchActivity() {
       if (!state.sessionId || !state.isRoot) return
@@ -251,7 +254,9 @@ function apply(ctx) {
       if (!running.length) { if (Object.keys(state.activity).length) { state.activity = {}; notify() } return }
       var pending = running.length
       running.forEach(function (t) {
+        var epoch = reqEpoch
         rpc('agent-activity', { taskId: t.id }).then(function (r) {
+          if (epoch !== reqEpoch) return // 会话已切换，丢弃过期响应
           pending--
           var act = (r && r.activity) || null
           if (state.activity[t.id] !== act) { state.activity[t.id] = act; notify() }
@@ -261,7 +266,9 @@ function apply(ctx) {
     }
     function fetchArchived() {
       if (!state.sessionId) return
+      var epoch = reqEpoch
       rpc('get-tasks', { includeArchived: true }).then(function (d) {
+        if (epoch !== reqEpoch) return
         state.archived = ((d && d.tasks) || []).filter(function (t) { return t.status === 'archived' })
         notify()
       }).catch(function () {})
@@ -469,7 +476,7 @@ function apply(ctx) {
     function BoardButton(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
       var _a = useState(0), pendingCount = _a[0], setPendingCount = _a[1]; var _b = useState(false), isOpen = _b[0], setIsOpen = _b[1]; var _c = useState(0), escCount = _c[0], setEscCount = _c[1]; var _d2 = useState(true), isRoot = _d2[0], setIsRoot = _d2[1]
-      useEffect(function () { if (props && props.sessionId) { var sid = String(props.sessionId); if (state.sessionId !== sid) { state.sessionId = sid; fetchTasks(); fetchChildren() } } }, [props && props.sessionId])
+      useEffect(function () { if (props && props.sessionId) { var sid = String(props.sessionId); if (state.sessionId !== sid) { state.sessionId = sid; reqEpoch++; state.tasks = []; state.children = []; state.activity = {}; state.archived = []; state.detailId = null; notify(); fetchTasks(); fetchChildren() } } }, [props && props.sessionId])
       useEffect(function () { function update() { var n = 0, e = 0; for (var i = 0; i < state.tasks.length; i++) { if (state.tasks[i].status === 'pending') n++; if (state.tasks[i].escalation) e++ }; setPendingCount(n); setEscCount(e); setIsOpen(state.open); setIsRoot(state.isRoot) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!isRoot) return null // 子代理会话不显示看板入口
       return React.createElement('button', { onClick: function () { state.open = !state.open; notify() }, title: '智能看板' + (pendingCount > 0 ? '（' + pendingCount + ' 待办）' : '') + (escCount > 0 ? '（' + escCount + ' 待裁决）' : ''), style: { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', border: '1px solid ' + (escCount > 0 ? C.err : C.border), borderRadius: 6, background: isOpen ? C.nested : 'transparent', color: C.text, cursor: 'pointer', fontSize: 12 } }, React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center' } }, ic('clipboard-list', 14)), React.createElement('span', null, '智能看板'), escCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.err, color: C_INV, fontSize: 10, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 1, animation: 'tskb-pulse 1s ease-in-out infinite' }, title: escCount + ' 个任务待裁决' }, ic('alert-triangle', 10), escCount) : null, pendingCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.brand, color: C_INV, fontSize: 10, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' } }, String(pendingCount)) : null)
