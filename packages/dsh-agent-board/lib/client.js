@@ -712,7 +712,25 @@ function apply(ctx) {
           React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3 }, title: '一次性子代理会话' }, '会话 ' + String(m.runId || '').slice(0, 8) + '…（用完即销毁）'))
       }
       var ws = ps.workers || [], vs = ps.verifiers || []
+      var _R2 = React; var _st = _R2.useState(''), editMsg = _st[0], setEditMsg = _st[1]
+      function saveTimeout(cfgKey, v, min, max) {
+        var n = parseInt(v, 10)
+        if (isNaN(n) || n < min || n > max) { setEditMsg('范围 ' + min + '~' + max + ' 分钟'); setTimeout(function () { setEditMsg('') }, 2500); return }
+        rpc('set-board-config', { key: cfgKey, value: n }).then(function () { setEditMsg('✅ 已保存'); setTimeout(function () { setEditMsg('') }, 2000); fetchTasks() }).catch(function () { setEditMsg('⚠️ 保存失败'); setTimeout(function () { setEditMsg('') }, 2500) })
+      }
+      var tIn = { width: 44, padding: '1px 3px', fontSize: 10, textAlign: 'center', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text }
       return React.createElement('div', null,
+        React.createElement('div', { style: { marginBottom: 10, padding: '6px 8px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 10, color: C.text2 } },
+          ic('activity', 11),
+          React.createElement('span', null, '超时策略:'),
+          React.createElement('span', { style: { color: C.brand, fontWeight: 600 } }, '软超时'),
+          React.createElement('input', { type: 'number', defaultValue: String(state.softTimeoutMin || 30), min: 1, max: 480, title: '超过该时长只提醒主窗口，不终止 run', onBlur: function (e) { saveTimeout('softTimeoutMin', e.target.value, 1, 480) }, onKeyDown: function (e) { if (e.key === 'Enter') saveTimeout('softTimeoutMin', e.target.value, 1, 480) }, style: tIn }),
+          React.createElement('span', null, '分（仅提醒，由你决定继续等待或终止）'),
+          React.createElement('span', { style: { margin: '0 3px', color: C.border } }, '·'),
+          React.createElement('span', { style: { color: C.warn, fontWeight: 600 } }, '硬超时'),
+          React.createElement('input', { type: 'number', defaultValue: String(state.hardTimeoutMin || 120), min: 1, max: 1440, title: '人不在线时兜底：自动终止挂死 run 并重试', onBlur: function (e) { saveTimeout('hardTimeoutMin', e.target.value, 1, 1440) }, onKeyDown: function (e) { if (e.key === 'Enter') saveTimeout('hardTimeoutMin', e.target.value, 1, 1440) }, style: tIn }),
+          React.createElement('span', null, '分（兜底自动终止并重试）'),
+          editMsg ? React.createElement('span', { style: { color: editMsg.indexOf('✅') === 0 ? C.ok : C.err, fontWeight: 600 } }, editMsg) : null),
         React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('zap', 12), 'Worker 池 (' + ws.length + ')'),
         ws.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 10 } }, '暂无 Worker（有待办任务时自动扩容）') : React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 } }, ws.map(function (m) { return memberCard(m, 'worker') })),
         React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('clipboard-check', 12), 'Verifier 池 (' + vs.length + ')'),
