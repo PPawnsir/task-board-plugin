@@ -139,6 +139,32 @@ export function apply(ctx) {
     var packByChild = {}
     var pendingPacks = []
 
+    // 历史会话留档：t.runs = [{ role, id, at, model, outcome, endedAt }]，上限 20 条
+    // 目的：任务流转到 resolved/archived 后，详情页仍能选择跳转到任一历史阶段的会话
+    // （Worker 首次/重试、Verifier 各次），而不是只剩最后一次 run id。
+    async function recordRunHistory(sid, taskId, role, runId, model, hardMin) {
+      try {
+        await mutateLocked(sid, function (d) {
+          var t = d.tasks.find(function (x) { return x.id === taskId })
+          if (!t) return
+          if (!Array.isArray(t.runs)) t.runs = []
+          t.runs.push({ role: role, id: runId, at: new Date().toISOString(), model: model || '', outcome: 'running', hardMin: hardMin || 120 })
+          if (t.runs.length > 20) t.runs = t.runs.slice(-20)
+        })
+      } catch (e) { console.error('[task-board] recordRunHistory failed:', String(e)) }
+    }
+    async function closeRunHistory(sid, taskId, runId, outcome) {
+      try {
+        await mutateLocked(sid, function (d) {
+          var t = d.tasks.find(function (x) { return x.id === taskId })
+          if (!t || !Array.isArray(t.runs)) return
+          for (var i = t.runs.length - 1; i >= 0; i--) {
+            if (t.runs[i].id === runId) { t.runs[i].outcome = outcome; t.runs[i].endedAt = new Date().toISOString(); break }
+          }
+        })
+      } catch (e) { console.error('[task-board] closeRunHistory failed:', String(e)) }
+    }
+
     async function spawnOneShot(sid, t, role) {
       var subagents = ctx.subagents; if (!subagents) return null
       var parent = rootForSession(sid); if (!parent) { console.error('[task-board] no root agent for session ' + sid + ', skip spawn'); return null }
@@ -174,6 +200,9 @@ export function apply(ctx) {
       if (pack) packByChild[String(run.id)] = pack
       if (!dispatchedEver[sid]) dispatchedEver[sid] = {}
       dispatchedEver[sid][String(run.id)] = true
+      // 历史会话留档：每次派发都追加一条 {role,id,at,model}，任务完成后仍可回看
+      // 各阶段（含重试的第 1/2/3 次 Worker）会话——否则 claimedBy/verifierRun 只留最后一次
+      recordRunHistory(sid, t.id, role, String(run.id), modelOverride, c.hardTimeoutMin).catch(function () {})
       // ===== 两级超时：软超时只提醒主窗口（由人决定继续等待或终止），硬超时兜底 dispose =====
       // 一次性 run 没有看门狗：完全依赖人工决策时，人不在线挂死的 run 会永久占用并发位，
       // 所以保留硬上限作为最后防线（默认 120min，可配置）。
@@ -207,6 +236,8 @@ export function apply(ctx) {
         if (rec.role === 'worker') await settleWorker(sid, rec, output, failed, errText)
         else await settleVerifier(sid, rec, output, failed, errText)
       } catch (e) { console.error('[task-board] settle ' + rec.role + ' failed (task ' + rec.taskId + '):', String(e)) }
+      // 历史会话留档：记录该次 run 的结局（完成/失败/硬超时），详情页可据此标注阶段状态
+      closeRunHistory(sid, rec.taskId, String(rec.run.id), failed ? (err ? 'timeout/error' : 'incomplete') : 'completed').catch(function () {})
     }
 
     async function settleWorker(sid, rec, output, failed, errText) {

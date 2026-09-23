@@ -586,6 +586,15 @@ function apply(ctx) {
     var pipeMeta = { full: { icon: 'flask-conical', label: '全流程（执行+验证）', short: '全流程' }, work: { icon: 'file-text', label: '免验证（只做不验）', short: '免验' }, direct: { icon: 'message-square', label: '主窗口直接处理', short: '直办' } }
     function durOf(t) { try { var s = t.createdAt ? new Date(t.createdAt).getTime() : 0; if (!s) return ''; var eRaw = t.resolvedAt || t.archivedAt; var e = eRaw ? new Date(eRaw).getTime() : Date.now(); var m = Math.max(0, Math.round((e - s) / 60000)); if (m < 1) return '<1m'; if (m < 60) return m + 'm'; var h = Math.floor(m / 60); return h + 'h' + (m % 60 ? (m % 60) + 'm' : '') } catch (_) { return '' } }
     function elapsedMin(iso) { var s = iso ? new Date(iso).getTime() : 0; if (!s) return 0; return Math.max(0, Math.round((Date.now() - s) / 60000)) }
+    // 历史会话列表：优先用 host 留档的 t.runs（含全部重试）；老任务回退到 claimedBy/verifierRun
+    function historyRuns(t) {
+      var out = Array.isArray(t.runs) ? t.runs.slice() : []
+      if (!out.length) {
+        if (t.claimedBy && t.claimedBy !== 'auto-dispatch' && t.claimedBy !== 'system') out.push({ role: 'worker', id: t.claimedBy, at: t.claimedAt })
+        if (t.verifierRun) out.push({ role: 'verifier', id: t.verifierRun, at: t.verifiedAt })
+      }
+      return out.filter(function (r) { return r && r.id })
+    }
     function elapsedSince(iso) { var m = elapsedMin(iso); if (!m) return '<1m'; if (m < 60) return m + 'm'; var h = Math.floor(m / 60); return h + 'h' + (m % 60 ? (m % 60) + 'm' : '') }
     function pipeOf(t) { return pipeMeta[t.pipeline] || pipeMeta.full }
     // #14 批量操作条（#16 带一步撤销：快照操作前的 priority/status）
@@ -669,9 +678,22 @@ function apply(ctx) {
               t.verification ? React.createElement('span', { title: '验收结论: ' + (t.verification.summary || '').slice(0, 100), style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: t.verification.verdict === 'approved' ? C.ok : C.err, color: C_INV } }, t.verification.verdict === 'approved' ? '过' : '驳') : null,
               React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, t.archivedAt ? ago(t.archivedAt) : '')),
             t.verification && t.verification.summary ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '📝 ' + t.verification.summary) : null,
-            React.createElement('div', { style: { display: 'flex', gap: 5, marginTop: 4 } },
+            React.createElement('div', { style: { display: 'flex', gap: 5, marginTop: 4, flexWrap: 'wrap' } },
               React.createElement('button', { onClick: function () { restore(t.id) }, title: '恢复为待办', style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '↩ 恢复待办'),
-              React.createElement('button', { onClick: function () { if (sessionsSvc && t.claimedBy) sessionsSvc.open(t.claimedBy) }, disabled: !t.claimedBy, title: t.claimedBy ? '打开 Worker 会话' : '无执行会话', style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + C.border, borderRadius: 3, background: 'transparent', color: t.claimedBy ? C.brand : C.text2, cursor: t.claimedBy ? 'pointer' : 'not-allowed', opacity: t.claimedBy ? 1 : 0.5 } }, '→ Worker 会话')))
+              (function () {
+                var runs = historyRuns(t)
+                if (!runs.length) return React.createElement('span', { style: { fontSize: 9, color: C.text2, opacity: 0.6, padding: '2px 0' } }, '无历史会话')
+                var wN = 0, vN = 0
+                return React.createElement('span', { style: { display: 'inline-flex', gap: 5, flexWrap: 'wrap' } }, runs.map(function (r, i) {
+                  var seq = r.role === 'verifier' ? (++vN) : (++wN)
+                  var isV = r.role === 'verifier'
+                  return React.createElement('button', {
+                    key: i, onClick: function () { if (sessionsSvc) sessionsSvc.open(r.id) },
+                    title: (isV ? 'Verifier' : 'Worker') + ' 第 ' + seq + ' 次' + (r.at ? ' · ' + ago(r.at) : '') + (r.model ? ' · ' + r.model : '') + '（' + r.id + '）',
+                    style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + (isV ? C.warn : C.brand), borderRadius: 3, background: 'transparent', color: isV ? C.warn : C.brand, cursor: 'pointer' }
+                  }, '→ ' + (isV ? 'V' : 'W') + '#' + seq)
+                }))
+              })()))
         }))
     }
     function TeamView() {
@@ -728,7 +750,6 @@ function apply(ctx) {
       function doAction(fn) { fn().then(fetchTasks).catch(function () {}) }
       function saveEdit() { setSaving(true); rpc('update-task', { taskId: task.id, title: editTitle, description: editDesc, resetToPending: true }).then(function () { setSaving(false); fetchTasks() }).catch(function () { setSaving(false) }) }
       function jumpToAgent() { if (sessionsSvc && task.claimedBy) sessionsSvc.open(task.claimedBy) }
-      function jumpToVerifier() { if (sessionsSvc && task.verifierRun) sessionsSvc.open(task.verifierRun) }
       function submitArbitration() { if (!arbAnswer.trim()) return; rpc('resolve-escalation', { taskId: task.id, answer: arbAnswer }).then(function (r) { setActionMsg(r && r.ok ? '✅ 裁决已转达给 Worker' : '⚠️ ' + ((r && r.error) || '失败')); setArbAnswer(''); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) }) }
       function doTerminate() { rpc('terminate-agent', { taskId: task.id }).then(function (r) { setActionMsg(r && r.ok ? '⏹ 已终止 ' + (r.terminated || '') + '，任务重新排队' : '⚠️ ' + ((r && r.error) || '无活动 Agent')); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) }) }
       function doDismiss() { rpc('dismiss-suspect', { taskId: task.id }).then(function () { setActionMsg('✅ 已清除卡死标记，继续观察'); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) }) }
@@ -787,9 +808,28 @@ function apply(ctx) {
           task.status === 'verifying' && !task.escalation ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('dispatch-task', { taskId: task.id, role: 'verifier' }) }) }, title: '手动派发给一次性 Verifier 子代理', style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.warn, color: C_INV, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('zap', 10), '派发验收') : null,
           task.status === 'verifying' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'approved' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.ok, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('check-circle', 10), '通过') : null,
           task.status === 'verifying' ? React.createElement('button', { onClick: function () { var r = window.prompt('驳回原因：'); doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'rejected', comment: r || '' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.err, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('x-circle', 10), '驳回') : null,
-          task.status === 'resolved' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('archive-task', { taskId: task.id }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.text2, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('archive', 10), '归档') : null,
-          canJump ? React.createElement('button', { onClick: jumpToAgent, style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '→ Worker 会话') : null,
-          (task.verifierRun && (task.status === 'verifying' || task.status === 'resolved')) ? React.createElement('button', { onClick: jumpToVerifier, style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '→ Verifier 会话') : null),
+          task.status === 'resolved' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('archive-task', { taskId: task.id }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.text2, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('archive', 10), '归档') : null),
+        (function () {
+          // 历史会话：无论任务处于哪个阶段都完整列出（Worker 各次 + Verifier 各次）
+          var runs = historyRuns(task)
+          if (!runs.length) return null
+          var roleMeta = { worker: { label: 'W', color: C.brand, tip: 'Worker' }, verifier: { label: 'V', color: C.warn, tip: 'Verifier' } }
+          var wN = 0, vN = 0
+          return React.createElement('div', { style: { marginTop: 8, padding: '6px 8px', background: C.nested, borderRadius: 6 } },
+            React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('users', 10), '历史会话（点击跳转查看，含全部重试）'),
+            React.createElement('div', { style: { display: 'flex', gap: 5, flexWrap: 'wrap' } },
+              runs.map(function (r, i) {
+                var rm = roleMeta[r.role] || roleMeta.worker
+                var seq = r.role === 'verifier' ? (++vN) : (++wN)
+                var isCur = (r.role === 'worker' && task.claimedBy === r.id) || (r.role === 'verifier' && task.verifierRun === r.id)
+                var okMark = r.outcome === 'completed' ? ' ✅' : (r.outcome === 'running' ? ' ⏳' : (r.outcome ? ' ⚠' : ''))
+                return React.createElement('button', {
+                  key: i, onClick: function () { if (sessionsSvc) sessionsSvc.open(r.id) },
+                  title: rm.tip + ' 第 ' + seq + ' 次' + (r.at ? ' · ' + ago(r.at) : '') + (r.model ? ' · ' + r.model : '') + (r.outcome ? ' · ' + r.outcome : '') + '（' + r.id + '）',
+                  style: { fontSize: 10, padding: '2px 8px', border: '1px solid ' + (isCur ? rm.color : C.border), borderRadius: 3, background: isCur ? C.card : 'transparent', color: rm.color, cursor: 'pointer', fontWeight: isCur ? 600 : 400 }
+                }, '→ ' + rm.tip + ' #' + seq + (r.at ? ' · ' + ago(r.at) : '') + okMark)
+              })))
+        })(),
         canIntervene ? React.createElement('div', { style: { marginTop: 8, padding: '6px 8px', border: '1px dashed ' + C.warn, borderRadius: 6 } },
           React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.warn, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('zap', 11), '高优先级介入（插入执行 Agent 队首）'),
           React.createElement('div', { style: { display: 'flex', gap: 4 } },
