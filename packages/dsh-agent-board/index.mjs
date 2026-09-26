@@ -399,7 +399,10 @@ export function apply(ctx) {
         // 快进不写盘的前提是磁盘上的 poolStatus 已经是空的——否则（典型：DSH 重启清空了
         // 内存 runs 表，文件里残留重启前的忙碌快照）幽灵 Worker 会永远显示执行中
         var stalePool = snap.poolStatus && (((snap.poolStatus.workers || []).length + (snap.poolStatus.verifiers || []).length) > 0)
-        if (stalePool) { snap.poolStatus = emptyPool; try { await wt(sid, snap) } catch (_) {} }
+        // dispatchInfo 是瞬时通知（90s TTL）：空闲周期也要负责过期清理，否则永久残留
+        var staleInfo = snap.dispatchInfo && (!snap.dispatchInfoAt || Date.now() - new Date(snap.dispatchInfoAt).getTime() > 90000)
+        if (staleInfo) { delete snap.dispatchInfo; delete snap.dispatchInfoAt }
+        if (stalePool || staleInfo) { if (stalePool) snap.poolStatus = emptyPool; try { await wt(sid, snap) } catch (_) {} }
         return snap
       }
       var c = cfg(snap)
@@ -421,7 +424,8 @@ export function apply(ctx) {
         // UI 池状态：来自活跃 run（一次性模型：没有成员名册，只有在跑的任务）
         d.poolStatus = { workers: [], verifiers: [] }
         Object.keys(runs).forEach(function (k) { var rc = runs[k]; d.poolStatus[rc.role === 'worker' ? 'workers' : 'verifiers'].push({ id: k, num: '-', busy: true, taskId: rc.taskId, runId: String(rc.run.id), done: 0, queueLen: 0, suspect: false, model: rc.model || '' }) })
-        if (info.length > 0) d.dispatchInfo = info.join('; ')
+        if (info.length > 0) { d.dispatchInfo = info.join('; '); d.dispatchInfoAt = new Date().toISOString() }
+        else if (d.dispatchInfo && (!d.dispatchInfoAt || Date.now() - new Date(d.dispatchInfoAt).getTime() > 90000)) { delete d.dispatchInfo; delete d.dispatchInfoAt } // 瞬时通知：90s TTL 过期即清，不再永久残留
         return d
       }, true) // skipKick：poolCycle 自写不触发 kickCycle（防无限循环）
 

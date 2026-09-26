@@ -240,7 +240,7 @@ function apply(ctx) {
         state.poolStatus = (d && d.poolStatus) || null
         state.isRoot = !d || d.isRoot !== false
         if (state.isRoot === false && state.open) { state.open = false; state.detailId = null } // 子代理会话：强制收起看板
-        if (d && d.dispatchInfo) { state.dispatchInfo = d.dispatchInfo }
+        if (d && d.dispatchInfo && d.dispatchInfoAt && Date.now() - new Date(d.dispatchInfoAt).getTime() < 120000) { state.dispatchInfo = d.dispatchInfo } else { state.dispatchInfo = '' } // 瞬时通知 2min 内有效，过期强制清空（服务端写后不清曾致残留数天）
         // escalation 一等公民：出现新的待裁决任务 → 面板自动弹开直达该任务详情
         var newEsc = state.tasks.filter(function (t) { return t.escalation && state.escalatedIds.indexOf(t.id) < 0 })
         state.escalatedIds = state.tasks.filter(function (t) { return t.escalation }).map(function (t) { return t.id })
