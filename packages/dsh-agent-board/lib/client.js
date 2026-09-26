@@ -551,11 +551,19 @@ function apply(ctx) {
     function PoolCfgPopover(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect, useRef = _R.useRef
       var _a = useState(false), open = _a[0], setOpen = _a[1]
-      var ref = useRef(null)
+      var _p = useState(null), pos = _p[0], setPos = _p[1]
+      var ref = useRef(null); var btnRef = useRef(null)
       useEffect(function () { if (!open) return; function onDown(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }; document.addEventListener('mousedown', onDown); return function () { document.removeEventListener('mousedown', onDown) } }, [open])
+      function toggle() {
+        // position:fixed + 视口坐标：面板容器是 overflow:hidden + maxHeight:60vh，
+        // absolute 弹窗在面板内容短时会被裁掉下半截（超时配置行曾被整个裁掉）。
+        // fixed 脱离任何祖先裁剪（面板无 transform/filter，不会形成包含块）。
+        if (!open && btnRef.current) { var r = btnRef.current.getBoundingClientRect(); setPos({ top: r.bottom + 4, right: Math.max(8, window.innerWidth - r.right) }) }
+        setOpen(!open)
+      }
       return React.createElement('span', { ref: ref, style: { position: 'relative', display: 'inline-flex' } },
-        React.createElement('button', { onClick: function () { setOpen(!open) }, title: '池配置', style: { fontSize: 12, padding: '3px 8px', border: '1px solid ' + (open ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: open ? C.nested : 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('settings', 13)),
-        open ? React.createElement('div', { style: { position: 'absolute', top: '100%', right: 0, marginTop: 4, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 10, whiteSpace: 'nowrap' } },
+        React.createElement('button', { ref: btnRef, onClick: toggle, title: '池配置', style: { fontSize: 12, padding: '3px 8px', border: '1px solid ' + (open ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: open ? C.nested : 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('settings', 13)),
+        open && pos ? React.createElement('div', { style: { position: 'fixed', top: pos.top + 'px', right: pos.right + 'px', padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: 'calc(100vh - ' + (pos.top + 12) + 'px)', overflowY: 'auto' } },
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 5 } }, '并发上限（一次性派发，用完即销毁）'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
             React.createElement(PoolCfg, { label: 'W并发', cfgKey: 'maxWorkers', value: props.maxW }),

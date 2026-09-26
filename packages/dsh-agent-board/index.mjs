@@ -67,8 +67,23 @@ export function apply(ctx) {
     //  曾因此导致整个看板状态异常。绝对路径对此永久免疫）
     function boardPath(sid) { return path.join(os.homedir(), '.dsh', 'tasks-' + sid + '.json') }
     function fileFor(sid) { return boardPath(sid) } // 保留旧名兼容调用点，但已是绝对路径
-    async function rt(sid) { try { var r = await fsNode.promises.readFile(boardPath(sid), 'utf8'); var d = JSON.parse(r); if (vt(d) && d.ownerSession === sid) { teamModeCache[sid] = !!d.teamMode; return normalizeBoard(d) }; return seed(sid) } catch (_) { return seed(sid) } }
-    async function wt(sid, d) { var c = JSON.stringify(d); try { await fsNode.promises.writeFile(boardPath(sid), c, 'utf8') } catch (e) { console.error('[task-board] write:', String(e)); throw e } }
+    async function rt(sid) {
+      var r
+      try { r = await fsNode.promises.readFile(boardPath(sid), 'utf8') } catch (_) { return seed(sid) } // 不存在/不可读 → 空板
+      try {
+        var d = JSON.parse(r)
+        if (vt(d) && d.ownerSession === sid) { teamModeCache[sid] = !!d.teamMode; return normalizeBoard(d) }
+        return seed(sid)
+      } catch (_) {
+        // JSON 截断/损坏（如强杀打断写盘）：隔离留档再种新板——数据不丢，坏文件也不反复 poison
+        console.error('[task-board] board file corrupt, quarantining: ' + boardPath(sid))
+        fsNode.promises.rename(boardPath(sid), boardPath(sid) + '.corrupt-' + Date.now()).catch(function () {})
+        return seed(sid)
+      }
+    }
+    // 原子写盘：先写临时文件再 rename——强杀若发生在写盘中途，磁盘上最多留个 .tmp 残件，
+    // 看板本体永远不会是截断的半个 JSON（此前非原子直写，kill 中写 = 看板被 seed 清空）
+    async function wt(sid, d) { var c = JSON.stringify(d); var p = boardPath(sid); var tmp = p + '.tmp'; try { await fsNode.promises.writeFile(tmp, c, 'utf8'); await fsNode.promises.rename(tmp, p) } catch (e) { console.error('[task-board] write:', String(e)); throw e } }
     // 每会话一条 promise 链，串行化所有 读-改-写，消除并发写竞争
     var fileLocks = {}
     function withLock(sid, fn) { var prev = fileLocks[sid] || Promise.resolve(); var p = prev.then(function () { return fn() }); fileLocks[sid] = p.catch(function () {}); return p }
@@ -419,12 +434,14 @@ export function apply(ctx) {
         var now = Date.now()
         d.tasks.forEach(function (t) {
           if (isOrphan(d, t, runs, now)) { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', '执行 run 已结束/丢失，回收重新排队'); pushSysNote(sid, '任务「' + t.title + '」执行 run 丢失，已回收重新排队'); info.push('reclaim ' + t.id) }
+          // verifier 派发占位超时回收：占位后强杀/spawn 中断会留 spawn-pending 死占位，超 2min 清掉恢复可派发
+          if (t.status === 'verifying' && t.verifierRun === 'spawn-pending' && (now - new Date(t.verifierRunAt || 0).getTime()) > 120000) { t.verifierRun = null; delete t.verifierRunAt; ah(t, 'verifying', 'verifying', 'system', 'Verifier 派发占位超时，回收重新排队'); info.push('reclaim-verifier ' + t.id) }
         })
         // worker 派发仅 auto；verifier 派发两种模式都跑（manual 模式主窗口 claim 做完的 full 档任务需要验收）
         var capW = isAuto ? Math.max(0, c.maxWorkers - activeW) : 0
-        var picked = pickDispatch(d, capW, Math.max(0, c.maxVerifiers - activeV), null)
+        var picked = pickDispatch(d, capW, Math.max(0, c.maxVerifiers - activeV), runs)
         picked.pendings.forEach(function (t) { claimApply(d, t, 'spawn-pending', 'dispatch'); toSpawn.push({ role: 'worker', t: t }); info.push('dispatch ' + t.id) })
-        picked.verifs.forEach(function (t) { toSpawn.push({ role: 'verifier', t: t }); info.push('verify ' + t.id) })
+        picked.verifs.forEach(function (t) { t.verifierRun = 'spawn-pending'; t.verifierRunAt = new Date().toISOString(); toSpawn.push({ role: 'verifier', t: t }); info.push('verify ' + t.id) })
         // UI 池状态：来自活跃 run（一次性模型：没有成员名册，只有在跑的任务）
         d.poolStatus = { workers: [], verifiers: [] }
         Object.keys(runs).forEach(function (k) { var rc = runs[k]; d.poolStatus[rc.role === 'worker' ? 'workers' : 'verifiers'].push({ id: k, num: '-', busy: true, taskId: rc.taskId, runId: String(rc.run.id), done: 0, queueLen: 0, suspect: false, model: rc.model || '' }) })
@@ -439,11 +456,15 @@ export function apply(ctx) {
         var rec = await spawnOneShot(sid, sp.t, sp.role)
         if (rec) {
           // claim 占位换成真实 run id；verifier run 单独记（claimedBy 保留 worker 的，供详情页跳转会话）
-          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t) { if (sp.role === 'worker' && t.claimedBy === 'spawn-pending') t.claimedBy = String(rec.run.id); if (sp.role === 'verifier') t.verifierRun = String(rec.run.id) }; return t }, true)
+          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t) { if (sp.role === 'worker' && t.claimedBy === 'spawn-pending') t.claimedBy = String(rec.run.id); if (sp.role === 'verifier' && t.verifierRun === 'spawn-pending') { t.verifierRun = String(rec.run.id); t.verifierRunAt = new Date().toISOString() } }; return t }, true)
         } else if (sp.role === 'worker') {
-          // spawn 失败 → 回 pending（verifier spawn 失败无需处理，下轮 cycle 会重试）
+          // spawn 失败 → 回 pending
           await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t && t.status === 'in-progress' && t.claimedBy === 'spawn-pending') { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', 'spawn 失败，回收重新排队') }; return t }, true)
           pushSysNote(sid, '任务「' + sp.t.title + '」Worker 启动失败，已重新排队')
+        } else if (sp.role === 'verifier') {
+          // verifier spawn 失败 → 清占位，下轮 cycle 重试（占位不清会永远卡住派发）
+          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t && t.verifierRun === 'spawn-pending') { t.verifierRun = null; delete t.verifierRunAt }; return t }, true)
+          pushSysNote(sid, '任务「' + sp.t.title + '」Verifier 启动失败，下轮自动重试')
         }
       }
       return result

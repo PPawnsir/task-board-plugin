@@ -162,7 +162,7 @@ export function buildVerifierPrompt(t, pack) {
 export function pickDispatch(d, capW, capV, busyTaskIds) {
   var pendings = capW > 0 ? d.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && t.assignMode !== 'manual' && t.pipeline !== 'direct' && depsSatisfied(d, t) && !t.escalation })
     .sort(function (a, b) { var p = (PRIO_RANK[b.priority] || 2) - (PRIO_RANK[a.priority] || 2); return p !== 0 ? p : (a.createdAt || '').localeCompare(b.createdAt || '') }).slice(0, capW) : []
-  var verifs = capV > 0 ? d.tasks.filter(function (t) { return t.status === 'verifying' && (!t.pipeline || t.pipeline === 'full') && !t.escalation && !(busyTaskIds && busyTaskIds[t.id]) }).slice(0, capV) : []
+  var verifs = capV > 0 ? d.tasks.filter(function (t) { return t.status === 'verifying' && (!t.pipeline || t.pipeline === 'full') && !t.escalation && t.verifierRun !== 'spawn-pending' && !(busyTaskIds && busyTaskIds[t.id]) }).slice(0, capV) : []
   return { pendings: pendings, verifs: verifs }
 }
 // 孤儿回收判定：in-progress 且 claimedBy 非主会话、无活跃 run、无 escalation、超 2 分钟

@@ -274,6 +274,19 @@ test('pickDispatch: verifying 只派 full 档，排除 escalation 和忙中', ()
   assert.deepEqual(r.verifs.map(t => t.id), ['vf']) // work 档不派审、escalation 不派、忙中不派
 })
 
+test('pickDispatch: verifying spawn-pending 占位不重复派发（防双 Verifier）', () => {
+  const tasks = [
+    mkTask({ id: 'vp', status: 'verifying', pipeline: 'full', verifierRun: 'spawn-pending' }),
+    mkTask({ id: 'vd', status: 'verifying', pipeline: 'full', verifierRun: '12345' }), // 有真实 run id 但 run 已死（崩溃恢复场景）→ 应重派
+    mkTask({ id: 'vn', status: 'verifying', pipeline: 'full' }), // 从未派发 → 应派
+  ]
+  const r = core.pickDispatch(mkBoard(tasks), 0, 5, null)
+  assert.deepEqual(r.verifs.map(t => t.id), ['vd', 'vn'])
+  // 占位 + 忙中双重排除
+  const r2 = core.pickDispatch(mkBoard(tasks), 0, 5, { vd: true })
+  assert.deepEqual(r2.verifs.map(t => t.id), ['vn'])
+})
+
 // ===== 孤儿回收 =====
 test('isOrphan: 认领者非主会话 + 无活跃 run + 超 2 分钟', () => {
   const old = new Date(Date.now() - 200000).toISOString()
