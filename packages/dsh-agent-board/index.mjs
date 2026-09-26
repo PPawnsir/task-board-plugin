@@ -62,9 +62,13 @@ export function apply(ctx) {
     function touchSession(sid) { if (sid && typeof sid === 'string' && sid !== 'unknown') knownSessions[sid] = Date.now() }
     // teamMode 缓存：由 rt() 同步，供 systemPrompt 动态引导段读取（v65）
     var teamModeCache = {}
-    function fileFor(sid) { return '.dsh/tasks-' + sid + '.json' }
-    async function rt(sid) { try { var t = await fs.resolve(fileFor(sid)); var r = await fs.readText(t); var d = JSON.parse(r); if (vt(d) && d.ownerSession === sid) { teamModeCache[sid] = !!d.teamMode; return normalizeBoard(d) }; return seed(sid) } catch (_) { return seed(sid) } }
-    async function wt(sid, d) { var c = JSON.stringify(d); try { var t = await fs.resolve(fileFor(sid)); await fs.writeText(t, c) } catch (e) { console.error('[task-board] write:', String(e)); throw e } }
+    // 看板文件用「家目录绝对路径 + node:fs」直读写——不再走 fs 服务的相对路径解析
+    // （fs 服务的相对路径解析根 = 进程启动 cwd，cwd 一变所有看板静默读成空板；
+    //  曾因此导致整个看板状态异常。绝对路径对此永久免疫）
+    function boardPath(sid) { return path.join(os.homedir(), '.dsh', 'tasks-' + sid + '.json') }
+    function fileFor(sid) { return boardPath(sid) } // 保留旧名兼容调用点，但已是绝对路径
+    async function rt(sid) { try { var r = await fsNode.promises.readFile(boardPath(sid), 'utf8'); var d = JSON.parse(r); if (vt(d) && d.ownerSession === sid) { teamModeCache[sid] = !!d.teamMode; return normalizeBoard(d) }; return seed(sid) } catch (_) { return seed(sid) } }
+    async function wt(sid, d) { var c = JSON.stringify(d); try { await fsNode.promises.writeFile(boardPath(sid), c, 'utf8') } catch (e) { console.error('[task-board] write:', String(e)); throw e } }
     // 每会话一条 promise 链，串行化所有 读-改-写，消除并发写竞争
     var fileLocks = {}
     function withLock(sid, fn) { var prev = fileLocks[sid] || Promise.resolve(); var p = prev.then(function () { return fn() }); fileLocks[sid] = p.catch(function () {}); return p }
@@ -533,11 +537,16 @@ export function apply(ctx) {
       if (!rec || !rec.run) return { ok: true, activity: null, reason: 'no active run' }
       var child = String(rec.run.id)
       try {
-        var boardAbs = await fs.resolve(fileFor(sid))
-        var ws = path.dirname(path.dirname(boardAbs))
-        var bucket = '--' + ws.replace(/[\\/:]/g, '-') + '--'
-        var log = path.join(os.homedir(), '.dsh', 'sessions', bucket, child, 'session.jsonl.zstd')
-        if (!fsNode.existsSync(log)) return { ok: true, activity: null, reason: 'log not found' }
+        // 子会话日志定位：直接扫描 ~/.dsh/sessions/*/<child>/session.jsonl.zstd
+        // （不再从看板路径反推 workspace——那依赖进程 cwd 凑巧等于工作区，曾是隐性 bug）
+        var sessionsRoot = path.join(os.homedir(), '.dsh', 'sessions')
+        var log = null
+        var buckets = fsNode.readdirSync(sessionsRoot)
+        for (var bi = 0; bi < buckets.length; bi++) {
+          var cand = path.join(sessionsRoot, buckets[bi], child, 'session.jsonl.zstd')
+          if (fsNode.existsSync(cand)) { log = cand; break }
+        }
+        if (!log) return { ok: true, activity: null, reason: 'log not found' }
         // 只同步读末尾 2MB（日志追加写，末帧必在尾部）——整文件 readFileSync 在大日志上
         // 会造成数十毫秒级同步 I/O，多任务轮询时叠加成全局卡顿
         var sz = fsNode.statSync(log).size
