@@ -16,6 +16,9 @@ function apply(ctx) {
     var slots = ctx.get('slots')
     if (slots === undefined) return
     var sessionsSvc = ctx.get('sessions')
+    // 会话跳转走 uiWorkspace.openSession（0.1.7 起 sessions 服务已无 open 方法，
+    // 旧调用 sessionsSvc.open 会抛 TypeError: sessionsSvc.open is not a function）
+    var uiWorkspaceSvc = ctx.get('uiWorkspace')
     var C = { bg: 'var(--dsw-alias-bg-base)', card: 'var(--dsw-alias-bg-layer-1)', nested: 'var(--dsw-alias-bg-layer-2)', border: 'var(--dsw-alias-border-l1)', border2: 'var(--dsw-alias-border-l2)', brand: 'var(--dsw-alias-brand-primary)', text: 'var(--dsw-alias-label-primary)', text2: 'var(--dsw-alias-label-secondary)', err: 'var(--dsw-alias-state-error-primary)', ok: 'var(--dsw-alias-state-success-primary)', warn: 'var(--dsw-alias-state-warn-primary)' }
     var C_INV = 'var(--dsw-alias-label-primary-inverted)' // 品牌底/彩色底上的反色文字（深浅模式自动反转）
     var prioColor = { critical: C.err, high: C.warn, medium: C.brand, low: C.text2 }
@@ -303,7 +306,7 @@ function apply(ctx) {
     function fmtTime(iso) { if (!iso) return '-'; try { return new Date(iso).toLocaleString() } catch (_) { return iso } }
     function getTask(id) { return state.tasks.find(function (t) { return t.id === id }) }
     function shortId(sid) { return sid ? String(sid).slice(0, 14) : '' }
-    function jumpTo(actorId) { if (sessionsSvc && actorId && actorId !== 'system' && actorId !== 'unknown' && actorId !== 'auto-dispatch') sessionsSvc.open(actorId) }
+    function jumpTo(actorId) { if (uiWorkspaceSvc && actorId && actorId !== 'system' && actorId !== 'unknown' && actorId !== 'auto-dispatch') uiWorkspaceSvc.openSession(actorId) }
     function transition(taskId, from, to) {
       if (from === to) return
       var ok = function () { fetchTasks() }; var fail = function () { fetchTasks() }
@@ -420,7 +423,7 @@ function apply(ctx) {
         open ? (shown.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2, padding: '6px 0' } }, '时间范围内无活跃会话') : shown.map(function (b, i) {
           var isSelf = b.session === state.sessionId
           return React.createElement('div', { key: i, style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, padding: '3px 0', borderBottom: '1px solid ' + C.nested } },
-            React.createElement('span', { onClick: function () { if (!isSelf && sessionsSvc) sessionsSvc.open(b.session) }, style: { color: isSelf ? C.text2 : C.brand, cursor: isSelf ? 'default' : 'pointer', textDecoration: isSelf ? 'none' : 'underline', minWidth: 90 } }, (isSelf ? '★ ' : '') + shortId(b.session)),
+            React.createElement('span', { onClick: function () { if (!isSelf && uiWorkspaceSvc) uiWorkspaceSvc.openSession(b.session) }, style: { color: isSelf ? C.text2 : C.brand, cursor: isSelf ? 'default' : 'pointer', textDecoration: isSelf ? 'none' : 'underline', minWidth: 90 } }, (isSelf ? '★ ' : '') + shortId(b.session)),
             React.createElement('span', { style: { color: C.text2 } }, b.teamMode ? 'Team' : (b.boardMode === 'auto' ? '自动' : '手动')),
             React.createElement('span', { style: { display: 'inline-flex', gap: 5 } },
               b.counts.inProgress ? React.createElement('span', { style: { color: C.brand } }, '▶' + b.counts.inProgress) : null,
@@ -696,7 +699,7 @@ function apply(ctx) {
                   var seq = r.role === 'verifier' ? (++vN) : (++wN)
                   var isV = r.role === 'verifier'
                   return React.createElement('button', {
-                    key: i, onClick: function () { if (sessionsSvc) sessionsSvc.open(r.id) },
+                    key: i, onClick: function () { if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(r.id) },
                     title: (isV ? 'Verifier' : 'Worker') + ' 第 ' + seq + ' 次' + (r.at ? ' · ' + ago(r.at) : '') + (r.model ? ' · ' + r.model : '') + '（' + r.id + '）',
                     style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + (isV ? C.warn : C.brand), borderRadius: 3, background: 'transparent', color: isV ? C.warn : C.brand, cursor: 'pointer' }
                   }, '→ ' + (isV ? 'V' : 'W') + '#' + seq)
@@ -775,7 +778,7 @@ function apply(ctx) {
       if (!task) { state.detailId = null; return React.createElement('div', { style: { padding: 20, color: C.text2 } }, '任务不存在') }
       function doAction(fn) { fn().then(fetchTasks).catch(function () {}) }
       function saveEdit() { setSaving(true); rpc('update-task', { taskId: task.id, title: editTitle, description: editDesc, resetToPending: true }).then(function () { setSaving(false); fetchTasks() }).catch(function () { setSaving(false) }) }
-      function jumpToAgent() { if (sessionsSvc && task.claimedBy) sessionsSvc.open(task.claimedBy) }
+      function jumpToAgent() { if (uiWorkspaceSvc && task.claimedBy) uiWorkspaceSvc.openSession(task.claimedBy) }
       function submitArbitration() { if (!arbAnswer.trim()) return; rpc('resolve-escalation', { taskId: task.id, answer: arbAnswer }).then(function (r) { setActionMsg(r && r.ok ? '✅ 裁决已转达给 Worker' : '⚠️ ' + ((r && r.error) || '失败')); setArbAnswer(''); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) }) }
       function doTerminate() { rpc('terminate-agent', { taskId: task.id }).then(function (r) { setActionMsg(r && r.ok ? '⏹ 已终止 ' + (r.terminated || '') + '，任务重新排队' : '⚠️ ' + ((r && r.error) || '无活动 Agent')); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) }) }
       function doDismiss() { rpc('dismiss-suspect', { taskId: task.id }).then(function () { setActionMsg('✅ 已清除卡死标记，继续观察'); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) }) }
@@ -850,7 +853,7 @@ function apply(ctx) {
                 var isCur = (r.role === 'worker' && task.claimedBy === r.id) || (r.role === 'verifier' && task.verifierRun === r.id)
                 var okMark = r.outcome === 'completed' ? ' ✅' : (r.outcome === 'running' ? ' ⏳' : (r.outcome ? ' ⚠' : ''))
                 return React.createElement('button', {
-                  key: i, onClick: function () { if (sessionsSvc) sessionsSvc.open(r.id) },
+                  key: i, onClick: function () { if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(r.id) },
                   title: rm.tip + ' 第 ' + seq + ' 次' + (r.at ? ' · ' + ago(r.at) : '') + (r.model ? ' · ' + r.model : '') + (r.outcome ? ' · ' + r.outcome : '') + '（' + r.id + '）',
                   style: { fontSize: 10, padding: '2px 8px', border: '1px solid ' + (isCur ? rm.color : C.border), borderRadius: 3, background: isCur ? C.card : 'transparent', color: rm.color, cursor: 'pointer', fontWeight: isCur ? 600 : 400 }
                 }, '→ ' + rm.tip + ' #' + seq + (r.at ? ' · ' + ago(r.at) : '') + okMark)
@@ -907,7 +910,7 @@ function apply(ctx) {
     slots.inject('shell.overlay', function () { return slots.register({ name: 'shell.overlay', id: 'task-board-top-panel' }, function () { return React.createElement(TopPanel) }) })
 }
 
-module.exports = { name: 'dsh-agent-board', inject: ['slots', 'sessions', 'timer'], apply: apply }
+module.exports = { name: 'dsh-agent-board', inject: ['slots', 'sessions', 'uiWorkspace', 'timer'], apply: apply }
 return module.exports
   }
 })

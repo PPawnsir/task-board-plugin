@@ -99,7 +99,12 @@ export function apply(ctx) {
     // makeMsg 支持插件来源标记（参考 dsh-notes 派发模式）：
     // form 'recall' = 背景回执（召回上下文，非指令）；'notice' = 需注意的通知（带一行 summary）
     // 不再用 kind:'user'——插件消息不该冒充用户在说话，模型可据 form 正确理解语义
-    function makeMsg(text, form, summary) { var src = { kind: 'plugin', plugin: 'dsh-agent-board' }; if (form) { src.form = form; if (form === 'notice' && summary) src.summary = summary }; return { id: 'm' + Date.now() + Math.random().toString(36).slice(2, 6), role: 'user', content: [{ type: 'text', text: text }], source: src } }
+    // v0.1.7 起会话日志为 format v4：source.kind 必须是「生产者自有 kind」，kind:'plugin'
+    // 是已退役的 v3 包装写法，落盘时 persistence 直接抛 SessionFormatError
+    // （format v4 message requires a producer-owned source kind）并连带炸掉主窗口当前轮次。
+    // v3→v4 迁移把 {kind:'plugin',plugin:'dsh-agent-board'} 映射为 {kind:'plugin:dsh-agent-board'}，
+    // 这里直接写迁移后的形态，与存量历史一致；form/summary 作为 source 元数据字段保留。
+    function makeMsg(text, form, summary) { var src = { kind: 'plugin:dsh-agent-board' }; if (form) { src.form = form; if (form === 'notice' && summary) src.summary = summary }; return { id: 'm' + Date.now() + Math.random().toString(36).slice(2, 6), role: 'user', content: [{ type: 'text', text: text }], source: src } }
     // 超时保护：run 挂死时走失败重试路径
     function withTimeout(promise, ms, label) { var timer = ctx.timer; if (!timer) return promise; return Promise.race([promise, timer.timeout(ms).then(function () { throw new Error(label + ' timeout ' + ms + 'ms') })]) }
 
@@ -129,16 +134,21 @@ export function apply(ctx) {
     // 主窗口预研文件：t.context.files 里的路径由主 agent 选择性指定（它调研时读过哪些文件），
     // host 在派发时从磁盘读最新内容注入 prompt——Worker/Verifier 不用从零重复调研。
     // 上限：单文件 8KB、总计 40KB，超出截断并标注。
-    async function readContextPack(t) {
+    // 相对路径的解析根必须是「该会话的工作区」（root agent 的 session.header.cwd），
+    // 不能靠进程 cwd——dsh web 从家目录启动时相对路径会解析到 ~/.dsh 之外的家目录下，
+    // 全部读成「读取失败」（v0.1.7 实测：dsh-notes-plugin/... → C:\Users\<user>\dsh-notes-plugin）。
+    function sessionCwd(sid) { try { var root = rootForSession(sid); var cwd = root && root.session && root.session.header && root.session.header.cwd; return (typeof cwd === 'string' && cwd) ? cwd : '' } catch (_) { return '' } }
+    async function readContextPack(sid, t) {
       var paths = (t.context && Array.isArray(t.context.files)) ? t.context.files : []
       var notes = (t.context && typeof t.context.notes === 'string') ? t.context.notes : ''
       if (!paths.length && !notes.trim()) return ''
+      var cwd = sessionCwd(sid)
       var out = [], total = 0
       for (var i = 0; i < paths.length && total < 40960; i++) {
         var p = String(paths[i] || '')
         if (!p) continue
         try {
-          var content = await fs.readText(await fs.resolve(p))
+          var content = await fs.readText(await fs.resolve(p, cwd ? { cwd: cwd } : undefined))
           var truncated = false
           if (content.length > 8192) { content = content.slice(0, 8192); truncated = true }
           if (total + content.length > 40960) { content = content.slice(0, 40960 - total); truncated = true }
@@ -193,7 +203,7 @@ export function apply(ctx) {
       if (role === 'verifier') { modelOverride = (typeof dsnap.verifierModel === 'string' && dsnap.verifierModel.trim()) ? dsnap.verifierModel.trim() : ''; if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited, using parent model'); modelOverride = '' } }
       else if (role === 'worker') { modelOverride = (typeof dsnap.workerModel === 'string' && dsnap.workerModel.trim()) ? dsnap.workerModel.trim() : ''; if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited, using parent model'); modelOverride = '' } }
       var pack = ''
-      try { pack = await readContextPack(t) } catch (e) { console.error('[task-board] context pack read failed:', String(e)) }
+      try { pack = await readContextPack(sid, t) } catch (e) { console.error('[task-board] context pack read failed:', String(e)) }
       // user prompt 只留一行指引，内容走上下文注入区块
       var packNote = pack ? '本任务附带主窗口预研文件，已通过「上下文注入」区提供（含文件完整内容），直接基于其内容工作，不要重复读取这些文件。' : ''
       var req = { label: role + ':' + t.id, prompt: [{ type: 'text', text: role === 'worker' ? buildWorkerPrompt(t, packNote) : buildVerifierPrompt(t, packNote) }], parent: parent, signal: makeSignal() }
@@ -527,7 +537,7 @@ export function apply(ctx) {
     // ===== Tools =====
     ctx.tools.register(defineTool({ name: 'task_list', description: '列出当前会话任务。', parameters: { type: 'object', properties: { status: { type: 'string', enum: ['pending', 'in-progress', 'verifying', 'resolved', 'blocked', 'cancelled'] }, priority: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] }, tag: { type: 'string' }, parentId: { type: 'string' }, includeArchived: { type: 'boolean' }, limit: { type: 'number' } }, required: [] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var d = await rt(sid); var a = d.tasks; var ts = a; if (!args.includeArchived) ts = ts.filter(function (x) { return x.status !== 'archived' }); if (args.status) ts = ts.filter(function (x) { return x.status === args.status }); if (args.priority) ts = ts.filter(function (x) { return x.priority === args.priority }); if (args.tag) ts = ts.filter(function (x) { return (x.tags || []).indexOf(args.tag) >= 0 }); if (args.parentId === 'null') ts = ts.filter(function (x) { return !isb(x) }); else if (args.parentId) ts = ts.filter(function (x) { return x.parentId === args.parentId }); var po = PRIO_RANK; ts.sort(function (a, b) { var dd = (po[b.priority] || 0) - (po[a.priority] || 0); return dd !== 0 ? dd : (a.createdAt || '').localeCompare(b.createdAt || '') }); var lim = Math.min(args.limit || 20, 100); var res = ts.slice(0, lim).map(function (x) { var e = Object.assign({}, x); if (isb(x)) { var p = gpt(x, a); if (p) e.parentSummary = { id: p.id, title: p.title, status: p.status } }; var ch = gsb(x.id, a); if (ch.length) { e.subtaskCount = ch.length; e.subtaskResolved = ch.filter(function (y) { return y.status === 'resolved' }).length }; return e }); var out = { tasks: res, total: ts.length, session: sid, actor: getActorId(), boardMode: d.boardMode || 'auto', teamMode: !!d.teamMode, poolStatus: d.poolStatus }; if (d.teamMode) out.teamHint = 'Team 模式已开启：实质性改动请优先 task_create 提交看板由池执行；调研/读取/讨论可直接进行；Worker 歧义会上报等你裁决。'; return out } }))
     ctx.tools.register(defineTool({ name: 'task_context', description: '获取任务完整上下文。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, expandFiles: { type: 'boolean' }, includeParent: { type: 'boolean' }, includeSubtasks: { type: 'boolean' } }, required: ['taskId'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var d = await rt(sid); var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found: ' + args.taskId }; return { ok: true, context: { task: t, inheritedContext: t.context || {} } } } }))
-    ctx.tools.register(defineTool({ name: 'task_preview_context', description: '派发前上下文预览：预演 task_create 的 contextFiles/contextNotes 将注入给子代理的实际内容（读盘后的最终形态），用于确认材料是否足够。不创建任务。返回 ok=false/empty=true 说明无可注入内容。', parameters: { type: 'object', properties: { contextFiles: { type: 'array', items: { type: 'string' }, description: '预演的文件路径列表' }, contextNotes: { type: 'string', description: '预演的调研笔记' } }, required: [] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var files = Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : []; var notes = typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : ''; if (!files.length && !notes.trim()) return { ok: false, error: 'contextFiles/contextNotes 至少提供一个' }; try { var pack = await readContextPack({ context: { files: files, notes: notes } }); return { ok: true, empty: !pack, pack: pack } } catch (e) { return { ok: false, error: String(e).slice(0, 200) } } } }))
+    ctx.tools.register(defineTool({ name: 'task_preview_context', description: '派发前上下文预览：预演 task_create 的 contextFiles/contextNotes 将注入给子代理的实际内容（读盘后的最终形态），用于确认材料是否足够。不创建任务。返回 ok=false/empty=true 说明无可注入内容。', parameters: { type: 'object', properties: { contextFiles: { type: 'array', items: { type: 'string' }, description: '预演的文件路径列表' }, contextNotes: { type: 'string', description: '预演的调研笔记' } }, required: [] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var files = Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : []; var notes = typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : ''; if (!files.length && !notes.trim()) return { ok: false, error: 'contextFiles/contextNotes 至少提供一个' }; try { var pack = await readContextPack(sid, { context: { files: files, notes: notes } }); return { ok: true, empty: !pack, pack: pack } } catch (e) { return { ok: false, error: String(e).slice(0, 200) } } } }))
     ctx.tools.register(defineTool({ name: 'task_claim', description: '领取待办任务→in-progress。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, reason: { type: 'string' } }, required: ['taskId'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; var err = claimCheck(d, t, actor); if (err) return { ok: false, error: err }; claimApply(d, t, actor, args.reason || 'claimed'); return { ok: true, task: t, context: { task: t, inheritedContext: t.context || {} } } }) } }))
     ctx.tools.register(defineTool({ name: 'task_resolve', description: '提交验证(verifying)或阻塞(blocked)。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, status: { type: 'string', enum: ['verifying', 'blocked'] }, resolution: { type: 'string' } }, required: ['taskId', 'status'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'in-progress') return { ok: false, error: 'not in-progress' }; if (t.claimedBy !== actor) return { ok: false, error: 'not claimed by you' }; if (args.status === 'verifying' && !args.resolution) return { ok: false, error: 'resolution required' }; return resolveApply(d, t, actor, args.status, args.resolution, args.resolution || args.status) }) } }))
     ctx.tools.register(defineTool({ name: 'task_verify', description: '验收：approved→resolved，rejected→in-progress。子任务全完成父任务自动verifying。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, verdict: { type: 'string', enum: ['approved', 'rejected'] }, comment: { type: 'string' } }, required: ['taskId', 'verdict'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'verifying') return { ok: false, error: 'not verifying' }; return verifyApply(d, t, actor, args.verdict, args.comment) }) } }))
@@ -548,7 +558,7 @@ export function apply(ctx) {
       var notes = typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : ''
       if (!files.length && !notes.trim()) return { ok: false, error: 'contextFiles/contextNotes 至少提供一个' }
       var pack = ''
-      try { pack = await readContextPack({ context: { files: files, notes: notes } }) } catch (e) { return { ok: false, error: '读取失败: ' + String(e).slice(0, 120) } }
+      try { pack = await readContextPack(rpcSessionId(args), { context: { files: files, notes: notes } }) } catch (e) { return { ok: false, error: '读取失败: ' + String(e).slice(0, 120) } }
       return { ok: true, filesCount: files.length, notesLen: notes.length, pack: pack, empty: !pack }
     })
     // 活动心跳：读子代理会话日志的最后一帧，提取最近的动作摘要（卡片/详情页展示"现在跑到哪了"）
@@ -558,14 +568,19 @@ export function apply(ctx) {
       if (!rec || !rec.run) return { ok: true, activity: null, reason: 'no active run' }
       var child = String(rec.run.id)
       try {
-        // 子会话日志定位：直接扫描 ~/.dsh/sessions/*/<child>/session.jsonl.zstd
+        // 子会话日志定位：直接扫描 ~/.dsh/sessions/*/<child>/session.vN.jsonl.zstd
         // （不再从看板路径反推 workspace——那依赖进程 cwd 凑巧等于工作区，曾是隐性 bug）
+        // v0.1.7 起日志文件名带格式版本号（session.v4.jsonl.zstd），旧会话是
+        // session.v3.jsonl.zstd / session.jsonl.zstd——按新到旧逐个探测。
         var sessionsRoot = path.join(os.homedir(), '.dsh', 'sessions')
         var log = null
+        var LOG_NAMES = ['session.v4.jsonl.zstd', 'session.v3.jsonl.zstd', 'session.v2.jsonl.zstd', 'session.jsonl.zstd']
         var buckets = fsNode.readdirSync(sessionsRoot)
-        for (var bi = 0; bi < buckets.length; bi++) {
-          var cand = path.join(sessionsRoot, buckets[bi], child, 'session.jsonl.zstd')
-          if (fsNode.existsSync(cand)) { log = cand; break }
+        for (var bi = 0; bi < buckets.length && !log; bi++) {
+          for (var ni = 0; ni < LOG_NAMES.length; ni++) {
+            var cand = path.join(sessionsRoot, buckets[bi], child, LOG_NAMES[ni])
+            if (fsNode.existsSync(cand)) { log = cand; break }
+          }
         }
         if (!log) return { ok: true, activity: null, reason: 'log not found' }
         // 只同步读末尾 2MB（日志追加写，末帧必在尾部）——整文件 readFileSync 在大日志上
@@ -577,18 +592,29 @@ export function apply(ctx) {
         var fd = fsNode.openSync(log, 'r')
         try { fsNode.readSync(fd, buf, 0, buf.length, start) } finally { fsNode.closeSync(fd) }
         var MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
-        var last = buf.lastIndexOf(MAGIC) // 追加写多帧格式：最新事件在末帧，只解一帧控成本
-        if (last < 0) return { ok: true, activity: null }
-        var text = zstdDecompressSync(buf.subarray(last)).toString('utf8')
-        var lines = text.split('\n').filter(Boolean)
+        // 追加写多帧格式：最新事件在末帧。但末帧可能只有 step/end、turn/end 这类
+        // 结算事件（v4 一帧只装一个step的增量），单解一帧经常捞不到动作 → 从新到旧
+        // 最多回扫 3 帧，找到第一个动作摘要即止（成本仍受控：每帧只是一次 zstd 解压）
         var activity = null
-        for (var i = lines.length - 1; i >= 0 && !activity; i--) {
-          try {
-            var e = JSON.parse(lines[i])
-            var dta = e.data || {}
-            if (e.type === 'tool/call' && dta.name) activity = '🔧 ' + dta.name + ' ' + String(dta.arguments || '').replace(/\s+/g, ' ').slice(0, 90)
-            else if (e.type === 'assistant/chunk' && dta.block && dta.block.type === 'text' && dta.block.text && dta.block.text.trim()) activity = '💬 ' + dta.block.text.replace(/\s+/g, ' ').slice(0, 120)
-          } catch (_) {}
+        for (var frame = 0; frame < 3 && !activity; frame++) {
+          var last = buf.lastIndexOf(MAGIC, frame === 0 ? buf.length - 1 : last - 1)
+          if (last < 0) break
+          var text = zstdDecompressSync(buf.subarray(last)).toString('utf8')
+          var lines = text.split('\n').filter(Boolean)
+          for (var i = lines.length - 1; i >= 0 && !activity; i--) {
+            try {
+              var e = JSON.parse(lines[i])
+              var dta = e.data || {}
+              if (e.type === 'tool/call' && dta.name) activity = '🔧 ' + dta.name + ' ' + String(dta.arguments || '').replace(/\s+/g, ' ').slice(0, 90)
+              // v4：助手文本在 assistant/message 的 content 块里；v3 及以前是 assistant/chunk 流片
+              else if (e.type === 'assistant/message') {
+                var msg = dta.message || {}
+                var blocks = Array.isArray(msg.content) ? msg.content : []
+                for (var b = blocks.length - 1; b >= 0; b--) { if (blocks[b] && blocks[b].type === 'text' && String(blocks[b].text || '').trim()) { activity = '💬 ' + String(blocks[b].text).replace(/\s+/g, ' ').slice(0, 120); break } }
+              }
+              else if (e.type === 'assistant/chunk' && dta.block && dta.block.type === 'text' && dta.block.text && dta.block.text.trim()) activity = '💬 ' + dta.block.text.replace(/\s+/g, ' ').slice(0, 120)
+            } catch (_) {}
+          }
         }
         return { ok: true, activity: activity }
       } catch (e) { return { ok: true, activity: null, reason: String(e).slice(0, 80) } }
@@ -833,7 +859,11 @@ export function apply(ctx) {
         req.on('error', reject)
       })
     }
-    ctx.webServer.register({
+    // ctx.webServer.register 只返回释放器、不绑定调用方 fiber（tools.register 才会），
+    // 必须自己 ctx.effect 包住——否则插件禁用/重载后路由残留，handler 闭包指向已销毁的
+    // fiber 内状态（500），且再次启用时撞 "duplicate exact route" 永远起不来。
+    ctx.effect(function () {
+      return ctx.webServer.register({
       kind: 'exact',
       path: '/dsh-agent-board',
       handler: async function (req, res) {
@@ -846,6 +876,7 @@ export function apply(ctx) {
         if (!fn) { res.writeHead(404); res.end(JSON.stringify({ ok: false, message: 'unknown method: ' + payload.method })); return }
         try { var out = await fn(payload.args); res.writeHead(200); res.end(JSON.stringify(out === undefined ? null : out)) } catch (e) { res.writeHead(500); res.end(JSON.stringify({ ok: false, message: String(e) })) }
       },
+      })
     })
 
     console.log('[task-board] v74 loaded (pool removed: one-shot dispatch, context injected per task, dispose on settle)')
