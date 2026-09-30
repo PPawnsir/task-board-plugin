@@ -139,7 +139,7 @@ export function buildWorkerPrompt(t, pack) {
   if (notes) p += '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，请务必遵循最新裁决方向）：\n' + notes
   if (msgs) p += '\n\n该任务的详细消息（裁决答案/干预指令/歧义原文等，请务必遵循）：\n' + msgs
   if (pack) p += '\n\n' + pack
-  p += '\n\n完成契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + t.id + '，summary=开发描述/changes=改动清单/selfTest=自测情况/diffStat=变更概要）；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况 / ## diff 概要）。\n   diffStat 要求：若本次改动发生在 git 仓库内，运行 git diff --stat（含 git status --short），把输出贴进 diffStat（≤1500 字符）；关键逻辑变更可附 ≤20 行核心片段。非代码任务/无 git 仓库可省略。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate, taskId=' + t.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测。上报歧义后直接结束本轮——裁决后会有新 Worker 带着裁决答案接手。'
+  p += '\n\n完成契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + t.id + '，summary=开发描述/changes=改动清单/selfTest=自测情况/diffStat=变更概要）；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况 / ## diff 概要）。\n   diffStat 要求：若本次改动发生在 git 仓库内，运行 git diff --stat（含 git status --short），把输出贴进 diffStat（≤1500 字符）；关键逻辑变更可附 ≤20 行核心片段。非代码任务/无 git 仓库可省略。\n   **board_report 调用成功即任务终点：立即结束输出，不要再修改/验证任何文件**。上报后任务即刻进入验收，你继续改动会让代码在验收口径之外漂移、且阻塞 Verifier 派发（实测有 Worker 上报后又自测 16 分钟）；上报后发现新问题的，写进 selfTest 备注交由 Verifier/主窗口裁决。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate, taskId=' + t.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测。上报歧义后直接结束本轮——裁决后会有新 Worker 带着裁决答案接手。'
   return p
 }
 export function buildVerifierPrompt(t, pack) {
