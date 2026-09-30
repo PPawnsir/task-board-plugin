@@ -118,14 +118,22 @@ dsh --profile web
 - [ ] `curl -X POST http://127.0.0.1:3080/<route> -d '{"method":"..."}'` 返回 JSON 而非 405 空 body（405 空 body = 前端静态服务器的默认响应，说明路由没挂上）
 - [ ] 页面刷新后 client UI 出现（本插件：会话标题栏 📋 按钮）
 
-## 6. 其他备忘
+## 6. README 单一来源约定（发版前必做）
+
+- **根 `README.md` 是唯一来源**；npm 页面展示的是 `packages/dsh-agent-board/README.md`（发布 tarball 里的那份），两份必须逐字节一致。
+- 改了根 README 后，发版前在 `packages/dsh-agent-board` 跑一次 `npm run sync-readme`（node 跨平台复制，把根 README 覆盖进包）。
+- 校验：`Compare-Object (Get-Content README.md) (Get-Content packages\dsh-agent-board\README.md)` 无输出即一致。
+- 历史教训：v1.2.2 发版时只改了包内 README，根 README 停留在旧版，GitHub 落地页与 npm 页面内容分叉；v1.2.5 起以此约定收口。
+- docs/ 目录（含本文件）不进 npm 包（`files[]` 不含），维护者文档只存在于仓库。
+
+## 7. 其他备忘
 
 - **`patchReload: live`** 只对 `cordis.patch.yml` 改动生效；新增/移除 bundle（package.json 变化）必须重启进程
 - **动态 vs 静态冲突**：静态包挂载后，同名动态插件必须停掉（工具名重复注册会冲突）；DSH 重启会自然清掉动态插件，通常无需手动处理
 - **数据兼容**：动态/静态读写同一份数据文件（本插件 `~/.dsh/tasks-<sessionId>.json`），切换形态不丢数据
 - 参考实现：`~/.dsh/profiles/web/node_modules/dsh-chat-import`（完整模板）、`web_backup/node_modules/dsh-task-board`（webServer 路由模式出处）
 
-## 7. 静态化的架构冲击：进程单例 vs 会话隔离（重要）
+## 8. 静态化的架构冲击：进程单例 vs 会话隔离（重要）
 
 动态插件**每个会话一个实例**，实例内的状态（如执行池）天然按会话隔离。静态 Bundle 挂 host 层后是**全进程单例**——所有会话共享同一个 `apply` 闭包。
 
