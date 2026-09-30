@@ -194,6 +194,7 @@ git push --follow-tags     # tag 推送触发流水线
 3. 点 **Publish release** —— 触发发布流水线
 
 - 流水线会拒绝与 tag 不一致的 `package.json` version（如 tag `v1.0.1` 但包里是 `1.0.0`），防止版本错位
+- **README 单一来源**：本文件（根 README）即唯一来源；发版前在 `packages/dsh-agent-board` 跑一次 `npm run sync-readme` 同步进包（npm 页面展示的是包内 README）
 - 需在仓库 **Settings → Secrets and variables → Actions** 配置 `NPM_TOKEN`
   （npm granular access token：bypass 2FA + direct publish）
 - 日常 push / PR 有 `test.yml` 跑语法检查 + 30 例单测
