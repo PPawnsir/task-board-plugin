@@ -668,16 +668,27 @@ export function apply(ctx) {
       })
       return result
     }
-    // 高优介入（v74）：有活跃 run 则直接 followup 进其会话；无则只记录 history（下次派发随 prompt 注入）
+    // 高优介入（v74）：有活跃 run 则直接打进其会话；无则只记录 history（下次派发随 prompt 注入）
+    // 通道选择（v1.2.4）：steer 优先——下一个 step 边界即消费；followup 要等整个 turn 结束，
+    // 长 turn 下干预形同失联（实测：Worker 单 turn 跑 10+ 分钟，「口径重写」类干预到位时活已按旧口径干完）。
+    // steer 不可用（老宿主无此方法）或抛错时回退 followup。
     async function doIntervene(sid, actor, taskId, msg) {
       if (!(msg || '').trim()) return { ok: false, error: 'message required' }
       var rec = runsFor(sid)[taskId]
       var delivered = false
+      var channel = ''
       if (rec && rec.run && rec.run.localAgent) {
-        try { rec.run.localAgent.followup(makeMsg('[高优先级干预] 来自主窗口/用户的指令：\n\n' + msg + '\n\n请优先响应此指令，然后继续当前任务。', 'notice', '高优干预: ' + taskId)); delivered = true } catch (_) {}
+        var agent = rec.run.localAgent
+        var m = makeMsg('[高优先级干预] 来自主窗口/用户的指令：\n\n' + msg + '\n\n请优先响应此指令，然后继续当前任务。', 'notice', '高优干预: ' + taskId)
+        if (typeof agent.steer === 'function') {
+          try { agent.steer(m); delivered = true; channel = 'steer' } catch (_) {}
+        }
+        if (!delivered) {
+          try { agent.followup(m); delivered = true; channel = 'followup' } catch (_) {}
+        }
       }
       await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === taskId }); if (t) { if (!Array.isArray(t.messages)) t.messages = []; t.messages.push({ kind: 'intervention', text: msg, at: new Date().toISOString(), by: actor }); ah(t, t.status, t.status, actor, '高优干预: ' + msg.slice(0, 200) + (delivered ? '' : '（无活跃 run，随下次派发注入）')) }; return t })
-      return { ok: true, delivered: delivered }
+      return { ok: true, delivered: delivered, channel: channel }
     }
     // 终止执行某任务的 run：dispose 并回 pending（verifying 则保持待审，由新 verifier 接手）
     async function doTerminate(sid, actor, taskId) {
@@ -735,7 +746,7 @@ export function apply(ctx) {
     handle('intervene-agent', async function (args) { return doIntervene(rpcSessionId(args), getActorId(), args.taskId, args.message) })
     // 主 Agent 工具版（Team 模式下主 Agent 通过工具裁决/介入）
     ctx.tools.register(defineTool({ name: 'task_arbitrate', description: 'Team 模式：裁决 Worker 上报的歧义（escalation）。答案直接转达给原 Worker 继续执行。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, answer: { type: 'string' } }, required: ['taskId', 'answer'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; return doResolveEscalation(toolSessionId(), getActorId(), args.taskId, args.answer) } }))
-    ctx.tools.register(defineTool({ name: 'task_intervene', description: 'Team 模式：向执行某任务的池中 Agent 发起高优先级指令（插入其队列头部，当前 turn 结束后优先处理）。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, message: { type: 'string' } }, required: ['taskId', 'message'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; return doIntervene(toolSessionId(), getActorId(), args.taskId, args.message) } }))
+    ctx.tools.register(defineTool({ name: 'task_intervene', description: 'Team 模式：向执行某任务的池中 Agent 发起高优先级指令（steer 通道，当前 step 结束即响应；无活跃 run 时记录随下次派发注入）。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, message: { type: 'string' } }, required: ['taskId', 'message'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; return doIntervene(toolSessionId(), getActorId(), args.taskId, args.message) } }))
     // ===== 池中 Agent 结构化回报工具（双模：工具优先，文本分段为降级路径）=====
     ctx.tools.register(defineTool({ name: 'board_report', description: '[任务看板 Worker 专用] 上报任务结果。kind=complete 时填 summary/changes/selfTest/diffStat（git 仓库内改动附 git diff --stat 概要）；kind=escalate 时填 question（歧义上报，等待主窗口裁决）。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, kind: { type: 'string', enum: ['complete', 'escalate'] }, summary: { type: 'string' }, changes: { type: 'string' }, selfTest: { type: 'string' }, diffStat: { type: 'string', description: '变更概要：git diff --stat（含 git status --short）输出，≤1500 字符' }, question: { type: 'string' } }, required: ['taskId', 'kind'] }, output: jo(), execute: async function (args) {
       var sid = toolSessionId(); var actor = getActorId()
