@@ -154,7 +154,8 @@ scenarios['manual-pickup'] = async () => {
 // S5 Team模式全流程
 scenarios['team-flow'] = async () => {
   console.log('\n[team-flow] Team模式：草稿→依赖门控→歧义上报→裁决→接续');
-  await rpcRaw('set-team-mode', { on: true });
+  const tm = await rpcRaw('set-team-mode', { enabled: true }); // 注意：服务端字段是 enabled（误传 on 会静默关成 false）
+  ok(tm.teamMode === true, 'Team 模式开启（enabled 字段）');
   await rpcRaw('set-board-mode', { mode: 'auto' });
   try {
     // 草稿先行（Team 模式规范：先全部草稿、写好依赖、再统一发布）
@@ -169,8 +170,10 @@ scenarios['team-flow'] = async () => {
     });
     const aid = a.task.id, bid = b.task.id;
     ok(aid && bid, '两张草稿卡创建成功');
-    await rpcRaw('update-task', { taskId: aid, publish: true });
-    await rpcRaw('update-task', { taskId: bid, publish: true });
+    const pa = await rpcRaw('update-task', { taskId: aid, publish: true });
+    const pb = await rpcRaw('update-task', { taskId: bid, publish: true });
+    if (pa.ok !== true || pb.ok !== true) console.log('  [debug] pa=' + JSON.stringify(pa).slice(0, 200) + ' pb=' + JSON.stringify(pb).slice(0, 200));
+    ok(pa.ok === true && pb.ok === true, '两张草稿发布成功（publish 返回值受检）');
     // 依赖门控：A 派发，B 因依赖未满足不派发
     const tA1 = await waitTask(aid, (t) => t.status === 'in-progress', 'A 自动派发', 60 * 1000);
     ok(tA1, 'A（无依赖）被派发');
@@ -189,7 +192,7 @@ scenarios['team-flow'] = async () => {
     await rpcRaw('archive-task', { taskId: aid });
     await rpcRaw('archive-task', { taskId: bid });
   } finally {
-    await rpcRaw('set-team-mode', { on: false });
+    await rpcRaw('set-team-mode', { enabled: false });
   }
 };
 

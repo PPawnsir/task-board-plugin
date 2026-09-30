@@ -83,7 +83,26 @@ export function apply(ctx) {
     }
     // 原子写盘：先写临时文件再 rename——强杀若发生在写盘中途，磁盘上最多留个 .tmp 残件，
     // 看板本体永远不会是截断的半个 JSON（此前非原子直写，kill 中写 = 看板被 seed 清空）
-    async function wt(sid, d) { var c = JSON.stringify(d); var p = boardPath(sid); var tmp = p + '.tmp'; try { await fsNode.promises.writeFile(tmp, c, 'utf8'); await fsNode.promises.rename(tmp, p) } catch (e) { console.error('[task-board] write:', String(e)); throw e } }
+    // Windows 特有问题：rename 目标被并发读句柄/Defender/索引器短暂占用时抛 EPERM/EBUSY
+    // （E2E 实测：GUI 3s 轮询 + 脚本 10s 轮询下偶发，publish 写入整个丢失）。
+    // 对这类瞬时占用做有限退避重试；其他错误（只读/不存在目录等）直接抛。
+    async function wt(sid, d) {
+      var c = JSON.stringify(d); var p = boardPath(sid); var tmp = p + '.tmp'
+      var lastErr = null
+      for (var attempt = 0; attempt < 6; attempt++) {
+        try { await fsNode.promises.writeFile(tmp, c, 'utf8'); await fsNode.promises.rename(tmp, p); return }
+        catch (e) {
+          lastErr = e
+          var code = e && e.code
+          if (code === 'EPERM' || code === 'EBUSY' || code === 'ENOTEMPTY' || code === 'EACCES') {
+            await new Promise(function (r) { setTimeout(r, 60 * (attempt + 1)) })
+            continue
+          }
+          console.error('[task-board] write:', String(e)); throw e
+        }
+      }
+      console.error('[task-board] write: retry exhausted (6 次) ->', String(lastErr)); throw lastErr
+    }
     // 每会话一条 promise 链，串行化所有 读-改-写，消除并发写竞争
     var fileLocks = {}
     function withLock(sid, fn) { var prev = fileLocks[sid] || Promise.resolve(); var p = prev.then(function () { return fn() }); fileLocks[sid] = p.catch(function () {}); return p }
