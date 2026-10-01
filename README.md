@@ -19,12 +19,13 @@
 
 | 宿主 DSH 版本 | 应装插件版本 | 原因 |
 | --- | --- | --- |
-| **≥ 0.1.7**（含 rc） | **≥ 1.2.2（必须）** | 0.1.7 会话日志升级为 format v4：插件消息 `source.kind` 必须是生产者自有 kind。1.2.1 及更早会在**任务完成/阻塞回执**落盘时抛 `SessionFormatError: format v4 message requires a producer-owned source kind`，并连带使主窗口当前轮次失败（表现为「本轮运行失败」）；同时「跳转会话」因宿主移除 `sessions.open` 而失效（控制台 `sessionsSvc.open is not a function`），卡片活动心跳读不到 v4 日志（`session.v4.jsonl.zstd`） |
+| **≥ 0.2.0**（含 rc） | **≥ 1.3.0（必须）** | 0.2.0 起宿主在启动/安装时强制校验 peerDependencies，区间不含 0.2.0 的包**直接拒绝激活**（路由不挂载、面板不出现）。1.3.0 声明 `^0.1.7 \|\| 0.2.0-rc.2 \|\| ^0.2.0`——注意 semver 预发布不命中宽区间，`0.2.0-rc.2` 必须显式枚举。运行时 API（subagents/systemPrompt/agents/uiWorkspace.openSession/sessions/v4 日志格式）在 0.2.0 全部兼容，已过 0.2.0-rc.2 实测（E2E 23+8 断言全绿） |
+| **0.1.7 ~ 0.1.7-x**（含 rc） | **≥ 1.2.2（必须）** | 0.1.7 会话日志升级为 format v4：插件消息 `source.kind` 必须是生产者自有 kind。1.2.1 及更早会在**任务完成/阻塞回执**落盘时抛 `SessionFormatError: format v4 message requires a producer-owned source kind`，并连带使主窗口当前轮次失败（表现为「本轮运行失败」）；同时「跳转会话」因宿主移除 `sessions.open` 而失效（控制台 `sessionsSvc.open is not a function`），卡片活动心跳读不到 v4 日志（`session.v4.jsonl.zstd`） |
 | 0.1.5-rc.1 ~ 0.1.6 | ≤ 1.2.1 | 1.2.2 起按 0.1.7 协议编写（v4 source kind、`uiWorkspace.openSession` 跳转），旧宿主未做回归验证，建议停留 1.2.1 |
 
 ```sh
-dsh plugin --profile web add dsh-agent-board@1.2.2   # 0.1.7+ 宿主
-dsh plugin --profile web add dsh-agent-board@1.2.1   # 0.1.5/0.1.6 宿主
+dsh plugin --profile web add dsh-agent-board@latest   # 0.1.7+/0.2.x 宿主（推荐）
+dsh plugin --profile web add dsh-agent-board@1.2.1    # 0.1.5/0.1.6 宿主
 ```
 
 > 从 ≤1.2.1 升到 ≥1.2.2 必须重启 DSH（host 端代码在启动时加载；1.2.2 之前的老版本还有一个路由残留 bug：禁用/启用热重载会撞 `duplicate exact route`，只能重启恢复，1.2.2 已修复）。
