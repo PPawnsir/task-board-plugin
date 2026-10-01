@@ -34,7 +34,20 @@ jobs:
             exit 1
           fi
 
+      - name: 幂等检查：npm 已有该版本则跳过发布
+        id: check
+        working-directory: packages/dsh-agent-board
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          if npm view "dsh-agent-board@$PKG" version --registry=https://registry.npmjs.org 2>/dev/null | grep -q "$PKG"; then
+            echo "已存在 dsh-agent-board@$PKG（如本地手动发过/重跑），跳过发布"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 发布到 npm（prepublishOnly 自动跑语法检查 + 30 例单测，挂了拒发）
+        if: steps.check.outputs.skip != 'true'
         working-directory: packages/dsh-agent-board
         run: npm publish --access public
         env:
