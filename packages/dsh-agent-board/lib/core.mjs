@@ -107,22 +107,26 @@ export function classifyPipeline(t) {
 // ===== 配置（一次性派发模型：max*=并发上限；min* 字段保留仅为兼容旧看板文件，引擎不使用）=====
 // 两级超时：软超时（默认 30min）只上报主窗口提醒，不杀 run；硬超时（默认 120min）才兜底
 // dispose 释放并发位——人在线时由人决策，人不在时系统兜底。
+// feedbackEnabled（学习飞轮 v1 总开关，默认开）：关掉后不生成候选教训、prompt 不提软召回、
+// 详情页沉淀按钮不渲染。老看板文件没有该字段 → 默认 true（normalizeBoard 补齐）。
 export function cfg(d) {
   var soft = Math.max(1, Math.min(480, d.softTimeoutMin || 30))
   var hard = Math.max(soft, Math.min(1440, d.hardTimeoutMin || 120))
-  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard }
+  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, feedbackEnabled: d.feedbackEnabled !== false }
 }
 
 // ===== 看板文件种子 =====
 // poolStatus 必须始终在种子/归一化里存在：task_list 工具输出 poolStatus: d.poolStatus，
 // 缺字段 = undefined → 工具结果的 lossless-JSON 校验会拒（"value is not lossless JSON"）
-export function seed(sid) { return { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, poolStatus: { workers: [], verifiers: [] }, tasks: [] } }
+export function seed(sid) { return { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, poolStatus: { workers: [], verifiers: [] }, tasks: [] } }
 // 旧文件缺 poolStatus 的归一化（读路径兜底，保证任何历史文件都满足工具输出契约）
 // touches 兼容：老任务没有该字段照常（这里只把「存在但非数组」的脏值收敛成数组，
 // 避免 holdsFiles/touchesConflict 里 Array.isArray 判定之外还有第三种形态）
+// feedbackEnabled 兼容：老看板没有该字段（或落了脏值）一律补 true——默认开，行为与 v1 之前一致。
 export function normalizeBoard(d) {
   if (d && typeof d === 'object') {
     if (!d.poolStatus || typeof d.poolStatus !== 'object' || !Array.isArray(d.poolStatus.workers) || !Array.isArray(d.poolStatus.verifiers)) d.poolStatus = { workers: [], verifiers: [] }
+    if (typeof d.feedbackEnabled !== 'boolean') d.feedbackEnabled = true
     if (Array.isArray(d.tasks)) {
       for (var i = 0; i < d.tasks.length; i++) {
         var t = d.tasks[i]
@@ -166,7 +170,44 @@ export function isEscalation(output) { return /\[ESCALATE\]/i.test(output || '')
 // 从 run.result.output（ContentBlock[]）提取纯文本
 export function outputText(res) { if (!res || !res.output) return ''; var parts = []; for (var i = 0; i < res.output.length; i++) { var b = res.output[i]; if (b && b.type === 'text' && b.text) parts.push(b.text) } return parts.join('\n') }
 
+// ===== 学习飞轮 v1：候选教训信号（只产信号，不做存储）=====
+// 设计红线（零耦合）：看板只把「候选教训」当作一条结构化的 messages 记录落盘（详情页可见），
+// 绝不调用任何笔记/记忆工具的 API、不写任何外部文件、也不知道对方最终把教训存到哪。
+// 沉淀动作由主窗口 agent 自己选择可用工具完成（push-lesson RPC 只负责把候选 followup 过去）。
+// 触发点（两处都先过 feedbackEnabled 总开关）：Verifier 驳回、主窗口仲裁结论。
+// 候选教训文本：三段式 markdown（场景 / 明细段… / 来源）；明细段每段截 300 字。
+// parts = [[标签, 正文], ...]，如 [['错误做法', 驳回理由]] 或 [['疑问', q], ['裁决结论', a]]。
+export function lessonText(scene, parts, source) {
+  var lines = ['场景: ' + String(scene == null ? '' : scene).trim().slice(0, 200)]
+  var list = Array.isArray(parts) ? parts : []
+  for (var i = 0; i < list.length && i < 4; i++) {
+    if (!list[i]) continue
+    lines.push(String(list[i][0]) + ': ' + String(list[i][1] == null ? '' : list[i][1]).trim().slice(0, 300))
+  }
+  lines.push('来源: ' + String(source == null ? '' : source))
+  return lines.join('\n')
+}
+// 往任务 messages 追一条候选教训（kind='lesson-candidate'）。轻量判重：同一 at 或正文前 80 字相同
+// 即视为同一事件（同一驳回/裁决可能被工具通道与 run 结算两条路径各触发一次）→ 不重复落。
+// 返回 true = 本次新落一条（调用方据此决定要不要提示 UI/主窗口）。
+export function pushLesson(t, text, at, by) {
+  if (!t || !text) return false
+  if (!Array.isArray(t.messages)) t.messages = []
+  var stamp = at || new Date().toISOString()
+  var head = String(text).slice(0, 80)
+  for (var i = 0; i < t.messages.length; i++) {
+    var m = t.messages[i]
+    if (!m || m.kind !== 'lesson-candidate') continue
+    if (m.at === stamp || String(m.text || '').slice(0, 80) === head) return false
+  }
+  t.messages.push({ kind: 'lesson-candidate', text: String(text), at: stamp, by: by || 'system' })
+  return true
+}
+
 // ===== 一次性子代理 prompt 构建（上下文由主窗口 agent 写入 description/instructions，系统只追加生命周期记录）=====
+// 学习飞轮 v1 软召回引导（feedbackEnabled 开时才拼进 prompt）：环境里若有笔记/记忆类工具，先查历史教训再动手。
+// 只是"提示先搜"——看板不代查、不调用任何记忆工具、也无从知道有没有这类工具（零耦合）。
+export var LESSON_RECALL_HINT = '开工前如环境装有笔记/记忆类工具（如 note_search），先检索相关历史教训再动手。'
 // 过程记录注入：驳回/裁决/干预 history + messages（裁决答案/干预指令/歧义原文）是系统管理的，必须带给子代理
 export function histNotes(t) { return (t.history || []).filter(function (h) { return h.note && (/歧义|裁决|驳回|干预|rejected/i.test(h.note)) }).map(function (h) { return '- [' + h.timestamp + '] ' + String(h.note).slice(0, 300) }).join('\n') }
 export function buildMessages(t) {
@@ -191,7 +232,7 @@ export function buildContextPackSection(files, notes) {
   }
   return parts.length ? parts.join('\n\n') : ''
 }
-export function buildWorkerPrompt(t, pack) {
+export function buildWorkerPrompt(t, pack, feedbackEnabled) {
   var notes = histNotes(t)
   var msgs = buildMessages(t)
   var p = '你是一个一次性任务执行 Worker。完成下面这个任务，完成后本会话即销毁。\n\ntaskId: ' + t.id + '\n任务: ' + t.title + '\n描述: ' + (t.description || '')
@@ -200,7 +241,10 @@ export function buildWorkerPrompt(t, pack) {
   if (notes) p += '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，请务必遵循最新裁决方向）：\n' + notes
   if (msgs) p += '\n\n该任务的详细消息（裁决答案/干预指令/歧义原文等，请务必遵循）：\n' + msgs
   if (pack) p += '\n\n' + pack
-  p += '\n\n完成契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + t.id + '，summary=开发描述/changes=改动清单/selfTest=自测情况/diffStat=变更概要）；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况 / ## diff 概要）。\n   diffStat 要求：若本次改动发生在 git 仓库内，运行 git diff --stat（含 git status --short），把输出贴进 diffStat（≤1500 字符）；关键逻辑变更可附 ≤20 行核心片段。非代码任务/无 git 仓库可省略。\n   **board_report 调用成功即任务终点：立即结束输出，不要再修改/验证任何文件**。上报后任务即刻进入验收，你继续改动会让代码在验收口径之外漂移、且阻塞 Verifier 派发（实测有 Worker 上报后又自测 16 分钟）；上报后发现新问题的，写进 selfTest 备注交由 Verifier/主窗口裁决。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate, taskId=' + t.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测。上报歧义后直接结束本轮——裁决后会有新 Worker 带着裁决答案接手。'
+  // 学习飞轮 v1 软召回（feedbackEnabled 关闭时不出现）：只提示"先查历史教训"，看板绝不代查——
+  // 环境里有没有笔记/记忆类工具、教训库长什么样，都是 Worker 自己判断的事（零耦合）。
+  if (feedbackEnabled !== false) p += '\n\n' + LESSON_RECALL_HINT
+  p += '\n\n完成契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + t.id + '，summary=开发描述/changes=改动清单/selfTest=自测情况/diffStat=变更概要）；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况 / ## diff 概要）。\n   diffStat 要求：若本次改动发生在 git 仓库内，运行 git diff --stat（含 git status --short），把输出贴进 diffStat（≤1500 字符）；关键逻辑变更可附 ≤20 行核心片段。非代码任务/无 git 仓库可省略。\n   **board_report 调用成功即任务终点：立即结束输出，不要再修改/验证任何文件**。上报后任务即刻进入验收，你继续改动会让代码在验收口径之外漂移、且阻塞 Verifier 派发（实测有 Worker 上报后又自测 16 分钟）；上报后发现新问题的，写进 selfTest 备注交由 Verifier/主窗口裁决。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate, taskId=' + t.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测。上报歧义后直接结束本轮——裁决后会有新 Worker 带着裁决答案接手。\n3. 进展汇报（较大任务）：按里程碑推进，每完成一个可验证的里程碑调用一次 board_report（kind="progress", taskId=' + t.id + ', question=一行进展摘要，≤200 字符）。只在有实际产物/结论时报；禁止定时汇报或表演式汇报。'
   return p
 }
 export function buildVerifierPrompt(t, pack) {

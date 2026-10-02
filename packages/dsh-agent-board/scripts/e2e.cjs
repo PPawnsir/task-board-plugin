@@ -5,7 +5,7 @@
 //   node scripts/e2e.cjs --session <会话id> [--base http://127.0.0.1:3080] [--only 场景1,场景2]
 //
 // 前置：--session 指定的会话必须在目标实例的 GUI 里处于打开状态（子代理 spawn 需要活的 root agent）。
-// 场景（默认跑除 team-flow/work-mode 外的全部；两者需显式 --only 指定）：
+// 场景（默认跑除 team-flow/work-mode/progress-report 外的全部；这三者需显式 --only 指定）：
 //   auto-full      非Team自动模式全流程：创建(full+上下文注入+硬性验收) → 自动派发 → Worker → Verifier → resolved
 //   manual-gate    手动模式门禁：manual 下任务不被自动领取；「派发」按钮可流转
 //   manual-claim   手动模式领取：主窗口 claim → 办理 → resolve → verify → resolved
@@ -13,6 +13,9 @@
 //   team-flow      Team模式：草稿→发布→依赖门控→Worker 歧义上报→主窗口裁决→重派完成→依赖任务接续
 //   team-draft-default  Team模式默认草稿护栏：不传 draft → 草稿；draft:false → pending；publish → pending；关 Team → pending
 //   work-mode      工作模式三档往返（set-work-mode）+ 老 RPC 兼容断言（纯参数往返，无子代理）
+//   progress-report 里程碑进展通道：Worker 中途 board_report(kind=progress) → lastProgress + messages 落盘
+//
+// 默认跑除 team-flow / work-mode / progress-report 外的全部；这三个需显式 --only 指定（progress-report 驱动真实子代理、较慢）。
 //
 // 全部场景自带清理（任务归档、临时文件删除），退出码 0=全过 / 1=有失败。
 
@@ -276,6 +279,44 @@ scenarios['work-mode'] = async () => {
   ok(back.workMode === 'auto' && back.boardMode === 'auto' && back.teamMode === false, '收尾复原 workMode=auto');
 };
 
+// S8 里程碑进展通道（board_report kind=progress → 卡片 lastProgress + 详情页 progress 消息）
+// 注意：本场景驱动真实子代理（较慢，约 1~3 分钟），默认不在场景清单里——用 --only progress-report 显式跑。
+scenarios['progress-report'] = async () => {
+  console.log('\n[progress-report] 里程碑进展通道：中途 progress 上报 → 完成后 lastProgress + messages 落盘');
+  await rpcRaw('set-board-mode', { mode: 'auto' });
+  await rpcRaw('set-team-mode', { enabled: false });
+  const r = await rpcRaw('create-task', {
+    title: 'E2E progress-report ' + new Date().toISOString().slice(11, 19),
+    pipeline: 'work',
+    description: '只读验证任务，不许改动任何文件。依次做三件事：①读 packages/dsh-agent-board/README.md，'
+      + '读完立刻调用一次 board_report（kind="progress", taskId=本任务id, question=一行进展摘要，例如「已读完 README」）；'
+      + '②读 packages/dsh-agent-board/package.json，读完再调用一次 board_report（kind="progress", taskId=本任务id, question 写第二行进展摘要）；'
+      + '③两次进展报完后，才调用 board_report（kind="complete", taskId=本任务id, summary/changes/selfTest 照实填）。'
+      + '严禁跳过 progress 直接 complete，也不要定时汇报。',
+  });
+  const id = r.task && r.task.id;
+  if (!ok(id, '进展验证任务创建成功（描述引导中途 progress 上报）')) return;
+  const t1 = await waitTask(id, (t) => t.status === 'in-progress' && t.claimedBy, '自动派发（Worker 认领）');
+  ok(t1, '自动派发生效');
+  // 完成前先抓一次：确认「进行中」阶段卡片展示字段已落地（覆盖式，只留最新一条）
+  const tMid = await waitTask(id, (t) => !!t.lastProgress, '中途 lastProgress 落地', TIMEOUT);
+  ok(tMid, '进行中阶段 lastProgress 已写入（卡片「最近进展」有内容可显示）');
+  if (tMid) {
+    ok(typeof tMid.lastProgress.text === 'string' && tMid.lastProgress.text.length > 0, 'lastProgress.text 非空');
+    ok(!!tMid.lastProgress.at, 'lastProgress.at 存在（卡片相对时间可渲染）');
+    ok(tMid.lastProgress.text.length <= 200, 'lastProgress.text ≤200 字符（截断口径）');
+  }
+  const t2 = await waitTask(id, (t) => t.status === 'resolved', 'Worker 完成 → resolved');
+  ok(t2, 'Worker 完成后任务 resolved');
+  if (t2) {
+    ok(!!t2.lastProgress && !!t2.lastProgress.text, '完成任务仍保留 lastProgress（覆盖式最新一条）');
+    const pm = (t2.messages || []).filter((m) => m.kind === 'progress');
+    ok(pm.length >= 1, 'messages 含 kind=progress 条目（详情页可展示，共 ' + pm.length + ' 条）');
+    ok(pm.every((m) => !!m.at && m.text && m.text.length <= 200), 'progress 条目含 at/text 且 text ≤200 字符');
+  }
+  await rpcRaw('archive-task', { taskId: id });
+};
+
 // ===== 主流程 =====
 (async () => {
   // 健康检查：实例可达 + 会话看板可读
@@ -284,7 +325,7 @@ scenarios['work-mode'] = async () => {
     console.log('实例 ' + BASE + ' | 会话 ' + SID.slice(0, 20) + '… | boardMode=' + st.boardMode + ' teamMode=' + st.teamMode);
   } catch (e) { console.error('实例不可达: ' + e.message); process.exit(1) }
 
-  const names = args.only || Object.keys(scenarios).filter((n) => n !== 'team-flow' && n !== 'work-mode');
+  const names = args.only || Object.keys(scenarios).filter((n) => n !== 'team-flow' && n !== 'work-mode' && n !== 'progress-report');
   for (const name of names) {
     if (!scenarios[name]) { console.error('未知场景: ' + name + '（可用: ' + Object.keys(scenarios).join(', ') + '）'); process.exit(1) }
     try { await scenarios[name]() } catch (e) { ok(false, '场景异常: ' + String(e).slice(0, 200)) }

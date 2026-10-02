@@ -2,7 +2,16 @@
 // 覆盖：状态机流转 / 依赖校验与环检测 / 管线分类 / 输出解析 / prompt 构建 / 派发决策 / 孤儿回收
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import zlib from 'node:zlib'
 import * as core from '../lib/core.mjs'
+// 粒度治理（软闸门）住在 index.mjs（IO 编排层）：纯函数 + 契约文案常量导出，便于这里直接断言
+import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE } from '../index.mjs'
+// Token 消耗聚合（纯函数 + 日志读取的优雅降级）住在 index.mjs，直接断言
+import { aggregateUsageSummary, readRunUsage, findRunLog } from '../index.mjs'
 
 function mkTask(over) { return Object.assign({ id: 't1', title: 'T', description: '', status: 'pending', priority: 'medium', tags: [], parentId: null, assignMode: 'auto', assignee: null, context: { instructions: '' }, acceptance: '', dependsOn: [], pipeline: 'full', claimedBy: null, claimedAt: null, createdAt: '2026-01-01T00:00:00Z', resolvedAt: null, history: [], messages: [] }, over || {}) }
 function mkBoard(tasks) { return { version: 11, ownerSession: 's1', boardMode: 'auto', tasks: tasks || [] } }
@@ -517,4 +526,214 @@ test('isOrphan: cancelled 状态不回收（不在 in-progress）', () => {
 test('isOrphan: 刚 claim 的（<2min）不回收', () => {
   const t = mkTask({ status: 'in-progress', claimedBy: 'run-x', claimedAt: new Date().toISOString() })
   assert.equal(core.isOrphan(mkBoard([t]), t, {}, Date.now()), false)
+})
+
+// ===== 任务粒度治理（软闸门：只提示，绝不阻断）=====
+test('suggestSplitOf: 常规粒度任务不提示（返回空串）', () => {
+  assert.equal(suggestSplitOf(mkTask({ title: '改按钮文案', description: '把按钮文案从 A 改成 B，肉眼确认' })), '')
+  assert.equal(suggestSplitOf(mkTask()), '')
+  assert.equal(suggestSplitOf(undefined), '')
+})
+
+test('suggestSplitOf: description 超过 500 字符触发建议（恰好 500 不触发）', () => {
+  assert.equal(suggestSplitOf(mkTask({ description: 'x'.repeat(500) })), '')
+  assert.equal(suggestSplitOf(mkTask({ description: 'x'.repeat(501) })), SUGGEST_SPLIT_TEXT)
+})
+
+test('suggestSplitOf: 命中史诗特征词触发建议（title / description 任一命中）', () => {
+  assert.equal(suggestSplitOf(mkTask({ title: '全量重构派发引擎' })), SUGGEST_SPLIT_TEXT)
+  assert.equal(suggestSplitOf(mkTask({ title: 'T', description: '把整个看板 UI 做一遍' })), SUGGEST_SPLIT_TEXT)
+  assert.equal(suggestSplitOf(mkTask({ title: 'T', description: '系统级改造' })), SUGGEST_SPLIT_TEXT)
+})
+
+test('suggestSplitOf: 建议文案含 10~30 分钟粒度与拆分出口', () => {
+  assert.match(SUGGEST_SPLIT_TEXT, /10~30 分钟/)
+  assert.match(SUGGEST_SPLIT_TEXT, /parentId/)
+  assert.match(SUGGEST_SPLIT_TEXT, /收窄边界/)
+})
+
+test('withSplitHint: 命中时才附加 suggestSplit，未命中返回体形态不变（老调用方无感）', () => {
+  const big = withSplitHint({ ok: true, task: {} }, mkTask({ title: '全量重写' }))
+  assert.equal(big.suggestSplit, SUGGEST_SPLIT_TEXT)
+  const small = withSplitHint({ ok: true, task: {} }, mkTask({ title: '改个错别字' }))
+  assert.deepEqual(Object.keys(small), ['ok', 'task']) // 不附加 suggestSplit
+  assert.equal(small.suggestSplit, undefined)
+})
+
+test('粒度治理接线：工具描述/Team 提示词/双出口返回体均已落地（源码级轻量断言）', () => {
+  const src = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
+  assert.match(TASK_SIZE_CONTRACT, /建议粒度：单任务 10~30 分钟/)
+  assert.match(TASK_SIZE_CONTRACT, /epic 卡/)
+  assert.match(TEAM_SPLIT_RULE, /大任务必须拆分/)
+  assert.match(TEAM_SPLIT_RULE, /pipeline 传 direct/)
+  assert.match(TEAM_SPLIT_RULE, /parentId=父卡 id/)
+  assert.match(TEAM_SPLIT_RULE, /checkParentAuto/)
+  assert.ok(src.includes("' + TASK_SIZE_CONTRACT")) // task_create 工具描述已拼接契约
+  assert.ok(src.includes("' + TEAM_SPLIT_RULE"))    // teamSection 已拼接第 6 条
+  assert.equal((src.match(/withSplitHint\(\{ ok: true, task: t \}, t\)/g) || []).length, 2) // task_create 工具 + create-task RPC
+  assert.match(src, /全量\|整体\|系统级\|全面\|重构\|所有模块\|整个/) // 史诗特征词表在位
+  assert.match(src, /SPLIT_DESC_LIMIT = 500/)                        // 500 字符阈值在位
+})
+
+// ===== Token 消耗统计 =====
+test('aggregateUsageSummary: 空任务/无 usage 任务 → 全零 + 空 Top', () => {
+  const s = aggregateUsageSummary([mkTask({ id: 'a' }), mkTask({ id: 'b', usage: null })])
+  assert.equal(s.total, 0); assert.equal(s.input, 0); assert.equal(s.output, 0); assert.equal(s.cacheRead, 0)
+  assert.deepEqual(s.byModel, {}); assert.deepEqual(s.topTasks, [])
+  assert.deepEqual(aggregateUsageSummary(undefined), { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, byModel: {}, topTasks: [] })
+})
+
+test('aggregateUsageSummary: 总量/输入输出缓存拆分累加 + 按模型小计合并', () => {
+  const u1 = { input: 100, output: 20, cacheRead: 1000, cacheWrite: 0, total: 1120, runs: 2, models: { 'deepseek-flash': 1000, 'glm-5': 120 } }
+  const u2 = { input: 5, output: 5, cacheRead: 0, cacheWrite: 3, total: 13, runs: 1, models: { 'deepseek-flash': 13 } }
+  const s = aggregateUsageSummary([mkTask({ id: 'a', usage: u1 }), mkTask({ id: 'b', usage: u2 }), mkTask({ id: 'c' })])
+  assert.equal(s.total, 1133); assert.equal(s.input, 105); assert.equal(s.output, 25)
+  assert.equal(s.cacheRead, 1000); assert.equal(s.cacheWrite, 3)
+  assert.deepEqual(s.byModel, { 'deepseek-flash': 1013, 'glm-5': 120 })
+})
+
+test('aggregateUsageSummary: Top 任务按总量降序、最多 8 条、带 runs 计数', () => {
+  const tasks = []
+  for (let i = 0; i < 12; i++) tasks.push(mkTask({ id: 't' + i, title: 'T' + i, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: i * 10, runs: i } }))
+  const s = aggregateUsageSummary(tasks)
+  assert.equal(s.topTasks.length, 8)
+  assert.deepEqual(s.topTasks.map(x => x.total), [110, 100, 90, 80, 70, 60, 50, 40]) // 降序取前 8
+  assert.equal(s.topTasks[0].id, 't11'); assert.equal(s.topTasks[0].title, 'T11'); assert.equal(s.topTasks[0].runs, 11)
+})
+
+test('readRunUsage: run 不存在 / 日志目录不可读 → null（优雅降级，不抛错）', () => {
+  assert.equal(readRunUsage('no-such-run-' + Date.now()), null)
+  assert.equal(readRunUsage(''), null)
+  assert.equal(findRunLog('no-such-run-' + Date.now()), null)
+})
+
+test('readRunUsage: v4 多帧日志真实解析（临时目录造帧 → usage 逐帧累加 + 模型取自 request/context）', (t) => {
+  // 只在宿主支持 zstd 压缩时构造样本（Node >= 22.15 / 23.8）；否则跳过，避免 CI 假红
+  if (typeof zlib.zstdCompressSync !== 'function') { t.skip('zstdCompressSync unavailable'); return }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-usage-'))
+  const runId = 'run-usage-test'
+  const dir = path.join(root, 'bucket', runId)
+  fs.mkdirSync(dir, { recursive: true })
+  const frameOf = (events) => zlib.zstdCompressSync(Buffer.from(events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8'))
+  // 三帧：帧 1 只有模型与一次 usage；帧 2 是半截坏帧（截断，必须被跳过而不是抛错）；帧 3 又一次 usage + 无 usage 事件
+  const f1 = frameOf([
+    { type: 'request/context', data: { model: 'deepseek-flash' } },
+    { type: 'assistant/message', data: { usage: { inputTokens: 100, outputTokens: 7, cacheReadTokens: 1000, cacheWriteTokens: 0, totalTokens: 1107 } } }
+  ])
+  const good = frameOf([{ type: 'assistant/message', data: { usage: { inputTokens: 3, outputTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 5, totalTokens: 12 } } }, { type: 'step/end', data: {} }])
+  const bad = good.subarray(0, Math.max(1, good.length - 6)) // 截断帧：解压必失败
+  fs.writeFileSync(path.join(dir, 'session.v4.jsonl.zstd'), Buffer.concat([f1, bad, good]))
+  const u = readRunUsage(runId, root)
+  assert.equal(u.input, 103); assert.equal(u.output, 11); assert.equal(u.cacheRead, 1000)
+  assert.equal(u.cacheWrite, 5); assert.equal(u.total, 1119); assert.equal(u.model, 'deepseek-flash')
+  // 只有坏帧 / 无 usage 事件 → null（不是 0 值对象，调用方按「暂无数据」降级）
+  const dir2 = path.join(root, 'bucket', 'run-no-usage'); fs.mkdirSync(dir2, { recursive: true })
+  fs.writeFileSync(path.join(dir2, 'session.v4.jsonl.zstd'), frameOf([{ type: 'step/end', data: {} }]))
+  assert.equal(readRunUsage('run-no-usage', root), null)
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('Token 消耗接线：settleRun 结算累加 + 按模型小计 + get-tasks 聚合 + 仪表盘区块（源码级断言）', () => {
+  const host = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(host, /await accumulateRunUsage\(sid, rec\)/)                    // settleRun（及手动终止）结算路径调用
+  assert.match(host, /t\.usage\.models\[mk\] = \(t\.usage\.models\[mk\] \|\| 0\) \+ u\.total/) // 按模型小计累加
+  assert.match(host, /rec\.model \|\| u\.model/)                                // 模型 key 来源：派发覆盖 > 日志记录
+  assert.match(host, /inputTokens/)                                            // 字段名与真实 v4 日志一致
+  assert.match(host, /d\.usageSummary = aggregateUsageSummary\(d\.tasks\)/)     // get-tasks 现算聚合
+  assert.match(cli, /React\.createElement\(TokenUsage, \{ usage: state\.usageSummary \}\)/) // 仪表盘插入消耗区
+  assert.match(cli, /state\.usageSummary = \(d && d\.usageSummary\) \|\| null/) // 客户端取数
+  assert.match(cli, /'⛁ ' \+ fmtTokens\(t\.usage\.total\)/)                     // 进行中/已完成卡片显示本任务累计
+})
+
+// ===== 学习飞轮 v1：候选教训信号 + feedbackEnabled 开关 + 软召回 =====
+test('cfg: feedbackEnabled 默认开（缺字段/脏值都算开），只有显式 false 才关', () => {
+  assert.equal(core.cfg({}).feedbackEnabled, true)
+  assert.equal(core.cfg({ feedbackEnabled: true }).feedbackEnabled, true)
+  assert.equal(core.cfg({ feedbackEnabled: false }).feedbackEnabled, false)
+  assert.equal(core.cfg({ feedbackEnabled: 'no' }).feedbackEnabled, true) // 脏值不关（默认开）
+})
+
+test('seed/normalizeBoard: feedbackEnabled 新看板默认 true，老看板读路径补 true，显式 false 保留', () => {
+  assert.equal(core.seed('s1').feedbackEnabled, true)
+  assert.equal(core.normalizeBoard({ tasks: [] }).feedbackEnabled, true)                       // 老看板无字段 → 默认开
+  assert.equal(core.normalizeBoard({ tasks: [], feedbackEnabled: false }).feedbackEnabled, false)
+  assert.equal(core.normalizeBoard({ tasks: [], feedbackEnabled: 'x' }).feedbackEnabled, true) // 脏值收敛成默认开
+})
+
+test('lessonText: 三段式（场景/明细段/来源），明细段截 300 字', () => {
+  const t = core.lessonText('任务「X」(t1) 被 Verifier 驳回', [['错误做法', '理'.repeat(400)]], '任务 t1 · 2026-01-01')
+  const lines = t.split('\n')
+  assert.equal(lines[0], '场景: 任务「X」(t1) 被 Verifier 驳回')
+  assert.ok(lines[1].indexOf('错误做法: ') === 0)
+  assert.equal(lines[1].slice('错误做法: '.length).length, 300) // 驳回理由截 300 字
+  assert.equal(lines[2], '来源: 任务 t1 · 2026-01-01')
+  // 仲裁形态：疑问 + 裁决结论两段
+  const a = core.lessonText('任务「Y」(t2) 的歧义裁决', [['疑问', '该走 A 还是 B？'], ['裁决结论', '走 B']], '任务 t2')
+  assert.match(a, /^场景: /)
+  assert.match(a, /疑问: 该走 A 还是 B？/)
+  assert.match(a, /裁决结论: 走 B/)
+  assert.match(a, /来源: 任务 t2$/)
+})
+
+test('pushLesson: 落 kind=lesson-candidate（by 默认 system），同 at / 同内容前缀判重', () => {
+  const t = { messages: [] }
+  const txt = core.lessonText('场景', [['错误做法', '驳回理由']], 'src')
+  assert.equal(core.pushLesson(t, txt, 'T1', 'system'), true)
+  assert.equal(core.pushLesson(t, txt, 'T1', 'system'), false) // 同 at → 判重（同一事件多路径触发）
+  assert.equal(core.pushLesson(t, txt, 'T2', 'system'), false) // 同内容前缀 → 判重
+  assert.equal(t.messages.length, 1)
+  assert.equal(t.messages[0].kind, 'lesson-candidate')
+  assert.equal(t.messages[0].at, 'T1'); assert.equal(t.messages[0].by, 'system')
+  const other = core.lessonText('另一个场景', [['错误做法', '别的理由']], 'src2')
+  assert.equal(core.pushLesson(t, other), true)                 // 不同事件照常落
+  assert.equal(t.messages[1].by, 'system')                      // by 缺省 system
+  assert.equal(core.pushLesson({ messages: [] }, ''), false)    // 空文本不落
+})
+
+test('buildWorkerPrompt: 软召回引导随 feedbackEnabled 开关（关则整句消失）', () => {
+  const t = mkTask({ id: 't1', title: 'X' })
+  assert.match(core.buildWorkerPrompt(t), /先检索相关历史教训再动手/)                  // 缺省（未传）＝默认开
+  assert.match(core.buildWorkerPrompt(t, '', true), /先检索相关历史教训再动手/)
+  assert.doesNotMatch(core.buildWorkerPrompt(t, '', false), /历史教训/)               // 关 → 不出现
+  assert.doesNotMatch(core.buildWorkerPrompt(t, '', false), /笔记\/记忆类工具/)
+  assert.match(core.LESSON_RECALL_HINT, /note_search/) // 引导里点名可用的检索工具类型（只是举例）
+})
+
+test('学习飞轮接线：两处触发点 + push-lesson 开关拦截 + prompt/客户端软召回（源码级断言）', () => {
+  const host = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  // 候选教训两处触发：Verifier 驳回（文本通道 + 工具通道 + GUI RPC）与主窗口仲裁结论
+  assert.match(host, /pushRejectLesson\(d, t, vsecs\.verifySummary \|\| trimmed, t\.verification\.at\)/)
+  assert.match(host, /if \(!approved\) pushRejectLesson\(d, t, \(args\.summary \|\| ''\)/)
+  assert.match(host, /if \(args\.verdict === 'rejected'\) pushRejectLesson\(d, t, args\.comment\)/)
+  assert.match(host, /pushArbitrationLesson\(d, t, escQ, answer \|\| '', arbAt\)/)
+  // 生成前一律过 feedbackEnabled 总开关（关掉 = 不生成、不推）
+  assert.equal((host.match(/if \(!cfg\(d\)\.feedbackEnabled\) return false/g) || []).length, 2)
+  // 沉淀推送通道：关 → 明确拒绝；开 → followup 给主窗口 agent 自行选择存储工具
+  assert.match(host, /handle\('push-lesson'/)
+  assert.match(host, /if \(!cfg\(d\)\.feedbackEnabled\) return \{ ok: false, error: 'feedback disabled' \}/)
+  assert.match(host, /请用你可用的笔记\/记忆工具（如 note_manage）沉淀，或评估后忽略。/)
+  assert.match(host, /root\.followup\(makeMsg\('📚 \[任务看板\] 候选教训沉淀请求/)
+  // 开关透出：get-tasks 返回体 + set-board-config 写入 + 缓存同步（systemPrompt 同步读取）
+  assert.match(host, /d\.feedbackEnabled = cfg\(d\)\.feedbackEnabled/)
+  assert.match(host, /args\.key === 'feedbackEnabled'/)
+  assert.match(host, /feedbackCache\[sid\] = d\.feedbackEnabled/)
+  assert.match(host, /feedbackCache\[sid\] = nd\.feedbackEnabled !== false/)
+  // 软召回：Worker prompt 与 Team 提示词都以开关为条件拼接
+  assert.match(host, /buildWorkerPrompt\(t, packNote, cfg\(dsnap\)\.feedbackEnabled\)/)
+  assert.match(host, /feedbackOn\(String\(agent\.id\)\) \? '\\n' \+ LESSON_RECALL_HINT/)
+  assert.match(coreSrc, /if \(feedbackEnabled !== false\) p \+= '\\n\\n' \+ LESSON_RECALL_HINT/)
+  // 客户端：开关读取 + 设置区 checkbox + 候选卡片「沉淀」按钮 + 关闭即整块不渲染
+  assert.match(cli, /state\.feedbackEnabled = !\(d && d\.feedbackEnabled === false\)/)
+  assert.match(cli, /key: 'feedbackEnabled', value: e\.target\.checked/)
+  assert.match(cli, /'lesson-candidate': \{ color: C\.brand, label: '候选教训', icon: 'book-open' \}/)
+  assert.match(cli, /rpc\('push-lesson', \{ taskId: props\.taskId, text: String\(m\.text \|\| ''\) \}\)/)
+  assert.match(cli, /if \(!state\.feedbackEnabled\) msgs = msgs\.filter\(function \(m\) \{ return m && m\.kind !== 'lesson-candidate' \}\)/)
+  // 零耦合红线：不出现任何笔记插件的模块导入/服务获取/API 调用
+  // （注释里的历史提及与 prompt 文案里「举例可用工具名」不算耦合）
+  assert.doesNotMatch(host, /from 'dsh-notes|require\('dsh-notes|ctx\.get\('notes'\)|uiWorkspace\.openNote|note_manage\(|note_search\(/)
+  assert.doesNotMatch(coreSrc, /from 'dsh-notes|ctx\.get\('notes'\)|uiWorkspace\.openNote|note_manage\(|note_search\(/)
+  assert.doesNotMatch(cli, /from 'dsh-notes|ctx\.get\('notes'\)|uiWorkspace\.openNote|note_manage\(|note_search\(/)
 })
