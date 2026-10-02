@@ -287,6 +287,23 @@ test('pickDispatch: verifying spawn-pending 占位不重复派发（防双 Verif
   assert.deepEqual(r2.verifs.map(t => t.id), ['vn'])
 })
 
+test('pickDispatch: frozen（裁决挂起冻结）不参与任何自动派发', () => {
+  const tasks = [
+    mkTask({ id: 'fz', frozen: true }), // pending 冻结 → 不派 Worker
+    mkTask({ id: 'nz' }), // 普通 pending → 应派
+    mkTask({ id: 'fv', status: 'verifying', pipeline: 'full', frozen: true }), // verifying 冻结 → 不派 Verifier
+    mkTask({ id: 'nv', status: 'verifying', pipeline: 'full' }), // 普通 verifying → 应派
+  ]
+  const r = core.pickDispatch(mkBoard(tasks), 5, 5, null)
+  assert.deepEqual(r.pendings.map(t => t.id), ['nz'])
+  assert.deepEqual(r.verifs.map(t => t.id), ['nv'])
+  // 解冻（unfreeze-task 清 frozen）后立即恢复可派发
+  delete tasks[0].frozen; delete tasks[2].frozen
+  const r2 = core.pickDispatch(mkBoard(tasks), 5, 5, null)
+  assert.deepEqual(r2.pendings.map(t => t.id).sort(), ['fz', 'nz'])
+  assert.deepEqual(r2.verifs.map(t => t.id).sort(), ['fv', 'nv'])
+})
+
 // ===== 孤儿回收 =====
 test('isOrphan: 认领者非主会话 + 无活跃 run + 超 2 分钟', () => {
   const old = new Date(Date.now() - 200000).toISOString()
