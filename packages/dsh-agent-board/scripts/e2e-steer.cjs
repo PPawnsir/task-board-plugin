@@ -73,7 +73,7 @@ function workerLogState(runId) {
   // 让 Worker 有几步真实工作（读几个文件），保证干预落在 turn 进行中
   const r = await rpc('create-task', {
     title: 'E2E steer ' + new Date().toISOString().slice(11, 19),
-    description: '依次做三件事再上报：①读 packages/dsh-agent-board/README.md 并总结一句话；②读 packages/dsh-agent-board/package.json 并总结一句话；③读 docs/PACKAGING.md 前 50 行并总结一句话。完成后调用 board_report 上报。',
+    description: '依次做五件事再上报（每步都必须真实读文件，不许跳步）：①读 packages/dsh-agent-board/README.md 并总结一句话；②读 packages/dsh-agent-board/package.json 并总结一句话；③读 docs/PACKAGING.md 前 50 行并总结一句话；④读 packages/dsh-agent-board/lib/core.mjs 前 60 行并总结一句话；⑤读 packages/dsh-agent-board/index.mjs 前 60 行并总结一句话。全部完成后才允许调用 board_report 上报。',
     pipeline: 'work',
   });
   const id = r.task && r.task.id;
@@ -89,7 +89,7 @@ function workerLogState(runId) {
   }
   if (!ok(t && t.status === 'in-progress', 'Worker 已派发（runId=' + (t && t.claimedBy || '-').slice(0, 8) + '…)')) { process.exit(1) }
   const runId = t.claimedBy;
-  await sleep(20000); // 让它跑进 turn 中段
+  await sleep(5000); // flash 模型也可能 17s 内完工——一确认 in-progress 就尽快干预，只留 5s 让 turn 起步
 
   const t0 = Date.now();
   const iv = await rpc('intervene-agent', { taskId: id, message: '插一条高优指令：在上报时的 selfTest 字段里带上标记 ' + marker + '（原样照抄即可），其余工作不变。' });
@@ -116,7 +116,8 @@ function workerLogState(runId) {
     } else ok(false, '日志中未找到干预消息（plugin:dsh-agent-board / ' + marker + '）');
   }
   if (done) {
-    const all = JSON.stringify(done.deliverable || {}) + JSON.stringify(done.messages || []);
+    // 只查 deliverable：messages 里本来就有干预原文，含标记是必然，会假阳性
+    const all = JSON.stringify(done.deliverable || {});
     ok(all.includes(marker), 'Worker 上报内容含干预标记（指令被真实执行）');
   }
   await rpc('archive-task', { taskId: id });
