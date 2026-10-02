@@ -11,6 +11,7 @@
 //   manual-claim   手动模式领取：主窗口 claim → 办理 → resolve → verify → resolved
 //   manual-pickup  切回自动：积压任务在下一心跳周期被自动拾取
 //   team-flow      Team模式：草稿→发布→依赖门控→Worker 歧义上报→主窗口裁决→重派完成→依赖任务接续
+//   team-draft-default  Team模式默认草稿护栏：不传 draft → 草稿；draft:false → pending；publish → pending；关 Team → pending
 //
 // 全部场景自带清理（任务归档、临时文件删除），退出码 0=全过 / 1=有失败。
 
@@ -193,6 +194,51 @@ scenarios['team-flow'] = async () => {
     await rpcRaw('archive-task', { taskId: bid });
   } finally {
     await rpcRaw('set-team-mode', { enabled: false });
+  }
+};
+
+// S6 Team 模式默认草稿护栏（缺省 draft 跟随 teamMode；显式 draft:false 保留逃生门）
+scenarios['team-draft-default'] = async () => {
+  console.log('\n[team-draft-default] Team 模式默认草稿护栏');
+  const cleanup = []; // 收尾统一归档
+  const tm = await rpcRaw('set-team-mode', { enabled: true });
+  ok(tm.teamMode === true, 'Team 模式开启（enabled 字段）');
+  try {
+    // ① Team 模式下不传 draft → 缺省建草稿（不被派发，留出补 dependsOn/上下文的时间窗）
+    const a = await rpcRaw('create-task', { title: 'E2E team-draft-default A（不传 draft）', description: '占位验证任务，无需实际工作，直接上报完成即可。', pipeline: 'work' });
+    const aid = a.task && a.task.id;
+    cleanup.push(aid);
+    ok(aid && a.task.status === 'draft', 'Team 模式不传 draft → draft');
+    // ② 显式 draft:false 是逃生门：仍可直接建 pending（Team 模式下随即入派发池）
+    const b = await rpcRaw('create-task', { title: 'E2E team-draft-default B（draft:false）', description: '占位验证任务，无需实际工作，直接上报完成即可。', pipeline: 'work', draft: false });
+    const bid = b.task && b.task.id;
+    cleanup.push(bid);
+    ok(bid && b.task.status === 'pending', 'Team 模式显式 draft:false → pending');
+    // ③ 草稿 publish 后回 pending，正常进入派发池
+    const pub = await rpcRaw('update-task', { taskId: aid, publish: true });
+    ok(pub.ok === true && pub.task.status === 'pending', '草稿 publish → pending');
+    // ④ 关 Team（顺带切手动：避免这张 pending 立刻被子代理领走，收尾由主窗口 claim 办理）→ 缺省行为回到 pending
+    const off = await rpcRaw('set-board-mode', { mode: 'manual' });
+    ok(off.teamMode === false && off.boardMode === 'manual', '关闭 Team 模式（切手动，teamMode 一并关闭）');
+    const c = await rpcRaw('create-task', { title: 'E2E team-draft-default C（非 Team 不传 draft）', description: '占位验证任务：主窗口领取并办理。', pipeline: 'work' });
+    const cid = c.task && c.task.id;
+    cleanup.push(cid);
+    ok(cid && c.task.status === 'pending', '非 Team 模式不传 draft → pending（行为不变）');
+    // 收尾：C 走 claim→resolve→archive，不起子代理；A/B 已被自动派发，等 resolved 后归档
+    const cur = (await rpcRaw('get-tasks', {})).tasks.find((x) => x.id === cid);
+    if (cur && cur.status === 'pending') {
+      await rpcRaw('claim-task', { taskId: cid });
+      await rpcRaw('resolve-task', { taskId: cid, status: 'verifying', resolution: '占位验证任务，主窗口直接办理完成' });
+    }
+    for (const id of cleanup) {
+      if (!id) continue;
+      const done = await waitTask(id, (x) => x.status === 'resolved', '收尾等待 ' + id + ' resolved', 180 * 1000);
+      const ar = await rpcRaw('archive-task', { taskId: id });
+      if (!done || ar.ok !== true) console.log('  ⚠️ ' + id + ' 收尾未归档（最后状态: ' + ((await rpcRaw('get-tasks', {})).tasks.find((x) => x.id === id) || {}).status + '），需人工清理');
+    }
+  } finally {
+    // 恢复自动派发（teamMode 已关），不留测试态
+    await rpcRaw('set-board-mode', { mode: 'auto' });
   }
 };
 
