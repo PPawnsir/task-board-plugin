@@ -189,6 +189,10 @@ function apply(ctx) {
       'stop-circle': [
         ['circle', { cx: 12, cy: 12, r: 10 }],
         ['rect', { width: 6, height: 6, x: 9, y: 9 }]
+      ],
+      'plus': [
+        ['path', { d: 'M5 12h14' }],
+        ['path', { d: 'M12 5v14' }]
       ]
     }
     // 图标+文字内联组合的快捷渲染
@@ -205,7 +209,7 @@ function apply(ctx) {
     }
     var COLUMNS = ['draft', 'pending', 'in-progress', 'verifying', 'resolved', 'blocked']
     var reqEpoch = 0 // 会话切换纪元：切会话时自增，旧会话在途响应按纪元丢弃
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, isRoot: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [] }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, isRoot: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '' }
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
       var onKey = function (e) {
@@ -213,7 +217,8 @@ function apply(ctx) {
         var ae = document.activeElement
         if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) return
         if (!state.open) return
-        if (state.detailId) { state.detailId = null; notify() }
+        if (state.createOpen) { state.createOpen = false; notify() }
+        else if (state.detailId) { state.detailId = null; notify() }
         else if (state.selectMode) { state.selectMode = false; state.selected = {}; notify() }
         else { state.open = false; notify() }
         e.stopPropagation()
@@ -303,10 +308,17 @@ function apply(ctx) {
     // 去抖：切会话时 body 子树 style 大面积变动会触发回调风暴，300ms 合并一次
     var layoutTimer = null
     function syncLayoutDebounced() { if (layoutTimer) return; layoutTimer = setTimeout(function () { layoutTimer = null; syncLayout() }, 300) }
-    ctx.effect(function () { return function () { if (layoutTimer) { clearTimeout(layoutTimer); layoutTimer = null } } })
+    ctx.effect(function () { return function () { if (layoutTimer) { clearTimeout(layoutTimer); layoutTimer = null } if (createFlashTimer) { clearTimeout(createFlashTimer); createFlashTimer = null } } })
     try { var ro = new ResizeObserver(function () { syncLayoutDebounced() }); ro.observe(document.body); ctx.effect(function () { return function () { ro.disconnect() } }) } catch (_) {}
     try { var mo = new MutationObserver(function () { syncLayoutDebounced() }); mo.observe(document.body, { attributes: true, attributeFilter: ['style'], subtree: true }); ctx.effect(function () { return function () { mo.disconnect() } }) } catch (_) {}
     syncLayout()
+    // 创建任务后的轻提示（头部短暂显示"✅ 已存草稿/已创建任务"，2.5s 后自动清空；不引入 toast 体系）
+    var createFlashTimer = null
+    function flashCreated(msg) {
+      state.createFlash = msg
+      if (createFlashTimer) clearTimeout(createFlashTimer)
+      createFlashTimer = setTimeout(function () { createFlashTimer = null; state.createFlash = ''; notify() }, 2500)
+    }
     function ago(iso) { if (!iso) return ''; var ms = Date.now() - new Date(iso).getTime(); if (ms < 60000) return '刚刚'; if (ms < 3600000) return Math.floor(ms / 60000) + ' 分钟前'; if (ms < 86400000) return Math.floor(ms / 3600000) + ' 小时前'; return Math.floor(ms / 86400000) + ' 天前' }
     function fmtTime(iso) { if (!iso) return '-'; try { return new Date(iso).toLocaleString() } catch (_) { return iso } }
     function getTask(id) { return state.tasks.find(function (t) { return t.id === id }) }
@@ -797,6 +809,77 @@ function apply(ctx) {
           candidates.map(function (x) { return React.createElement('option', { key: x.id, value: x.id }, x.title.slice(0, 36) + ' (' + (statusLabels[x.status] || x.status) + ')') })) : null,
         msg ? React.createElement('div', { style: { fontSize: 10, color: C.err, marginTop: 3 } }, msg) : null)
     }
+    // ===== GUI 创建任务：＋新建任务 表单弹层（提交走 create-task RPC，Team 托管默认存草稿）=====
+    function CreateTaskForm() {
+      var _R = React; var useState = _R.useState
+      // 草稿默认值：workMode 优先，缺失时按 boardMode/teamMode 本地兜底派生（与 fetchTasks 同口径）
+      var wm = state.workMode || (state.teamMode ? 'team' : (state.boardMode === 'auto' ? 'auto' : 'list'))
+      var _t = useState(''), title = _t[0], setTitle = _t[1]
+      var _d = useState(''), desc = _d[0], setDesc = _d[1]
+      var _p = useState('medium'), prio = _p[0], setPrio = _p[1]
+      var _pl = useState('full'), pipe = _pl[0], setPipe = _pl[1]
+      var _tc = useState(''), touchesRaw = _tc[0], setTouchesRaw = _tc[1]
+      var _dp = useState({}), depSel = _dp[0], setDepSel = _dp[1]
+      var _ac = useState(''), acc = _ac[0], setAcc = _ac[1]
+      var _dr = useState(wm === 'team'), asDraft = _dr[0], setAsDraft = _dr[1]
+      var _bs = useState(false), busy = _bs[0], setBusy = _bs[1]
+      var _er = useState(''), err = _er[0], setErr = _er[1]
+      // 依赖候选：当前看板 status 为 draft/pending 的任务
+      var cands = state.tasks.filter(function (t) { return t.status === 'draft' || t.status === 'pending' })
+      function close() { state.createOpen = false; notify() }
+      function toggleDep(id) { var next = Object.assign({}, depSel); if (next[id]) delete next[id]; else next[id] = true; setDepSel(next) }
+      function submit() {
+        if (busy) return
+        var t = title.trim()
+        if (!t) { setErr('⚠️ 请先填写标题'); return }
+        var touches = touchesRaw.split(/[\n,，;；]/).map(function (s) { return s.trim() }).filter(function (s) { return s.length > 0 })
+        var deps = cands.filter(function (x) { return depSel[x.id] }).map(function (x) { return x.id })
+        setBusy(true); setErr('')
+        rpc('create-task', { title: t, description: desc, priority: prio, pipeline: pipe, touches: touches, dependsOn: deps, acceptance: acc.trim(), draft: asDraft }).then(function (r) {
+          setBusy(false)
+          if (r && r.ok === false) { setErr('⚠️ ' + (r.error || '创建失败')); return }
+          state.createOpen = false
+          flashCreated(asDraft ? '✅ 已存草稿' : '✅ 已创建任务')
+          fetchTasks()
+          notify()
+        }).catch(function (e) { setBusy(false); setErr('⚠️ ' + String(e)) })
+      }
+      var inp = { width: '100%', boxSizing: 'border-box', fontSize: 11, padding: '4px 6px', border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text, fontFamily: 'inherit' }
+      var lblStyle = { fontSize: 10, color: C.text2, marginBottom: 3 }
+      function field(label, node) { return React.createElement('div', { style: { marginBottom: 8 } }, React.createElement('div', { style: lblStyle }, label), node) }
+      var btnGhost = { fontSize: 11, padding: '4px 12px', border: '1px solid ' + C.border, borderRadius: 5, background: 'transparent', color: C.text2, cursor: 'pointer' }
+      var btnPrimary = { fontSize: 11, padding: '4px 14px', border: 'none', borderRadius: 5, background: C.brand, color: C_INV, fontWeight: 600, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1 }
+      return React.createElement('div', { style: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.35)', zIndex: 20, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: 16, overflowY: 'auto' }, onClick: function (e) { if (e.target === e.currentTarget) close() } },
+        React.createElement('div', { style: { width: 440, maxWidth: '100%', background: C.bg, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 12px 32px rgba(0,0,0,0.28)', padding: 12 } },
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 } },
+            React.createElement('span', { style: { fontSize: 13, fontWeight: 600, color: C.text, display: 'inline-flex', alignItems: 'center', gap: 5 } }, ic('plus', 14), '新建任务'),
+            React.createElement('button', { onClick: close, title: '关闭', style: { border: 'none', background: 'transparent', cursor: 'pointer', color: C.text2, display: 'inline-flex' } }, ic('x', 14))),
+          field('标题 *', React.createElement('input', { value: title, onChange: function (e) { setTitle(e.target.value) }, placeholder: '一句话说清要做什么', style: inp })),
+          field('描述', React.createElement('textarea', { value: desc, onChange: function (e) { setDesc(e.target.value) }, rows: 3, placeholder: '背景 / 目标 / 约束（可空）', style: Object.assign({}, inp, { resize: 'vertical', minHeight: 46 }) })),
+          React.createElement('div', { style: { display: 'flex', gap: 8 } },
+            React.createElement('div', { style: { flex: '1 1 0', minWidth: 0 } }, field('优先级', React.createElement('select', { value: prio, onChange: function (e) { setPrio(e.target.value) }, style: inp }, ['critical', 'high', 'medium', 'low'].map(function (p) { return React.createElement('option', { key: p, value: p }, prioLabel[p] + '（' + p + '）') })))),
+            React.createElement('div', { style: { flex: '1 1 0', minWidth: 0 } }, field('管线', React.createElement('select', { value: pipe, onChange: function (e) { setPipe(e.target.value) }, style: inp },
+              React.createElement('option', { value: 'full' }, '全流程（执行+验证）'),
+              React.createElement('option', { value: 'work' }, '免验证（只做不验）'),
+              React.createElement('option', { value: 'direct' }, '主窗口处理'))))),
+          field('touches（文件/glob，逗号或换行分隔，可空）', React.createElement('input', { value: touchesRaw, onChange: function (e) { setTouchesRaw(e.target.value) }, placeholder: 'src/a.mjs, src/**', style: inp })),
+          field('依赖（全部完成后才派发，可空）', cands.length === 0
+            ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '当前无草稿/待办任务可选')
+            : React.createElement('div', { style: { maxHeight: 96, overflowY: 'auto', border: '1px solid ' + C.border, borderRadius: 4, padding: '4px 6px', background: C.card } }, cands.map(function (x) {
+              return React.createElement('label', { key: x.id, style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, padding: '1px 0', cursor: 'pointer' } },
+                React.createElement('input', { type: 'checkbox', checked: !!depSel[x.id], onChange: function () { toggleDep(x.id) } }),
+                React.createElement('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, (statusLabels[x.status] || x.status) + ' · ' + (x.title || x.id)))
+            }))),
+          field('验收脚本（命令，可空）', React.createElement('input', { value: acc, onChange: function (e) { setAcc(e.target.value) }, placeholder: '如 node --test test/x.test.js', style: Object.assign({}, inp, { fontFamily: 'monospace' }) })),
+          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: C.text, cursor: 'pointer', marginBottom: 6, flexWrap: 'wrap' } },
+            React.createElement('input', { type: 'checkbox', checked: asDraft, onChange: function (e) { setAsDraft(e.target.checked) } }),
+            '存为草稿',
+            React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, wm === 'team' ? '（Team 托管默认草稿；取消勾选 = 立即派发）' : '（先补依赖/上下文，稍后统一发布）')),
+          err ? React.createElement('div', { style: { fontSize: 11, color: C.err, marginBottom: 6 } }, err) : null,
+          React.createElement('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 6 } },
+            React.createElement('button', { onClick: close, style: btnGhost }, '取消'),
+            React.createElement('button', { onClick: submit, disabled: busy, title: asDraft ? '创建为草稿（不派发）' : '创建并立即进入派发池', style: btnPrimary }, busy ? '创建中…' : (asDraft ? '存为草稿' : '创建并派发')))))
+    }
     function DetailView() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect; var task = getTask(state.detailId)
       var _a = useState(task ? task.title : ''), editTitle = _a[0], setEditTitle = _a[1]; var _b = useState(task ? task.description || '' : ''), editDesc = _b[0], setEditDesc = _b[1]; var _c = useState(false), saving = _c[0], setSaving = _c[1]; var _d = useState(state.boardMode), mode = _d[0], setMode = _d[1]
@@ -930,8 +1013,9 @@ function apply(ctx) {
       var _m = useState(state.minWorkers), minW = _m[0], setMinW = _m[1]; var _n = useState(state.maxWorkers), maxW = _n[0], setMaxW = _n[1]; var _o = useState(state.minVerifiers), minV = _o[0], setMinV = _o[1]; var _p = useState(state.maxVerifiers), maxV = _p[0], setMaxV = _p[1]; var _wm = useState(state.workerModel), workerModel = _wm[0], setWorkerModel = _wm[1]; var _vm = useState(state.verifierModel), verifierModel = _vm[0], setVerifierModel = _vm[1]
       var _q = useState(state.teamMode), teamMode = _q[0], setTeamMode = _q[1]; var _dr = useState(state.dateRange), setDR = _dr[1]
       var _wmo = useState(state.workMode), workMode = _wmo[0], setWorkModeState = _wmo[1]
+      var _cro = useState(state.createOpen), createOpen = _cro[0], setCreateOpen = _cro[1]; var _crf = useState(state.createFlash), createFlash = _crf[0], setCreateFlash = _crf[1]
       var _sto = useState(state.softTimeoutMin), softT = _sto[0], setSoftT = _sto[1]; var _hto = useState(state.hardTimeoutMin), hardT = _hto[0], setHardT = _hto[1]
-      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
+      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!open) return null
       if (state.isRoot === false) return null // 子代理会话不渲染看板面板
       var active = tasks.filter(function (t) { return t.status !== 'archived' }); var archived = tasks.filter(function (t) { return t.status === 'archived' })
@@ -959,11 +1043,14 @@ function apply(ctx) {
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' } },
             React.createElement(PoolCfgPopover, { minW: minW, maxW: maxW, minV: minV, maxV: maxV, workerModel: workerModel, verifierModel: verifierModel, softT: softT, hardT: hardT }),
             dispatchInfo ? React.createElement('span', { style: { fontSize: 9, color: C.brand, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: dispatchInfo }, dispatchInfo) : null,
+            React.createElement('button', { onClick: function () { state.createOpen = true; notify() }, title: '新建任务（可存为草稿）', style: { fontSize: 11, padding: '3px 8px', border: '1px solid ' + C.border, borderRadius: 6, cursor: 'pointer', background: 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('plus', 11), '新建任务'),
+            createFlash ? React.createElement('span', { style: { fontSize: 10, color: C.ok } }, createFlash) : null,
             React.createElement('button', { onClick: function () { state.selectMode = !state.selectMode; if (!state.selectMode) state.selected = {}; notify() }, title: '多选批量操作', style: { fontSize: 11, padding: '3px 8px', border: '1px solid ' + (state.selectMode ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: state.selectMode ? C.brand : 'transparent', color: state.selectMode ? C_INV : C.text2, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('square-check-big', 11), '多选'),
             React.createElement(WorkModeSwitch, { mode: workMode }),
             React.createElement('button', { onClick: function () { fetchTasks(); fetchChildren() }, title: '刷新', style: { border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 12, color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('refresh-cw', 13)),
             React.createElement('button', { onClick: function () { state.open = false; state.detailId = null; notify() }, title: '关闭', style: { border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 14, color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('x', 14)))),
-        React.createElement('div', { style: { flex: 1, overflowY: 'auto', padding: '10px 12px' } }, tasks.length === 0 ? React.createElement('div', { style: { textAlign: 'center', padding: 24, color: C.text2, fontSize: 12 } }, '🎉 暂无任务') : content))
+        React.createElement('div', { style: { flex: 1, overflowY: 'auto', padding: '10px 12px' } }, tasks.length === 0 ? React.createElement('div', { style: { textAlign: 'center', padding: 24, color: C.text2, fontSize: 12 } }, '🎉 暂无任务') : content),
+        createOpen ? React.createElement(CreateTaskForm, null) : null)
     }
     slots.inject('conversation.session.header.actions', function () { return slots.register({ name: 'conversation.session.header.actions', id: 'task-board-btn', label: '任务看板', order: 30 }, function (props) { return React.createElement(BoardButton, props) }) })
     slots.inject('shell.overlay', function () { return slots.register({ name: 'shell.overlay', id: 'task-board-top-panel' }, function () { return React.createElement(TopPanel) }) })
