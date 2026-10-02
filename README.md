@@ -104,6 +104,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **依赖调度**：`dependsOn` 声明依赖（DFS 环检测），依赖全部完成后才会被派发，串行链路自动编排
 - **管线分档**：`full`（执行+验证）/ `work`（只做不验）/ `direct`（不进池，主窗口直接处理），创建时按规则自动分类、可手动覆盖
 - **硬性验收**：`acceptance` 字段写验收脚本命令，Worker 必须实际运行、Verifier 必须独立复跑
+- **文件级排他**：`touches` 声明本任务要改的文件/glob（如 `["src/**", "README.md"]`）；进行中的任务持有文件锁，派发器发现候选与活动任务 touches 重叠就跳过本轮（卡片显示 `🔒 等文件释放`，详情页列出在等谁），锁在提交验收/完成后自动释放——避免并行 Worker 改同一批文件互踩。手动「派发」遇到冲突会列出冲突任务，确认后才以 `force` 越权派发
 - **子任务**：父子层级 + 上下文继承 + 父任务自动流转 + 级联归档
 
 ### 一次性派发（v74 去池化）
@@ -151,7 +152,7 @@ Team 模式开启时强制自动派发（防止"引导派发 + 手动模式"死�
 │   ├── index.mjs                 #   host 端：IO 编排（工具/RPC/一次性派发引擎接线）
 │   ├── lib/core.mjs              #   纯逻辑核心：状态机/依赖/分类/prompt/解析（无 IO，可单测）
 │   ├── lib/client.js             #   client 端（ModuleLoader 包装，图标统一走 ICONS + ic()）
-│   ├── test/core.test.mjs        #   单元测试（node --test，30 例）
+│   ├── test/core.test.mjs        #   单元测试（node --test，54 例）
 │   ├── package.json              #   dsh.bundle.patch + dsh.client 元数据
 │   └── cordis.patch.yml          #   bundle 挂载行
 └── docs/
@@ -198,7 +199,7 @@ git push --follow-tags     # tag 推送触发流水线
 - **README 单一来源**：本文件（根 README）即唯一来源；发版前在 `packages/dsh-agent-board` 跑一次 `npm run sync-readme` 同步进包（npm 页面展示的是包内 README）
 - 需在仓库 **Settings → Secrets and variables → Actions** 配置 `NPM_TOKEN`
   （npm granular access token：bypass 2FA + direct publish）
-- 日常 push / PR 有 `test.yml` 跑语法检查 + 30 例单测
+- 日常 push / PR 有 `test.yml` 跑语法检查 + 54 例单测
 - 本地手动发布仍然可用：`npm publish --registry=https://registry.npmjs.org`（本机默认源是镜像时必须显式指定）
 
 ## License

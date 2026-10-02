@@ -14,6 +14,54 @@ export function gsb(p, a) { return a.filter(function (x) { return x.parentId ===
 export function gpt(t, a) { return isb(t) ? a.find(function (x) { return x.id === t.parentId }) : undefined }
 export function vt(d) { return d && typeof d === 'object' && Array.isArray(d.tasks) }
 
+// ===== touches 文件级排他（glob 最小匹配器，零依赖）=====
+// 背景：并行 Worker 改同一批文件会互踩（diff 冲突/一方覆盖另一方）。任务可声明
+// touches: string[]（glob），派发器发现与「活动（in-progress）任务的 touches」冲突
+// 则本轮跳过该候选（记入 pickDispatch 返回的 blockedTouches），等锁释放再派。
+// 语义（宁可偏严不可漏拦）：
+//   1. 先归一化：\ → /、去 './' 前缀、去尾部 '/'；空串或非字符串忽略。
+//   2. a === b 视为冲突。
+//   3. 'dir/**' 目录前缀覆盖（含两侧都 /** 时前缀互相包含）；`*` 只当通配符处理，
+//      不做通用 glob 展开——最小实现，够用且不会误判。
+//   4. '*.ext' 后缀：两侧都是 '*.ext' 比扩展名；一侧是具体路径看 endsWith('/'+glob)
+//      或本身 endsWith。
+//   5. 裸文件名（无 '/' 且非 '*.ext'）只在「另一侧也是裸名」时比 basename 相等；
+//      含 '/' 的具体路径不参与裸名规则（否则 'a/core.mjs' 会误撞裸名 'core.mjs'）。
+// 保守倾向：不确定即算冲突（误拦只是晚一轮派发，漏拦会让两个 Worker 互踩）。
+function normTouch(s) {
+  var v = String(s).replace(/\\/g, '/').trim()
+  while (v.slice(0, 2) === './') v = v.slice(2)
+  while (v.length > 1 && v.charAt(v.length - 1) === '/') v = v.slice(0, -1)
+  return v
+}
+function baseOf(p) { var i = p.lastIndexOf('/'); return i < 0 ? p : p.slice(i + 1) }
+function isStarDot(p) { return p.length > 2 && p.indexOf('*') === 0 && p.charAt(1) === '.' && p.indexOf('/') < 0 }
+function dirLockPrefix(p) { return p.length > 3 && p.slice(-3) === '/**' ? p.slice(0, -2) : '' }
+function matchOne(pattern, subject) {
+  var p = normTouch(pattern), s = normTouch(subject)
+  if (!p || !s) return false
+  if (p === s) return true
+  // 目录锁：'dir/**' 覆盖 dir 下的任意路径（两个方向都试，任一侧声明目录锁即锁定整棵子树）
+  var pfx = dirLockPrefix(p); if (pfx && s.indexOf(pfx) === 0) return true
+  var sfx = dirLockPrefix(s); if (sfx && p.indexOf(sfx) === 0) return true
+  var ps = isStarDot(p), ss = isStarDot(s)
+  if (ps && ss) return p === s // 两侧都是通配扩展名：只有完全相同才算（*.js vs *.ts 不冲突）
+  if (ps) return s.length > p.length - 1 && s.slice(-(p.length - 1)) === p.slice(1)
+  if (ss) return p.length > s.length - 1 && p.slice(-(s.length - 1)) === s.slice(1)
+  // 含 '/' 的具体路径：一侧是另一侧目录下的文件即冲突（src/lib 覆盖 src/lib/core.mjs）
+  if (p.indexOf('/') >= 0 || s.indexOf('/') >= 0) return s.indexOf(p + '/') === 0 || p.indexOf(s + '/') === 0
+  return baseOf(p) === baseOf(s)
+}
+// 两组 glob 是否可能命中同一批文件（对称判定）
+export function patOverlap(a, b) { if (typeof a !== 'string' || typeof b !== 'string') return false; return matchOne(a, b) || matchOne(b, a) }
+// 已声明 touches 的任务集合是否与本任务声明的 touches 冲突
+export function overlapsTouches(mine, theirs) {
+  var m = Array.isArray(mine) ? mine : []
+  var th = Array.isArray(theirs) ? theirs : []
+  for (var i = 0; i < m.length; i++) { for (var j = 0; j < th.length; j++) { if (patOverlap(m[i], th[j])) return true } }
+  return false
+}
+
 // ===== 依赖校验（#18）=====
 // 存在性 + 自引用 + DFS 环检测；返回错误消息或 null
 export function validateDeps(d, taskId, deps) {
@@ -70,7 +118,20 @@ export function cfg(d) {
 // 缺字段 = undefined → 工具结果的 lossless-JSON 校验会拒（"value is not lossless JSON"）
 export function seed(sid) { return { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, poolStatus: { workers: [], verifiers: [] }, tasks: [] } }
 // 旧文件缺 poolStatus 的归一化（读路径兜底，保证任何历史文件都满足工具输出契约）
-export function normalizeBoard(d) { if (d && typeof d === 'object') { if (!d.poolStatus || typeof d.poolStatus !== 'object' || !Array.isArray(d.poolStatus.workers) || !Array.isArray(d.poolStatus.verifiers)) d.poolStatus = { workers: [], verifiers: [] } }; return d }
+// touches 兼容：老任务没有该字段照常（这里只把「存在但非数组」的脏值收敛成数组，
+// 避免 holdsFiles/touchesConflict 里 Array.isArray 判定之外还有第三种形态）
+export function normalizeBoard(d) {
+  if (d && typeof d === 'object') {
+    if (!d.poolStatus || typeof d.poolStatus !== 'object' || !Array.isArray(d.poolStatus.workers) || !Array.isArray(d.poolStatus.verifiers)) d.poolStatus = { workers: [], verifiers: [] }
+    if (Array.isArray(d.tasks)) {
+      for (var i = 0; i < d.tasks.length; i++) {
+        var t = d.tasks[i]
+        if (t && t.touches !== undefined && !Array.isArray(t.touches)) t.touches = []
+      }
+    }
+  }
+  return d
+}
 
 // ===== 状态流转 =====
 export function claimCheck(d, t, sid) { if (CLAIMABLE.indexOf(t.status) < 0) return 'cannot claim in ' + t.status; if (t.claimedBy && t.claimedBy !== sid && t.status === 'in-progress') return 'claimed by ' + t.claimedBy; if (d.boardMode === 'manual' || t.assignMode === 'manual') { if (t.assignee && t.assignee !== sid) return 'assigned to ' + t.assignee }; if (isb(t)) { var p = gpt(t, d.tasks); if (!p) return 'parent not found'; if (p.status !== 'in-progress' && p.status !== 'verifying') return 'parent not in-progress' }; var mc = d.tasks.filter(function (x) { return x.claimedBy === sid && (x.status === 'in-progress' || x.status === 'verifying') && !isb(x) }); if (!isb(t) && mc.length >= MAX_CLAIMED) return 'max ' + MAX_CLAIMED + ' active'; return null }
@@ -157,15 +218,55 @@ export function buildVerifierPrompt(t, pack) {
   return p
 }
 
+// ===== 文件锁持有集合（touches 排他）=====
+// 仅 in-progress + claimedBy + 声明了 touches 的任务持有文件锁：
+//   - verifying 不持有（Worker 已按契约停笔，锁随 in-progress→verifying 自动释放；
+//     驳回回 in-progress 时重新持有）；
+//   - pending/blocked/draft 没有 Worker 在改文件，不持有。
+// 返回 [{id, touches}]，id 用于 blockedTouches.conflicts 展示"在等谁"。
+export function holdsFiles(d) {
+  var out = []
+  if (!d || !Array.isArray(d.tasks)) return out
+  for (var i = 0; i < d.tasks.length; i++) {
+    var t = d.tasks[i]
+    if (t.status === 'in-progress' && t.claimedBy && Array.isArray(t.touches) && t.touches.length) out.push({ id: t.id, touches: t.touches })
+  }
+  return out
+}
+// 候选任务（pending）与一组锁持有者是否冲突；返回持有者 id 列表（空数组 = 无冲突）
+export function touchesConflict(t, holds) {
+  var out = []
+  if (!t || !Array.isArray(holds)) return out
+  for (var i = 0; i < holds.length; i++) { if (holds[i] && holds[i].id !== t.id && overlapsTouches(t.touches, holds[i].touches)) out.push(holds[i].id) }
+  return out
+}
+
 // ===== 派发决策（纯函数版，poolCycle 持锁段调用）=====
-// 返回 { pendings, verifs }：按优先级排序的可派发任务清单
+// 返回 { pendings, verifs, blockedTouches }：按优先级排序的可派发任务清单。
 // frozen（裁决挂起冻结）不参与任何自动派发：pending 不派 Worker、verifying 不派 Verifier；
 // 只能由主窗口显式解冻（unfreeze-task RPC / task_update unfreeze:true）后重新入池。
+// blockedTouches（touches 文件级排他）：候选声明了 touches 且与活动任务的 touches 冲突 →
+// 不进 pendings，改记 [{id, conflicts:[持有任务id...]}]，由 index.mjs 的 poolCycle 写展示态字段
+// t.waitingForTouches（每心跳刷新的 UI 展示，不参与其他逻辑）。verifs 不受 touches 影响（Verifier 只读）。
+// 注意：frozen/dependsOn/escalation/上限 的优先级不变——先过滤再算 touches 冲突。
 export function pickDispatch(d, capW, capV, busyTaskIds) {
-  var pendings = capW > 0 ? d.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && !t.frozen && t.assignMode !== 'manual' && t.pipeline !== 'direct' && depsSatisfied(d, t) && !t.escalation })
-    .sort(function (a, b) { var p = (PRIO_RANK[b.priority] || 2) - (PRIO_RANK[a.priority] || 2); return p !== 0 ? p : (a.createdAt || '').localeCompare(b.createdAt || '') }).slice(0, capW) : []
+  var blockedTouches = []
+  var pendings = []
+  // 锁持有集合在本轮内动态增长：一旦某候选被纳入本轮派发，它立即成为持有者，
+  // 防止同一轮 cycle 派出的两个任务声明重叠 touches。
+  var holds = holdsFiles(d)
+  if (capW > 0) {
+    var cands = d.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && !t.frozen && t.assignMode !== 'manual' && t.pipeline !== 'direct' && depsSatisfied(d, t) && !t.escalation })
+      .sort(function (a, b) { var p = (PRIO_RANK[b.priority] || 2) - (PRIO_RANK[a.priority] || 2); return p !== 0 ? p : (a.createdAt || '').localeCompare(b.createdAt || '') })
+    for (var i = 0; i < cands.length && pendings.length < capW; i++) {
+      var conflicts = touchesConflict(cands[i], holds)
+      if (conflicts.length) { blockedTouches.push({ id: cands[i].id, conflicts: conflicts }); continue }
+      pendings.push(cands[i])
+      if (Array.isArray(cands[i].touches) && cands[i].touches.length) holds.push({ id: cands[i].id, touches: cands[i].touches })
+    }
+  }
   var verifs = capV > 0 ? d.tasks.filter(function (t) { return t.status === 'verifying' && !t.frozen && (!t.pipeline || t.pipeline === 'full') && !t.escalation && t.verifierRun !== 'spawn-pending' && !(busyTaskIds && busyTaskIds[t.id]) }).slice(0, capV) : []
-  return { pendings: pendings, verifs: verifs }
+  return { pendings: pendings, verifs: verifs, blockedTouches: blockedTouches }
 }
 // 孤儿回收判定：in-progress 且 claimedBy 非主会话、无活跃 run、无 escalation、超 2 分钟
 export function isOrphan(d, t, runs, now) {

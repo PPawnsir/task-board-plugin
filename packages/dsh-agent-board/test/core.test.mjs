@@ -304,6 +304,149 @@ test('pickDispatch: frozen（裁决挂起冻结）不参与任何自动派发', 
   assert.deepEqual(r2.verifs.map(t => t.id).sort(), ['fv', 'nv'])
 })
 
+// ===== touches 文件级排他：glob 最小匹配器 =====
+test('patOverlap: 完全相同路径冲突 + 归一化（\\ → /、去 ./ 前缀与尾 /）', () => {
+  assert.equal(core.patOverlap('src/a.js', 'src/a.js'), true)
+  assert.equal(core.patOverlap('src\\a.js', 'src/a.js'), true)   // 反斜杠归一化
+  assert.equal(core.patOverlap('./src/a.js', 'src/a.js'), true) // ./ 前缀
+  assert.equal(core.patOverlap('src/', 'src'), true)            // 尾 / 归一化
+  assert.equal(core.patOverlap('src/a.js', 'src/b.js'), false)
+  // 空/非字符串不冲突（脏声明不该误拦一切）
+  assert.equal(core.patOverlap('', 'src/a.js'), false)
+  assert.equal(core.patOverlap(null, 'src/a.js'), false)
+  assert.equal(core.patOverlap(undefined, 'a.js'), false)
+})
+
+test('patOverlap: dir/** 目录覆盖（含两侧都 /** 时前缀互相包含）', () => {
+  assert.equal(core.patOverlap('src/**', 'src/a.js'), true)
+  assert.equal(core.patOverlap('src/a.js', 'src/**'), true)          // 对称
+  assert.equal(core.patOverlap('src/**', 'src/deep/nested/b.js'), true)
+  assert.equal(core.patOverlap('src/**', 'src2/a.js'), false)        // 前缀必须带 /
+  assert.equal(core.patOverlap('src/**', 'lib/a.js'), false)
+  assert.equal(core.patOverlap('src/**', 'src2/**'), false)
+  assert.equal(core.patOverlap('src/**', 'src/**'), true)
+  assert.equal(core.patOverlap('src/sub/**', 'src/**'), true)        // 前缀互相包含
+  assert.equal(core.patOverlap('**/*.js', 'src/a.js'), false)        // '*.js' 只按扩展名后缀匹配，不展开目录通配
+  assert.equal(core.patOverlap('**/*.js', 'src/a.ts'), false)
+  assert.equal(core.patOverlap('**/lib/**', '**/lib/core.mjs'), true) // 复合 glob 的 dir 段（一侧是另一侧前缀）
+})
+
+test('patOverlap: *.ext 后缀（两侧 *.ext 比扩展名；*.ext vs 具体文件看 endsWith）', () => {
+  assert.equal(core.patOverlap('*.js', 'src/a.js'), true)
+  assert.equal(core.patOverlap('src/a.js', '*.js'), true)
+  assert.equal(core.patOverlap('*.js', 'a.js'), true)
+  assert.equal(core.patOverlap('*.js', '*.js'), true)
+  assert.equal(core.patOverlap('*.js', '*.ts'), false)
+  assert.equal(core.patOverlap('*.js', 'src/a.ts'), false)  // 扩展名不同 → 不冲突
+  assert.equal(core.patOverlap('*.jsx', 'src/a.js'), false) // 后缀比对是整段（'a.js' 不以 '.jsx' 结尾）
+})
+
+test('patOverlap: 裸文件名（无 /）只与另一侧 basename 相等才算冲突', () => {
+  assert.equal(core.patOverlap('index.mjs', 'index.mjs'), true)
+  assert.equal(core.patOverlap('a/core.mjs', 'core.mjs'), false) // 具体路径不参与裸名规则
+  assert.equal(core.patOverlap('core.mjs', 'a/core.mjs'), false)
+  assert.equal(core.patOverlap('src/a.js', 'lib/a.js'), false)   // 同 basename 不同目录
+  assert.equal(core.patOverlap('src/a.js', 'src/lib'), false)    // 含 / 时只比目录包含（'src/a.js' 不在 'src/lib/' 下）
+})
+
+test('touchesConflict: 与锁持有者逐条比对，返回冲突持有者 id', () => {
+  const holds = [
+    { id: 'h1', touches: ['src/**'] },
+    { id: 'h2', touches: ['docs/x.md'] },
+  ]
+  assert.deepEqual(core.touchesConflict({ id: 'w1', touches: ['src/a.js'] }, holds), ['h1'])
+  assert.deepEqual(core.touchesConflict({ id: 'w2', touches: ['lib/a.js'] }, holds), [])
+  assert.deepEqual(core.touchesConflict({ id: 'w3', touches: ['docs/x.md', 'src/b.js'] }, holds), ['h1', 'h2'])
+  assert.deepEqual(core.touchesConflict({ id: 'w4' }, holds), [])          // 没声明 touches = 不参与排他
+  assert.deepEqual(core.touchesConflict({ id: 'h1', touches: ['src/a.js'] }, holds), []) // 不和自己冲突
+})
+
+test('holdsFiles: 仅 in-progress + claimedBy + 有 touches 持有文件锁', () => {
+  const tasks = [
+    mkTask({ id: 'live', status: 'in-progress', claimedBy: 'run-1', touches: ['src/**'] }),
+    mkTask({ id: 'notouch', status: 'in-progress', claimedBy: 'run-2' }),
+    mkTask({ id: 'noclaim', status: 'in-progress' }),
+    mkTask({ id: 'pending', status: 'pending', touches: ['src/a.js'] }),
+    mkTask({ id: 'verifying', status: 'verifying', touches: ['src/b.js'] }),
+    mkTask({ id: 'empty', status: 'in-progress', claimedBy: 'run-3', touches: [] }),
+  ]
+  const holds = core.holdsFiles(mkBoard(tasks))
+  assert.deepEqual(holds.map(h => h.id), ['live'])
+  assert.deepEqual(holds[0].touches, ['src/**'])
+  assert.deepEqual(core.holdsFiles(null), [])
+})
+
+// ===== 派发决策（touches 拦截）=====
+test('pickDispatch: touches 与活动任务冲突 → 不进 pendings，记入 blockedTouches', () => {
+  const tasks = [
+    mkTask({ id: 'holder', status: 'in-progress', claimedBy: 'run-1', touches: ['src/**'] }),
+    mkTask({ id: 'clash', touches: ['src/a.js'], createdAt: '2026-01-01' }),
+    mkTask({ id: 'free', touches: ['lib/a.js'], createdAt: '2026-01-02' }),
+    mkTask({ id: 'untouched', createdAt: '2026-01-03' }), // 没声明 touches → 不被拦
+  ]
+  const r = core.pickDispatch(mkBoard(tasks), 5, 0, null)
+  assert.deepEqual(r.pendings.map(t => t.id).sort(), ['free', 'untouched'])
+  assert.deepEqual(r.blockedTouches, [{ id: 'clash', conflicts: ['holder'] }])
+})
+
+test('pickDispatch: verifying 不持有文件锁（Worker 已停笔），verifier 派发（verifs）不受 touches 影响', () => {
+  const tasks = [
+    // verifying 的任务即使声明了 touches 也不持有锁
+    mkTask({ id: 'vt', status: 'verifying', pipeline: 'full', claimedBy: 'run-1', touches: ['src/**'] }),
+    mkTask({ id: 'w1', touches: ['src/a.js'] }),
+  ]
+  const r = core.pickDispatch(mkBoard(tasks), 5, 5, null)
+  assert.deepEqual(r.pendings.map(t => t.id), ['w1'])          // 未被 verifying 任务拦住
+  assert.deepEqual(r.blockedTouches, [])
+  assert.deepEqual(r.verifs.map(t => t.id), ['vt'])            // Verifier 照常派（只读，不参与排他）
+  // 反向：pending 任务声明 touches 也不影响 verifs 派发
+  const tasks2 = [mkTask({ id: 'w2', touches: ['src/**'] }), mkTask({ id: 'v2', status: 'verifying', pipeline: 'full' })]
+  const r2 = core.pickDispatch(mkBoard(tasks2), 5, 5, null)
+  assert.deepEqual(r2.verifs.map(t => t.id), ['v2'])
+})
+
+test('pickDispatch: 未声明 touches 的任务不做任何拦截；同一轮内已派发任务立即成为锁持有者', () => {
+  // 无锁持有者时，声明了 touches 的任务照常派发（锁只在 in-progress 时持有）
+  const solo = mkBoard([mkTask({ id: 'solo', touches: ['src/**'] })])
+  const r1 = core.pickDispatch(solo, 5, 0, null)
+  assert.deepEqual(r1.pendings.map(t => t.id), ['solo'])
+  assert.deepEqual(r1.blockedTouches, [])
+  // 同一轮拿两个候选：第一个把 src/ 纳入锁，第二个声明重叠 → 本轮只派第一个
+  const d = mkBoard([
+    mkTask({ id: 'one', touches: ['src/a.js'], priority: 'critical', createdAt: '2026-01-01' }),
+    mkTask({ id: 'two', touches: ['src/**'], createdAt: '2026-01-02' }),
+  ])
+  const r2 = core.pickDispatch(d, 5, 0, null)
+  assert.deepEqual(r2.pendings.map(t => t.id), ['one'])
+  assert.deepEqual(r2.blockedTouches, [{ id: 'two', conflicts: ['one'] }])
+})
+
+test('pickDispatch: frozen/dependsOn/escalation 优先级不变（touches 拦截附加在原有过滤之后）', () => {
+  const tasks = [
+    mkTask({ id: 'holder', status: 'in-progress', claimedBy: 'run-1', touches: ['src/**'] }),
+    mkTask({ id: 'fz', frozen: true, touches: ['src/a.js'] }),                 // 冻结 → 既有语义直接排除，不记 blockedTouches
+    mkTask({ id: 'dep', dependsOn: ['holder'], touches: ['src/a.js'] }),        // 依赖未满足 → 既有语义排除
+    mkTask({ id: 'esc', escalation: { question: 'q' }, touches: ['src/a.js'] }),// 待裁决 → 排除
+    mkTask({ id: 'clash', touches: ['src/a.js'] }),                            // 唯一被 touches 拦下的
+  ]
+  const r = core.pickDispatch(mkBoard(tasks), 5, 0, null)
+  assert.deepEqual(r.pendings, [])
+  assert.deepEqual(r.blockedTouches, [{ id: 'clash', conflicts: ['holder'] }])
+  // 锁释放（holder 结算/归档）后，被拦任务下一轮自动恢复可派发
+  mkBoard(tasks).tasks[0].status = 'verifying'
+  const r2 = core.pickDispatch(mkBoard(tasks), 5, 0, null)
+  assert.ok(r2.pendings.map(t => t.id).indexOf('clash') >= 0)
+  assert.deepEqual(r2.blockedTouches, [])
+})
+
+test('normalizeBoard: touches 脏值（非数组）收敛为空数组，缺字段任务照常', () => {
+  const legacy = { tasks: [{ id: 'a', touches: 'src/a.js' }, { id: 'b' }, { id: 'c', touches: ['src/c.js'] }] }
+  const d = core.normalizeBoard(legacy)
+  assert.deepEqual(d.tasks[0].touches, [])
+  assert.equal(d.tasks[1].touches, undefined) // 缺字段不动（老看板文件兼容）
+  assert.deepEqual(d.tasks[2].touches, ['src/c.js'])
+})
+
 // ===== 孤儿回收 =====
 test('isOrphan: 认领者非主会话 + 无活跃 run + 超 2 分钟', () => {
   const old = new Date(Date.now() - 200000).toISOString()
