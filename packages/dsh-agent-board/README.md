@@ -86,6 +86,7 @@ dsh plugin --profile web remove dsh-agent-board
 ### 看板 UI
 
 - 会话标题栏「智能看板」按钮 → 顶部抽屉面板（看板 / 团队 / 仪表盘三视图）
+- 面板右上角「＋ 新建任务」：表单弹层填标题/描述/优先级/管线/touches/依赖多选/验收脚本，Team 托管默认存为草稿（提交走 create-task RPC，成功即刷新、失败表单内联报错）
 - 六列状态流：草稿 → 待办 → 进行中 → 验证中 → 已完成 → 阻塞
 - 拖拽流转、多选批量操作（带一步撤销）、文本/优先级/标签筛选
 - 归档区：时间倒序 + 排序选择器 + 纵向滚动
@@ -104,6 +105,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **依赖调度**：`dependsOn` 声明依赖（DFS 环检测），依赖全部完成后才会被派发，串行链路自动编排
 - **管线分档**：`full`（执行+验证）/ `work`（只做不验）/ `direct`（不进池，主窗口直接处理），创建时按规则自动分类、可手动覆盖
 - **硬性验收**：`acceptance` 字段写验收脚本命令，Worker 必须实际运行、Verifier 必须独立复跑
+- **文件级排他**：`touches` 声明本任务要改的文件/glob（如 `["src/**", "README.md"]`）；进行中的任务持有文件锁，派发器发现候选与活动任务 touches 重叠就跳过本轮（卡片显示 `🔒 等文件释放`，详情页列出在等谁），锁在提交验收/完成后自动释放——避免并行 Worker 改同一批文件互踩。手动「派发」遇到冲突会列出冲突任务，确认后才以 `force` 越权派发
 - **子任务**：父子层级 + 上下文继承 + 父任务自动流转 + 级联归档
 
 ### 一次性派发（v74 去池化）
@@ -116,23 +118,31 @@ draft → pending → in-progress → verifying → resolved → archived
 - 手动派发：详情页「派发 / 派发验收」按钮可随时手动触发单任务派发（auto 模式补派、manual 模式主通道）
 - 会话隔离：看板按会话分桶，多会话互不干扰
 
-### 手动 / 自动派发模式
+### 工作模式（三档）
 
-| | 🤖 自动 | 👤 手动 |
-|---|---|---|
-| Worker 派发 | poolCycle 自动调度（并发上限可配） | 主窗口自行 claim 处理，或详情页手动「派发」 |
-| Verifier 派发 | 自动 | **自动**（主窗口手动做完的 full 档任务也会自动验收） |
-| 孤儿回收 | 开启 | 开启 |
+看板上一个选择器切换三档工作模式（RPC 单入口 `set-work-mode`，`mode` = `list` / `auto` / `team`）：
 
-Team 模式开启时强制自动派发（防止"引导派发 + 手动模式"死锁组合）。
+| 档位 | 内部映射 | 行为 | 适合场景 |
+|---|---|---|---|
+| 📋 清单模式 | `boardMode=manual` + `teamMode=false` | 看板当 TODO 列表：任务建了就是 `pending` 躺着，主窗口自己 claim 办理，或逐张在详情页点「派发」才起 Worker | 需求还在拆、想自己盯着逐条推进；或只想借看板记账 |
+| ⚡ 自动派发 | `boardMode=auto` + `teamMode=false` | 即建即派：`pending` 任务在心跳周期内自动派给一级 Worker，主窗口也可以自己 claim 干活 | 任务描述已经写清楚、依赖也理顺，交给 Worker 跑 |
+| 🤖 Team 托管 | `boardMode=auto` + `teamMode=true` | 主窗口当调度员：`task_create` 缺省建草稿（补完 dependsOn/上下文再 publish 统一发布），Worker 歧义上报主窗口裁决 | 多任务编排、长链路、需要人工把关键决策点 |
 
-### Team 模式
+三档通用（**不是某一档专属**）：
 
-开启后（Team 开关）：
-- 主窗口 system prompt 注入派发引导（提示词层面建议实质性改动走看板，不硬拦截）
-- 引导含**上下文书写提示**：子代理是全新会话、无会话记忆，description 写不够会自行调研跑偏
-- Worker 歧义自动上报主窗口聊天流，等待裁决
+- **歧义裁决**：Worker 遇歧义不猜测，一律上报；裁决后新 Worker 携带答案接手（Team 托管档附带 system prompt 派发引导 + 默认草稿护栏）
+- **Verifier 验收**：`acceptance` 硬性验收脚本命令，Worker 必须实际运行、Verifier 必须独立复跑；跨档一致
+- **touches 排他**：`touches` 文件级排他锁在活动任务间生效，冲突任务跳过本轮派发，提交验收/完成后释放；跨档一致
+- 孤儿回收、看门狗、级联归档、会话隔离同样三档一致
+
+Team 托管档独有（调度员体验）：
+- 主窗口 system prompt 注入派发引导（提示词层面建议实质性改动走看板，不硬拦截）；引导含**上下文书写提示**——子代理是全新会话、无会话记忆，description 写不够会自行调研跑偏
+- **默认草稿护栏**：`task_create` / `create-task` 缺省建为草稿（草稿不派发），先把所有任务的 dependsOn、contextNotes/contextFiles 补齐，再逐个 `task_update publish=true` 统一发布；确实要立即派发的单个任务才显式传 `draft:false`
+- **歧义通知 25s 去抖**：通知延迟 25s 投递，投递前重读看板——歧义已被裁决、或任务已 resolved/archived 就静默跳过（消除主窗口 turn 排队导致的过期回声）；同一任务连续多次上报只投最新一条
 - 任务完成/阻塞时主窗口收到**批量聚合回执**（45s 窗口或满 5 条聚合，等主窗口空闲再发，不打断对话）
+
+> 兼容：旧的 `set-board-mode` / `set-team-mode` 两个 RPC 原样保留（旧客户端与脚本不受影响），
+> 内部仍以 `boardMode` + `teamMode` 两个字段落盘，老看板文件无损；`get-tasks` 额外返回派生字段 `workMode` 供 UI 单点读取。
 
 ## 13 个 Agent 工具
 
@@ -151,7 +161,7 @@ Team 模式开启时强制自动派发（防止"引导派发 + 手动模式"死�
 │   ├── index.mjs                 #   host 端：IO 编排（工具/RPC/一次性派发引擎接线）
 │   ├── lib/core.mjs              #   纯逻辑核心：状态机/依赖/分类/prompt/解析（无 IO，可单测）
 │   ├── lib/client.js             #   client 端（ModuleLoader 包装，图标统一走 ICONS + ic()）
-│   ├── test/core.test.mjs        #   单元测试（node --test，30 例）
+│   ├── test/core.test.mjs        #   单元测试（node --test，54 例）
 │   ├── package.json              #   dsh.bundle.patch + dsh.client 元数据
 │   └── cordis.patch.yml          #   bundle 挂载行
 └── docs/
@@ -198,7 +208,7 @@ git push --follow-tags     # tag 推送触发流水线
 - **README 单一来源**：本文件（根 README）即唯一来源；发版前在 `packages/dsh-agent-board` 跑一次 `npm run sync-readme` 同步进包（npm 页面展示的是包内 README）
 - 需在仓库 **Settings → Secrets and variables → Actions** 配置 `NPM_TOKEN`
   （npm granular access token：bypass 2FA + direct publish）
-- 日常 push / PR 有 `test.yml` 跑语法检查 + 30 例单测
+- 日常 push / PR 有 `test.yml` 跑语法检查 + 54 例单测
 - 本地手动发布仍然可用：`npm publish --registry=https://registry.npmjs.org`（本机默认源是镜像时必须显式指定）
 
 ## License
