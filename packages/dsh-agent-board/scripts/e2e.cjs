@@ -5,13 +5,14 @@
 //   node scripts/e2e.cjs --session <会话id> [--base http://127.0.0.1:3080] [--only 场景1,场景2]
 //
 // 前置：--session 指定的会话必须在目标实例的 GUI 里处于打开状态（子代理 spawn 需要活的 root agent）。
-// 场景（默认跑除 team-flow 外的全部；team-flow 需显式指定）：
+// 场景（默认跑除 team-flow/work-mode 外的全部；两者需显式 --only 指定）：
 //   auto-full      非Team自动模式全流程：创建(full+上下文注入+硬性验收) → 自动派发 → Worker → Verifier → resolved
 //   manual-gate    手动模式门禁：manual 下任务不被自动领取；「派发」按钮可流转
 //   manual-claim   手动模式领取：主窗口 claim → 办理 → resolve → verify → resolved
 //   manual-pickup  切回自动：积压任务在下一心跳周期被自动拾取
 //   team-flow      Team模式：草稿→发布→依赖门控→Worker 歧义上报→主窗口裁决→重派完成→依赖任务接续
 //   team-draft-default  Team模式默认草稿护栏：不传 draft → 草稿；draft:false → pending；publish → pending；关 Team → pending
+//   work-mode      工作模式三档往返（set-work-mode）+ 老 RPC 兼容断言（纯参数往返，无子代理）
 //
 // 全部场景自带清理（任务归档、临时文件删除），退出码 0=全过 / 1=有失败。
 
@@ -242,6 +243,39 @@ scenarios['team-draft-default'] = async () => {
   }
 };
 
+// S7 工作模式三档（set-work-mode 单入口）+ 老 RPC 兼容（纯参数往返，不 spawn 子代理，秒级完成）
+scenarios['work-mode'] = async () => {
+  console.log('\n[work-mode] 工作模式三档往返 + 老 RPC 兼容');
+  // ① team 档 → boardMode=auto + teamMode=true，get-tasks 派生 workMode='team'
+  const r1 = await rpcRaw('set-work-mode', { mode: 'team' });
+  ok(r1.ok === true && r1.boardMode === 'auto' && r1.teamMode === true && r1.workMode === 'team', 'set-work-mode team → auto + teamOn');
+  const g1 = await rpcRaw('get-tasks', {});
+  ok(g1.workMode === 'team' && g1.boardMode === 'auto' && g1.teamMode === true, 'get-tasks 返回 workMode=team');
+  // ② list 档 → manual + teamOff，workMode='list'
+  const r2 = await rpcRaw('set-work-mode', { mode: 'list' });
+  ok(r2.ok === true && r2.boardMode === 'manual' && r2.teamMode === false && r2.workMode === 'list', 'set-work-mode list → manual + teamOff');
+  const g2 = await rpcRaw('get-tasks', {});
+  ok(g2.workMode === 'list' && g2.boardMode === 'manual' && g2.teamMode === false, 'get-tasks 返回 workMode=list');
+  // ③ auto 档 → auto + teamOff，workMode='auto'
+  const r3 = await rpcRaw('set-work-mode', { mode: 'auto' });
+  ok(r3.ok === true && r3.boardMode === 'auto' && r3.teamMode === false && r3.workMode === 'auto', 'set-work-mode auto → auto + teamOff');
+  const g3 = await rpcRaw('get-tasks', {});
+  ok(g3.workMode === 'auto' && g3.boardMode === 'auto' && g3.teamMode === false, 'get-tasks 返回 workMode=auto');
+  // ④ 非法/缺省 mode 兜底 auto（不抛错、不留脏状态）
+  const r4 = await rpcRaw('set-work-mode', { mode: 'bogus' });
+  ok(r4.ok === true && r4.workMode === 'auto' && r4.teamMode === false, '非法 mode 兜底为 auto');
+  // ⑤ 老 RPC 兼容：set-team-mode enabled:true 后 workMode 仍派生为 'team'（旧客户端/脚本路径不回归）
+  const legacy = await rpcRaw('set-team-mode', { enabled: true });
+  const g4 = await rpcRaw('get-tasks', {});
+  ok(legacy.teamMode === true && g4.workMode === 'team', '老 RPC set-team-mode(true) 后 get-tasks workMode=team');
+  const legacyOff = await rpcRaw('set-board-mode', { mode: 'manual' });
+  const g5 = await rpcRaw('get-tasks', {});
+  ok(legacyOff.boardMode === 'manual' && legacyOff.teamMode === false && g5.workMode === 'list', '老 RPC set-board-mode(manual) 关 team 后 workMode=list');
+  // ⑥ 复原 auto，不留测试态
+  const back = await rpcRaw('set-work-mode', { mode: 'auto' });
+  ok(back.workMode === 'auto' && back.boardMode === 'auto' && back.teamMode === false, '收尾复原 workMode=auto');
+};
+
 // ===== 主流程 =====
 (async () => {
   // 健康检查：实例可达 + 会话看板可读
@@ -250,7 +284,7 @@ scenarios['team-draft-default'] = async () => {
     console.log('实例 ' + BASE + ' | 会话 ' + SID.slice(0, 20) + '… | boardMode=' + st.boardMode + ' teamMode=' + st.teamMode);
   } catch (e) { console.error('实例不可达: ' + e.message); process.exit(1) }
 
-  const names = args.only || Object.keys(scenarios).filter((n) => n !== 'team-flow');
+  const names = args.only || Object.keys(scenarios).filter((n) => n !== 'team-flow' && n !== 'work-mode');
   for (const name of names) {
     if (!scenarios[name]) { console.error('未知场景: ' + name + '（可用: ' + Object.keys(scenarios).join(', ') + '）'); process.exit(1) }
     try { await scenarios[name]() } catch (e) { ok(false, '场景异常: ' + String(e).slice(0, 200)) }

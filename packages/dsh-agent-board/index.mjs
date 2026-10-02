@@ -62,6 +62,12 @@ export function apply(ctx) {
     function touchSession(sid) { if (sid && typeof sid === 'string' && sid !== 'unknown') knownSessions[sid] = Date.now() }
     // teamMode 缓存：由 rt() 同步，供 systemPrompt 动态引导段读取（v65）
     var teamModeCache = {}
+    // 工作模式三档收敛（UI 一维化）：内部仍存 boardMode+teamMode 两个 flag（老数据/老 RPC 无损），
+    // workMode 是纯派生字段——由两 flag 算出，不落盘（normalizeBoard 无需改动）。
+    //   'team' → boardMode=auto + teamMode=true（主窗口当调度员：默认草稿 + 裁决歧义）
+    //   'auto' → boardMode=auto + teamMode=false（即建即派给 Worker）
+    //   'list' → boardMode=manual + teamMode=false（看板=TODO 列表，手动 claim 或逐张派发）
+    function deriveWorkMode(d) { return (d && d.teamMode) ? 'team' : ((d && d.boardMode) === 'auto' ? 'auto' : 'list') }
     // 看板文件用「家目录绝对路径 + node:fs」直读写——不再走 fs 服务的相对路径解析
     // （fs 服务的相对路径解析根 = 进程启动 cwd，cwd 一变所有看板静默读成空板；
     //  曾因此导致整个看板状态异常。绝对路径对此永久免疫）
@@ -645,6 +651,8 @@ export function apply(ctx) {
     handle('get-tasks', async function (args) { var sid = rpcSessionId(args); var d = await rt(sid); d.sessionId = sid; var __ag = ctx.agents; d.isRoot = true; if (__ag) { var __roots = __ag.roots(); var __rids = []; for (var __i = 0; __i < __roots.length; __i++) __rids.push(String(__roots[__i].id)); d.isRoot = __rids.indexOf(sid) >= 0 }
       // poolStatus 防幽灵：只保留指向当前活跃任务的条目（重启后内存 runs 清空，文件快照可能残留）
       if (d.poolStatus) { var __act = {}; (d.tasks || []).forEach(function (t) { if (t.status === 'in-progress' || t.status === 'verifying') __act[t.id] = true }); d.poolStatus.workers = (d.poolStatus.workers || []).filter(function (w) { return __act[w.taskId] }); d.poolStatus.verifiers = (d.poolStatus.verifiers || []).filter(function (v) { return __act[v.taskId] }) }
+      // 工作模式派生字段：UI 只读这一个字段决定三档选中态（不落盘，写入仍走 boardMode/teamMode）
+      d.workMode = deriveWorkMode(d)
       return d })
     // 派发前上下文预览：主 agent 用它确认"我将注入给子代理的材料"是否足够（不发任务、不落盘）
     handle('preview-context', async function (args) {
@@ -743,8 +751,23 @@ export function apply(ctx) {
     handle('verify-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'verifying') return { ok: false, error: 'not verifying' }; delete t.escalation; delete t.verifyRetries; return verifyApply(d, t, actor, args.verdict, args.comment) }) })
     handle('archive-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var a = d.tasks; var t = a.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'resolved' && t.status !== 'cancelled') return { ok: false, error: 'cannot archive' }; var ps = t.status; t.status = 'archived'; t.archivedAt = new Date().toISOString(); ah(t, ps, 'archived', actor, 'manual archive'); var ca = 0; gsb(t.id, a).forEach(function (c) { if (c.status !== 'archived') { ah(c, c.status, 'archived', actor, 'cascade'); c.status = 'archived'; c.archivedAt = new Date().toISOString(); ca++ } }); var r = { ok: true, task: t }; if (ca) r.childrenArchived = ca; return r }) })
     handle('update-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (args.title !== undefined) t.title = args.title; if (args.description !== undefined) t.description = args.description; if (args.priority !== undefined) t.priority = args.priority; if (args.assignMode !== undefined) t.assignMode = args.assignMode; if (args.assignee !== undefined) t.assignee = args.assignee || null; if (args.dependsOn !== undefined) { var derr = validateDeps(d, t.id, args.dependsOn); if (derr) return { ok: false, error: derr }; t.dependsOn = args.dependsOn } if (args.pipeline !== undefined) { t.pipeline = args.pipeline; t.pipelineAuto = false } if (args.contextFiles !== undefined) { if (!t.context) t.context = { files: [], docs: [], instructions: '', notes: '', relatedTasks: [], prerequisites: '' }; t.context.files = Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : [] } if (args.contextNotes !== undefined) { if (!t.context) t.context = { files: [], docs: [], instructions: '', notes: '', relatedTasks: [], prerequisites: '' }; t.context.notes = typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : '' } if (args.publish) { if (t.status !== 'draft') return { ok: false, error: 'not a draft' }; t.status = 'pending'; ah(t, 'draft', 'pending', actor, 'published') } if (args.unfreeze && t.frozen) { delete t.frozen; delete t.frozenAt; delete t.frozenBy; ah(t, t.status, t.status, actor, '解除冻结，重新进入派发池') } if (args.resetToPending) { var ps = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'pending', actor, 'reset to pending after edit') }; return { ok: true, task: t } }) })
-    handle('set-board-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.boardMode = args.mode === 'manual' ? 'manual' : 'auto'; if (d.boardMode === 'manual' && d.teamMode) { d.teamMode = false; teamModeCache[sid] = false }; return { ok: true, boardMode: d.boardMode, teamMode: !!d.teamMode } }) })
-    handle('set-team-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.teamMode = !!args.enabled; if (d.teamMode) d.boardMode = 'auto'; teamModeCache[sid] = d.teamMode; return { ok: true, teamMode: d.teamMode, boardMode: d.boardMode } }) })
+    handle('set-board-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.boardMode = args.mode === 'manual' ? 'manual' : 'auto'; if (d.boardMode === 'manual' && d.teamMode) { d.teamMode = false; teamModeCache[sid] = false }; return { ok: true, boardMode: d.boardMode, teamMode: !!d.teamMode, workMode: deriveWorkMode(d) } }) })
+    handle('set-team-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.teamMode = !!args.enabled; if (d.teamMode) d.boardMode = 'auto'; teamModeCache[sid] = d.teamMode; return { ok: true, teamMode: d.teamMode, boardMode: d.boardMode, workMode: deriveWorkMode(d) } }) })
+    // 工作模式三档单入口（v75 UI 收敛）：一次写入 boardMode+teamMode 两个字段，
+    // 复用与老 RPC 完全相同的写入语义（team 档强制 auto；list 档关 team）——
+    // 老 RPC set-board-mode/set-team-mode 原样保留，旧客户端/脚本/E2E 不受影响。
+    handle('set-work-mode', async function (args) {
+      var sid = rpcSessionId(args)
+      var m = args && args.mode
+      var mode = (m === 'list' || m === 'team') ? m : 'auto' // 缺省/非法值兜底 auto
+      return mutateLocked(sid, function (d) {
+        if (mode === 'list') { d.boardMode = 'manual'; d.teamMode = false }
+        else if (mode === 'team') { d.boardMode = 'auto'; d.teamMode = true }
+        else { d.boardMode = 'auto'; d.teamMode = false }
+        teamModeCache[sid] = !!d.teamMode // 同步 systemPrompt 引导段的 teamMode 缓存
+        return { ok: true, mode: mode, workMode: deriveWorkMode(d), boardMode: d.boardMode, teamMode: !!d.teamMode }
+      })
+    })
     // 裁决回流（v74 一次性模型）：原 Worker 已结束，答案写入 history 后任务回 pending，
     // 下个派发周期 spawn 新 Worker，裁决内容随 prompt 注入（histNotes 匹配"裁决"）
     // 结构化动作（裁决竞态保护）：
