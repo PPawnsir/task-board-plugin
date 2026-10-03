@@ -83,6 +83,7 @@ dsh plugin --profile web remove dsh-agent-board
 >
 > - **归属**：看板文件按**会话**分文件，同时在文件里记 `ownerCwd`（创建该看板的会话工作区路径，取不到则省略该字段）——`~/.dsh/tasks-*.json` 每个文件是一块看板，`list-boards` 全局视图可看到本机所有板。
 > - **重启继承**：DSH 重启后同一会话的根 id 可能漂移，此时新 id 没有对应文件——若同工作区（`ownerCwd` 严格相等）存在**唯一**「原主已不在 `agents.roots()`」的看板，则自动继承：文件重命名为新 id、文件内 `ownerSession` 改写为新 id、`console.error` 留一行 `[task-board] 继承看板 <旧sid> → <新sid>`；**多个候选一律不自动接管**（记一行日志后按空板处理，防误合并，旧板仍可在 `list-boards` 全局视图里看到）。
+> - **写盘保护**：落盘走 临时文件+rename 原子写（EPERM/EBUSY 退避重试）；瞬时读失败/坏文件隔离后返回的空板**禁止回写**（防一个"读不到"的瞬间把看板覆成空板），坏文件隔离为 `.corrupt-<时间戳>` 留档不丢数据。
 
 ## 功能总览
 
@@ -184,8 +185,9 @@ Team 托管档独有（调度员体验）：
 
 ```
 └── packages/dsh-agent-board/     # 插件全部源码
-│   ├── index.mjs                 #   host 端：IO 编排（工具/RPC/一次性派发引擎接线）
+│   ├── index.mjs                 #   host 端薄壳（~70 行）：cordis 契约 + 共享 state 构建 + 模块接线
 │   ├── lib/core.mjs              #   纯逻辑核心：状态机/依赖/分类/prompt/解析（无 IO，可单测）
+│   ├── lib/*.mjs                 #   host 端领域模块（按任务边界拆分，见下节）
 │   ├── lib/client/               #   client 端模块源（按用户感知域拆分，见下节）
 │   ├── lib/client.js             #   client 端产物（⚠️ GENERATED：scripts/build-client.cjs 拼装，勿直接编辑）
 │   ├── scripts/build-client.cjs  #   零依赖组装器（模块源 → 产物；--check 校验产物新鲜度）
@@ -198,6 +200,23 @@ Team 托管档独有（调度员体验）：
     ├── icon-style-guide.md       # 图标风格指南（Lucide 线性 SVG + emoji 分界）
     └── REGRESSION-v59.md         # 端到端回归测试记录
 ```
+
+### host 模块边界（lib/*.mjs）
+
+v1.6.0 起 host 端从单体 index.mjs（1487 行）拆为薄壳 + 7 个领域模块，
+共享闭包状态收进显式 `state` 对象逐模块注入——模块边界即任务边界，并行任务不再全员互锁：
+
+| 模块 | 域 | 内容 |
+|---|---|---|
+| `policy.mjs` | 策略层 | 粒度治理软闸门 + 学习飞轮候选教训（纯函数零状态） |
+| `usage.mjs` | 统计 | v4 会话日志定位 / zstd 分帧 / token usage 聚合（纯函数） |
+| `session.mjs` | 会话 | root 解析缓存 / 会话 id 归一 / workMode 派生 / runsFor |
+| `store.mjs` | 持久化 | boardPath / rt / wt 原子落盘 / 跨重启继承 / fileLocks 串行化 / mutateLocked |
+| `notify.mjs` | 通知 | makeMsg / 歧义 25s 去抖 / 回执聚合 + 空闲门控 / 投递前过滤 |
+| `dispatch.mjs` | 派发引擎 | poolCycle / spawnOneShot / settleRun / 两级超时 / 孤儿回收 |
+| `rpc.mjs` | 接口层 | RPC 路由 + 13 个 Agent 工具注册 |
+
+（store→dispatch 的循环依赖由 `deps.poolCycle` 晚绑定解开；index.mjs 对外 re-export 契约不变。）
 
 ### 前端模块边界（lib/client/）
 

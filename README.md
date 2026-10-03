@@ -83,6 +83,7 @@ dsh plugin --profile web remove dsh-agent-board
 >
 > - **归属**：看板文件按**会话**分文件，同时在文件里记 `ownerCwd`（创建该看板的会话工作区路径，取不到则省略该字段）——`~/.dsh/tasks-*.json` 每个文件是一块看板，`list-boards` 全局视图可看到本机所有板。
 > - **重启继承**：DSH 重启后同一会话的根 id 可能漂移，此时新 id 没有对应文件——若同工作区（`ownerCwd` 严格相等）存在**唯一**「原主已不在 `agents.roots()`」的看板，则自动继承：文件重命名为新 id、文件内 `ownerSession` 改写为新 id、`console.error` 留一行 `[task-board] 继承看板 <旧sid> → <新sid>`；**多个候选一律不自动接管**（记一行日志后按空板处理，防误合并，旧板仍可在 `list-boards` 全局视图里看到）。
+> - **写盘保护**：落盘走 临时文件+rename 原子写（EPERM/EBUSY 退避重试）；瞬时读失败/坏文件隔离后返回的空板**禁止回写**（防一个"读不到"的瞬间把看板覆成空板），坏文件隔离为 `.corrupt-<时间戳>` 留档不丢数据。
 
 ## 功能总览
 
