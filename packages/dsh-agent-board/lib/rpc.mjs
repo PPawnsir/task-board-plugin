@@ -11,6 +11,7 @@ import fsNode from 'node:fs'
 import { findRunLog, readLogBytes, readLogFrames, aggregateUsageSummary } from './usage.mjs'
 import { TASK_SIZE_CONTRACT, withSplitHint, pushRejectLesson, pushArbitrationLesson } from './policy.mjs'
 import { makeMsg } from './notify.mjs'
+import { computeHealthHints } from './health.mjs'
 const { ah, isb, gsb, gpt, vt, validateDeps, classifyPipeline, cfg, claimCheck, claimApply, resolveApply, verifyApply, PRIO_RANK, touchesConflict, holdsFiles, boardHome } = core
 
 function defineTool(options) {
@@ -71,6 +72,8 @@ export function createRpc(ctx, state, deps) {
       d.workMode = deriveWorkMode(d)
       // ===== board 级 token 消耗聚合（现算，不落盘）：总量 + 输入/输出/缓存读 + 按模型 + 任务 Top8 =====
       d.usageSummary = aggregateUsageSummary(d.tasks)
+      // 架构自省 L1：healthHints 现算（纯函数零存储零 IO，近 50 卡窗口），客户端「架构健康」区超阈值才显示
+      d.healthHints = computeHealthHints(d.tasks)
       return d })
     // 派发前上下文预览：主 agent 用它确认"我将注入给子代理的材料"是否足够（不发任务、不落盘）
     handle('preview-context', async function (args) {

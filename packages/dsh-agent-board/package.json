@@ -6,7 +6,7 @@
   "main": "./index.mjs",
   "scripts": {
     "build-client": "node scripts/build-client.cjs",
-    "test": "node --test test/core.test.mjs",
+    "test": "node --test test/*.test.mjs",
     "pretest": "npm run build-client",
     "sync-readme": "node -e \"require('fs').copyFileSync('../../README.md','README.md')\"",
     "prepublishOnly": "npm run build-client && node --check index.mjs && node --check lib/client.js && node --check lib/core.mjs && npm test",

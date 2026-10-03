@@ -32,7 +32,7 @@ export function vt(d) { return d && typeof d === 'object' && Array.isArray(d.tas
 //   5. 裸文件名（无 '/' 且非 '*.ext'）只在「另一侧也是裸名」时比 basename 相等；
 //      含 '/' 的具体路径不参与裸名规则（否则 'a/core.mjs' 会误撞裸名 'core.mjs'）。
 // 保守倾向：不确定即算冲突（误拦只是晚一轮派发，漏拦会让两个 Worker 互踩）。
-function normTouch(s) {
+export function normTouch(s) {
   var v = String(s).replace(/\\/g, '/').trim()
   while (v.slice(0, 2) === './') v = v.slice(2)
   while (v.length > 1 && v.charAt(v.length - 1) === '/') v = v.slice(0, -1)
