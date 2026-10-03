@@ -43,7 +43,11 @@
     "kanban",
     "agent",
     "subagent",
-    "task-dispatch"
+    "multi-agent",
+    "ai-agent",
+    "task-dispatch",
+    "workflow",
+    "orchestration"
   ],
   "repository": {
     "type": "git",
