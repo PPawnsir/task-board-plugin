@@ -32,9 +32,7 @@
   },
   "files": [
     "index.mjs",
-    "lib/core.mjs",
-    "lib/client.js",
-    "lib/client/",
+    "lib/",
     "cordis.patch.yml",
     "README.md",
     "test/"
