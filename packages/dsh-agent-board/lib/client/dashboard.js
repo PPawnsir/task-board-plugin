@@ -1,6 +1,7 @@
 // ============================================================================
 // dashboard —— 仪表盘域：统计（computeStats/TrendChart/StatCard/BarRow）· 范围筛选（RangeFilter）
 //   · 全局总览（GlobalBoards）· 报告（buildReport/ReportButton）· Token 消耗（TokenUsage）
+//   · 架构健康（HealthHints，架构自省 L1）
 //   · 团队池（TeamView/PoolStatus）· 设置（WorkModeSwitch/PoolCfg/MinCfg/ModelCfg/PoolCfgPopover）
 // 本文件是 apply(ctx) 函数体片段，不可独立运行；由 scripts/build-client.cjs 按序拼接生成 lib/client.js。
 // ============================================================================
@@ -204,12 +205,44 @@
             }))))
     }
 
+    // ===== 架构健康提示区（架构自省 L1 · 数据源：host 端 get-tasks 的 healthHints）=====
+    // healthHints 由 host lib/health.mjs 的 computeHealthHints(tasks) 每次请求现算（纯函数零存储零 IO）：
+    //   [{ level: 'warn'|'info', text }]。缺省兼容：老 host 无此字段 / 非数组 / 空数组 → 返回 null，
+    //   整块不渲染（零残留）。无按钮无状态（不做 dismiss）：以 state.tasks 为 effect 依赖——kernel
+    //   fetchTasks 每轮都赋它新数组引用，故本区随 3s 轮询同步重取，只反映 host 最新一轮纯重算结果。
+    function HealthHints() {
+      var _R = React; var useState = _R.useState, useEffect = _R.useEffect
+      var _a = useState([]), hints = _a[0], setHints = _a[1]
+      useEffect(function () {
+        var dead = false
+        rpc('get-tasks').then(function (d) {
+          if (dead) return
+          var arr = (d && Array.isArray(d.healthHints)) ? d.healthHints : []
+          setHints(arr.filter(function (h) { return h && h.text }))
+        }).catch(function () {})
+        return function () { dead = true }
+      }, [state.tasks])
+      if (!hints.length) return null
+      // 两级配色：warn=⚠️ 琥珀（C.warn）；info=ℹ️ 蓝灰（DSH 现有 business 信息色——色板无独立 info 档）
+      var infoColor = 'var(--dsw-alias-state-business-primary)'
+      return React.createElement('div', { style: { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 } },
+        React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('activity', 11), '架构健康'),
+        hints.map(function (h, i) {
+          var warn = h.level === 'warn'
+          var col = warn ? C.warn : infoColor
+          return React.createElement('div', { key: i, style: { display: 'flex', alignItems: 'baseline', gap: 5, fontSize: 10, lineHeight: 1.5, color: col, marginBottom: 3 } },
+            React.createElement('span', { style: { flexShrink: 0 } }, warn ? '⚠️' : 'ℹ️'),
+            React.createElement('span', null, String(h.text)))
+        }))
+    }
+
     function Dashboard() {
       var stats = computeStats(state.tasks); var statusOrder = ['pending', 'in-progress', 'verifying', 'resolved', 'blocked', 'archived']; var prioOrder = ['critical', 'high', 'medium', 'low']
       return React.createElement('div', null,
         React.createElement(RangeFilter),
         React.createElement(GlobalBoards),
         React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' } }, React.createElement(StatCard, { label: '总任务', value: stats.total, color: C.text }), React.createElement(StatCard, { label: '待办', value: stats.byStatus['pending'] || 0, color: C.text2 }), React.createElement(StatCard, { label: '进行中', value: stats.byStatus['in-progress'] || 0, color: C.brand }), React.createElement(StatCard, { label: '验证中', value: stats.byStatus['verifying'] || 0, color: C.warn }), React.createElement(StatCard, { label: '已完成', value: stats.byStatus['resolved'] || 0, color: C.ok }), React.createElement(StatCard, { label: '已归档', value: stats.byStatus['archived'] || 0, color: C.text2 })),
+        React.createElement(HealthHints),
         React.createElement(TokenUsage, { usage: state.usageSummary }),
         React.createElement('div', { style: { display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' } },
           React.createElement('div', { style: { flex: '1 1 0', minWidth: 200, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '按状态分布'), statusOrder.map(function (s) { return React.createElement(BarRow, { key: s, label: statusLabels[s] || s, count: stats.byStatus[s] || 0, total: stats.total, color: statusColors[s] || C.brand }) })),

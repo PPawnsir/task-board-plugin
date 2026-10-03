@@ -864,3 +864,17 @@ test('学习飞轮接线：两处触发点 + push-lesson 开关拦截 + prompt/�
   assert.doesNotMatch(coreSrc, /from 'dsh-notes|ctx\.get\('notes'\)|uiWorkspace\.openNote|note_manage\(|note_search\(/)
   assert.doesNotMatch(cli, /from 'dsh-notes|ctx\.get\('notes'\)|uiWorkspace\.openNote|note_manage\(|note_search\(/)
 })
+
+// ===== 架构自省 L1·UI：仪表盘「架构健康」提示区接线（源码级断言；纯函数信号本身见 health.test.mjs）=====
+test('架构健康接线：get-tasks 返回 healthHints + 仪表盘 HealthHints 区缺省兼容渲染', () => {
+  const host = hostSrc()
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(host, /d\.healthHints = computeHealthHints\(d\.tasks\)/)   // host 每次请求现算返回（零存储）
+  assert.match(cli, /function HealthHints\(\)/)                          // 仪表盘提示区组件
+  assert.match(cli, /React\.createElement\(HealthHints\)/)               // 挂进 Dashboard（统计卡行下方、Token 消耗区上方）
+  assert.match(cli, /Array\.isArray\(d\.healthHints\)/)                  // 缺省兼容：老 host 无字段/非数组 → 按空处理
+  assert.match(cli, /if \(!hints\.length\) return null/)                 // 空数组 → 整块不渲染（零残留）
+  assert.match(cli, /'架构健康'/)                                        // 区标题
+  assert.match(cli, /warn \? C\.warn : infoColor/)                       // warn=琥珀 / info=蓝灰 两级配色
+  assert.match(cli, /dsw-alias-state-business-primary/)                  // info 蓝灰用 DSH 现有 business 信息色（色板无独立 info 档）
+})
