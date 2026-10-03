@@ -244,6 +244,130 @@ test('buildContextPackSection: 仅笔记无文件也可注入', () => {
   assert.equal(core.buildContextPackSection(null, '  '), '')
 })
 
+test('buildContextPackSection: meta 截断详情 + 结构索引块渲染（①②④）', () => {
+  const s = core.buildContextPackSection([
+    { path: 'src/big.js', content: 'function a() {}', truncated: true, meta: '截断：共 3800 行，已注入 1–96 行', outline: ['L12: export function foo(a, b)', 'L88: class Bar'] },
+  ])
+  assert.match(s, /### src\/big\.js（截断：共 3800 行，已注入 1–96 行）/)
+  assert.match(s, /结构索引/); assert.match(s, /L12: export function foo\(a, b\)/); assert.match(s, /L88: class Bar/)
+})
+
+test('buildContextPackSection: 锚点行段 meta 渲染', () => {
+  const s = core.buildContextPackSection([
+    { path: 'src/big.js:L2350-L2420', content: 'x', truncated: false, meta: '锚点行段：共 3800 行，已注入 L2350–L2420' },
+  ])
+  assert.match(s, /### src\/big\.js:L2350-L2420（锚点行段：共 3800 行，已注入 L2350–L2420）/)
+  assert.doesNotMatch(s, /结构索引/)
+})
+
+// ===== 锚点行段解析（②，零依赖纯正则，Windows 盘符冒号不得误判）=====
+test('parseAnchorPath: 无锚点原样返回', () => {
+  assert.deepEqual(core.parseAnchorPath('src/a.js'), { file: 'src/a.js', from: null, to: null })
+  assert.deepEqual(core.parseAnchorPath(''), { file: '', from: null, to: null })
+  // 盘符无锚点：冒号在最前，不触发
+  assert.deepEqual(core.parseAnchorPath('C:\\Users\\x\\a.js'), { file: 'C:\\Users\\x\\a.js', from: null, to: null })
+})
+
+test('parseAnchorPath: 单行与行段锚点', () => {
+  assert.deepEqual(core.parseAnchorPath('src/a.js:L2350'), { file: 'src/a.js', from: 2350, to: null })
+  assert.deepEqual(core.parseAnchorPath('src/a.js:L2350-L2420'), { file: 'src/a.js', from: 2350, to: 2420 })
+  // 第二段 L 可省略
+  assert.deepEqual(core.parseAnchorPath('src/a.js:L10-20'), { file: 'src/a.js', from: 10, to: 20 })
+})
+
+test('parseAnchorPath: Windows 盘符 + 锚点共存', () => {
+  assert.deepEqual(core.parseAnchorPath('C:\\Users\\x\\a.js:L100-L200'), { file: 'C:\\Users\\x\\a.js', from: 100, to: 200 })
+  assert.deepEqual(core.parseAnchorPath('D:/deepseek-work/b.mjs:L5'), { file: 'D:/deepseek-work/b.mjs', from: 5, to: null })
+})
+
+test('parseAnchorPath: 非法锚点剥掉并标记 invalidAnchor（调用方回退头部）', () => {
+  var r1 = core.parseAnchorPath('a.js:L0')
+  assert.equal(r1.file, 'a.js'); assert.equal(r1.from, null); assert.equal(r1.invalidAnchor, true)
+  var r2 = core.parseAnchorPath('a.js:L5-L2')  // to < from
+  assert.equal(r2.from, null); assert.equal(r2.invalidAnchor, true)
+  // 完全不成形的尾巴（:Lab）不匹配锚点正则 → 按无锚点处理，路径原样保留
+  var r3 = core.parseAnchorPath('a.js:Lab')
+  assert.equal(r3.file, 'a.js:Lab'); assert.equal(r3.from, null); assert.equal(r3.invalidAnchor, undefined)
+})
+
+// ===== 按行切段（②，行号 1 起、from/to 皆含）=====
+test('sliceLines: 正常切段', () => {
+  var c = ['l1', 'l2', 'l3', 'l4', 'l5'].join('\n')
+  var s = core.sliceLines(c, 2, 4)
+  assert.equal(s.text, 'l2\nl3\nl4')
+  assert.equal(s.totalLines, 5); assert.equal(s.injectedFrom, 2); assert.equal(s.injectedTo, 4)
+  assert.equal(s.capped, false); assert.equal(s.invalid, false)
+  // to 省略 → 到文末
+  var s2 = core.sliceLines(c, 4, null)
+  assert.equal(s2.text, 'l4\nl5'); assert.equal(s2.injectedTo, 5)
+  // from 为 null → 全量（头部注入口径）
+  var s3 = core.sliceLines(c, null)
+  assert.equal(s3.text, c); assert.equal(s3.injectedFrom, 1); assert.equal(s3.injectedTo, 5)
+})
+
+test('sliceLines: 超界无效 / to 超尾收敛', () => {
+  var c = ['l1', 'l2', 'l3'].join('\n')
+  var bad = core.sliceLines(c, 99, null)
+  assert.equal(bad.invalid, true); assert.equal(bad.text, ''); assert.equal(bad.totalLines, 3)
+  assert.equal(core.sliceLines(c, 0, 2).invalid, true)   // from < 1
+  assert.equal(core.sliceLines(c, 3, 2).invalid, true)   // to < from
+  // to 写超了 → 收敛到文末，不算无效
+  var ok = core.sliceLines(c, 2, 9999)
+  assert.equal(ok.invalid, false); assert.equal(ok.injectedTo, 3); assert.equal(ok.text, 'l2\nl3')
+})
+
+test('sliceLines: 400 行段长上限', () => {
+  var lines = []
+  for (var i = 1; i <= 1000; i++) lines.push('row' + i)
+  var s = core.sliceLines(lines.join('\n'), 1, null)
+  assert.equal(s.capped, true); assert.equal(s.injectedFrom, 1); assert.equal(s.injectedTo, 400)
+  assert.equal(s.text.split('\n').length, 400); assert.equal(s.totalLines, 1000)
+  // 段内不超上限不标记
+  var s2 = core.sliceLines(lines.join('\n'), 500, 600)
+  assert.equal(s2.capped, false); assert.equal(s2.injectedTo, 600)
+})
+
+// ===== 结构索引（①④，逐行正则，宁可漏检不可误切）=====
+test('buildFileOutline: JS 函数/类/箭头赋值', () => {
+  var c = [
+    'import os from "node:os"',
+    'export function foo(a, b) {',
+    '  return a + b',
+    '}',
+    'class Bar {',
+    '}',
+    'baz = async function () {}',
+    'qux = async (x) => x',
+    'const plain = 42',
+    // 规格正则不含 var/let/const 前缀赋值形态——宁可漏检不可误切（var baz = ... 不入索引）
+    'var prefixed = function () {}',
+  ].join('\n')
+  var o = core.buildFileOutline(c)
+  assert.deepEqual(o, ['L2: export function foo(a, b) {', 'L5: class Bar {', 'L7: baz = async function () {}', 'L8: qux = async (x) => x'])
+})
+
+test('buildFileOutline: Markdown 标题 + 签名超 80 字符截断', () => {
+  var longSig = 'function ' + 'a'.repeat(100) + '() {'
+  var c = ['# 标题', '正文', '## 小节', '####### 七级不算标题', longSig].join('\n')
+  var o = core.buildFileOutline(c)
+  assert.equal(o[0], 'L1: # 标题'); assert.equal(o[1], 'L3: ## 小节')
+  assert.equal(o.length, 3)  // 七级 # 不匹配；长签名收进来但截断
+  assert.ok(o[2].startsWith('L5: function ')); assert.equal(o[2].length, 'L5: '.length + 81); assert.ok(o[2].endsWith('…'))
+})
+
+test('buildFileOutline: 40 条上限 + 省略标注', () => {
+  var lines = []
+  for (var i = 1; i <= 50; i++) lines.push('function f' + i + '() {}')
+  var o = core.buildFileOutline(lines.join('\n'))
+  assert.equal(o.length, 41)  // 40 条 + 1 条省略标注
+  assert.equal(o[0], 'L1: function f1() {}')
+  assert.equal(o[39], 'L40: function f40() {}')
+  assert.match(o[40], /另有 10 条结构省略/)
+  // 不超上限无省略标注
+  var o2 = core.buildFileOutline(['function only() {}'].join('\n'))
+  assert.deepEqual(o2, ['L1: function only() {}'])
+})
+
 // ===== 派发决策 =====
 test('pickDispatch: 优先级排序 + 并发上限 + 排除项', () => {
   const tasks = [

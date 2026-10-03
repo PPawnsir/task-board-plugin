@@ -245,10 +245,89 @@ export function buildContextPackSection(files, notes) {
     parts.push('主窗口预研文件（主窗口创建任务前已读过以下内容，直接使用，不要重复读取；标"截断"的内容可按需补读）：')
     for (var i = 0; i < files.length; i++) {
       var f = files[i]
-      parts.push('### ' + sanitizeCtx(f.path) + (f.truncated ? '（截断）' : '') + '\n' + sanitizeCtx(f.content))
+      // meta 携带截断详情/锚点信息（readContextPack 组装）；老数据只有 truncated 时回退「（截断）」
+      var head = '### ' + sanitizeCtx(f.path) + (f.meta ? '（' + sanitizeCtx(f.meta) + '）' : (f.truncated ? '（截断）' : ''))
+      parts.push(head + '\n' + sanitizeCtx(f.content))
+      // 结构索引块：供 Worker 按行号用锚点语法直读目标段，不用全文盘点
+      if (Array.isArray(f.outline) && f.outline.length) {
+        parts.push('结构索引（' + sanitizeCtx(f.path) + ' 的函数/标题及行号，可用 路径:L起-L止 锚点补读）：\n' + f.outline.map(function (x) { return sanitizeCtx(x) }).join('\n'))
+      }
     }
   }
   return parts.length ? parts.join('\n\n') : ''
+}
+
+// ===== 上下文注入增强：锚点行段 + 截断结构索引（看板反馈 n-musaoirgsigo ①②④）=====
+// 背景：contextFiles 注入大文件被 8KB 头部截断，目标代码段在中部/尾部，Worker 仍需全文盘点；
+// 且只标"截断"二字，不知道截掉了什么、该补读哪里。
+// 三个纯函数落在这里可单测；零依赖纯行正则，宁可漏检不可误切（不引 parser）。
+// 锚点行段长度上限（行）：超出截断到该上限并标记 capped
+export var CONTEXT_SLICE_MAX_LINES = 400
+// 结构索引条数上限：超出附一条省略标注
+export var CONTEXT_OUTLINE_MAX = 40
+
+// 锚点只认路径尾部的 :L<num>(-L?<num>)?（-L200 / -200 都收）。
+// 正则锚定 $ 且要求 ":L" 前缀——Windows 盘符 "C:\" 的冒号在最前，绝不会误匹配。
+var ANCHOR_TAIL = /:L(\d+)(?:-L?(\d+))?$/i
+// 解析 'path:L2350-L2420' / 'path:L2350' 行段语法。
+// 返回 {file, from, to}；无锚点 → {file: 原串, from: null, to: null}；
+// 写法非法（:L0、:L5-L2 等）→ 剥掉锚点、from=null、invalidAnchor=true（调用方回退头部并标注）。
+export function parseAnchorPath(p) {
+  var s = String(p || '')
+  var m = s.match(ANCHOR_TAIL)
+  if (!m) return { file: s, from: null, to: null }
+  var from = parseInt(m[1], 10)
+  var to = m[2] != null ? parseInt(m[2], 10) : null
+  var file = s.slice(0, m.index)
+  if (!isFinite(from) || from < 1 || (to != null && (!isFinite(to) || to < from))) return { file: file, from: null, to: null, invalidAnchor: true }
+  return { file: file, from: from, to: to }
+}
+
+// 按行切段（行号 1 起，from/to 皆含）。
+// from 为 null → 全量（头部注入口径，injectedFrom=1、injectedTo=末行）。
+// 段无效（from 越界/<1、to<from）→ invalid=true，调用方回退头部注入并标注。
+// to 超文末 → 收敛到文末（锚点大意写超了，给到手头有的，不算无效）。
+// 段长超 CONTEXT_SLICE_MAX_LINES → 截到上限并 capped=true。
+export function sliceLines(content, from, to) {
+  var text = String(content == null ? '' : content)
+  var lines = text.split('\n')
+  var total = lines.length
+  if (from == null) return { text: text, totalLines: total, injectedFrom: 1, injectedTo: total, capped: false, invalid: false }
+  var f = Math.floor(Number(from))
+  var t = to == null ? total : Math.floor(Number(to))
+  if (!isFinite(f) || f < 1 || f > total || (to != null && (!isFinite(t) || t < f))) {
+    return { text: '', totalLines: total, injectedFrom: 0, injectedTo: 0, capped: false, invalid: true }
+  }
+  if (t > total) t = total
+  var capped = false
+  if (t - f + 1 > CONTEXT_SLICE_MAX_LINES) { t = f + CONTEXT_SLICE_MAX_LINES - 1; capped = true }
+  return { text: lines.slice(f - 1, t).join('\n'), totalLines: total, injectedFrom: f, injectedTo: t, capped: capped, invalid: false }
+}
+
+// 结构索引：JS/TS 顶层函数/类/箭头赋值 与 Markdown 标题，逐行正则（零依赖，宁可漏检不可误切）。
+// 每条 'L<n>: <签名≤80字符>'；超 CONTEXT_OUTLINE_MAX 条截断并附一条省略标注。
+// 两个正则都无 /g，.test 无状态可安全复用。
+var OUTLINE_JS = /^(?:export\s+)?(?:async\s+)?(?:function\s|class\s|[\w$]+\s*=\s*(?:async\s+)?(?:function|\())/
+var OUTLINE_MD = /^#{1,6}\s/
+function outlineHit(ln) { return OUTLINE_JS.test(ln) || OUTLINE_MD.test(ln) }
+export function buildFileOutline(content) {
+  var lines = String(content == null ? '' : content).split('\n')
+  var out = []
+  var i
+  for (i = 0; i < lines.length; i++) {
+    if (!outlineHit(lines[i])) continue
+    var sig = lines[i].trim()
+    if (sig.length > 80) sig = sig.slice(0, 80) + '…'
+    out.push('L' + (i + 1) + ': ' + sig)
+    if (out.length >= CONTEXT_OUTLINE_MAX) break
+  }
+  // 已达上限 → 数一遍剩余命中，附省略标注（只在截断时多扫这一次尾部）
+  if (out.length >= CONTEXT_OUTLINE_MAX && i < lines.length) {
+    var rest = 0
+    for (var j = i + 1; j < lines.length; j++) { if (outlineHit(lines[j])) rest++ }
+    if (rest > 0) out.push('…（另有 ' + rest + ' 条结构省略）')
+  }
+  return out
 }
 export function buildWorkerPrompt(t, pack, feedbackEnabled) {
   var notes = histNotes(t)

@@ -10,7 +10,7 @@ import { zstdDecompressSync } from 'node:zlib'
 import os from 'node:os'
 import path from 'node:path'
 import fsNode from 'node:fs'
-const { ah, isb, gsb, gpt, vt, validateDeps, depsSatisfied, depsCancelled, classifyPipeline, seed, normalizeBoard, cfg, claimCheck, claimApply, checkParentAuto, resolveApply, verifyApply, parseSections, parseVerdict, isEscalation, outputText, histNotes, buildContextPackSection, buildWorkerPrompt, buildVerifierPrompt, pickDispatch, isOrphan, PRIO_RANK, patOverlap, overlapsTouches, touchesConflict, holdsFiles, lessonText, pushLesson, LESSON_RECALL_HINT, boardHome } = core
+const { ah, isb, gsb, gpt, vt, validateDeps, depsSatisfied, depsCancelled, classifyPipeline, seed, normalizeBoard, cfg, claimCheck, claimApply, checkParentAuto, resolveApply, verifyApply, parseSections, parseVerdict, isEscalation, outputText, histNotes, buildContextPackSection, buildWorkerPrompt, buildVerifierPrompt, pickDispatch, isOrphan, PRIO_RANK, patOverlap, overlapsTouches, touchesConflict, holdsFiles, lessonText, pushLesson, LESSON_RECALL_HINT, boardHome, parseAnchorPath, sliceLines, buildFileOutline } = core
 
 function defineTool(options) {
   var userExecute = options.execute
@@ -468,12 +468,45 @@ export function apply(ctx) {
       for (var i = 0; i < paths.length && total < 40960; i++) {
         var p = String(paths[i] || '')
         if (!p) continue
+        // 锚点行段语法：'path:L2350-L2420' / 'path:L2350'（看板反馈 n-musaoirgsigo ②）
+        // 盘符冒号不会被误判（parseAnchorPath 只认尾部 :L<num>）；展示路径保留原始写法。
+        var anchor = parseAnchorPath(p)
         try {
-          var content = await fs.readText(await fs.resolve(p, cwd ? { cwd: cwd } : undefined))
-          var truncated = false
+          var full = await fs.readText(await fs.resolve(anchor.file, cwd ? { cwd: cwd } : undefined))
+          var content = full, truncated = false, meta = '', outline = null
+          var anchorFrom = null // 锚点段起点（预算二次截断时换算注入末行用）
+          if (anchor.from != null) {
+            var seg = sliceLines(full, anchor.from, anchor.to)
+            if (seg.invalid) {
+              // 段超范围 → 回退头部注入并标注（调用方写明锚点意图，Worker 可据此换锚点重读）
+              meta = '锚点 L' + anchor.from + (anchor.to != null ? '-L' + anchor.to : '') + ' 无效（共 ' + seg.totalLines + ' 行），已回退头部'
+            } else {
+              content = seg.text
+              anchorFrom = seg.injectedFrom
+              meta = '锚点行段：共 ' + seg.totalLines + ' 行，已注入 L' + seg.injectedFrom + '–L' + seg.injectedTo + (seg.capped ? '（超 400 行段长上限）' : '')
+            }
+          } else if (anchor.invalidAnchor) {
+            meta = '锚点写法无效，已回退头部'
+          }
+          // 预算口径不变：单文件 8KB、总计 40KB（锚点段同样计入）
           if (content.length > 8192) { content = content.slice(0, 8192); truncated = true }
           if (total + content.length > 40960) { content = content.slice(0, 40960 - total); truncated = true }
-          out.push({ path: p, content: content, truncated: truncated })
+          if (truncated) {
+            // 截断标注升级（①）：从「（截断）」升级为「共 N 行，已注入 X–M 行」
+            var gotLines = content ? content.split('\n').length : 0
+            if (anchorFrom != null) {
+              meta += '；预算截断到 L' + (anchorFrom + gotLines - 1)
+            } else {
+              var totalLines = full.split('\n').length
+              meta += (meta ? '；' : '') + '截断：共 ' + totalLines + ' 行，已注入 1–' + gotLines + ' 行'
+              // 结构索引（①④）：头部注入被截断时附上，Worker 可照索引用锚点语法直读目标段
+              outline = buildFileOutline(full)
+            }
+          }
+          var entry = { path: p, content: content, truncated: truncated }
+          if (meta) entry.meta = meta
+          if (outline && outline.length) entry.outline = outline
+          out.push(entry)
           total += content.length
         } catch (e) {
           out.push({ path: p, content: '[读取失败: ' + String(e).slice(0, 120) + ']', truncated: false })

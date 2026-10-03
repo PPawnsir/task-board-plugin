@@ -133,6 +133,9 @@ draft → pending → in-progress → verifying → resolved → archived
 ### 一次性派发（v74 去池化）
 
 - 每个任务 spawn 一个**一次性子代理**（Worker/Verifier），上下文全量注入 prompt，做完即销毁——无常驻池、无池化状态残留
+- **预研上下文注入（contextFiles/contextNotes）**：主窗口调研时读过的文件与笔记，由 host 在派发时读盘取最新内容，经「上下文注入」区块提供给 Worker/Verifier（不混进 user prompt）；预算口径单文件 8KB、总包 40KB
+  - **锚点行段**：`contextFiles` 支持 `path:L2350-L2420` / `path:L2350` 行段语法（只认尾部 `:L<行号>`，兼容 Windows 盘符），只注入该段（段长上限 400 行，超出截断并标注）；锚点无效（越界/写法错）自动回退头部注入并标注「锚点无效，已回退头部」
+  - **截断结构索引**：头部注入被预算截断时，标注升级为「截断：共 N 行，已注入 1–M 行」，并附结构索引块（JS/TS 顶层函数/类/箭头赋值、Markdown 标题及行号，上限 40 条）——Worker 照索引用锚点语法补读目标段即可，不用全文盘点
 - **Worker/Verifier 均可配置异构模型**（⚙️ 弹出层下拉选择，空 = 继承父级），避免同源盲点；模型故障自动熔断回退父级模型
 - 孤儿回收：子代理 run 结束/丢失超 2 分钟 → 任务自动回待办重派
 - 看门狗：运行超时且事件流停滞 → 标记"疑似卡死"（不自动杀，裁决权交主窗口/用户）
@@ -184,7 +187,7 @@ Team 托管档独有（调度员体验）：
 │   ├── index.mjs                 #   host 端：IO 编排（工具/RPC/一次性派发引擎接线）
 │   ├── lib/core.mjs              #   纯逻辑核心：状态机/依赖/分类/prompt/解析（无 IO，可单测）
 │   ├── lib/client.js             #   client 端（ModuleLoader 包装，图标统一走 ICONS + ic()）
-│   ├── test/core.test.mjs        #   单元测试（node --test，72 例）
+│   ├── test/core.test.mjs        #   单元测试（node --test，84 例）
 │   ├── package.json              #   dsh.bundle.patch + dsh.client 元数据
 │   └── cordis.patch.yml          #   bundle 挂载行
 └── docs/
