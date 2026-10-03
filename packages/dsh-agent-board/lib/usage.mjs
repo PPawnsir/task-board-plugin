@@ -1,0 +1,134 @@
+// dsh-agent-board — Token 消耗统计（lib/usage.mjs）
+// v4 会话日志定位 / zstd 分帧 / usage 聚合：纯函数 + node 模块，不碰 ctx 与共享状态。
+// index.mjs 薄壳 re-export findRunLog/readRunUsage/aggregateUsageSummary（对外契约不变）；
+// readLogBytes/readLogFrames 新增 export 供 rpc.mjs 的 agent-activity 复用（原 index.mjs 模块内私有）。
+import { zstdDecompressSync } from 'node:zlib'
+import os from 'node:os'
+import path from 'node:path'
+import fsNode from 'node:fs'
+
+// ===== Token 消耗统计（v4 会话日志 usage 聚合）=====
+// 数据源：Worker/Verifier 一次性子会话的 v4 追加写日志
+//   ~/.dsh/sessions/<bucket>/<childSessionId>/session.v4.jsonl.zstd
+// 字段形状（用本机真实日志逐帧核对后确认，2026-10）：
+//   type === 'assistant/message' 的事件带 data.usage =
+//     { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens }
+//   模型名不在 assistant/message 上，而在同会话的 request/context（data.model，
+//   与 request/header 的 data.header.config.model 同源）——模型小计以日志记录的为准。
+// 定位/分帧逻辑与 agent-activity RPC 共用（同一套日志名探测 + zstd 帧头切分），
+// 区别只是 usage 要扫全部帧、activity 只看最新几帧。
+// 约束：只做展示、不做计费断言；读不到日志/无 usage 一律返回 null（调用方降级为「暂无数据」），绝不抛错。
+var USAGE_LOG_NAMES = ['session.v4.jsonl.zstd', 'session.v3.jsonl.zstd', 'session.v2.jsonl.zstd', 'session.jsonl.zstd']
+var ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+
+// 定位某个 run（子会话 id）的日志文件：bucket × 版本名逐个探测（新版本名优先）；找不到/不可读返回 null
+export function findRunLog(runId, sessionsRoot) {
+  if (!runId) return null
+  try {
+    var root = sessionsRoot || path.join(os.homedir(), '.dsh', 'sessions')
+    var buckets = fsNode.readdirSync(root)
+    for (var bi = 0; bi < buckets.length; bi++) {
+      for (var ni = 0; ni < USAGE_LOG_NAMES.length; ni++) {
+        var cand = path.join(root, buckets[bi], String(runId), USAGE_LOG_NAMES[ni])
+        if (fsNode.existsSync(cand)) return cand
+      }
+    }
+  } catch (_) {}
+  return null
+}
+
+// 读日志字节：tailBytes > 0 时只读末尾这么多字节（activity 热路径用），否则读整份（usage 结算用）。
+// 尾部截断可能切在帧中间，交给 readLogFrames 逐帧 try/catch 降级。
+export function readLogBytes(logPath, tailBytes) {
+  try {
+    var sz = fsNode.statSync(logPath).size
+    var start = (tailBytes > 0 && sz > tailBytes) ? sz - tailBytes : 0
+    var buf = Buffer.alloc(sz - start)
+    var fd = fsNode.openSync(logPath, 'r')
+    try { fsNode.readSync(fd, buf, 0, buf.length, start) } finally { fsNode.closeSync(fd) }
+    return buf
+  } catch (_) { return null }
+}
+
+// 追加写多帧格式：按帧头 MAGIC 切段、逐帧解压、逐行 JSON.parse。
+// 返回帧数组（从新到旧），每帧是事件数组（保持帧内原序）；limit > 0 只取最新 limit 帧。
+// 坏帧/半帧（强杀截断、MAGIC 假命中、尾部切在压缩流中间）整帧跳过，绝不抛错。
+export function readLogFrames(buf, limit) {
+  var out = []
+  if (!buf || !buf.length) return out
+  var offs = []
+  var at = buf.indexOf(ZSTD_MAGIC)
+  while (at >= 0) { offs.push(at); at = buf.indexOf(ZSTD_MAGIC, at + 1) }
+  for (var k = offs.length - 1; k >= 0; k--) {
+    if (limit > 0 && out.length >= limit) break
+    var end = k + 1 < offs.length ? offs[k + 1] : buf.length
+    var evs = []
+    try {
+      var text = zstdDecompressSync(buf.subarray(offs[k], end)).toString('utf8')
+      var lines = text.split('\n')
+      for (var i = 0; i < lines.length; i++) {
+        if (!lines[i]) continue
+        try { evs.push(JSON.parse(lines[i])) } catch (_) {}
+      }
+    } catch (_) { continue }
+    out.push(evs)
+  }
+  return out
+}
+
+// 聚合一次 run 的全部 token 消耗：{input, output, cacheRead, cacheWrite, total, model}。
+// 逐帧扫 assistant/message 的 data.usage 累加（无 usage 的事件跳过、没有 usage 事件返回 null）。
+// total 优先取日志自带的 totalTokens，缺失时才用 输入+输出+缓存读+缓存写 兜底。
+export function readRunUsage(runId, sessionsRoot) {
+  try {
+    var log = findRunLog(runId, sessionsRoot)
+    if (!log) return null
+    // 整份读取：usage 必须全量累加（单次 run 日志量级 MB，结算时只读一次）。
+    // 极端超大日志封顶 64MB——只丢最老的历史帧，好过结算路径被一次同步 IO 拖住。
+    var buf = readLogBytes(log, 64 * 1024 * 1024)
+    if (!buf) return null
+    var frames = readLogFrames(buf, 0)
+    var out = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, model: '' }
+    var hasUsage = false
+    for (var fi = 0; fi < frames.length; fi++) {
+      var evs = frames[fi]
+      for (var i = 0; i < evs.length; i++) {
+        var e = evs[i]; var dta = (e && e.data) || {}
+        if (e && e.type === 'request/context' && dta.model && !out.model) out.model = String(dta.model)
+        if (!e || e.type !== 'assistant/message') continue
+        var u = dta.usage
+        if (!u) continue
+        var inp = numOr0(u.inputTokens), outp = numOr0(u.outputTokens)
+        var cr = numOr0(u.cacheReadTokens), cw = numOr0(u.cacheWriteTokens)
+        out.input += inp; out.output += outp; out.cacheRead += cr; out.cacheWrite += cw
+        out.total += numOr0(u.totalTokens) || (inp + outp + cr + cw)
+        hasUsage = true
+      }
+    }
+    return hasUsage ? out : null
+  } catch (e) {
+    // 日志解析失败一律降级：usage 只是展示统计，绝不影响结算与状态流转
+    console.error('[task-board] readRunUsage failed (' + runId + '):', String(e))
+    return null
+  }
+}
+function numOr0(v) { var n = Number(v); return isFinite(n) && n > 0 ? n : 0 }
+
+// board 级聚合（get-tasks 现算，不落盘额外表）：总量 + 输入/输出/缓存读拆分 + 按模型小计 + 任务 Top8。
+// 归档任务同样计入（它们确实消耗过 token）；无 usage 的任务跳过。
+export function aggregateUsageSummary(tasks) {
+  var s = { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, byModel: {}, topTasks: [] }
+  var list = Array.isArray(tasks) ? tasks : []
+  for (var i = 0; i < list.length; i++) {
+    var t = list[i]; var u = t && t.usage
+    if (!u) continue
+    s.total += u.total || 0; s.input += u.input || 0; s.output += u.output || 0
+    s.cacheRead += u.cacheRead || 0; s.cacheWrite += u.cacheWrite || 0
+    var ms = u.models || {}
+    for (var mk in ms) { if (Object.prototype.hasOwnProperty.call(ms, mk)) s.byModel[mk] = (s.byModel[mk] || 0) + (ms[mk] || 0) }
+    if (u.total) s.topTasks.push({ id: t.id, title: t.title, total: u.total, runs: u.runs || 0 })
+  }
+  s.topTasks.sort(function (a, b) { return b.total - a.total })
+  s.topTasks = s.topTasks.slice(0, 8)
+  return s
+}

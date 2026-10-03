@@ -184,8 +184,9 @@ Team 托管档独有（调度员体验）：
 
 ```
 └── packages/dsh-agent-board/     # 插件全部源码
-│   ├── index.mjs                 #   host 端：IO 编排（工具/RPC/一次性派发引擎接线）
+│   ├── index.mjs                 #   host 端薄壳（~70 行）：cordis 契约 + 共享 state 构建 + 模块接线
 │   ├── lib/core.mjs              #   纯逻辑核心：状态机/依赖/分类/prompt/解析（无 IO，可单测）
+│   ├── lib/*.mjs                 #   host 端领域模块（按任务边界拆分，见下节）
 │   ├── lib/client/               #   client 端模块源（按用户感知域拆分，见下节）
 │   ├── lib/client.js             #   client 端产物（⚠️ GENERATED：scripts/build-client.cjs 拼装，勿直接编辑）
 │   ├── scripts/build-client.cjs  #   零依赖组装器（模块源 → 产物；--check 校验产物新鲜度）
@@ -198,6 +199,23 @@ Team 托管档独有（调度员体验）：
     ├── icon-style-guide.md       # 图标风格指南（Lucide 线性 SVG + emoji 分界）
     └── REGRESSION-v59.md         # 端到端回归测试记录
 ```
+
+### host 模块边界（lib/*.mjs）
+
+v1.6.0 起 host 端从单体 index.mjs（1487 行）拆为薄壳 + 7 个领域模块，
+共享闭包状态收进显式 `state` 对象逐模块注入——模块边界即任务边界，并行任务不再全员互锁：
+
+| 模块 | 域 | 内容 |
+|---|---|---|
+| `policy.mjs` | 策略层 | 粒度治理软闸门 + 学习飞轮候选教训（纯函数零状态） |
+| `usage.mjs` | 统计 | v4 会话日志定位 / zstd 分帧 / token usage 聚合（纯函数） |
+| `session.mjs` | 会话 | root 解析缓存 / 会话 id 归一 / workMode 派生 / runsFor |
+| `store.mjs` | 持久化 | boardPath / rt / wt 原子落盘 / 跨重启继承 / fileLocks 串行化 / mutateLocked |
+| `notify.mjs` | 通知 | makeMsg / 歧义 25s 去抖 / 回执聚合 + 空闲门控 / 投递前过滤 |
+| `dispatch.mjs` | 派发引擎 | poolCycle / spawnOneShot / settleRun / 两级超时 / 孤儿回收 |
+| `rpc.mjs` | 接口层 | RPC 路由 + 13 个 Agent 工具注册 |
+
+（store→dispatch 的循环依赖由 `deps.poolCycle` 晚绑定解开；index.mjs 对外 re-export 契约不变。）
 
 ### 前端模块边界（lib/client/）
 

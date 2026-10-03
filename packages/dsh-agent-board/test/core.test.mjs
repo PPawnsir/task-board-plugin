@@ -8,10 +8,13 @@ import os from 'node:os'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import * as core from '../lib/core.mjs'
-// 粒度治理（软闸门）住在 index.mjs（IO 编排层）：纯函数 + 契约文案常量导出，便于这里直接断言
+// 粒度治理（软闸门）住在 lib/policy.mjs（策略层，纯函数）、usage 聚合住在 lib/usage.mjs，
+// 均由 index.mjs 薄壳 re-export（对外契约不变），这里仍从 index.mjs 导入直接断言
 import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE } from '../index.mjs'
-// Token 消耗聚合（纯函数 + 日志读取的优雅降级）住在 index.mjs，直接断言
 import { aggregateUsageSummary, readRunUsage, findRunLog } from '../index.mjs'
+// host 端源码拼接（Phase 2 模块化后：薄壳 index.mjs + lib/*.mjs 领域模块），供源码级接线断言
+const HOST_SOURCES = ['../index.mjs', '../lib/policy.mjs', '../lib/usage.mjs', '../lib/session.mjs', '../lib/store.mjs', '../lib/notify.mjs', '../lib/dispatch.mjs', '../lib/rpc.mjs']
+function hostSrc() { return HOST_SOURCES.map(function (f) { return readFileSync(new URL(f, import.meta.url), 'utf8') }).join('\n') }
 
 function mkTask(over) { return Object.assign({ id: 't1', title: 'T', description: '', status: 'pending', priority: 'medium', tags: [], parentId: null, assignMode: 'auto', assignee: null, context: { instructions: '' }, acceptance: '', dependsOn: [], pipeline: 'full', claimedBy: null, claimedAt: null, createdAt: '2026-01-01T00:00:00Z', resolvedAt: null, history: [], messages: [] }, over || {}) }
 function mkBoard(tasks) { return { version: 11, ownerSession: 's1', boardMode: 'auto', tasks: tasks || [] } }
@@ -685,7 +688,7 @@ test('withSplitHint: 命中时才附加 suggestSplit，未命中返回体形态�
 })
 
 test('粒度治理接线：工具描述/Team 提示词/双出口返回体均已落地（源码级轻量断言）', () => {
-  const src = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
+  const src = hostSrc()
   assert.match(TASK_SIZE_CONTRACT, /建议粒度：单任务 10~30 分钟/)
   assert.match(TASK_SIZE_CONTRACT, /epic 卡/)
   assert.match(TEAM_SPLIT_RULE, /大任务必须拆分/)
@@ -758,7 +761,7 @@ test('readRunUsage: v4 多帧日志真实解析（临时目录造帧 → usage �
 })
 
 test('Token 消耗接线：settleRun 结算累加 + 按模型小计 + get-tasks 聚合 + 仪表盘区块（源码级断言）', () => {
-  const host = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
+  const host = hostSrc()
   const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   assert.match(host, /await accumulateRunUsage\(sid, rec\)/)                    // settleRun（及手动终止）结算路径调用
   assert.match(host, /t\.usage\.models\[mk\] = \(t\.usage\.models\[mk\] \|\| 0\) \+ u\.total/) // 按模型小计累加
@@ -825,7 +828,7 @@ test('buildWorkerPrompt: 软召回引导随 feedbackEnabled 开关（关则整�
 })
 
 test('学习飞轮接线：两处触发点 + push-lesson 开关拦截 + prompt/客户端软召回（源码级断言）', () => {
-  const host = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
+  const host = hostSrc()
   const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
   // 候选教训两处触发：Verifier 驳回（文本通道 + 工具通道 + GUI RPC）与主窗口仲裁结论
