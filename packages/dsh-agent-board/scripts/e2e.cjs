@@ -183,7 +183,7 @@ scenarios['team-flow'] = async () => {
     const tA1 = await waitTask(aid, (t) => t.status === 'in-progress', 'A 自动派发', 60 * 1000);
     ok(tA1, 'A（无依赖）被派发');
     const bNow = (await rpcRaw('get-tasks', {})).tasks.find((x) => x.id === bid);
-    ok(bNow.status === 'pending', 'B（依赖未满足）保持 pending 不被派发');
+    ok(bNow && bNow.status === 'pending', 'B（依赖未满足）保持 pending 不被派发' + (bNow ? '' : '（B 不在看板中！疑似写丢失）'));
     // A 上报歧义 → 主窗口裁决 → 重派完成
     const tEsc = await waitTask(aid, (t) => !!t.escalation, 'A Worker 上报歧义');
     ok(tEsc, '歧义上报到达，任务带 escalation');

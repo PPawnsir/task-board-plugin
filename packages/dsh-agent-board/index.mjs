@@ -336,7 +336,7 @@ export function apply(ctx) {
       try { r = await fsNode.promises.readFile(boardPath(sid), 'utf8') } catch (e) {
         // 只有「文件确实不存在（ENOENT）」才触发继承：EACCES/EPERM/被占 等说明本会话看板很可能存在、
         // 只是这一刻读不到——此时去接管会把别的板写到本会话文件名上（改前行为只是内存空板，不落盘）。
-        if (!e || e.code !== 'ENOENT') { console.error('[task-board] 读看板失败（不触发继承）: ' + boardPath(sid) + ' :: ' + String(e)); return seed(sid, sessionCwd(sid)) }
+        if (!e || e.code !== 'ENOENT') { console.error('[task-board] 读看板失败（不触发继承）: ' + boardPath(sid) + ' :: ' + String(e)); return seedNoPersist(sid) }
         // 本 sid 无看板文件：先试「同工作区唯一孤儿板」继承，接不到才种新板（种板即带 ownerCwd，供下次重启继承）
         try {
           var cwd0 = sessionCwd(sid)
@@ -359,9 +359,12 @@ export function apply(ctx) {
         // JSON 截断/损坏（如强杀打断写盘）：隔离留档再种新板——数据不丢，坏文件也不反复 poison
         console.error('[task-board] board file corrupt, quarantining: ' + boardPath(sid))
         fsNode.promises.rename(boardPath(sid), boardPath(sid) + '.corrupt-' + Date.now()).catch(function () {})
-        return seed(sid, sessionCwd(sid))
+        return seedNoPersist(sid)
       }
     }
+    // 瞬时读失败/坏文件隔离后的空板必须禁止回写：否则一个「读不到」的瞬间就会把 106 张卡覆成空板。
+    // __noPersist 用 non-enumerable 挂载——即使将来有路径漏判把它写出去，JSON.stringify 也会跳过该字段。
+    function seedNoPersist(sid) { var d = seed(sid, sessionCwd(sid)); try { Object.defineProperty(d, '__noPersist', { value: true, enumerable: false }) } catch (_) {} return d }
     // 原子写盘：先写临时文件再 rename——强杀若发生在写盘中途，磁盘上最多留个 .tmp 残件，
     // 看板本体永远不会是截断的半个 JSON（此前非原子直写，kill 中写 = 看板被 seed 清空）
     // Windows 特有问题：rename 目标被并发读句柄/Defender/索引器短暂占用时抛 EPERM/EBUSY
@@ -391,7 +394,7 @@ export function apply(ctx) {
     // 写成功后异步触发一次 poolCycle（派发/回收反应快），按会话去抖避免连环触发
     var cyclePending = {}
     function kickCycle(sid) { if (cyclePending[sid]) return; cyclePending[sid] = true; var tm = ctx.timer; var go = function () { cyclePending[sid] = false; poolCycle(sid).catch(function () {}) }; if (tm) tm.timeout(50).then(go); else Promise.resolve().then(go) }
-    function mutateLocked(sid, mutate, skipKick) { return withLock(sid, async function () { var d = await rt(sid); var r = await mutate(d); if (r !== null && r !== undefined) { await wt(sid, d); if (!skipKick) kickCycle(sid); return r } return r }) }
+    function mutateLocked(sid, mutate, skipKick) { return withLock(sid, async function () { var d = await rt(sid); if (d && d.__noPersist) { console.error('[task-board] 看板暂时不可读，拒绝在空板上覆写（防瞬时读失败清板）: ' + sid); return { ok: false, error: '看板暂时不可读，请重试' } } var r = await mutate(d); if (r !== null && r !== undefined) { await wt(sid, d); if (!skipKick) kickCycle(sid); return r } return r }) }
     function jo() { return { schema: { type: 'object', additionalProperties: true }, render: function (a, v) { return [{ type: 'text', text: JSON.stringify(v, null, 2) }] } } }
     // touches（文件级排他声明）归一化：非字符串项过滤掉，空数组 = 不声明（无锁语义）。
     // 上限 20 条，与 contextFiles 上限一致，防止 prompt/看板文件被超长清单撑爆。
