@@ -34,16 +34,21 @@ jobs:
             exit 1
           fi
 
-      - name: 幂等检查：npm 已有该版本则跳过发布
+      - name: 幂等检查：npm 已有该版本则跳过发布（带传播延迟重试）
         id: check
         working-directory: packages/dsh-agent-board
         run: |
           PKG=$(node -p "require('./package.json').version")
-          if npm view "dsh-agent-board@$PKG" version --registry=https://registry.npmjs.org 2>/dev/null | grep -q "$PKG"; then
-            echo "已存在 dsh-agent-board@$PKG（如本地手动发过/重跑），跳过发布"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+          # npm 读侧 CDN 有分钟级传播延迟：本地刚发布完就推 tag 时，直接判定会误判 skip=false 导致重复发布失败
+          for i in $(seq 1 8); do
+            if npm view "dsh-agent-board@$PKG" version --registry=https://registry.npmjs.org 2>/dev/null | grep -q "$PKG"; then
+              echo "已存在 dsh-agent-board@$PKG（如本地手动发过/重跑），跳过发布"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            [ $i -lt 8 ] && sleep 15
+          done
+          echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: 发布到 npm（prepublishOnly 自动跑语法检查 + 30 例单测，挂了拒发）
