@@ -10,7 +10,7 @@ import { zstdDecompressSync } from 'node:zlib'
 import os from 'node:os'
 import path from 'node:path'
 import fsNode from 'node:fs'
-const { ah, isb, gsb, gpt, vt, validateDeps, depsSatisfied, depsCancelled, classifyPipeline, seed, normalizeBoard, cfg, claimCheck, claimApply, checkParentAuto, resolveApply, verifyApply, parseSections, parseVerdict, isEscalation, outputText, histNotes, buildContextPackSection, buildWorkerPrompt, buildVerifierPrompt, pickDispatch, isOrphan, PRIO_RANK, patOverlap, overlapsTouches, touchesConflict, holdsFiles, lessonText, pushLesson, LESSON_RECALL_HINT } = core
+const { ah, isb, gsb, gpt, vt, validateDeps, depsSatisfied, depsCancelled, classifyPipeline, seed, normalizeBoard, cfg, claimCheck, claimApply, checkParentAuto, resolveApply, verifyApply, parseSections, parseVerdict, isEscalation, outputText, histNotes, buildContextPackSection, buildWorkerPrompt, buildVerifierPrompt, pickDispatch, isOrphan, PRIO_RANK, patOverlap, overlapsTouches, touchesConflict, holdsFiles, lessonText, pushLesson, LESSON_RECALL_HINT, boardHome } = core
 
 function defineTool(options) {
   var userExecute = options.execute
@@ -230,20 +230,136 @@ export function apply(ctx) {
     // 看板文件用「家目录绝对路径 + node:fs」直读写——不再走 fs 服务的相对路径解析
     // （fs 服务的相对路径解析根 = 进程启动 cwd，cwd 一变所有看板静默读成空板；
     //  曾因此导致整个看板状态异常。绝对路径对此永久免疫）
-    function boardPath(sid) { return path.join(os.homedir(), '.dsh', 'tasks-' + sid + '.json') }
+    function boardPath(sid) { return path.join(boardHome(), 'tasks-' + sid + '.json') }
     function fileFor(sid) { return boardPath(sid) } // 保留旧名兼容调用点，但已是绝对路径
+
+    // ===== 看板跨重启继承（会话根 id 漂移 → 不分裂）=====
+    // 背景（看板反馈 n-mur1bmrwvoge）：DSH 重启后同一会话在宿主侧的根 id 可能变
+    // （实测 55b0879a → 7b44fb23），看板按 ownerSession 分文件 → 新卡落新板，
+    // 旧板（73 张卡历史）从默认视图消失，用户视角就是「看板被清空了」。
+    // 归属改为「工作区」：文件里记 ownerCwd；以新 sid 访问且本 sid 无文件时，
+    // 若同工作区存在**唯一**「原主已死（不在 agents.roots()）」的看板 → 接管它。
+    // 防误继承三闸门：① 只认 ownerCwd 严格相等；② 原主必须不在存活 root 集合里；
+    // ③ 候选必须唯一 —— 多候选一律不动（宁可留孤儿板等人工认领，也不合并错板）。
+    // 触发点在 rt() 的「文件不存在」分支：工具 / RPC / UI 三通道都走 rt，天然统一受益。
+    function activeRootIds() { try { var rs = ctx.agents && ctx.agents.roots(); var s = {}; if (Array.isArray(rs)) for (var i = 0; i < rs.length; i++) s[String(rs[i].id)] = true; return s } catch (_) { return {} } }
+    // 找可接管的孤儿看板：返回文件名，或 null（含「多候选」——多候选刻意返回 null）
+    function findAdoptableBoardFile(sid, cwd) {
+      if (!cwd) return null                                  // 本会话工作区未知 → 绝不猜（猜错就是合并错板）
+      var home = boardHome()
+      var files
+      try { files = fsNode.readdirSync(home) } catch (_) { return null }
+      var alive = activeRootIds()
+      var hits = []
+      for (var i = 0; i < files.length; i++) {
+        var f = String(files[i] || '')
+        if (f.indexOf('tasks-') !== 0 || f.slice(-5) !== '.json') continue
+        var owner = f.slice(6, -5)
+        if (!owner || owner === sid) continue                // 本 sid 的文件不该走到这里（本函数只在「本板不存在」时调用）
+        if (alive[owner]) continue                           // 原主还活着 → 不是孤儿板，绝不碰
+        var d = null
+        try { d = JSON.parse(fsNode.readFileSync(path.join(home, f), 'utf8')) } catch (_) { continue }
+        if (!vt(d)) continue
+        if (d.ownerCwd !== cwd) continue                     // 老文件没 ownerCwd（undefined）→ 天然不匹配，不会被误接管
+        hits.push({ file: f, sid: owner })
+      }
+      if (hits.length > 1) {                                 // 多候选：记录一行但不自动动（多板并存时人工 list-boards 处理）
+        console.error('[task-board] 继承跳过：工作区 ' + cwd + ' 有 ' + hits.length + ' 个候选孤儿板（' + hits.map(function (h) { return h.sid }).join(', ') + '），不自动接管')
+        return null
+      }
+      return hits.length === 1 ? hits[0] : null
+    }
+    // 瞬时占用白名单（与 wt() 同款）：Windows 上 rename/unlink 的目标名被并发读句柄、Defender、
+    // 索引器短暂占用时会抛这几个码——退避后重试即可；其它错误（跨设备 EXDEV、只读等）立即放弃。
+    var TRANSIENT_FS = { EPERM: 1, EBUSY: 1, ENOTEMPTY: 1, EACCES: 1 }
+    function isTransientFs(e) { return !!(e && TRANSIENT_FS[e.code]) }
+    // rename 退避重试：成功 true；非瞬时错误或重试耗尽 false（由调用方决定降级/回滚）
+    async function renameRetry(from, to, tries) {
+      var n = tries || 6
+      for (var i = 0; i < n; i++) {
+        try { await fsNode.promises.rename(from, to); return true }
+        catch (e) {
+          if (!isTransientFs(e) || i === n - 1) { console.error('[task-board] rename failed (' + from + ' -> ' + to + '):', String(e)); return false }
+          await new Promise(function (r) { setTimeout(r, 60 * (i + 1)) })
+        }
+      }
+      return false
+    }
+    // unlink 退避重试：ENOENT 视为已达成；重试耗尽返回 false（调用方记一行日志，不再阻断继承）
+    async function unlinkRetry(p, tries) {
+      var n = tries || 6
+      for (var i = 0; i < n; i++) {
+        try { await fsNode.promises.unlink(p); return true }
+        catch (e) {
+          if (e && e.code === 'ENOENT') return true
+          if (!isTransientFs(e) || i === n - 1) { console.error('[task-board] unlink failed (' + p + '):', String(e)); return false }
+          await new Promise(function (r) { setTimeout(r, 60 * (i + 1)) })
+        }
+      }
+      return false
+    }
+    // 接管落盘：两条路径，都保证「接管后看板目录里只剩新 sid 那一个文件」（不残留 .adopt-/.tmp 之类残件——
+    // 残留一份含全部历史卡的旧板 = 用户磁盘上多一份完整看板，下次继承还会把它算成候选）。
+    //   ① 主路径 rename(p → np)：原子、复用 wt() 同款 EPERM/EBUSY 退避重试。注意 rename 只搬内容，
+    //      文件里 ownerSession 仍写着旧 sid，所以必须紧接着用 wt() 把改写后的内容原子写回 np；
+    //      写回失败则把文件改名退回 p —— 绝不留下「名字是新 sid、内容写着旧主」的半成品（否则 rt()
+    //      读到 ownerSession 不匹配会退回空板，用户视角仍是「看板被清空」）。
+    //   ② 兜底 rename 走不通（跨设备/顽固占用）→ wt() 写新板 + unlinkRetry 删旧板。先写后删：
+    //      任何时刻磁盘上至少有一份完整看板。
+    async function adoptBoard(sid, cand, cwd) {
+      var p = boardPath(cand.sid), np = boardPath(sid)
+      // 目标名已被占用 → 绝不接管（防覆盖：本会话看板若只是「这一刻读不到」，覆盖等于把本板换成孤儿板）
+      if (cand.sid === sid || fsNode.existsSync(np)) return false
+      var c = null
+      try { c = JSON.parse(await fsNode.promises.readFile(p, 'utf8')) } catch (e) { console.error('[task-board] 继承失败（读旧板）:', String(e)); return false }
+      if (!vt(c)) return false
+      c.ownerSession = sid
+      if (typeof cwd === 'string' && cwd) c.ownerCwd = cwd
+      if (await renameRetry(p, np)) {                            // ① 主路径：先改名，再把 ownerSession 改写写回
+        try {
+          await wt(sid, c)
+          console.error('[task-board] 继承看板 ' + cand.sid + ' → ' + sid + '（工作区 ' + cwd + '，原主已不在 roots）')
+          return true
+        } catch (e) {
+          console.error('[task-board] 继承失败（改写 ownerSession）:', String(e))
+          await renameRetry(np, p)                               // 回滚到旧名：下次 rt 还能再试，且不留半成品
+          return false
+        }
+      }
+      try { await wt(sid, c) } catch (e) { console.error('[task-board] 继承失败（写新板）:', String(e)); return false }
+      await unlinkRetry(p)
+      console.error('[task-board] 继承看板 ' + cand.sid + ' → ' + sid + '（工作区 ' + cwd + '，原主已不在 roots；rename 不通，走写新+删旧）')
+      return true
+    }
     async function rt(sid) {
-      var r
-      try { r = await fsNode.promises.readFile(boardPath(sid), 'utf8') } catch (_) { return seed(sid) } // 不存在/不可读 → 空板
+      var r = null
+      try { r = await fsNode.promises.readFile(boardPath(sid), 'utf8') } catch (e) {
+        // 只有「文件确实不存在（ENOENT）」才触发继承：EACCES/EPERM/被占 等说明本会话看板很可能存在、
+        // 只是这一刻读不到——此时去接管会把别的板写到本会话文件名上（改前行为只是内存空板，不落盘）。
+        if (!e || e.code !== 'ENOENT') { console.error('[task-board] 读看板失败（不触发继承）: ' + boardPath(sid) + ' :: ' + String(e)); return seed(sid, sessionCwd(sid)) }
+        // 本 sid 无看板文件：先试「同工作区唯一孤儿板」继承，接不到才种新板（种板即带 ownerCwd，供下次重启继承）
+        try {
+          var cwd0 = sessionCwd(sid)
+          var cand = findAdoptableBoardFile(sid, cwd0)
+          if (cand && await adoptBoard(sid, cand, cwd0)) r = await fsNode.promises.readFile(boardPath(sid), 'utf8')
+        } catch (e2) { console.error('[task-board] 继承流程异常（降级为空板）:', String(e2)) }
+        if (r === null) return seed(sid, sessionCwd(sid))
+      }
       try {
         var d = JSON.parse(r)
-        if (vt(d) && d.ownerSession === sid) { teamModeCache[sid] = !!d.teamMode; var nd = normalizeBoard(d); feedbackCache[sid] = nd.feedbackEnabled !== false; return nd }
-        return seed(sid)
+        if (vt(d) && d.ownerSession === sid) {
+          teamModeCache[sid] = !!d.teamMode; var nd = normalizeBoard(d); feedbackCache[sid] = nd.feedbackEnabled !== false
+          // ownerCwd 回填（只改内存，随下一次写盘落盘）：老看板文件没有该字段，而继承判定靠它——
+          // 不写盘就永远不能匿名继承。这里不额外做 IO，避免把只读路径变成写路径。
+          if (!nd.ownerCwd) { var cw = sessionCwd(sid); if (cw) nd.ownerCwd = cw }
+          return nd
+        }
+        return seed(sid, sessionCwd(sid))
       } catch (_) {
         // JSON 截断/损坏（如强杀打断写盘）：隔离留档再种新板——数据不丢，坏文件也不反复 poison
         console.error('[task-board] board file corrupt, quarantining: ' + boardPath(sid))
         fsNode.promises.rename(boardPath(sid), boardPath(sid) + '.corrupt-' + Date.now()).catch(function () {})
-        return seed(sid)
+        return seed(sid, sessionCwd(sid))
       }
     }
     // 原子写盘：先写临时文件再 rename——强杀若发生在写盘中途，磁盘上最多留个 .tmp 残件，
@@ -918,7 +1034,7 @@ export function apply(ctx) {
     })
     // 全局多会话总览：聚合本机所有看板的任务计数（只读，供 dashboard 跨会话视图）
     handle('list-boards', async function (args) {
-      var home = path.join(os.homedir(), '.dsh')
+      var home = boardHome()
       var out = []
       var files
       try { files = fsNode.readdirSync(home).filter(function (f) { return f.indexOf('tasks-') === 0 && f.slice(-5) === '.json' }) } catch (e) { return { ok: true, boards: [] } }
@@ -945,6 +1061,42 @@ export function apply(ctx) {
     handle('resolve-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'in-progress') return { ok: false, error: 'not in-progress' }; return resolveApply(d, t, actor, args.status, args.resolution, args.resolution || args.status) }) })
     handle('verify-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'verifying') return { ok: false, error: 'not verifying' }; delete t.escalation; delete t.verifyRetries; var r = verifyApply(d, t, actor, args.verdict, args.comment); if (args.verdict === 'rejected') pushRejectLesson(d, t, args.comment); return r }) })
     handle('archive-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var a = d.tasks; var t = a.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'resolved' && t.status !== 'cancelled') return { ok: false, error: 'cannot archive' }; var ps = t.status; t.status = 'archived'; t.archivedAt = new Date().toISOString(); ah(t, ps, 'archived', actor, 'manual archive'); var ca = 0; gsb(t.id, a).forEach(function (c) { if (c.status !== 'archived') { ah(c, c.status, 'archived', actor, 'cascade'); c.status = 'archived'; c.archivedAt = new Date().toISOString(); ca++ } }); var r = { ok: true, task: t }; if (ca) r.childrenArchived = ca; return r }) })
+    // ===== 任务删除通道（真删，无 undo）=====
+    // 背景：archive-task 只收 resolved/cancelled，草稿/误建卡片此前没有任何下线通道（只能永远挂着）。
+    // 状态门禁（delete-task 与 batch-op delete 共用本函数，保证两条入口语义完全一致）：
+    //   draft / pending / blocked → 允许删（未产生任何执行痕迹，删了不丢信息）
+    //   in-progress / verifying   → 拒绝，提示先 terminate-agent 终止（避免把在跑的 run 变成孤儿）
+    //   resolved / cancelled      → 拒绝，引导用 archive-task（已落定任务留档可检索）
+    //   archived                  → 幂等 ok（已不在活跃看板里，重复调用不报错）
+    // 未归档子任务（parentId 指向本任务且 status !== 'archived'）存在时拒删：父卡一删子任务的
+    // parentId 就成了悬空引用（checkParentAuto / 上下文继承都会失效），必须先处理子任务。
+    // 返回 { err: '...' } 或 { mode: 'already' }；调用方按需转成各自的返回体。
+    function deleteGate(d, t) {
+      if (t.status === 'in-progress' || t.status === 'verifying') return { err: '任务正在执行中，请先用 terminate-agent 终止（in-progress 回待办、verifying 换 verifier 接手）再删除' }
+      if (t.status === 'resolved' || t.status === 'cancelled') return { err: '已落定任务请用归档（archive-task），不要删除' }
+      if (t.status === 'archived') return { mode: 'already' }
+      // 允许态只剩 draft / pending / blocked；其他未知状态（老看板/人工改档）一律拒删，宁可保守
+      if (t.status !== 'draft' && t.status !== 'pending' && t.status !== 'blocked') return { err: '任务状态 ' + t.status + ' 不在可删除范围（仅草稿/待办/阻塞可删）' }
+      var live = gsb(t.id, d.tasks).filter(function (c) { return c.status !== 'archived' })
+      if (live.length) return { err: '该任务还有 ' + live.length + ' 个未归档子任务（' + live.map(function (c) { return c.title || c.id }).slice(0, 3).join('、') + '），请先删除或归档子任务' }
+      return { mode: 'ok' }
+    }
+    // 单任务删除：真删（从 d.tasks 数组移除），不写 history（记录随任务一起消失），不留档、无 undo。
+    // console.error 留一行操作日志，便于事后溯源"某个卡片什么时候被谁删了"。
+    handle('delete-task', async function (args) {
+      var sid = rpcSessionId(args); var actor = getActorId()
+      if (!args.taskId) return { ok: false, error: 'taskId required' }
+      return mutateLocked(sid, function (d) {
+        var t = d.tasks.find(function (x) { return x.id === args.taskId })
+        if (!t) return { ok: false, error: 'not found' }
+        var g = deleteGate(d, t)
+        if (g.mode === 'already') return { ok: true, deleted: t.id, alreadyArchived: true }
+        if (g.err) return { ok: false, error: g.err }
+        d.tasks = d.tasks.filter(function (x) { return x.id !== t.id })
+        console.error('[task-board] delete-task: ' + t.id + ' «' + String(t.title || '').slice(0, 60) + '» (status=' + t.status + ') by ' + actor)
+        return { ok: true, deleted: t.id }
+      })
+    })
     handle('update-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (args.title !== undefined) t.title = args.title; if (args.description !== undefined) t.description = args.description; if (args.priority !== undefined) t.priority = args.priority; if (args.assignMode !== undefined) t.assignMode = args.assignMode; if (args.assignee !== undefined) t.assignee = args.assignee || null; if (args.dependsOn !== undefined) { var derr = validateDeps(d, t.id, args.dependsOn); if (derr) return { ok: false, error: derr }; t.dependsOn = args.dependsOn } if (args.pipeline !== undefined) { t.pipeline = args.pipeline; t.pipelineAuto = false } if (args.contextFiles !== undefined) { if (!t.context) t.context = { files: [], docs: [], instructions: '', notes: '', relatedTasks: [], prerequisites: '' }; t.context.files = Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : [] } if (args.contextNotes !== undefined) { if (!t.context) t.context = { files: [], docs: [], instructions: '', notes: '', relatedTasks: [], prerequisites: '' }; t.context.notes = typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : '' } if (args.publish) { if (t.status !== 'draft') return { ok: false, error: 'not a draft' }; t.status = 'pending'; ah(t, 'draft', 'pending', actor, 'published') } if (args.unfreeze && t.frozen) { delete t.frozen; delete t.frozenAt; delete t.frozenBy; ah(t, t.status, t.status, actor, '解除冻结，重新进入派发池') } if (args.resetToPending) { var ps = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'pending', actor, 'reset to pending after edit') }; return { ok: true, task: t } }) })
     handle('set-board-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.boardMode = args.mode === 'manual' ? 'manual' : 'auto'; if (d.boardMode === 'manual' && d.teamMode) { d.teamMode = false; teamModeCache[sid] = false }; return { ok: true, boardMode: d.boardMode, teamMode: !!d.teamMode, workMode: deriveWorkMode(d) } }) })
     handle('set-team-mode', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { d.teamMode = !!args.enabled; if (d.teamMode) d.boardMode = 'auto'; teamModeCache[sid] = d.teamMode; return { ok: true, teamMode: d.teamMode, boardMode: d.boardMode, workMode: deriveWorkMode(d) } }) })
@@ -1199,17 +1351,30 @@ export function apply(ctx) {
     handle('set-board-config', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { if (args.key === 'maxWorkers') d.maxWorkers = Math.max(1, Math.min(10, args.value || 3)); else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } return { ok: true } }) })
     handle('create-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { if (args.id && d.tasks.find(function (x) { return x.id === args.id })) return { ok: false, error: 'duplicate id' }; if (args.dependsOn && args.dependsOn.length) { var derr = validateDeps(d, args.id || '(pending)', args.dependsOn); if (derr) return { ok: false, error: derr } }; var now = new Date().toISOString(); /* Team 模式护栏：draft 缺省跟随 teamMode（先补齐依赖/上下文再统一 publish）；显式 draft:false 保留为立即派发的逃生门 */ var asDraft = args.draft === undefined ? !!d.teamMode : !!args.draft; var t = { id: args.id || ('task-' + Date.now().toString(36)), title: args.title || 'Untitled', description: args.description || '', status: asDraft ? 'draft' : 'pending', priority: args.priority || 'medium', tags: args.tags || [], parentId: args.parentId || null, subtaskStrategy: null, assignMode: 'auto', assignee: null, context: { files: (Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : []), docs: [], instructions: args.instructions || '', notes: (typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : ''), relatedTasks: [], prerequisites: '' }, acceptance: args.acceptance || '', dependsOn: args.dependsOn || [], touches: normTouches(args.touches), pipeline: args.pipeline || '', claimedBy: null, claimedAt: null, createdAt: now, resolvedAt: null, verifiedAt: null, verifiedBy: null, archivedAt: null, resolution: null, waitingForTouches: null, messages: [], history: [{ from: 'created', to: asDraft ? 'draft' : 'pending', timestamp: now, actor: actor, note: asDraft ? 'created as draft' : 'created' }] }; if (!t.pipeline) { t.pipeline = classifyPipeline(t); t.pipelineAuto = true }; d.tasks.push(t); return withSplitHint({ ok: true, task: t }, t) }) })
     handle('list-children', async function (args) { var sid = rpcSessionId(args); var subs = ctx.subagents; if (!subs) return { ok: true, children: [] }; try { var list = await subs.listChildren(sid); var children = (list || []).map(function (c) { return { id: String(c.sessionId || c.id || ''), label: String(c.label || c.title || c.mode || '') } }).filter(function (c) { return c.id.length > 0 }); return { ok: true, children: children } } catch (e) { return { ok: true, children: [], error: String(e) } } })
-    // ===== #14 批量操作：archive（仅 resolved/cancelled）/ set-priority（全部）=====
+    // ===== #14 批量操作：archive（仅 resolved/cancelled）/ set-priority（全部）/ delete（真删，无 undo）=====
+    // delete op 与单任务 delete-task 走同一套 deleteGate 门禁（状态 + 未归档子任务），
+    // done/skipped 语义与 archive 完全一致：门禁不过就进 skipped（附 reasons[id] 一行原因）。
+    // 注意：批量删除是**真删**（从 tasks 数组移除），不产生 undo 快照——batch-undo 对 delete 无意义。
     handle('batch-op', async function (args) {
       var sid = rpcSessionId(args); var actor = getActorId()
       var ids = Array.isArray(args.ids) ? args.ids : []
       if (ids.length === 0) return { ok: false, error: 'no ids' }
       return mutateLocked(sid, function (d) {
-        var done = 0, skipped = []
+        var done = 0, skipped = [], reasons = {}
+        // skip 点统一收口：追加 id + 原因（原因只进 reasons，不改 skipped 的 string[] 老契约）
+        function skip(id, why) { skipped.push(id); if (why) reasons[id] = why }
         ids.forEach(function (id) {
           var t = d.tasks.find(function (x) { return x.id === id })
-          if (!t) { skipped.push(id); return }
-          if (args.op === 'archive') {
+          if (!t) { skip(id, '任务不存在'); return }
+          if (args.op === 'delete') {
+            var g = deleteGate(d, t)
+            if (g.err) { skip(id, g.err); return }
+            // archived 幂等：已归档的不再删（也不计入 done，与 archive 对已归档项的处理保持一致）
+            if (g.mode === 'already') { skip(id, '已归档'); return }
+            d.tasks = d.tasks.filter(function (x) { return x.id !== id })
+            console.error('[task-board] batch delete: ' + id + ' «' + String(t.title || '').slice(0, 60) + '» (status=' + t.status + ') by ' + actor)
+            done++
+          } else if (args.op === 'archive') {
             if (t.status !== 'resolved' && t.status !== 'cancelled') { skipped.push(id); return }
             var ps = t.status; t.status = 'archived'; t.archivedAt = new Date().toISOString(); ah(t, ps, 'archived', actor, 'batch archive'); done++
           } else if (args.op === 'set-priority') {
@@ -1220,10 +1385,16 @@ export function apply(ctx) {
             t.status = 'pending'; ah(t, 'draft', 'pending', actor, 'batch publish'); done++
           } else { skipped.push(id) }
         })
-        return { ok: true, done: done, skipped: skipped }
+        // reasons 只在 delete op 下有内容（其他 op 的跳过原因沿用"未命中门禁"的老行为），
+        // 老客户端只读 skipped.length，多一个可选字段无感。
+        return { ok: true, done: done, skipped: skipped, reasons: reasons }
       })
     })
     // #16 批量撤销：按快照恢复 priority（任何状态）与 status（仅 archive→resolved 回滚）
+    // 明确不支持 op='delete'：删除是真删（任务对象已从 tasks 数组移除，快照里只剩 id/priority/status），
+    // 没有任何可恢复的原始字段，撤销只能凭空造一张残缺卡片——所以 delete 不产生 undo 快照，
+    // 客户端也不为 delete 显示「↩️ 撤销」按钮（snapshot 只在 done>0 且 op!=='delete' 时保留）。
+    // 若老客户端硬发 op='delete' 快照进来，落到 else 分支只做 priority 回填，不会凭空复活任务。
     handle('batch-undo', async function (args) {
       var sid = rpcSessionId(args); var actor = getActorId()
       var snap = args && args.snapshot

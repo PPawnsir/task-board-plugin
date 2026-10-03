@@ -1,6 +1,10 @@
 // dsh-agent-board — 纯逻辑核心（lib/core.mjs）
 // 不依赖任何 ctx/服务/IO：任务状态机、依赖校验、管线分类、prompt 构建、输出解析。
 // index.mjs（IO 编排层）从这里 import；单元测试直接跑本文件（node --test）。
+// 例外：boardDirName/boardHome 只做纯路径拼接（读 env，不碰磁盘），放在这里是为了让
+// 「临时 HOME」可被自测注入——os.homedir() 进程内首次调用即缓存，晚改 env 无效。
+import os from 'node:os'
+import path from 'node:path'
 
 // ===== 常量 =====
 export const MAX_CLAIMED = 3
@@ -115,10 +119,24 @@ export function cfg(d) {
   return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, feedbackEnabled: d.feedbackEnabled !== false }
 }
 
+// ===== 看板数据目录（跨重启继承用）=====
+// 单独抽成纯函数，是为了让「临时 HOME」可被测试注入：
+// os.homedir() 在进程内**首次调用即缓存**，等到测试里再改 env 已经晚了（拿到的是真实家目录）；
+// 每次调用都读一遍 env，才能让自测脚本用 temp 目录隔离真实看板（scripts/self-config-inherit.cjs）。
+// 优先顺序与 Node 的 homedir 一致：HOME（类 Unix / 显式覆盖）→ USERPROFILE（Windows）→ os.homedir() 兜底。
+export function boardDirName() { return (process.env.HOME || process.env.USERPROFILE || os.homedir() || '.') }
+export function boardHome() { return path.join(boardDirName(), '.dsh') }
+
 // ===== 看板文件种子 =====
 // poolStatus 必须始终在种子/归一化里存在：task_list 工具输出 poolStatus: d.poolStatus，
 // 缺字段 = undefined → 工具结果的 lossless-JSON 校验会拒（"value is not lossless JSON"）
-export function seed(sid) { return { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, poolStatus: { workers: [], verifiers: [] }, tasks: [] } }
+// ownerCwd（跨重启继承）：创建该看板的会话工作区路径，继承判定全靠它——取不到就省略字段
+// （绝不落空串，否则「路径读不到的多个会话」会被误判成同一工作区）。
+export function seed(sid, ownerCwd) {
+  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, poolStatus: { workers: [], verifiers: [] }, tasks: [] }
+  if (typeof ownerCwd === 'string' && ownerCwd) d.ownerCwd = ownerCwd
+  return d
+}
 // 旧文件缺 poolStatus 的归一化（读路径兜底，保证任何历史文件都满足工具输出契约）
 // touches 兼容：老任务没有该字段照常（这里只把「存在但非数组」的脏值收敛成数组，
 // 避免 holdsFiles/touchesConflict 里 Array.isArray 判定之外还有第三种形态）

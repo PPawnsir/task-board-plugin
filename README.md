@@ -80,6 +80,9 @@ dsh plugin --profile web remove dsh-agent-board
 ```
 
 > 看板数据存在 `~/.dsh/tasks-<sessionId>.json`，卸载不删数据。
+>
+> - **归属**：看板文件按**会话**分文件，同时在文件里记 `ownerCwd`（创建该看板的会话工作区路径，取不到则省略该字段）——`~/.dsh/tasks-*.json` 每个文件是一块看板，`list-boards` 全局视图可看到本机所有板。
+> - **重启继承**：DSH 重启后同一会话的根 id 可能漂移，此时新 id 没有对应文件——若同工作区（`ownerCwd` 严格相等）存在**唯一**「原主已不在 `agents.roots()`」的看板，则自动继承：文件重命名为新 id、文件内 `ownerSession` 改写为新 id、`console.error` 留一行 `[task-board] 继承看板 <旧sid> → <新sid>`；**多个候选一律不自动接管**（记一行日志后按空板处理，防误合并，旧板仍可在 `list-boards` 全局视图里看到）。
 
 ## 功能总览
 
@@ -123,6 +126,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **里程碑进展通道**：Worker 每完成一个可验证的里程碑，可调用 `board_report`（`kind: "progress"`，`question` 写一行进展摘要 ≤200 字符）上报——进行中的卡片显示「📈 最近进展 · 相对时间」（覆盖式只留最新一条），详情页消息流保留全部 progress 条目
 - **防表演式汇报**：进展契约只写在 Worker prompt 里、且要求「有实际产物/结论才报」（禁止定时汇报）；progress **静默不通知主窗口**（不进回执聚合），也不写 `history` 流转记录，避免刷屏
 - **子任务**：父子层级 + 上下文继承 + 父任务自动流转 + 级联归档
+- **删除通道（真删，无 undo）**：`delete-task` RPC（卡片 hover 垃圾桶按钮 / 详情页「删除」按钮，均先 `confirm('删除不可恢复，确认删除「标题」？')`）+ `batch-op op='delete'`（多选模式底部「批量删除」，同样 confirm）。状态门禁：**草稿/待办/阻塞可删**；进行中/验证中拒绝并提示先用 `terminate-agent` 终止（避免在跑的 run 变孤儿）；已完成/取消引导改用归档（`archive-task`，留档可检索）；有**未归档子任务**时拒删（防 `parentId` 悬空破坏父任务自动流转）；已归档任务幂等返回 ok。是真删（从 `tasks` 数组移除），因此**不产生 `batch-undo` 撤销快照**（批量条对 delete 不显示「↩️ 撤销」），删除操作在 host 端 `console.error` 留一行日志便于溯源
 - **任务粒度建议**：单任务 **10~30 分钟**可独立完成为甜区；预计超过 30 分钟的大任务先建一张 **epic 父卡**（`pipeline: direct`，不进池派发），再挂若干 10~30 分钟的子任务（`task_create` 传 `parentId=父卡 id`，有先后顺序用 `dependsOn` 串联），子任务全部完成后父卡自动流转（`checkParentAuto`）——`task_create` 工具描述与 Team 模式提示词都写了这条契约
 - **suggestSplit 软提示**：`task_create` / `create-task` 发现描述超 500 字符、或标题/描述命中「全量 / 整体 / 系统级 / 全面 / 重构 / 所有模块 / 整个」等史诗特征词时，返回体附带一行 `suggestSplit` 建议文案（**只提示，不阻断创建与派发**；未命中则不出现该字段，老调用方无感）
 

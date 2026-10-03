@@ -84,6 +84,14 @@ function apply(ctx) {
         ['path', { d: 'M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8' }],
         ['path', { d: 'M10 12h4' }]
       ],
+      // 删除入口图标（草稿/待办/阻塞卡片 hover 小按钮、详情页按钮、批量删除共用）
+      'trash-2': [
+        ['path', { d: 'M3 6h18' }],
+        ['path', { d: 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6' }],
+        ['path', { d: 'M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2' }],
+        ['path', { d: 'M10 11v6' }],
+        ['path', { d: 'M14 11v6' }]
+      ],
       'package': [
         ['path', { d: 'M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z' }],
         ['path', { d: 'M12 22V12' }],
@@ -213,7 +221,7 @@ function apply(ctx) {
     }
     var COLUMNS = ['draft', 'pending', 'in-progress', 'verifying', 'resolved', 'blocked']
     var reqEpoch = 0 // 会话切换纪元：切会话时自增，旧会话在途响应按纪元丢弃
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, lessonPushed: {}, isRoot: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', usageSummary: null }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, lessonPushed: {}, isRoot: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', usageSummary: null }
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
       var onKey = function (e) {
@@ -342,6 +350,24 @@ function apply(ctx) {
       else if (to === 'in-progress' && from === 'verifying') { var c = window.prompt('驳回原因（可选）：'); rpc('verify-task', { taskId: taskId, verdict: 'rejected', comment: c || '' }).then(ok).catch(fail) }
       else if (to === 'blocked' && from === 'in-progress') { var r = window.prompt('阻塞原因（可选）：') || ''; rpc('resolve-task', { taskId: taskId, status: 'blocked', resolution: r }).then(ok).catch(fail) }
       else if (to === 'archived' && from === 'resolved') rpc('archive-task', { taskId: taskId }).then(ok).catch(fail)
+    }
+    // ===== 删除通道（与 host delete-task / batch-op delete 门禁一一对应）=====
+    // 可删状态：草稿/待办/阻塞（未产生执行痕迹）。in-progress/verifying 需先终止；resolved/cancelled 引导归档；
+    // 有未归档子任务时 host 会拒删——客户端只做"按钮是否出现"的粗筛，真正的门禁以 host 返回的 error 为准。
+    function canDelete(t) { return !!t && (t.status === 'draft' || t.status === 'pending' || t.status === 'blocked') }
+    // 误删防呆：真删不可恢复，必须先过 window.confirm（详情页/卡片/批量三处入口共用同一句提示语）
+    // 失败时把 host 的中文门禁原因原样回显（如"请先用 terminate-agent 终止"），不做二次翻译。
+    function deleteTask(id, title, onMsg) {
+      var t = getTask(id)
+      var name = title || (t && t.title) || id
+      if (!window.confirm('删除不可恢复，确认删除「' + name + '」？')) return Promise.resolve({ ok: false, cancelled: true })
+      return rpc('delete-task', { taskId: id }).then(function (r) {
+        if (r && r.ok === false) { if (onMsg) onMsg('⚠️ ' + (r.error || '删除失败')) }
+        else if (onMsg) onMsg('🗑 已删除「' + name + '」')
+        if (state.detailId === id) state.detailId = null // 详情页开着被删任务 → 关掉，避免下一帧渲染"任务不存在"
+        fetchTasks()
+        return r
+      }).catch(function (e) { if (onMsg) onMsg('⚠️ ' + String(e)); return { ok: false, error: String(e) } })
     }
     function onDragStart(e, task) { e.dataTransfer.setData('text/plain', JSON.stringify({ id: task.id, status: task.status })); e.dataTransfer.effectAllowed = 'move'; state.dragTask = task.id; notify() }
     function onDragEnd() { state.dragTask = null; state.dragOver = null; notify() }
@@ -708,7 +734,7 @@ function apply(ctx) {
     }
     function elapsedSince(iso) { var m = elapsedMin(iso); if (!m) return '<1m'; if (m < 60) return m + 'm'; var h = Math.floor(m / 60); return h + 'h' + (m % 60 ? (m % 60) + 'm' : '') }
     function pipeOf(t) { return pipeMeta[t.pipeline] || pipeMeta.full }
-    // #14 批量操作条（#16 带一步撤销：快照操作前的 priority/status）
+    // #14 批量操作条（#16 带一步撤销：快照操作前的 priority/status；delete 是真删，明确不支持撤销）
     function BatchBar() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
       var _a = useState(0), cnt = _a[0], setCnt = _a[1]; var _b = useState(false), on = _b[0], setOn = _b[1]; var _c = useState(''), msg = _c[0], setMsg = _c[1]; var _d = useState(null), undo = _d[0], setUndo = _d[1]
@@ -716,14 +742,36 @@ function apply(ctx) {
       if (!on) return null
       var ids = Object.keys(state.selected)
       function snapshot(op) { return { op: op, at: Date.now(), items: ids.map(function (id) { var t = getTask(id); return t ? { id: id, priority: t.priority, status: t.status } : null }).filter(Boolean) } }
-      function run(op, value) { var snap = snapshot(op); var payload = { ids: ids, op: op }; if (value !== undefined) payload.value = value; rpc('batch-op', payload).then(function (r) { state.selected = {}; state.undoSnapshot = (r && r.done > 0) ? snap : null; setMsg('✅ 已处理 ' + (r && r.done || 0) + ' 个' + (r && r.skipped && r.skipped.length ? '，跳过 ' + r.skipped.length : '')); fetchTasks() }).catch(function (e) { setMsg('⚠️ ' + String(e)) }) }
+      // 跳过原因只回显第一条（如"任务正在执行中，请先…"），避免把整屏门禁文案塞进批量条
+      function firstReason(r) { var m = (r && r.reasons) || {}; var ks = Object.keys(m); return ks.length ? String(m[ks[0]]) : '' }
+      function run(op, value) {
+        // 只有可撤销的 op 才需要快照（delete 是真删，快照里的 status/priority 复活不回整张卡）
+        var snap = op === 'delete' ? null : snapshot(op)
+        var payload = { ids: ids, op: op }; if (value !== undefined) payload.value = value
+        rpc('batch-op', payload).then(function (r) {
+          state.selected = {}
+          // 删除无 undo：done>0 也不留撤销快照（否则「↩️ 撤销」点了恢复不了，纯粹误导）；其他 op 维持一步撤销
+          state.undoSnapshot = (r && r.done > 0 && op !== 'delete') ? snap : null
+          var reason = (op === 'delete' && r && r.reasons) ? firstReason(r) : ''
+          setMsg('✅ 已处理 ' + (r && r.done || 0) + ' 个' + (r && r.skipped && r.skipped.length ? '，跳过 ' + r.skipped.length + (reason ? '（' + reason + '）' : '') : ''))
+          fetchTasks()
+        }).catch(function (e) { setMsg('⚠️ ' + String(e)) })
+      }
+      // 批量删除：真删不可恢复，必须先 confirm；确认后走 batch-op delete，逐 id 受 host 同一套状态门禁约束
+      function batchDelete() {
+        if (cnt === 0) return
+        if (!window.confirm('批量删除不可恢复，确认删除选中的 ' + cnt + ' 个任务？\n（执行中/验证中的会被跳过，需先终止；已落定任务请改用归档）')) return
+        run('delete')
+      }
       function doUndo() { if (!undo) return; rpc('batch-undo', { snapshot: undo }).then(function (r) { setMsg('↩️ 已撤销 ' + (r && r.done || 0) + ' 个'); state.undoSnapshot = null; fetchTasks() }).catch(function (e) { setMsg('⚠️ ' + String(e)) }) }
       var btn = { fontSize: 10, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', fontWeight: 600 }
       return React.createElement('div', { style: { position: 'sticky', bottom: 0, display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', marginTop: 8, background: C.nested, border: '1px solid ' + C.border, borderRadius: 6 } },
         React.createElement('span', { style: { fontSize: 11, color: C.text, fontWeight: 600 } }, '已选 ' + cnt + ' 项'),
         React.createElement('button', { onClick: function () { run('archive') }, disabled: cnt === 0, style: Object.assign({}, btn, { background: C.text2, color: C_INV, display: 'inline-flex', alignItems: 'center', gap: 3 }) }, ic('archive', 11), '批量归档'),
         ['critical', 'high', 'medium', 'low'].map(function (p) { return React.createElement('button', { key: p, onClick: function () { run('set-priority', p) }, disabled: cnt === 0, style: Object.assign({}, btn, { background: prioColor[p], color: C_INV }) }, prioLabel[p]) }),
-        undo ? React.createElement('button', { onClick: doUndo, title: '撤销最近一次批量操作', style: Object.assign({}, btn, { background: C.brand, color: C_INV }) }, '↩️ 撤销') : null,
+        // 批量删除（drop 语义）：红底实心 + confirm 防误删；执行中/验证中与有未归档子任务的会被 host 跳过
+        React.createElement('button', { onClick: batchDelete, disabled: cnt === 0, title: '删除选中任务（不可恢复；执行中/验证中的需先终止，已落定请用归档）', style: Object.assign({}, btn, { background: C.err, color: C_INV, display: 'inline-flex', alignItems: 'center', gap: 3 }) }, ic('trash-2', 11), '批量删除'),
+        undo ? React.createElement('button', { onClick: doUndo, title: '撤销最近一次批量操作（删除不可撤销）', style: Object.assign({}, btn, { background: C.brand, color: C_INV }) }, '↩️ 撤销') : null,
         msg ? React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, msg) : null,
         React.createElement('button', { onClick: function () { state.selected = {}; notify() }, style: { marginLeft: 'auto', fontSize: 10, padding: '3px 8px', border: 'none', background: 'transparent', color: C.text2, cursor: 'pointer' } }, '清除选择'))
     }
@@ -742,14 +790,25 @@ function apply(ctx) {
         allTags().length > 0 ? React.createElement('select', { value: ft, onChange: function (e) { state.filterTag = e.target.value; notify() }, style: { fontSize: 10, padding: '2px 4px', border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text } }, React.createElement('option', { value: '' }, '🏷 全部标签'), allTags().map(function (g) { return React.createElement('option', { key: g, value: g }, g) })) : null,
         hasFilter ? React.createElement('button', { onClick: clearAll, style: { fontSize: 10, padding: '2px 8px', borderRadius: 10, border: 'none', background: C.nested, color: C.text2, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('x', 9), '清除') : null)
     }
-    function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); return React.createElement('div', { draggable: !state.selectMode, onDragStart: function (e) { onDragStart(e, t) }, onDragEnd: onDragEnd, onClick: function () { if (state.selectMode) { if (state.selected[t.id]) delete state.selected[t.id]; else state.selected[t.id] = true; notify() } else { state.detailId = t.id; notify() } }, style: { border: '1px solid ' + (sel ? C.brand : (t.escalation ? C.err : (critGlow ? C.err : C.border))), borderRadius: 6, padding: '6px 8px', marginBottom: 6, background: sel ? C.nested : C.card, borderLeft: '3px solid ' + (t.escalation ? C.err : pc), cursor: state.selectMode ? 'pointer' : 'grab', fontSize: 12, opacity: dragging ? 0.4 : (depBlock ? 0.65 : 1), transition: 'opacity .15s', animation: critGlow ? 'tskb-crit 2s ease-in-out infinite' : 'none' } }, React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 4 } }, state.selectMode ? React.createElement('span', { style: { color: sel ? C.brand : C.text2, flexShrink: 0, marginTop: 1, display: 'inline-flex' } }, ic(sel ? 'square-check-big' : 'square', 12)) : null, React.createElement('div', { style: { fontWeight: 600, color: C.text, marginBottom: 2, wordBreak: 'break-word', flex: 1 } }, t.title), React.createElement('span', { style: { flexShrink: 0, marginTop: 1, display: 'inline-flex', color: C.text2 }, title: pm.label }, ic(pm.icon, 10)), React.createElement('span', { style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + pc + ' 20%, transparent)', color: pc, flexShrink: 0, marginTop: 1 } }, prioLabel[t.priority] || '中'), (t.usage && t.usage.total) ? React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0, marginTop: 1 }, title: '本任务累计 token：' + String(t.usage.total) + '（' + (t.usage.runs || 0) + ' 次 run）' }, '⛁ ' + fmtTokens(t.usage.total)) : null), t.escalation ? React.createElement('div', { style: { fontSize: 10, color: C.err, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 3 } }, ic('alert-triangle', 10), '待裁决 — 点击查看疑问') : null, depBlock ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 2 } }, '⛓ 被 ' + t.dependsOn.filter(function (id) { var d = getTask(id); return !d || (d.status !== 'resolved' && d.status !== 'archived') }).length + ' 个依赖阻塞') : null, t.stuckSince ? React.createElement('div', { style: { fontSize: 10, color: C.warn, fontWeight: 600, marginBottom: 2, animation: 'tskb-pulse 1.5s ease-in-out infinite' } }, '⏱ 疑似卡死 · ' + ago(t.stuckSince) + ' — 点击处理') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2, display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' } },
+    // 卡片删除入口的 hover 态（值形如 "taskId|del"，未 hover 时为空串）：
+    // 只用于控制垃圾桶按钮的淡入/淡出（平时 opacity:0 不抢视觉），不参与拖拽/选中逻辑。
+    function isCardHover(id, kind) { return String(state.cardHover || '') === (id + '|' + kind) }
+    function setHover(id, kind) { var v = id ? (id + '|' + kind) : ''; if (state.cardHover !== v) { state.cardHover = v; notify() } }
+    function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); var delOk = !state.selectMode && canDelete(t); return React.createElement('div', { draggable: !state.selectMode, onDragStart: function (e) { onDragStart(e, t) }, onDragEnd: onDragEnd, onMouseEnter: function () { if (delOk) setHover(t.id, 'del') }, onMouseLeave: function () { if (delOk) setHover('', '') }, onClick: function () { if (state.selectMode) { if (state.selected[t.id]) delete state.selected[t.id]; else state.selected[t.id] = true; notify() } else { state.detailId = t.id; notify() } }, style: { border: '1px solid ' + (sel ? C.brand : (t.escalation ? C.err : (critGlow ? C.err : C.border))), borderRadius: 6, padding: '6px 8px', marginBottom: 6, background: sel ? C.nested : C.card, borderLeft: '3px solid ' + (t.escalation ? C.err : pc), cursor: state.selectMode ? 'pointer' : 'grab', fontSize: 12, opacity: dragging ? 0.4 : (depBlock ? 0.65 : 1), transition: 'opacity .15s', animation: critGlow ? 'tskb-crit 2s ease-in-out infinite' : 'none' } }, React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 4 } }, state.selectMode ? React.createElement('span', { style: { color: sel ? C.brand : C.text2, flexShrink: 0, marginTop: 1, display: 'inline-flex' } }, ic(sel ? 'square-check-big' : 'square', 12)) : null, React.createElement('div', { style: { fontWeight: 600, color: C.text, marginBottom: 2, wordBreak: 'break-word', flex: 1 } }, t.title), React.createElement('span', { style: { flexShrink: 0, marginTop: 1, display: 'inline-flex', color: C.text2 }, title: pm.label }, ic(pm.icon, 10)), React.createElement('span', { style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + pc + ' 20%, transparent)', color: pc, flexShrink: 0, marginTop: 1 } }, prioLabel[t.priority] || '中'), (t.usage && t.usage.total) ? React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0, marginTop: 1 }, title: '本任务累计 token：' + String(t.usage.total) + '（' + (t.usage.runs || 0) + ' 次 run）' }, '⛁ ' + fmtTokens(t.usage.total)) : null), t.escalation ? React.createElement('div', { style: { fontSize: 10, color: C.err, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 3 } }, ic('alert-triangle', 10), '待裁决 — 点击查看疑问') : null, depBlock ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 2 } }, '⛓ 被 ' + t.dependsOn.filter(function (id) { var d = getTask(id); return !d || (d.status !== 'resolved' && d.status !== 'archived') }).length + ' 个依赖阻塞') : null, t.stuckSince ? React.createElement('div', { style: { fontSize: 10, color: C.warn, fontWeight: 600, marginBottom: 2, animation: 'tskb-pulse 1.5s ease-in-out infinite' } }, '⏱ 疑似卡死 · ' + ago(t.stuckSince) + ' — 点击处理') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2, display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' } },
             t.frozen ? React.createElement('span', { title: '已冻结：不参与自动派发（详情页可「解除冻结」）', style: { color: C.brand, fontWeight: 600 } }, '❄ 冻结') : null,
             (Array.isArray(t.waitingForTouches) && t.waitingForTouches.length) ? React.createElement('span', { title: '等文件锁释放：' + t.waitingForTouches.join('、') + '（touches 冲突，详情页可 force 越权派发）', style: { color: C.warn, fontWeight: 600 } }, '🔒 等文件释放') : null,
             React.createElement('span', { title: pm.label, style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: C.nested, border: '1px solid ' + C.border } }, pm.short),
             (t.retryCount || 0) + (t.rejectCount || 0) > 0 ? React.createElement('span', { title: '重试 ' + (t.retryCount || 0) + ' 次 / 驳回 ' + (t.rejectCount || 0) + ' 次', style: { color: C.warn, fontWeight: 600 } }, '⟳' + ((t.retryCount || 0) + (t.rejectCount || 0))) : null,
             t.status === 'in-progress' && t.claimedBy ? React.createElement('span', null, '⚡ ' + shortId(t.claimedBy)) : null,
             t.assignee ? React.createElement('span', null, '👤→' + shortId(t.assignee)) : null,
-            durOf(t) ? React.createElement('span', { title: '创建至今耗时' }, '⏱ ' + durOf(t)) : null),
+            durOf(t) ? React.createElement('span', { title: '创建至今耗时' }, '⏱ ' + durOf(t)) : null,
+            // 删除入口（仅草稿/待办/阻塞，多选模式下隐藏以免误触）：hover 才由透明转红，平时不抢视觉
+            delOk ? React.createElement('span', {
+              onClick: function (e) { e.stopPropagation(); deleteTask(t.id, t.title) }, // 阻止冒泡：不打开详情页
+              onMouseDown: function (e) { e.stopPropagation() }, // 也不触发卡片拖拽
+              title: '删除任务（不可恢复；执行中请先终止，已落定请用归档）',
+              style: { flexShrink: 0, marginTop: 1, display: 'inline-flex', cursor: 'pointer', color: C.err, opacity: isCardHover(t.id, 'del') ? 1 : 0, transition: 'opacity .15s' }
+            }, ic('trash-2', 11)) : null),
           (t.status === 'in-progress' || t.status === 'verifying') && state.activity[t.id] ? React.createElement('div', { style: { fontSize: 10, color: C.brand, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: state.activity[t.id] }, '👁 ' + state.activity[t.id]) : null,
           // 里程碑进展（Worker 主动上报的轻量进展，kind=progress）：进行中的卡片显示最新一条 + 相对时间，无则不显示
           t.status === 'in-progress' && t.lastProgress && t.lastProgress.text ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: '最近进展（' + (t.lastProgress.by || '') + ' · ' + fmtTime(t.lastProgress.at) + '）：' + t.lastProgress.text }, '📈 ' + t.lastProgress.text + ' · ' + ago(t.lastProgress.at)) : null,
@@ -1070,6 +1129,10 @@ function apply(ctx) {
           task.status === 'verifying' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'approved' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.ok, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('check-circle', 10), '通过') : null,
           task.status === 'verifying' ? React.createElement('button', { onClick: function () { var r = window.prompt('驳回原因：'); doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'rejected', comment: r || '' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.err, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('x-circle', 10), '驳回') : null,
           task.status === 'resolved' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('archive-task', { taskId: task.id }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.text2, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('archive', 10), '归档') : null),
+          // 删除（仅草稿/待办/阻塞）：confirm 防误删；被 host 门禁拒绝时把原因回显到详情页 actionMsg
+          // 容器 div 的收尾括号已挂在「归档」行；删除按钮作为**额外一行元素**排在它后面
+          // （多一个实参给同一个 createElement，属于合法调用），因此本行自身必须配平。
+          canDelete(task) ? React.createElement('button', { onClick: function () { deleteTask(task.id, task.title, setActionMsg) }, title: '删除任务（不可恢复；执行中请先终止，已落定请用归档）', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.err, borderRadius: 3, background: 'transparent', color: C.err, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('trash-2', 10), '删除') : null,
         (function () {
           // 历史会话：无论任务处于哪个阶段都完整列出（Worker 各次 + Verifier 各次）
           var runs = historyRuns(task)
