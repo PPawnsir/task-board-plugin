@@ -93,6 +93,20 @@ dsh plugin --profile web remove dsh-agent-board
 - Esc 逐级关闭（详情 → 看板 → 面板）
 - 全部结构性图标为 Lucide 线性 SVG（`currentColor` 跟随主题，浅深色自适应）
 
+### 仪表盘（Token 消耗）
+
+- 仪表盘视图新增「Token 消耗」区：本看板累计总量 + 输入 / 输出 / 缓存读（缓存写非零时一并展示）拆分、按模型分布条形图、任务消耗 **Top 8**（标题可点击直达该任务详情）；进行中的卡片右上角显示本任务已累计消耗（`⛁ 数字`）
+- 数据来源：每次 Worker/Verifier run 结算时读该 run 的 v4 会话日志（`~/.dsh/sessions/*/<runId>/session.v4.jsonl.zstd`），把 `assistant/message` 事件的 `usage`（`inputTokens` / `outputTokens` / `cacheReadTokens` / `cacheWriteTokens` / `totalTokens`，字段形状以真实日志为准）按 zstd 帧逐帧累加到任务 `usage`（含按模型小计与 `runs` 计数，多轮重跑/驳回重做自动累加），`get-tasks` 再现算 board 级 `usageSummary`（总量 / 按模型 / Top8，不落盘额外表）——**只做展示、不做计费断言**，日志读不到或没有 usage 时一律显示「暂无数据」
+
+### 学习反馈（候选教训信号 → 主窗口沉淀）
+
+- **信号源架构（零耦合）**：看板只产「候选教训**信号**」，不做**存储**——不调用任何笔记/记忆工具的 API、不写任何外部文件、也不知道教训最终被存到哪；用不用、存进哪个工具（如 `note_search` / `note_manage`）完全由主窗口 agent 自己决定
+- **自动生成候选**（两处触发）：① Verifier 驳回 → 一条 `lesson-candidate` 消息（场景 / 错误做法 / 来源）；② 主窗口裁决 Worker 歧义 → 一条 `lesson-candidate` 消息（场景 / 疑问 / 裁决结论）。同一事件按「同时间戳 / 同内容前缀」轻量判重只落一条，且不写 `history` 流转记录（不刷屏）
+- **详情页「沉淀」按钮**：把该条候选教训经 `push-lesson` RPC followup 给主窗口 agent（提示语写明「请用你可用的笔记/记忆工具沉淀，或评估后忽略」），推送成功后按钮变「✅ 已推送」置灰
+- **软召回引导**：Worker prompt 与 Team 模式提示词都会加一句「开工前如环境装有笔记/记忆类工具（如 note_search），先检索相关历史教训再动手」（Team 档另外提醒把检索到的教训写进任务的 `contextNotes`）
+- **开关 `feedbackEnabled`**（⚙️ 设置区「学习反馈」，默认**开**）：关掉后不生成候选、prompt 不提软召回、详情页候选卡片与「沉淀」按钮整个不渲染；老看板文件没有该字段 → 读路径自动补 `true`（与升级前行为一致）
+- **两插件完全独立**：`dsh-agent-board` 与笔记类插件（如 `dsh-notes-plugin`）之间没有任何依赖、服务调用或文件直写——看板只发一条 followup 文本，怎么用由主窗口 agent 决定
+
 ### 任务模型
 
 ```
@@ -106,7 +120,11 @@ draft → pending → in-progress → verifying → resolved → archived
 - **管线分档**：`full`（执行+验证）/ `work`（只做不验）/ `direct`（不进池，主窗口直接处理），创建时按规则自动分类、可手动覆盖
 - **硬性验收**：`acceptance` 字段写验收脚本命令，Worker 必须实际运行、Verifier 必须独立复跑
 - **文件级排他**：`touches` 声明本任务要改的文件/glob（如 `["src/**", "README.md"]`）；进行中的任务持有文件锁，派发器发现候选与活动任务 touches 重叠就跳过本轮（卡片显示 `🔒 等文件释放`，详情页列出在等谁），锁在提交验收/完成后自动释放——避免并行 Worker 改同一批文件互踩。手动「派发」遇到冲突会列出冲突任务，确认后才以 `force` 越权派发
+- **里程碑进展通道**：Worker 每完成一个可验证的里程碑，可调用 `board_report`（`kind: "progress"`，`question` 写一行进展摘要 ≤200 字符）上报——进行中的卡片显示「📈 最近进展 · 相对时间」（覆盖式只留最新一条），详情页消息流保留全部 progress 条目
+- **防表演式汇报**：进展契约只写在 Worker prompt 里、且要求「有实际产物/结论才报」（禁止定时汇报）；progress **静默不通知主窗口**（不进回执聚合），也不写 `history` 流转记录，避免刷屏
 - **子任务**：父子层级 + 上下文继承 + 父任务自动流转 + 级联归档
+- **任务粒度建议**：单任务 **10~30 分钟**可独立完成为甜区；预计超过 30 分钟的大任务先建一张 **epic 父卡**（`pipeline: direct`，不进池派发），再挂若干 10~30 分钟的子任务（`task_create` 传 `parentId=父卡 id`，有先后顺序用 `dependsOn` 串联），子任务全部完成后父卡自动流转（`checkParentAuto`）——`task_create` 工具描述与 Team 模式提示词都写了这条契约
+- **suggestSplit 软提示**：`task_create` / `create-task` 发现描述超 500 字符、或标题/描述命中「全量 / 整体 / 系统级 / 全面 / 重构 / 所有模块 / 整个」等史诗特征词时，返回体附带一行 `suggestSplit` 建议文案（**只提示，不阻断创建与派发**；未命中则不出现该字段，老调用方无感）
 
 ### 一次性派发（v74 去池化）
 
@@ -153,6 +171,7 @@ Team 托管档独有（调度员体验）：
 | 子代理上报 | `board_report` / `board_verdict` |
 
 > 管理工具仅主窗口可用（子代理调用会被拒绝）；`board_report`/`board_verdict` 是子代理的专用上报通道。
+> `board_report` 的 `kind` 三档：`complete`（交付完成）/ `escalate`（歧义上报等裁决）/ `progress`（里程碑进展，静默可见、不通知）。
 
 ## 仓库结构
 
@@ -161,7 +180,7 @@ Team 托管档独有（调度员体验）：
 │   ├── index.mjs                 #   host 端：IO 编排（工具/RPC/一次性派发引擎接线）
 │   ├── lib/core.mjs              #   纯逻辑核心：状态机/依赖/分类/prompt/解析（无 IO，可单测）
 │   ├── lib/client.js             #   client 端（ModuleLoader 包装，图标统一走 ICONS + ic()）
-│   ├── test/core.test.mjs        #   单元测试（node --test，54 例）
+│   ├── test/core.test.mjs        #   单元测试（node --test，72 例）
 │   ├── package.json              #   dsh.bundle.patch + dsh.client 元数据
 │   └── cordis.patch.yml          #   bundle 挂载行
 └── docs/
@@ -208,7 +227,7 @@ git push --follow-tags     # tag 推送触发流水线
 - **README 单一来源**：本文件（根 README）即唯一来源；发版前在 `packages/dsh-agent-board` 跑一次 `npm run sync-readme` 同步进包（npm 页面展示的是包内 README）
 - 需在仓库 **Settings → Secrets and variables → Actions** 配置 `NPM_TOKEN`
   （npm granular access token：bypass 2FA + direct publish）
-- 日常 push / PR 有 `test.yml` 跑语法检查 + 54 例单测
+- 日常 push / PR 有 `test.yml` 跑语法检查 + 60 例单测
 - 本地手动发布仍然可用：`npm publish --registry=https://registry.npmjs.org`（本机默认源是镜像时必须显式指定）
 
 ## License
