@@ -5,9 +5,12 @@
   "type": "module",
   "main": "./index.mjs",
   "scripts": {
+    "build-client": "node scripts/build-client.cjs",
     "test": "node --test test/core.test.mjs",
+    "pretest": "npm run build-client",
     "sync-readme": "node -e \"require('fs').copyFileSync('../../README.md','README.md')\"",
-    "prepublishOnly": "node --check index.mjs && node --check lib/client.js && node --check lib/core.mjs && npm test",
+    "prepublishOnly": "npm run build-client && node --check index.mjs && node --check lib/client.js && node --check lib/core.mjs && npm test",
+    "pree2e": "npm run build-client",
     "e2e": "node scripts/e2e.cjs"
   },
   "exports": {
@@ -31,6 +34,7 @@
     "index.mjs",
     "lib/core.mjs",
     "lib/client.js",
+    "lib/client/",
     "cordis.patch.yml",
     "README.md",
     "test/"

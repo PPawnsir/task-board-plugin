@@ -5,19 +5,20 @@
 //
 // 行为：
 //   - index.mjs / lib/*.mjs 变更（host 逻辑）→ 杀掉 dev 实例重启（约 3-5s）
-//   - lib/client.js 变更 → 同样重启（0.1.5-rc.2 起 client bundle 启动时组合缓存，旧 rev 不更新）
+//   - lib/client/*.js 模块源变更 → 先跑 build-client 重组装 lib/client.js，再重启
+//     （0.1.5-rc.2 起 client bundle 启动时组合缓存，旧 rev 不更新）
 //   - 防抖 800ms（连续保存合并为一次重启）
 //
 // 为什么不用官方 cordis-plugin-hmr：web 部署的 base composition 把它
 // `disabled: true`（TODO: reload lifecycle 未测完），实测 watcher 对 link:
 // 插件的文件变更完全静默（连语法错误都无反应），不可用。
 
-const { spawn } = require('child_process')
+const { spawn, execSync } = require('child_process')
 const fs = require('fs')
 const path = require('path')
 
 const PKG_DIR = path.resolve(__dirname, '..')
-const WATCH_DIRS = [PKG_DIR, path.join(PKG_DIR, 'lib')]
+const WATCH_DIRS = [PKG_DIR, path.join(PKG_DIR, 'lib'), path.join(PKG_DIR, 'lib', 'client')]
 const PORT = process.env.DEV_PORT || 3081
 const PROFILE = process.env.DEV_PROFILE || 'dev'
 const DEBOUNCE_MS = 800
@@ -66,6 +67,10 @@ for (const dir of WATCH_DIRS) {
     const f = String(filename)
     if (!/\.(mjs|js)$/.test(f)) return
     if (/\.test\.|test[\\/]|node_modules/.test(f)) return
+    // 模块源（lib/client/*.js）变更：先重组装产物；产物随之变更的事件会被防抖合并进同一次重启
+    if (dir.endsWith('client')) {
+      try { execSync('node scripts/build-client.cjs', { cwd: PKG_DIR, stdio: 'inherit' }) } catch (_) { return }
+    }
     scheduleRestart(f)
   })
   console.log('[dev-watch] watching ' + dir)
@@ -73,4 +78,4 @@ for (const dir of WATCH_DIRS) {
 
 process.on('SIGINT', () => { try { child && child.kill() } catch (_) {} process.exit(0) })
 boot()
-console.log('[dev-watch] 浏览器打开 http://127.0.0.1:' + PORT + ' 开始 E2E；改 host 代码自动重启，改 client.js 刷新页面即可')
+console.log('[dev-watch] 浏览器打开 http://127.0.0.1:' + PORT + ' 开始 E2E；改 host 代码自动重启，改 lib/client/ 模块源自动重组装并重启')

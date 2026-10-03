@@ -183,10 +183,12 @@ Team 托管档独有（调度员体验）：
 ## 仓库结构
 
 ```
-└── packages/dsh-agent-board/     # 插件全部源码（直接维护，无构建步骤）
+└── packages/dsh-agent-board/     # 插件全部源码
 │   ├── index.mjs                 #   host 端：IO 编排（工具/RPC/一次性派发引擎接线）
 │   ├── lib/core.mjs              #   纯逻辑核心：状态机/依赖/分类/prompt/解析（无 IO，可单测）
-│   ├── lib/client.js             #   client 端（ModuleLoader 包装，图标统一走 ICONS + ic()）
+│   ├── lib/client/               #   client 端模块源（按用户感知域拆分，见下节）
+│   ├── lib/client.js             #   client 端产物（⚠️ GENERATED：scripts/build-client.cjs 拼装，勿直接编辑）
+│   ├── scripts/build-client.cjs  #   零依赖组装器（模块源 → 产物；--check 校验产物新鲜度）
 │   ├── test/core.test.mjs        #   单元测试（node --test，84 例）
 │   ├── package.json              #   dsh.bundle.patch + dsh.client 元数据
 │   └── cordis.patch.yml          #   bundle 挂载行
@@ -196,6 +198,24 @@ Team 托管档独有（调度员体验）：
     ├── icon-style-guide.md       # 图标风格指南（Lucide 线性 SVG + emoji 分界）
     └── REGRESSION-v59.md         # 端到端回归测试记录
 ```
+
+### 前端模块边界（lib/client/）
+
+dsh web 的 client 运行时不具备模块解析能力（entry 被整体读成字符串经 `new Function` 求值，
+相对 import 是语法错误），所以前端模块化走**构建时拼装**：模块源在 `lib/client/`，
+`npm run build-client`（pretest/prepublishOnly 已挂链）拼装成单文件产物 `lib/client.js`。
+四个模块按**用户感知域**划分——边界即未来任务边界，新功能先想清楚落在哪个域：
+
+| 模块 | 域 | 内容 |
+|---|---|---|
+| `kernel.js` | 底座（用户不可感知） | 渲染原语（ic/icText/ActorLink）、RPC 封装与轮询族、共享状态（state/listeners/notify）、图标（ICONS）、共享任务工具，以及面板骨架入口（BoardButton/ViewTab/TopPanel/slots.inject） |
+| `board-list.js` | 看板列表 | 看板列与卡片（Card）、筛选条、多选批量操作条、建卡表单、归档列表 |
+| `task-detail.js` | 任务详情 | 详情抽屉（编辑/流转/冻结/touches/历史会话/高优介入）、歧义裁决对话与候选教训沉淀、依赖区块 |
+| `dashboard.js` | 仪表盘与设置 | 统计图表、Token 消耗、全局总览、报告生成、团队池视图、池/模型/超时设置与工作模式开关 |
+
+四个模块拼进同一个 `apply(ctx)` 函数作用域（`var`/`function` 声明提升使跨模块引用与拼接顺序无关；
+所有同步执行代码——DOM 监听、轮询注册、布局同步、slots.inject——都在 kernel 域内保持原相对顺序）。
+改模块源后必须重新组装（`npm run build-client`）产物才更新；直接编辑 `lib/client.js` 会在下次拼装时被覆盖。
 
 > v68 起拆除了"动态源码 → 静态包"的转换层（build-pkg.cjs）：插件已稳定，
 > 双形态维护的复杂度大于收益，包内文件即唯一源码，改完重启 dsh 即生效。

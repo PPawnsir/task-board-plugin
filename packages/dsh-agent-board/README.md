@@ -133,6 +133,9 @@ draft → pending → in-progress → verifying → resolved → archived
 ### 一次性派发（v74 去池化）
 
 - 每个任务 spawn 一个**一次性子代理**（Worker/Verifier），上下文全量注入 prompt，做完即销毁——无常驻池、无池化状态残留
+- **预研上下文注入（contextFiles/contextNotes）**：主窗口调研时读过的文件与笔记，由 host 在派发时读盘取最新内容，经「上下文注入」区块提供给 Worker/Verifier（不混进 user prompt）；预算口径单文件 8KB、总包 40KB
+  - **锚点行段**：`contextFiles` 支持 `path:L2350-L2420` / `path:L2350` 行段语法（只认尾部 `:L<行号>`，兼容 Windows 盘符），只注入该段（段长上限 400 行，超出截断并标注）；锚点无效（越界/写法错）自动回退头部注入并标注「锚点无效，已回退头部」
+  - **截断结构索引**：头部注入被预算截断时，标注升级为「截断：共 N 行，已注入 1–M 行」，并附结构索引块（JS/TS 顶层函数/类/箭头赋值、Markdown 标题及行号，上限 40 条）——Worker 照索引用锚点语法补读目标段即可，不用全文盘点
 - **Worker/Verifier 均可配置异构模型**（⚙️ 弹出层下拉选择，空 = 继承父级），避免同源盲点；模型故障自动熔断回退父级模型
 - 孤儿回收：子代理 run 结束/丢失超 2 分钟 → 任务自动回待办重派
 - 看门狗：运行超时且事件流停滞 → 标记"疑似卡死"（不自动杀，裁决权交主窗口/用户）
@@ -180,11 +183,13 @@ Team 托管档独有（调度员体验）：
 ## 仓库结构
 
 ```
-└── packages/dsh-agent-board/     # 插件全部源码（直接维护，无构建步骤）
+└── packages/dsh-agent-board/     # 插件全部源码
 │   ├── index.mjs                 #   host 端：IO 编排（工具/RPC/一次性派发引擎接线）
 │   ├── lib/core.mjs              #   纯逻辑核心：状态机/依赖/分类/prompt/解析（无 IO，可单测）
-│   ├── lib/client.js             #   client 端（ModuleLoader 包装，图标统一走 ICONS + ic()）
-│   ├── test/core.test.mjs        #   单元测试（node --test，72 例）
+│   ├── lib/client/               #   client 端模块源（按用户感知域拆分，见下节）
+│   ├── lib/client.js             #   client 端产物（⚠️ GENERATED：scripts/build-client.cjs 拼装，勿直接编辑）
+│   ├── scripts/build-client.cjs  #   零依赖组装器（模块源 → 产物；--check 校验产物新鲜度）
+│   ├── test/core.test.mjs        #   单元测试（node --test，84 例）
 │   ├── package.json              #   dsh.bundle.patch + dsh.client 元数据
 │   └── cordis.patch.yml          #   bundle 挂载行
 └── docs/
@@ -193,6 +198,24 @@ Team 托管档独有（调度员体验）：
     ├── icon-style-guide.md       # 图标风格指南（Lucide 线性 SVG + emoji 分界）
     └── REGRESSION-v59.md         # 端到端回归测试记录
 ```
+
+### 前端模块边界（lib/client/）
+
+dsh web 的 client 运行时不具备模块解析能力（entry 被整体读成字符串经 `new Function` 求值，
+相对 import 是语法错误），所以前端模块化走**构建时拼装**：模块源在 `lib/client/`，
+`npm run build-client`（pretest/prepublishOnly 已挂链）拼装成单文件产物 `lib/client.js`。
+四个模块按**用户感知域**划分——边界即未来任务边界，新功能先想清楚落在哪个域：
+
+| 模块 | 域 | 内容 |
+|---|---|---|
+| `kernel.js` | 底座（用户不可感知） | 渲染原语（ic/icText/ActorLink）、RPC 封装与轮询族、共享状态（state/listeners/notify）、图标（ICONS）、共享任务工具，以及面板骨架入口（BoardButton/ViewTab/TopPanel/slots.inject） |
+| `board-list.js` | 看板列表 | 看板列与卡片（Card）、筛选条、多选批量操作条、建卡表单、归档列表 |
+| `task-detail.js` | 任务详情 | 详情抽屉（编辑/流转/冻结/touches/历史会话/高优介入）、歧义裁决对话与候选教训沉淀、依赖区块 |
+| `dashboard.js` | 仪表盘与设置 | 统计图表、Token 消耗、全局总览、报告生成、团队池视图、池/模型/超时设置与工作模式开关 |
+
+四个模块拼进同一个 `apply(ctx)` 函数作用域（`var`/`function` 声明提升使跨模块引用与拼接顺序无关；
+所有同步执行代码——DOM 监听、轮询注册、布局同步、slots.inject——都在 kernel 域内保持原相对顺序）。
+改模块源后必须重新组装（`npm run build-client`）产物才更新；直接编辑 `lib/client.js` 会在下次拼装时被覆盖。
 
 > v68 起拆除了"动态源码 → 静态包"的转换层（build-pkg.cjs）：插件已稳定，
 > 双形态维护的复杂度大于收益，包内文件即唯一源码，改完重启 dsh 即生效。
