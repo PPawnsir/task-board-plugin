@@ -1049,7 +1049,7 @@ function apply(ctx) {
     }
 
 // ============================================================================
-// dashboard —— 仪表盘域：统计（computeStats/TrendChart/StatCard/BarRow）· 范围筛选（RangeFilter）
+// dashboard —— 仪表盘域：统计（computeStats/TrendChart/StatCard/BarRow/ResearchRoiRow）· 范围筛选（RangeFilter）
 //   · 全局总览（GlobalBoards）· 报告（buildReport/ReportButton）· Token 消耗（TokenUsage）
 //   · 架构健康（HealthHints，架构自省 L1）
 //   · 团队池（TeamView/PoolStatus）· 设置（WorkModeSwitch/PoolCfg/MinCfg/ModelCfg/PoolCfgPopover）
@@ -1064,8 +1064,32 @@ function apply(ctx) {
       recentActivity.sort(function (a, b) { return (b.timestamp || '').localeCompare(a.timestamp || '') }); recentActivity = recentActivity.slice(0, 10)
       function avgMs(arr) { if (arr.length === 0) return null; var s = arr.reduce(function (a, b) { return a + b }, 0); return Math.round(s / arr.length) }
       function fmtMs(ms) { if (!ms) return '-'; var m = Math.floor(ms / 60000); if (m < 60) return m + ' 分钟'; var h = Math.floor(m / 60); if (h < 24) return h + ' 小时 ' + (m % 60) + ' 分'; return Math.floor(h / 24) + ' 天 ' + (h % 24) + ' 时' }
+      // 调研 ROI 分组（task-mutnjesa）：resolved/archived 且有执行数据（claimedAt→resolvedAt 可算，
+      //   无 claimedAt 的手工/direct 卡跳过）的卡按「有无调研注入」分两组——有调研 = context.files /
+      //   context.notes 任一非空（context 缺省按无调研，与详情页「调研注入」行同口径）。
+      //   与 usageSummary 同哲学：纯现算零存储。任一组为空或总样本 <4 时 roi=null（样本太少没说服力，不渲染）。
+      var roiYes = [], roiNo = []
+      tasks.forEach(function (t) {
+        if (t.status !== 'resolved' && t.status !== 'archived') return
+        if (!t.claimedAt || !t.resolvedAt) return
+        var execMs = new Date(t.resolvedAt) - new Date(t.claimedAt)
+        if (!(execMs >= 0)) return // 时间戳异常（NaN/负值）跳过
+        var cx = t.context || {}
+        var hasRes = (Array.isArray(cx.files) && cx.files.length > 0) || (typeof cx.notes === 'string' && cx.notes.trim().length > 0)
+        var tok = (t.usage && typeof t.usage.total === 'number' && t.usage.total > 0) ? t.usage.total : null // 无 usage 记录的卡不拉低 token 均值（只计有结算样本）
+        ;(hasRes ? roiYes : roiNo).push({ execMs: execMs, tok: tok })
+      })
+      var roi = null
+      if (roiYes.length > 0 && roiNo.length > 0 && roiYes.length + roiNo.length >= 4) {
+        var roiAgg = function (arr) {
+          var execMs = Math.round(arr.reduce(function (a, b) { return a + b.execMs }, 0) / arr.length)
+          var toks = []; arr.forEach(function (x) { if (x.tok !== null) toks.push(x.tok) })
+          return { n: arr.length, execMs: execMs, tok: toks.length ? Math.round(toks.reduce(function (a, b) { return a + b }, 0) / toks.length) : null }
+        }
+        roi = { yes: roiAgg(roiYes), no: roiAgg(roiNo) }
+      }
       // 耗时口径三分离（task-mutdnitw）：avgQueue=平均排队（创建→被领取）、avgExec=平均执行（被领取→完成），均只统计领取过的卡；avgVerify 口径不动（完成→验收）
-      return { total: total, byStatus: byStatus, byPriority: byPriority, byAgent: byAgent, avgQueue: fmtMs(avgMs(queueTimes)), avgExec: fmtMs(avgMs(execTimes)), avgVerify: fmtMs(avgMs(verifyTimes)), todayDone: todayDone, dailyDone: dailyDone, recentActivity: recentActivity }
+      return { total: total, byStatus: byStatus, byPriority: byPriority, byAgent: byAgent, avgQueue: fmtMs(avgMs(queueTimes)), avgExec: fmtMs(avgMs(execTimes)), avgVerify: fmtMs(avgMs(verifyTimes)), todayDone: todayDone, dailyDone: dailyDone, recentActivity: recentActivity, roi: roi }
     }
 
     function TrendChart(props) {
@@ -1087,6 +1111,26 @@ function apply(ctx) {
 
     // 双行指标卡（耗时口径三分离：原「平均完成时间」一个展示位拆为 排队/执行 两行，不挤占其他指标位）
     function StatCardDual(props) { return React.createElement('div', { style: { flex: '1 1 0', minWidth: 80, padding: '6px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, textAlign: 'center' }, title: props.title }, React.createElement('div', { style: { fontSize: 14, fontWeight: 700, color: props.color || C.text } }, String(props.value1)), React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 1 } }, props.label1), React.createElement('div', { style: { fontSize: 14, fontWeight: 700, color: props.color || C.text, marginTop: 3 } }, String(props.value2)), React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 1 } }, props.label2)) }
+
+    // 调研 ROI 对比行（task-mutnjesa）：让数据替道理说话——「有调研 vs 无调研」分组账单直接摆给主窗口看，
+    //   比任何引导文案都管用。数据源 computeStats 的 roi（null = 任一组为空或总样本 <4，整块不渲染）；
+    //   无调研组明显更慢（平均执行 > 有调研组 1.2 倍，阈值写清避免把随机波动误读成结论）时其数字用 warn 色。
+    function ResearchRoiRow(props) {
+      var roi = props.roi
+      if (!roi) return null
+      function fmtM(ms) { var m = Math.round(ms / 60000); if (m < 60) return m + 'm'; return (m / 60).toFixed(1) + 'h' }
+      var noSlower = roi.no.execMs > roi.yes.execMs * 1.2
+      function grp(icon, label, g, warnNums) {
+        return React.createElement('span', null,
+          icon + ' ' + label + ' ',
+          React.createElement('span', { style: { fontWeight: 600, color: warnNums ? C.warn : C.text } }, g.n + ' 卡 平均 ' + fmtM(g.execMs) + '/约 ' + (g.tok === null ? '-' : fmtTokens(g.tok)) + ' tok'))
+      }
+      return React.createElement('div', { style: { padding: '6px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12, fontSize: 10, color: C.text2, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }, title: 'resolved/archived 且领取过的卡按有无调研注入分组现算（执行 = 被领取→完成；token 均值只计有 usage 结算记录的卡）' },
+        React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('scale', 11), '调研 ROI'),
+        grp('📎', '有调研', roi.yes, false),
+        React.createElement('span', null, '·'),
+        grp('⚠️', '无调研', roi.no, noSlower))
+    }
 
     function BarRow(props) { var pct = props.total > 0 ? (props.count / props.total * 100) : 0; return React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 } }, React.createElement('span', { style: { width: 40, fontSize: 10, color: C.text2, textAlign: 'right', flexShrink: 0 } }, props.label), React.createElement('div', { style: { flex: 1, height: 8, background: C.nested, borderRadius: 4, overflow: 'hidden' } }, React.createElement('div', { style: { height: '100%', width: pct + '%', background: props.color || C.brand, borderRadius: 4, transition: 'width .3s' } })), React.createElement('span', { style: { width: 24, fontSize: 10, color: C.text2, flexShrink: 0 } }, String(props.count))) }
 
@@ -1292,6 +1336,7 @@ function apply(ctx) {
           React.createElement('div', { style: { flex: '1 1 0', minWidth: 200, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '按状态分布'), statusOrder.map(function (s) { return React.createElement(BarRow, { key: s, label: statusLabels[s] || s, count: stats.byStatus[s] || 0, total: stats.total, color: statusColors[s] || C.brand }) })),
           React.createElement('div', { style: { flex: '1 1 0', minWidth: 200, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '按优先级分布'), prioOrder.map(function (p) { return React.createElement(BarRow, { key: p, label: prioLabel[p] || p, count: stats.byPriority[p] || 0, total: stats.total, color: prioColor[p] || C.brand }) }))),
         React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' } }, React.createElement(StatCardDual, { label1: '平均排队', value1: stats.avgQueue, label2: '平均执行', value2: stats.avgExec, title: '耗时口径三分离：⏳ 排队 = 创建 → 被领取（等了多久）；⏱ 执行 = 被领取 → 完成（干了多久）；均不含验收时长' }), React.createElement(StatCard, { label: '平均验证时间', value: stats.avgVerify }), React.createElement(StatCard, { label: '今日完成', value: stats.todayDone, color: C.ok })),
+        React.createElement(ResearchRoiRow, { roi: stats.roi }),
         React.createElement(TrendChart, { data: stats.dailyDone }),
         Object.keys(stats.byAgent).length > 0 ? React.createElement('div', { style: { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, 'Agent 负载（进行中+验证中）'), Object.keys(stats.byAgent).map(function (aid) { return React.createElement('div', { key: aid, style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, fontSize: 11 } }, React.createElement(ActorLink, { id: aid }), React.createElement('span', { style: { color: C.text2 } }, stats.byAgent[aid] + ' 个任务')) })) : null,
         React.createElement('div', { style: { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '最近活跃'), stats.recentActivity.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无记录') : stats.recentActivity.map(function (a, i) { return React.createElement('div', { key: i, style: { fontSize: 10, color: C.text2, marginBottom: 3, display: 'flex', gap: 4, alignItems: 'center' } }, React.createElement('span', { style: { color: statusColors[a.to] || C.brand, fontWeight: 600 } }, statusLabels[a.to] || a.to), React.createElement('span', { style: { color: C.text, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, a.title), React.createElement(ActorLink, { id: a.actor }), React.createElement('span', null, ago(a.timestamp))) })))

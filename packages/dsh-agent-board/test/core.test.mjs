@@ -708,7 +708,8 @@ test('粒度治理接线：工具描述/Team 提示词/双出口返回体均已�
 // extra 可覆盖默认 deps（如 epic 预检用例注入 pushSysNote 捕获 / sessionCwd 解析根）
 function mkRpcHandlers(board, extra) {
   const state = { handlers: {}, teamModeCache: {}, feedbackCache: {} }
-  const ctx = { tools: { register() {} }, effect() {}, webServer: { register() { return () => {} } } }
+  const tools = {} // 工具通道捕获：双通道接线测试经 __tools['task_create'].execute(...) 直调
+  const ctx = { tools: { register(t) { tools[t.name] = t } }, effect() {}, webServer: { register() { return () => {} } } }
   const deps = Object.assign({
     getActorId: () => 'tester', resolveRoot: (x) => x,
     toolSessionId: () => 's1', rpcSessionId: () => 's1',
@@ -719,6 +720,7 @@ function mkRpcHandlers(board, extra) {
     pushSysNote: () => {}, sessionCwd: () => '',
   }, extra || {})
   createRpc(ctx, state, deps)
+  state.handlers.__tools = tools
   return state.handlers
 }
 const EMPTY_DESC_WARNING = '任务描述为空——Worker 只能凭标题猜需求，建议补一句目标/约束'
@@ -855,6 +857,119 @@ test('update-task RPC: 发布 epic（有子任务缺调研注入）→ pushSysNo
   // 非 draft 发布被拒（not a draft）→ 不预检不投递：ep2 已是 pending，重复 publish 应被拒
   const r3 = await h2['update-task']({ taskId: 'ep2', publish: true })
   assert.equal(r3.ok, false); assert.match(r3.error, /not a draft/); assert.equal(notes2.length, 0)
+})
+
+// ===== 调研遵循·host 三件套（task-mutnj3a4）：touches→suggestedContextFiles 桥接 + Verifier 归因 + 驳回 hint =====
+
+test('suggestContextFiles: glob 跳过 / 锚点剥离 / 存在性过滤 / 去重 / 上限 20 全矩阵', () => {
+  // 非数组 / 空条目 / 非字符串 → 空
+  assert.deepEqual(core.suggestContextFiles(null, () => true), [])
+  assert.deepEqual(core.suggestContextFiles(['', '  ', 42], () => true), [])
+  // glob 条目（* ? [ ] { } 任一）跳过；具体文件保留
+  assert.deepEqual(core.suggestContextFiles(['src/**', '*.mjs', 'a?.js', 'x/[ab].js', 'x/{a,b}.js', 'lib/a.mjs'], () => true), ['lib/a.mjs'])
+  // 锚点 :L 段剥掉后再查存在性，返回剥锚后的相对原样
+  const seen = []
+  const r = core.suggestContextFiles(['lib/a.mjs:L10-L20'], (p) => { seen.push(p); return true })
+  assert.deepEqual(r, ['lib/a.mjs']); assert.deepEqual(seen, ['lib/a.mjs'])
+  // 存在性过滤：不存在的剔除
+  assert.deepEqual(core.suggestContextFiles(['a.mjs', 'b.mjs'], (p) => p === 'b.mjs'), ['b.mjs'])
+  // exists 抛异常视为不存在（宁缺勿滥）
+  assert.deepEqual(core.suggestContextFiles(['a.mjs'], () => { throw new Error('x') }), [])
+  // exists 缺省 → 退化为只做 glob/锚点过滤（与 epicPrecheck 同口径）
+  assert.deepEqual(core.suggestContextFiles(['a.mjs', 'src/**']), ['a.mjs'])
+  // 去重（按剥锚后原串）+ 顺序保持
+  assert.deepEqual(core.suggestContextFiles(['a.mjs', 'a.mjs:L5', 'b.mjs', 'a.mjs'], () => true), ['a.mjs', 'b.mjs'])
+  // 上限 20（与 contextFiles 上限一致）
+  const many = []
+  for (let i = 0; i < 25; i++) many.push('f' + i + '.mjs')
+  assert.equal(core.suggestContextFiles(many, () => true).length, 20)
+})
+
+test('attachContextSuggestions: 触发②且有建议 → warning 补尾 + 挂字段；否则形态不变', () => {
+  // 触发：warnings 含无调研警告且 touches 有可建议文件
+  const out = { ok: true }
+  const warns = core.createTaskWarnings(mkTask({ description: 'd', touches: ['lib/a.mjs'] }))
+  const suggested = core.attachContextSuggestions(out, warns, ['lib/a.mjs'], () => true)
+  assert.deepEqual(suggested, ['lib/a.mjs'])
+  assert.deepEqual(out.suggestedContextFiles, ['lib/a.mjs'])
+  assert.match(warns[0], /可直接 task_update contextFiles 补上/)
+  // 不触发①：无「未附调研上下文」警告（已有调研上下文）→ null，out 不挂字段
+  const out2 = { ok: true }
+  const warns2 = core.createTaskWarnings(mkTask({ description: 'd', touches: ['lib/a.mjs'], context: { files: [], notes: 'n' } }))
+  assert.equal(core.attachContextSuggestions(out2, warns2, ['lib/a.mjs'], () => true), null)
+  assert.equal('suggestedContextFiles' in out2, false)
+  // 不触发②：touches 全 glob → null，warning 原文不变（不补尾巴）
+  const out3 = { ok: true }
+  const warns3 = core.createTaskWarnings(mkTask({ description: 'd', touches: ['src/**'] }))
+  const before = warns3.join('；')
+  assert.equal(core.attachContextSuggestions(out3, warns3, ['src/**'], () => true), null)
+  assert.equal('suggestedContextFiles' in out3, false)
+  assert.equal(warns3.join('；'), before)
+})
+
+test('create-task 双通道：touches 指向真实文件且无调研上下文 → 挂 suggestedContextFiles + warning 补尾', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'board-suggest-'))
+  fs.writeFileSync(path.join(tmp, 'real.mjs'), '// x')
+  const extra = { sessionCwd: () => tmp }
+  // RPC 通道：ghost.mjs 不存在、src/** 是 glob → 均剔除，只剩 real.mjs
+  const board = mkBoard([])
+  const r = await mkRpcHandlers(board, extra)['create-task']({ title: 'T', description: 'd', touches: ['real.mjs', 'ghost.mjs', 'src/**'] })
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.suggestedContextFiles, ['real.mjs'])
+  assert.match(r.warning, /未附调研上下文/); assert.match(r.warning, /可直接 task_update contextFiles 补上/)
+  // 工具通道（同口径）
+  const board2 = mkBoard([])
+  const tools = mkRpcHandlers(board2, extra).__tools
+  const r2 = await tools['task_create'].execute({ title: 'T', description: 'd', touches: ['real.mjs'] }, {})
+  assert.equal(r2.ok, true)
+  assert.deepEqual(r2.suggestedContextFiles, ['real.mjs'])
+  assert.match(r2.warning, /可直接 task_update contextFiles 补上/)
+})
+
+test('create-task：touches 全 glob 或已有调研上下文 → 不挂 suggestedContextFiles（返回体形态不变）', async () => {
+  const board = mkBoard([])
+  const r = await mkRpcHandlers(board)['create-task']({ title: 'T', description: 'd', touches: ['src/**'] })
+  assert.equal(r.ok, true); assert.match(r.warning, /未附调研上下文/)
+  assert.equal('suggestedContextFiles' in r, false)
+  assert.ok(!/可直接 task_update/.test(r.warning)) // 无建议时尾巴也不补
+  const board2 = mkBoard([])
+  const r2 = await mkRpcHandlers(board2)['create-task']({ title: 'T', description: 'd', touches: ['lib/a.mjs'], contextNotes: '已调研' })
+  assert.equal(r2.ok, true); assert.equal('warning' in r2, false); assert.equal('suggestedContextFiles' in r2, false)
+})
+
+test('verify 驳回 hint：verify-task RPC + task_verify 工具 rejected 附重派提示，approved 不附', async () => {
+  // RPC 通道 rejected → 附 hint，驳回语义不变（回 in-progress）
+  const board = mkBoard([mkTask({ id: 'v1', status: 'verifying' })])
+  const r = await mkRpcHandlers(board)['verify-task']({ taskId: 'v1', verdict: 'rejected', comment: '跑偏了' })
+  assert.equal(r.ok, true); assert.match(r.hint, /驳回原因写进 description/); assert.match(r.hint, /新 Worker 没有上一轮记忆/)
+  assert.equal(board.tasks[0].status, 'in-progress')
+  // RPC 通道 approved → 无 hint 字段
+  const board2 = mkBoard([mkTask({ id: 'v2', status: 'verifying' })])
+  const r2 = await mkRpcHandlers(board2)['verify-task']({ taskId: 'v2', verdict: 'approved' })
+  assert.equal(r2.ok, true); assert.equal('hint' in r2, false)
+  // 工具通道 rejected → 同口径附 hint
+  const board3 = mkBoard([mkTask({ id: 'v3', status: 'verifying' })])
+  const r3 = await mkRpcHandlers(board3).__tools['task_verify'].execute({ taskId: 'v3', verdict: 'rejected', comment: '缺测试' }, {})
+  assert.equal(r3.ok, true); assert.match(r3.hint, /驳回原因写进 description/)
+  // 工具通道 approved → 无 hint
+  const board4 = mkBoard([mkTask({ id: 'v4', status: 'verifying' })])
+  const r4 = await mkRpcHandlers(board4).__tools['task_verify'].execute({ taskId: 'v4', verdict: 'approved' }, {})
+  assert.equal(r4.ok, true); assert.equal('hint' in r4, false)
+})
+
+test('buildVerifierPrompt: 含「立单缺调研」驳回归因条款', () => {
+  const p = core.buildVerifierPrompt(mkTask({ id: 'tx', status: 'verifying' }), '')
+  assert.match(p, /立单缺调研/)
+  assert.match(p, /驳回热点统计/)
+})
+
+test('调研遵循接线：双通道 attachContextSuggestions / 驳回 hint 双挂 / Verifier 归因条款（源码级断言）', () => {
+  const src = hostSrc()
+  assert.equal((src.match(/attachContextSuggestions\(/g) || []).length, 2) // task_create 工具 + create-task RPC
+  assert.equal((src.match(/\.hint = REJECT_REDISPATCH_HINT/g) || []).length, 2) // task_verify 工具 + verify-task RPC
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  assert.match(coreSrc, /立单缺调研/) // Verifier prompt 归因条款在位
+  assert.match(coreSrc, /export function suggestContextFiles/)
 })
 
 test('调研门禁接线：双通道 warning 调用 / epic 预检投递 / 读包失败落卡（源码级轻量断言）', () => {
@@ -999,7 +1114,7 @@ test('学习飞轮接线：两处触发点 + push-lesson 开关拦截 + prompt/�
   // 候选教训两处触发：Verifier 驳回（文本通道 + 工具通道 + GUI RPC）与主窗口仲裁结论
   assert.match(host, /pushRejectLesson\(d, t, vsecs\.verifySummary \|\| trimmed, t\.verification\.at\)/)
   assert.match(host, /if \(!approved\) pushRejectLesson\(d, t, \(args\.summary \|\| ''\)/)
-  assert.match(host, /if \(args\.verdict === 'rejected'\) pushRejectLesson\(d, t, args\.comment\)/)
+  assert.match(host, /if \(args\.verdict === 'rejected'\) \{ pushRejectLesson\(d, t, args\.comment\); r\.hint = REJECT_REDISPATCH_HINT \}/) // verify-task RPC：候选教训 + 驳回重派 hint（task-mutnj3a4）同分支挂载
   assert.match(host, /pushArbitrationLesson\(d, t, escQ, answer \|\| '', arbAt\)/)
   // 生成前一律过 feedbackEnabled 总开关（关掉 = 不生成、不推）
   assert.equal((host.match(/if \(!cfg\(d\)\.feedbackEnabled\) return false/g) || []).length, 2)
@@ -1136,9 +1251,9 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
   assert.match(host, /claimApply\(d, t, 'spawn-pending', 'dispatch'\); if \(parentKickOnDispatch\(d, t\)\)/)
   // get-tasks 现算 childStats（零存储）
   assert.match(host, /d\.childStats = aggregateChildStats\(d\.tasks\)/)
-  // 两模块都从 core 解构引入（接线不断）；rpc.mjs 解构表尾部随调研门禁（task-mute6zpw）扩展三个纯函数
+  // 两模块都从 core 解构引入（接线不断）；rpc.mjs 解构表尾部随调研门禁（task-mute6zpw）与调研遵循三件套（task-mutnj3a4）扩展
   assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT \} = core/)
-  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote \} = core/)
+  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT \} = core/)
   // 既有「全子任务 resolved → 父 verifying」逻辑不动（checkParentAuto 仍在 verifyApply 链路；core.mjs 不在 hostSrc 清单，单独读）
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
   assert.match(coreSrc, /if \(verdict === 'approved' && isb\(t\)\) \{ var p = checkParentAuto\(d, t\)/)

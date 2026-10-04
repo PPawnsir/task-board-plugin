@@ -384,6 +384,9 @@ export function buildVerifierPrompt(t, pack) {
   if (notes) p += '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，若有）：\n' + notes + '\n注意：若过程记录显示主窗口已裁决改变任务方向，以裁决后的方向为验收标准。'
   if (msgs) p += '\n\n该任务的详细消息（裁决答案/干预指令/歧义原文等）：\n' + msgs
   if (pack) p += '\n\n' + pack
+  // 跑偏归因条款（调研遵循·host 三件套 ②）：驳回理由注明「立单缺调研」——归因计入驳回热点统计，
+  // 供主窗口分诊「立单缺料 vs Worker 执行问题」，缺料占高了就该把建卡调研门禁拧紧。
+  p += '\n驳回归因：若 Worker 的产出明显因缺少调研上下文而跑偏/绕路，驳回时请在驳回理由里注明「立单缺调研」（归因会计入驳回热点统计）。'
   p += '\n\n结论契约（双模，工具优先）：\n1. 优先调用 board_verdict 工具（taskId=' + t.id + ', verdict=approved/rejected, summary=测试概要, checks=逐条核对证据含行号）。\n2. 工具不可用则首行 APPROVED: <结论> 或 REJECTED: <结论>，然后 ## 测试概要 / ## 核对项 分段。'
   return p
 }
@@ -459,6 +462,13 @@ export function isTreeGlob(p) { var v = normTouch(p); return v === '**' || /\/\*
 // ②③ 的触发前提：pipeline≠'direct' 且 touches 非空（direct 主窗口直接处理、无 touches 不指望调研材料）。
 // 返回 string[]；调用方自行合并为一条 warning 字段（可选字段，老调用方无感）。
 export var EMPTY_DESC_WARNING = '任务描述为空——Worker 只能凭标题猜需求，建议补一句目标/约束'
+// ②的文案单独成常量：rpc 双通道在「触发②且 touches 有可建议文件」时要认出这条并补尾巴
+// （attachContextSuggestions），字面量若散在两处会漂移。
+export var NO_RESEARCH_WARNING = '未附调研上下文（contextFiles/contextNotes）——Worker 将自行 grep 定位，建议补上预研文件路径或勾选无需调研'
+// ②触发且 suggestContextFiles 非空时，warning 尾巴补的最省力动作指引（不含 '；'，不破坏多 warning 合并分隔）
+export var NO_RESEARCH_HINT = '（可直接 task_update contextFiles 补上：touches 指向的文件就是最相关的调研现场）'
+// verify 驳回响应的重派提示（task_verify 工具 + verify-task RPC 的 rejected 分支挂载；字段可选，老调用方无感）
+export var REJECT_REDISPATCH_HINT = '建议：驳回原因写进 description，并用 contextNotes 补调研结论后再重派——新 Worker 没有上一轮记忆'
 export function createTaskWarnings(t) {
   var out = []
   if (!t || typeof t !== 'object') return out
@@ -468,10 +478,58 @@ export function createTaskWarnings(t) {
     var cx = t.context || {}
     var hasFiles = Array.isArray(cx.files) && cx.files.length > 0
     var hasNotes = !!(cx.notes && String(cx.notes).trim())
-    if (!hasFiles && !hasNotes) out.push('未附调研上下文（contextFiles/contextNotes）——Worker 将自行 grep 定位，建议补上预研文件路径或勾选无需调研')
+    if (!hasFiles && !hasNotes) out.push(NO_RESEARCH_WARNING)
     if (touches.some(isTreeGlob)) out.push('touches 含整树 glob 会串行化整个批次——修复类任务建议精确到文件级')
   }
   return out
+}
+
+// ===== touches → suggestedContextFiles 自动桥接（调研遵循·host 三件套 ①）=====
+// 让遵守成为最省力路径：建卡触发「无调研上下文」warning 时，直接把 touches 里的具体文件
+// 提炼成可一键采纳的 contextFiles 建议（响应挂 suggestedContextFiles 字段）。
+// 只取「非 glob 的具体文件路径」：含 * ? [ ] { } 任一通配符的条目跳过（glob 指认不了单个现场）；
+// 锚点 :L 段剥掉（存在性是对文件而言的，建议也只到文件级）。exists(path) 由调用方注入
+// （fs.existsSync + 会话工作区相对解析包装）；缺省时退化为只做 glob/锚点过滤（与 epicPrecheck 同口径）。
+// 去重按剥锚后的原串（不强行归一 './'——相对原样返回，调用方怎么写就怎么收）。
+// 上限 20 条（与 contextFiles 上限一致）；exists 抛异常视为不存在（建议错了比没有更糟，宁缺勿滥）。
+export var SUGGEST_CONTEXT_MAX = 20
+var GLOB_CHARS = /[*?\[\]{}]/
+export function suggestContextFiles(touches, exists) {
+  var out = []
+  var seen = {}
+  var list = Array.isArray(touches) ? touches : []
+  for (var i = 0; i < list.length && out.length < SUGGEST_CONTEXT_MAX; i++) {
+    var raw = list[i]
+    if (typeof raw !== 'string' || !raw.trim()) continue
+    var file = parseAnchorPath(raw.trim()).file
+    if (!file || GLOB_CHARS.test(file)) continue
+    if (seen[file]) continue
+    if (typeof exists === 'function') {
+      var ok = false
+      try { ok = !!exists(file) } catch (_) { ok = false }
+      if (!ok) continue
+    }
+    seen[file] = true
+    out.push(file)
+  }
+  return out
+}
+
+// 建卡响应的建议桥接（task_create 工具 + create-task RPC 双通道同口径）：
+// warnings 里有「无调研上下文」警告且 touches 能提炼出建议时——
+//   ① 该条 warning 尾巴补 NO_RESEARCH_HINT（指认最省力动作）；
+//   ② out 挂 suggestedContextFiles 字段（可选字段，老调用方无感）。
+// 不触发/无建议 → 返回 null，out 与 warnings 形态完全不变（不改既有 warning 判定逻辑，只加建议通道）。
+// 注意：必须在 warnings join('；') 之前调用，尾巴才会进最终 warning 文案。
+export function attachContextSuggestions(out, warnings, touches, exists) {
+  if (!out || !Array.isArray(warnings)) return null
+  var idx = warnings.indexOf(NO_RESEARCH_WARNING)
+  if (idx < 0) return null
+  var suggested = suggestContextFiles(touches, exists)
+  if (!suggested.length) return null
+  warnings[idx] = NO_RESEARCH_WARNING + NO_RESEARCH_HINT
+  out.suggestedContextFiles = suggested
+  return suggested
 }
 
 // epic 发布预检：父卡 publish 时对其子任务做轻量调研注入预检。
