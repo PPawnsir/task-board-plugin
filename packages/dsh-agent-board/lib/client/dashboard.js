@@ -298,8 +298,9 @@
       var vActive = (ps.verifiers || []).filter(function (v) { return v.busy }).length
       var vTotal = (ps.verifiers || []).length
       return React.createElement('span', { style: { fontSize: 9, color: C.text2, display: 'inline-flex', gap: 4, alignItems: 'center' } },
-        React.createElement('span', { title: 'Worker 池', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('zap', 10), wActive + '/' + wTotal),
-        React.createElement('span', { title: 'Verifier 池', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('check', 10), vActive + '/' + vTotal))
+        // 池水位 title 标注（反馈 n-mut9rzoq3flu）：裸数字新用户看不懂，⚡=Worker 在跑/上限，✓=Verifier 在跑/上限
+        React.createElement('span', { title: 'Worker 在跑/上限', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('zap', 10), wActive + '/' + wTotal),
+        React.createElement('span', { title: 'Verifier 在跑/上限', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('check', 10), vActive + '/' + vTotal))
     }
 
     // #11 头部减负：池配置收纳进 ⚙️ 弹出层（含 #17 verifier 异构模型设置）

@@ -12,6 +12,7 @@ import * as core from '../lib/core.mjs'
 // 均由 index.mjs 薄壳 re-export（对外契约不变），这里仍从 index.mjs 导入直接断言
 import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE } from '../index.mjs'
 import { aggregateUsageSummary, readRunUsage, findRunLog } from '../index.mjs'
+import { createRpc } from '../lib/rpc.mjs'
 // host 端源码拼接（Phase 2 模块化后：薄壳 index.mjs + lib/*.mjs 领域模块），供源码级接线断言
 const HOST_SOURCES = ['../index.mjs', '../lib/policy.mjs', '../lib/usage.mjs', '../lib/session.mjs', '../lib/store.mjs', '../lib/notify.mjs', '../lib/dispatch.mjs', '../lib/rpc.mjs']
 function hostSrc() { return HOST_SOURCES.map(function (f) { return readFileSync(new URL(f, import.meta.url), 'utf8') }).join('\n') }
@@ -700,6 +701,43 @@ test('粒度治理接线：工具描述/Team 提示词/双出口返回体均已�
   assert.equal((src.match(/withSplitHint\(\{ ok: true, task: t \}, t\)/g) || []).length, 2) // task_create 工具 + create-task RPC
   assert.match(src, /全量\|整体\|系统级\|全面\|重构\|所有模块\|整个/) // 史诗特征词表在位
   assert.match(src, /SPLIT_DESC_LIMIT = 500/)                        // 500 字符阈值在位
+})
+
+// ===== create-task 空 description 软警告（E 卡）=====
+// 轻量 RPC 直调 harness：mock ctx（tools/effect/webServer）+ deps 最小面，直接调 handlers['create-task']
+function mkRpcHandlers(board) {
+  const state = { handlers: {}, teamModeCache: {}, feedbackCache: {} }
+  const ctx = { tools: { register() {} }, effect() {}, webServer: { register() { return () => {} } } }
+  const deps = {
+    getActorId: () => 'tester', resolveRoot: (x) => x,
+    toolSessionId: () => 's1', rpcSessionId: () => 's1',
+    rootForSession: () => null, deriveWorkMode: () => 'solo', runsFor: () => [],
+    rt: async () => board, mutateLocked: (sid, fn) => fn(board),
+    maybeNotify: () => {}, notifyTaskDone: () => {},
+    spawnOneShot: () => {}, accumulateRunUsage: () => {}, readContextPack: async () => null,
+  }
+  createRpc(ctx, state, deps)
+  return state.handlers
+}
+const EMPTY_DESC_WARNING = '任务描述为空——Worker 只能凭标题猜需求，建议补一句目标/约束'
+
+test('create-task RPC: description 空白（空串 / 纯空格）→ 创建成功且响应附 warning 软警告', async () => {
+  let board = mkBoard([])
+  let r = await mkRpcHandlers(board)['create-task']({ title: 'T', description: '' })
+  assert.equal(r.ok, true); assert.equal(r.warning, EMPTY_DESC_WARNING)
+  assert.equal(board.tasks.length, 1) // 软警告不拦截创建
+  board = mkBoard([])
+  r = await mkRpcHandlers(board)['create-task']({ title: 'T', description: '   ' }) // 纯空格同样视为空白（trim 判定）
+  assert.equal(r.ok, true); assert.equal(r.warning, EMPTY_DESC_WARNING)
+  assert.equal(board.tasks.length, 1)
+})
+
+test('create-task RPC: description 非空 → 响应无 warning 字段（返回体形态不变，老调用方无感）', async () => {
+  const board = mkBoard([])
+  const r = await mkRpcHandlers(board)['create-task']({ title: 'T', description: '把按钮文案从 A 改成 B，肉眼确认' })
+  assert.equal(r.ok, true)
+  assert.equal('warning' in r, false)
+  assert.equal(board.tasks.length, 1)
 })
 
 // ===== Token 消耗统计 =====

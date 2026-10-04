@@ -67,6 +67,36 @@
     function isCardHover(id, kind) { return String(state.cardHover || '') === (id + '|' + kind) }
     function setHover(id, kind) { var v = id ? (id + '|' + kind) : ''; if (state.cardHover !== v) { state.cardHover = v; notify() } }
 
+    // ===== 卡片「当前动作」行摘要化（client 侧提炼；host 仍下发原文，不改 host）=====
+    // host 的 activity 形如 `🔧 pwsh {"command": "Get-ChildItem …"}`（90 字符硬截，常断在 JSON 中段，
+    // 原样展示零信息量，反馈 n-mut914xana0t）或 `💬 自由文本`。这里提炼为「工具名 + 关键参数摘要」：
+    //   pwsh → 命令体；read/write/edit → 文件 basename；browser_* → 动作名 + 目标（target/url/ref）；
+    //   参数摘要 40 字符内、优先在空格/路径分隔符处断点；解析失败/自由文本回退为原文前 40 字符（头部截断）。
+    function actCut(s, n) { s = String(s || ''); if (s.length <= n) return s; var c = s.slice(0, n); var last = c.charCodeAt(c.length - 1); if (last >= 0xD800 && last <= 0xDBFF) c = c.slice(0, -1); var sp = Math.max(c.lastIndexOf(' '), c.lastIndexOf('/'), c.lastIndexOf('\\')); if (sp >= Math.floor(n / 2)) c = c.slice(0, sp); return c.replace(/[\s/\\]+$/, '') + '…' } // 不斩断代理对（emoji）
+    // 从不完整 JSON 文本里抢指定 key 的第一个字符串值（host 文本常被硬截，JSON.parse 多半失败，正则直达）
+    function actArg(rest, key) { var m = String(rest || '').match(new RegExp('"' + key + '"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)')); return m ? m[1] : '' }
+    function actBase(p) { p = String(p || ''); var i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\')); return i >= 0 ? p.slice(i + 1) : p }
+    function activitySummary(text) {
+      var s = String(text || '').trim()
+      if (!s) return ''
+      if (s.indexOf('💬') === 0) return actCut(s, 40) // 自由文本：保留 💬 前缀从头部截
+      var body = s.replace(/^🔧\s*/, '') // 去工具调用前缀（host 格式 🔧 <tool> <argsJSON>）
+      var m = body.match(/^([A-Za-z_][\w-]*)\s*([\s\S]*)$/)
+      if (!m) return actCut(s, 40)
+      var tool = m[1], rest = (m[2] || '').trim()
+      if (!rest) return actCut(s, 40)
+      var v = ''
+      if (tool === 'pwsh') v = actArg(rest, 'command')
+      else if (tool === 'read' || tool === 'write' || tool === 'edit') v = actBase(actArg(rest, 'file_path'))
+      if (v) return tool + ' ' + actCut(v, 40)
+      if (tool.indexOf('browser_') === 0) {
+        var act = actArg(rest, 'action'); var tgt = actArg(rest, 'target') || actArg(rest, 'url') || actArg(rest, 'ref')
+        var parts = []; if (act) parts.push(act); if (tgt) parts.push(tgt)
+        if (parts.length) return tool + ' ' + actCut(parts.join(' '), 40)
+      }
+      return actCut(s, 40) // 无法解析：原文前 40 字符（从头部截，不再断在 JSON 中段）
+    }
+
     // 史诗/依赖/父子识别层（childStats 缺省兼容：host 未返回该字段时一律不渲染相关元素）：
     //   父卡 = 元信息行首位「📦 史诗 · resolved/total」徽章 + 3px 迷你进度条 + activeTitle 非空时「▸ 在跑」行；
     //   子卡 = 标题下一行小字「↳ 父任务标题」（从 state.tasks 找父卡，找不到回退 shortId）；
@@ -90,7 +120,8 @@
           // 史诗迷你进度条（3px 高，resolved/total 比例，ok 色填充）+ 在跑子任务行（activeTitle 非空才渲染）
           epic ? React.createElement('div', { style: { height: 3, borderRadius: 2, background: C.nested, marginTop: 4, overflow: 'hidden' }, title: '子任务进度 ' + cs.resolved + '/' + cs.total }, React.createElement('div', { style: { height: '100%', width: Math.max(0, Math.min(100, Math.round((cs.resolved / cs.total) * 100))) + '%', background: C.ok, borderRadius: 2, transition: 'width .3s' } })) : null,
           epic && cs.activeTitle ? React.createElement('div', { style: { fontSize: 10, color: C.brand, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: '在跑子任务：' + cs.activeTitle }, '▸ 在跑：' + cs.activeTitle) : null,
-          (t.status === 'in-progress' || t.status === 'verifying') && state.activity[t.id] ? React.createElement('div', { style: { fontSize: 10, color: C.brand, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: state.activity[t.id] }, '👁 ' + state.activity[t.id]) : null,
+          // 当前动作行：展示摘要（工具名+关键参数），悬停 title 仍是 host 原文
+          (t.status === 'in-progress' || t.status === 'verifying') && state.activity[t.id] ? React.createElement('div', { style: { fontSize: 10, color: C.brand, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: state.activity[t.id] }, '👁 ' + activitySummary(state.activity[t.id])) : null,
           // 里程碑进展（Worker 主动上报的轻量进展，kind=progress）：进行中的卡片显示最新一条 + 相对时间，无则不显示
           t.status === 'in-progress' && t.lastProgress && t.lastProgress.text ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: '最近进展（' + (t.lastProgress.by || '') + ' · ' + fmtTime(t.lastProgress.at) + '）：' + t.lastProgress.text }, '📈 ' + t.lastProgress.text + ' · ' + ago(t.lastProgress.at)) : null,
           t.status === 'verifying' && preview ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '📝 ' + preview) : null, depBlock ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: '依赖全部完成后才会派发' }, '⛓ 等待「' + depWaitTitle + '」' + (depWaitN > 1 ? ' 等 ' + depWaitN + ' 个' : '')) : null) }
@@ -179,11 +210,16 @@
       function field(label, node) { return React.createElement('div', { style: { marginBottom: 8 } }, React.createElement('div', { style: lblStyle }, label), node) }
       var btnGhost = { fontSize: 11, padding: '4px 12px', border: '1px solid ' + C.border, borderRadius: 5, background: 'transparent', color: C.text2, cursor: 'pointer' }
       var btnPrimary = { fontSize: 11, padding: '4px 14px', border: 'none', borderRadius: 5, background: C.brand, color: C_INV, fontWeight: 600, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1 }
-      return React.createElement('div', { style: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.35)', zIndex: 20, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: 16, overflowY: 'auto' }, onClick: function (e) { if (e.target === e.currentTarget) close() } },
-        React.createElement('div', { style: { width: 440, maxWidth: '100%', background: C.bg, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 12px 32px rgba(0,0,0,0.28)', padding: 12 } },
-          React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 } },
+      // 视口级 overlay（修裁切，反馈 n-mut9rzl4mxe4）：fixed 全屏遮罩脱离看板抽屉（maxHeight 60vh + overflow hidden）
+      // 的裁剪上下文（抽屉无 transform/filter，fixed 相对视口定位不被裁）；弹窗限高 80vh、字段区内部滚动、
+      // 底部按钮区吸底常驻——标题与「创建并派发」始终同屏，无需盲滚。
+      return React.createElement('div', { style: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.45)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }, onClick: function (e) { if (e.target === e.currentTarget) close() } },
+        React.createElement('div', { style: { width: 440, maxWidth: '100%', maxHeight: '80vh', display: 'flex', flexDirection: 'column', background: C.bg, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 12px 32px rgba(0,0,0,0.28)', overflow: 'hidden' } },
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', borderBottom: '1px solid ' + C.border, flexShrink: 0 } },
             React.createElement('span', { style: { fontSize: 13, fontWeight: 600, color: C.text, display: 'inline-flex', alignItems: 'center', gap: 5 } }, ic('plus', 14), '新建任务'),
             React.createElement('button', { onClick: close, title: '关闭', style: { border: 'none', background: 'transparent', cursor: 'pointer', color: C.text2, display: 'inline-flex' } }, ic('x', 14))),
+          // 字段区：内容超出 80vh 时在此内部滚动
+          React.createElement('div', { style: { flex: 1, minHeight: 0, overflowY: 'auto', padding: '10px 12px 4px' } },
           field('标题 *', React.createElement('input', { value: title, onChange: function (e) { setTitle(e.target.value) }, placeholder: '一句话说清要做什么', style: inp })),
           field('描述', React.createElement('textarea', { value: desc, onChange: function (e) { setDesc(e.target.value) }, rows: 3, placeholder: '背景 / 目标 / 约束（可空）', style: Object.assign({}, inp, { resize: 'vertical', minHeight: 46 }) })),
           React.createElement('div', { style: { display: 'flex', gap: 8 } },
@@ -204,9 +240,11 @@
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: C.text, cursor: 'pointer', marginBottom: 6, flexWrap: 'wrap' } },
             React.createElement('input', { type: 'checkbox', checked: asDraft, onChange: function (e) { setAsDraft(e.target.checked) } }),
             '存为草稿',
-            React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, wm === 'team' ? '（Team 托管默认草稿；取消勾选 = 立即派发）' : '（先补依赖/上下文，稍后统一发布）')),
-          err ? React.createElement('div', { style: { fontSize: 11, color: C.err, marginBottom: 6 } }, err) : null,
-          React.createElement('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 6 } },
-            React.createElement('button', { onClick: close, style: btnGhost }, '取消'),
-            React.createElement('button', { onClick: submit, disabled: busy, title: asDraft ? '创建为草稿（不派发）' : '创建并立即进入派发池', style: btnPrimary }, busy ? '创建中…' : (asDraft ? '存为草稿' : '创建并派发')))))
+            React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, wm === 'team' ? '（Team 托管默认草稿；取消勾选 = 立即派发）' : '（先补依赖/上下文，稍后统一发布）'))),
+          // 底部：错误行 + 按钮区吸底常驻（flexShrink:0，不随字段区滚动）
+          React.createElement('div', { style: { flexShrink: 0, padding: '8px 12px 12px', borderTop: '1px solid ' + C.border, background: C.bg } },
+            err ? React.createElement('div', { style: { fontSize: 11, color: C.err, marginBottom: 6 } }, err) : null,
+            React.createElement('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 6 } },
+              React.createElement('button', { onClick: close, style: btnGhost }, '取消'),
+              React.createElement('button', { onClick: submit, disabled: busy, title: asDraft ? '创建为草稿（不派发）' : '创建并立即进入派发池', style: btnPrimary }, busy ? '创建中…' : (asDraft ? '存为草稿' : '创建并派发'))))))
     }
