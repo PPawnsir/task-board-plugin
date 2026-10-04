@@ -978,3 +978,21 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
   assert.match(coreSrc, /if \(verdict === 'approved' && isb\(t\)\) \{ var p = checkParentAuto\(d, t\)/)
 })
+
+// ===== 防再发：notify 逻辑单一来源（lib/notify.mjs）=====
+// dispatch.mjs 曾藏整套 notify 僵尸重复副本（本地 receiptBuf/escNotifyTimers + notifyTaskDone/flushReceipts 等：
+// 函数声明提升后被头部 var x = deps.x 赋值覆盖，是永不执行的死代码——改错地方不产生效果，挪赋值顺序即引爆）。
+// 此处断言六个函数的定义只存在于 notify.mjs，任何模块再长出副本即红。
+test('notify 单一来源：notifyTaskDone/flushReceipts/deliverEscalation 等函数定义只存在于 lib/notify.mjs', () => {
+  const names = ['deliverEscalation', 'notifyMainWindow', 'maybeNotify', 'notifyTaskDone', 'pushSysNote', 'flushReceipts']
+  const others = ['../index.mjs', '../lib/policy.mjs', '../lib/usage.mjs', '../lib/session.mjs', '../lib/store.mjs', '../lib/dispatch.mjs', '../lib/rpc.mjs']
+  const notifySrc = readFileSync(new URL('../lib/notify.mjs', import.meta.url), 'utf8')
+  for (const name of names) {
+    const re = new RegExp('function ' + name + '\\s*\\(')
+    assert.match(notifySrc, re, 'lib/notify.mjs 缺少 ' + name + ' 定义（权威实现应在此）')
+    for (const f of others) {
+      const src = readFileSync(new URL(f, import.meta.url), 'utf8')
+      assert.ok(!re.test(src), f + ' 不得再定义 ' + name + '（notify 逻辑唯一权威在 lib/notify.mjs，副本是僵尸死代码）')
+    }
+  }
+})

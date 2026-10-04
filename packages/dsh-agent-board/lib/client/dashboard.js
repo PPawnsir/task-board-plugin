@@ -205,23 +205,13 @@
             }))))
     }
 
-    // ===== 架构健康提示区（架构自省 L1 · 数据源：host 端 get-tasks 的 healthHints）=====
+    // ===== 架构健康提示区（架构自省 L1 · 数据源：state.healthHints）=====
     // healthHints 由 host lib/health.mjs 的 computeHealthHints(tasks) 每次请求现算（纯函数零存储零 IO）：
-    //   [{ level: 'warn'|'info', text }]。缺省兼容：老 host 无此字段 / 非数组 / 空数组 → 返回 null，
-    //   整块不渲染（零残留）。无按钮无状态（不做 dismiss）：以 state.tasks 为 effect 依赖——kernel
-    //   fetchTasks 每轮都赋它新数组引用，故本区随 3s 轮询同步重取，只反映 host 最新一轮纯重算结果。
+    //   [{ level: 'warn'|'info', text }]。kernel fetchTasks 已将其与 tasks 同源透传进 state.healthHints，
+    //   本组件不再自持 rpc('get-tasks')（消灭仪表盘打开期间的 3s 双轮询），随面板 notify 重渲染同步刷新。
+    //   缺省兼容：老 host 无此字段 / 非数组 / 空数组 → 返回 null，整块不渲染（零残留）。无按钮无状态。
     function HealthHints() {
-      var _R = React; var useState = _R.useState, useEffect = _R.useEffect
-      var _a = useState([]), hints = _a[0], setHints = _a[1]
-      useEffect(function () {
-        var dead = false
-        rpc('get-tasks').then(function (d) {
-          if (dead) return
-          var arr = (d && Array.isArray(d.healthHints)) ? d.healthHints : []
-          setHints(arr.filter(function (h) { return h && h.text }))
-        }).catch(function () {})
-        return function () { dead = true }
-      }, [state.tasks])
+      var hints = (Array.isArray(state.healthHints) ? state.healthHints : []).filter(function (h) { return h && h.text })
       if (!hints.length) return null
       // 两级配色：warn=⚠️ 琥珀（C.warn）；info=ℹ️ 蓝灰（DSH 现有 business 信息色——色板无独立 info 档）
       var infoColor = 'var(--dsw-alias-state-business-primary)'

@@ -67,6 +67,32 @@
         msg ? React.createElement('div', { style: { fontSize: 10, color: C.err, marginTop: 3 } }, msg) : null)
     }
 
+    // 父子区块（与 DepsSection 并列）：
+    //   子卡 = 父链面包屑「↳ 史诗：<父标题>」，点击回跳父卡详情；
+    //   父卡 = 非归档子任务清单（状态色点 + 标题 + 状态标签，点击直达子卡详情；标题行汇总 resolved/total）。
+    //   数据源是 state.tasks 按 parentId 现算（parentId 为老字段），不依赖 host 的 childStats，天然缺省兼容；
+    //   既无父也无子的普通卡整块不渲染。嵌套史诗（本身也是子卡的父卡）两段同区块上下排列。
+    function FamilySection(props) {
+      var task = props.task
+      var parentT = task.parentId ? getTask(task.parentId) : null
+      var kids = state.tasks.filter(function (x) { return x.parentId === task.id && x.status !== 'archived' })
+      if (!task.parentId && kids.length === 0) return null
+      var resolvedN = kids.filter(function (x) { return x.status === 'resolved' }).length
+      function jump(id) { state.detailId = id; notify() }
+      return React.createElement('div', { style: { marginBottom: 8, padding: '6px 8px', border: '1px solid ' + C.border, borderRadius: 6, background: C.card } },
+        task.parentId ? React.createElement('div', { style: { fontSize: 11, marginBottom: kids.length ? 6 : 0 } },
+          React.createElement('span', { style: { color: C.text2, fontWeight: 600 } }, '↳ 史诗：'),
+          React.createElement('span', { onClick: function () { if (parentT) jump(task.parentId) }, title: parentT ? parentT.title + ' (' + task.parentId + ')' : task.parentId, style: { color: parentT ? C.brand : C.text2, cursor: parentT ? 'pointer' : 'default', fontWeight: 600 } }, parentT && parentT.title ? parentT.title : shortId(task.parentId))) : null,
+        kids.length > 0 ? React.createElement('div', null,
+          React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '📦 子任务 · ' + resolvedN + '/' + kids.length + ' 已完成'),
+          kids.map(function (x) {
+            return React.createElement('div', { key: x.id, onClick: function () { jump(x.id) }, title: (statusLabels[x.status] || x.status) + ' · ' + x.id, style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, fontSize: 10, cursor: 'pointer' } },
+              React.createElement('span', { style: { width: 7, height: 7, borderRadius: '50%', background: statusColors[x.status] || C.text2, flexShrink: 0 } }),
+              React.createElement('span', { style: { color: C.brand, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 } }, x.title || x.id),
+              React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0 } }, statusLabels[x.status] || x.status))
+          })) : null)
+    }
+
     function DetailView() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect; var task = getTask(state.detailId)
       var _a = useState(task ? task.title : ''), editTitle = _a[0], setEditTitle = _a[1]; var _b = useState(task ? task.description || '' : ''), editDesc = _b[0], setEditDesc = _b[1]; var _c = useState(false), saving = _c[0], setSaving = _c[1]; var _d = useState(state.boardMode), mode = _d[0], setMode = _d[1]
@@ -102,6 +128,8 @@
       return React.createElement('div', { style: { padding: '4px 2px' } },
         React.createElement('div', { onClick: function () { state.detailId = null; notify() }, style: { fontSize: 11, color: C.brand, cursor: 'pointer', marginBottom: 8 } }, '← 返回看板'),
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 } }, React.createElement('span', { style: { fontSize: 10, padding: '1px 6px', borderRadius: 3, background: 'color-mix(in srgb, ' + (prioColor[task.priority] || prioColor.low) + ' 20%, transparent)', color: (prioColor[task.priority] || prioColor.low) } }, prioLabel[task.priority] || '中'), React.createElement('span', { style: { fontSize: 11, padding: '1px 8px', borderRadius: 3, background: C.nested, color: C.text } }, statusLabels[task.status] || task.status), React.createElement('select', { value: task.pipeline || 'full', onChange: function (e) { rpc('update-task', { taskId: task.id, pipeline: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '管线档位', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'full' }, '全流程（执行+验证）'), React.createElement('option', { value: 'work' }, '免验证（只做不验）'), React.createElement('option', { value: 'direct' }, '主窗口处理')), task.pipelineAuto ? React.createElement('span', { style: { fontSize: 9, color: C.text2 }, title: '由规则自动分类，可手动覆盖' }, 'auto') : null, isManual ? React.createElement('span', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('user', 10), '手动派发') : null),
+        // 最近失败（host settle 失败路径写入 task.lastError；缺字段静默不渲染，≤2 行截断，悬停看全文）
+        task.lastError ? React.createElement('div', { style: { fontSize: 11, color: C.err, marginBottom: 8, padding: '4px 8px', border: '1px solid ' + C.err, borderRadius: 6, background: 'color-mix(in srgb, ' + C.err + ' 8%, transparent)', display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden', wordBreak: 'break-all' }, title: String(task.lastError) }, '最近失败: ' + String(task.lastError)) : null,
         task.frozen ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 8, padding: '6px 8px', border: '1px solid ' + C.brand, borderRadius: 6, background: 'color-mix(in srgb, ' + C.brand + ' 8%, transparent)', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
           React.createElement('span', { style: { fontWeight: 600 } }, '❄ 已冻结：不参与自动派发'),
           React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '裁决挂起' + (task.frozenAt ? '（' + ago(task.frozenAt) + '）' : '') + '，留出补 dependsOn/上下文的时间；解冻后重新入池'),
@@ -144,6 +172,7 @@
         task.context && task.context.instructions ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6, padding: '4px 6px', background: C.nested, borderRadius: 4 } }, '指引: ' + task.context.instructions) : null,
         task.context && Array.isArray(task.context.files) && task.context.files.length > 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6, padding: '4px 6px', background: C.nested, borderRadius: 4, display: 'flex', alignItems: 'flex-start', gap: 4 } }, ic('file-text', 11), React.createElement('span', null, '预研文件（派发时注入子代理）: ' + task.context.files.join('、'))) : null,
         task.context && task.context.notes ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6, padding: '4px 6px', background: C.nested, borderRadius: 4, whiteSpace: 'pre-wrap', maxHeight: 100, overflowY: 'auto' } }, '调研笔记: ' + task.context.notes) : null,
+        React.createElement(FamilySection, { task: task }),
         React.createElement(DepsSection, { task: task }),
         task.acceptance ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, padding: '5px 8px', background: C.nested, borderRadius: 4, borderLeft: '2px solid ' + C.ok, fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 4 } }, ic('flask-conical', 11), '硬性验收: ' + task.acceptance) : null,
         task.resolution ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, padding: '5px 8px', background: C.nested, borderRadius: 4, borderLeft: '2px solid ' + C.warn, maxHeight: 120, overflowY: 'auto', whiteSpace: 'pre-wrap' } }, '📝 ' + task.resolution) : null,

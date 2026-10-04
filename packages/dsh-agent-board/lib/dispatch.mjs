@@ -117,10 +117,11 @@ export function createDispatch(ctx, state, deps) {
       try {
         await mutateLocked(sid, function (d) {
           var t = d.tasks.find(function (x) { return x.id === taskId })
-          if (!t) return
+          if (!t) return null // 找不到任务：返回 null 不写盘
           if (!Array.isArray(t.runs)) t.runs = []
           t.runs.push({ role: role, id: runId, at: new Date().toISOString(), model: model || '', outcome: 'running', hardMin: hardMin || 120 })
           if (t.runs.length > 20) t.runs = t.runs.slice(-20)
+          return { ok: true } // mutateLocked 契约：回调返回 null/undefined 则跳过写盘——必须显式返回非空值，否则 runs 永不落盘
         })
       } catch (e) { console.error('[task-board] recordRunHistory failed:', String(e)) }
     }
@@ -128,10 +129,11 @@ export function createDispatch(ctx, state, deps) {
       try {
         await mutateLocked(sid, function (d) {
           var t = d.tasks.find(function (x) { return x.id === taskId })
-          if (!t || !Array.isArray(t.runs)) return
+          if (!t || !Array.isArray(t.runs)) return null // 找不到任务/无 runs：返回 null 不写盘
           for (var i = t.runs.length - 1; i >= 0; i--) {
             if (t.runs[i].id === runId) { t.runs[i].outcome = outcome; t.runs[i].endedAt = new Date().toISOString(); break }
           }
+          return { ok: true } // 同上：显式返回非空值触发写盘
         })
       } catch (e) { console.error('[task-board] closeRunHistory failed:', String(e)) }
     }
@@ -250,6 +252,8 @@ export function createDispatch(ctx, state, deps) {
         // 工具通道已处理（board_report 已推进到 verifying/resolved 或挂了 escalation）→ 只收尾
         if (t.status !== 'in-progress' || t.escalation) return { task: t, already: true }
         if (failed) {
+          // 失败原因落卡（截断 300）：卡片详情页可直接查看最近失败原因，排查三连败不再靠猜
+          t.lastError = String(errText || '').slice(0, 300)
           t.retryCount = (t.retryCount || 0) + 1
           if (t.retryCount >= 3) { var ps = t.status; t.status = 'blocked'; ah(t, ps, 'blocked', String(rec.run.id), 'worker 失败 x' + t.retryCount + '（' + String(errText).slice(0, 120) + '），待人工介入'); return { task: t, blocked: true } }
           var ps2 = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, ps2, 'pending', String(rec.run.id), 'worker 失败（' + String(errText).slice(0, 80) + '），重新排队 (' + t.retryCount + '/3)')
@@ -264,7 +268,7 @@ export function createDispatch(ctx, state, deps) {
         }
         // 文本降级路径：分段格式上报
         var secs = parseSections(output)
-        delete t.retryCount; delete t.stuckSince
+        delete t.retryCount; delete t.stuckSince; delete t.lastError // 成功路径：失败计数/卡死标记/最近失败原因一并清除
         t.deliverable = { summary: secs.summary || output.slice(0, 600), changes: secs.changes || '', selfTest: secs.selfTest || '', diff: (secs.diff || '').slice(0, 4000), at: new Date().toISOString(), by: String(rec.run.id) }
         resolveApply(d, t, String(rec.run.id), 'verifying', output || 'Worker 完成', 'worker 文本上报完成')
         return { task: t }
@@ -286,6 +290,8 @@ export function createDispatch(ctx, state, deps) {
         var trimmed = (output || '').trim()
         var vm = trimmed.match(/^[ \t>*#\-\s]*(APPROVED|REJECTED)\b/im)
         if (failed || !vm) {
+          // 失败原因落卡（截断 300）：verifier 故障/输出无法判定的原因留在卡片上供排查
+          t.lastError = String(errText || 'verifier 未给出有效结论（输出格式异常）').slice(0, 300)
           // 失败/空输出/无法判定：verifyRetries 计数，>=3 转人工验收（deliverable 已完成，是 verifier 故障不是任务故障）
           if (failed && rec.model) { badModels[modelKey(sid, rec.model)] = true; pushSysNote(sid, '模型 ' + rec.model + ' 验收连续失败，已熔断回退父级模型') }
           t.verifyRetries = (t.verifyRetries || 0) + 1
@@ -295,7 +301,7 @@ export function createDispatch(ctx, state, deps) {
         }
         var approved = vm[1].toUpperCase() === 'APPROVED'
         var vsecs = parseSections(trimmed)
-        delete t.stuckSince; delete t.verifyRetries
+        delete t.stuckSince; delete t.verifyRetries; delete t.lastError // 成功给出结论：卡死标记/重试计数/最近失败原因一并清除
         t.verification = { verdict: approved ? 'approved' : 'rejected', summary: vsecs.verifySummary || trimmed.slice(0, 600), checks: vsecs.checks || '', at: new Date().toISOString(), by: String(rec.run.id) }
         verifyApply(d, t, String(rec.run.id), approved ? 'approved' : 'rejected', trimmed.slice(0, 200))
         if (!approved) {
@@ -314,142 +320,6 @@ export function createDispatch(ctx, state, deps) {
       if (result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved')
       if (result.task && result.task.status === 'blocked') notifyTaskDone(sid, result.task, 'blocked')
       kickCycle(sid)
-    }
-
-    // 歧义上报通知：任何模式都通知主窗口（escalation 需要人工裁决，不能静默吞掉）
-    // 25s 去抖投递：主窗口 turn 进行中时 followup 只在宿主侧排队，送达时任务常已被裁决/归档（过期回声）；
-    // 排队无法撤回，插件侧唯一可行的方案就是延迟 + 投递前重查看板。
-    // escNotifyTimers 存每个任务最新一次调度：同一任务再次上报即顶替旧调度（旧回调身份不匹配 → 静默丢弃）；
-    // 投递时才读 escalation.question，所以连续多次上报只会收到一条、且一定是最新疑问。
-    var escNotifyTimers = {}
-    function deliverEscalation(sid, taskId) {
-      rt(sid).then(function (d) {
-        var t = null
-        var list = (d && d.tasks) || []
-        for (var i = 0; i < list.length; i++) { if (list[i].id === taskId) { t = list[i]; break } }
-        // escalation 已消失（已被裁决）或任务已 resolved/archived → 通知已过期，静默跳过（history 不记）
-        if (!t || !t.escalation || t.status === 'resolved' || t.status === 'archived') return
-        var root = rootForSession(sid)
-        if (!root) return
-        try { root.followup(makeMsg('⚠️ [任务看板] Worker 上报歧义，等待裁决：\n\n任务: ' + t.title + ' (' + t.id + ')\n\n疑问:\n' + String(t.escalation.question || '').slice(0, 1500) + '\n\n请在看板详情页裁决，或直接回复指示。裁决后会有新 Worker 带着裁决答案接手。\n\n（若收到时任务已被裁决或归档，说明本通知投递晚于处理——先用 task_list/get-tasks 核对状态，勿重复裁决。）', 'notice', '任务待裁决: ' + t.title)) } catch (e) { console.error('[task-board] escalate notify failed:', String(e)) }
-      }).catch(function (e) { console.error('[task-board] escalate notify failed:', String(e)) })
-    }
-    function notifyMainWindow(sid, t) {
-      var tm = ctx.timer
-      if (!tm) { deliverEscalation(sid, t.id); return } // timer 不可用 → 直接投递（保持原即时行为）
-      var key = sid + ':' + t.id
-      var mine = tm.timeout(25000)
-      escNotifyTimers[key] = mine
-      mine.then(function () {
-        if (escNotifyTimers[key] !== mine) return // 已被该任务更新的一次上报顶替 → 丢弃，避免重复通知
-        delete escNotifyTimers[key]
-        deliverEscalation(sid, t.id)
-      }).catch(function () {}) // 插件销毁时 timeout 会 reject("Context has been disposed")，静默吞掉
-    }
-    function maybeNotify(sid, task) { if (task && task.escalation) { notifyMainWindow(sid, task) } }
-
-    // ===== 任务回执通知（批量聚合 + 空闲门控）：派发执行的任务在 完成/阻塞 时通知主窗口 =====
-    // 只通知派发执行的任务（isDispatched），主窗口自己手动处理的任务不回执（自己干的自己知道）。
-    // 批量聚合：任务多时每任务一条 followup 会把主窗口 turn 队列打满（用户输入排队等回执处理完才刷新），
-    // 改为 45s 窗口（或满 5 条）聚合为一条摘要；发送前等主窗口空闲，不打断对话。
-    var receiptBuf = {}
-    // 回执幂等去重表：key = 任务id + 类别 + 完成事件指纹（deliverable/verification/resolvedAt/末条history 时间戳）。
-    // 同一完成事件被任何路径（工具直报/run 结算/未来回归）重复通知时指纹一致 → 吞掉；
-    // 驳回后重做完成 → 时间戳全换新 → 指纹不同 → 正常回执。
-    var receiptedKeys = {}
-    function notifyTaskDone(sid, t, kind) {
-      if (!t || !isDispatched(sid, t.claimedBy)) return
-      var lastHist = (t.history && t.history.length) ? String(t.history[t.history.length - 1].timestamp || '') : ''
-      var stamp = [kind, (t.deliverable && t.deliverable.at) || '', (t.verification && t.verification.at) || '', t.resolvedAt || '', lastHist].join('|')
-      var key = t.id + ':' + stamp
-      if (receiptedKeys[key]) return
-      var rkeys = Object.keys(receiptedKeys)
-      if (rkeys.length > 512) { var rnow = Date.now(); for (var ri = 0; ri < rkeys.length; ri++) { if (rnow - receiptedKeys[rkeys[ri]] > 3600000) delete receiptedKeys[rkeys[ri]] } }
-      receiptedKeys[key] = Date.now()
-      var buf = receiptBuf[sid] || (receiptBuf[sid] = { items: [], timer: null })
-      var lastNote = (t.history && t.history.length) ? String(t.history[t.history.length - 1].note || '') : ''
-      buf.items.push({ kind: kind, title: t.title, id: t.id, summary: (t.deliverable && t.deliverable.summary) || '', note: lastNote })
-      if (buf.items.length >= 5) { flushReceipts(sid); return }
-      if (!buf.timer) {
-        var tm = ctx.timer
-        if (tm) { var captured = buf; buf.timer = tm.timeout(45000).then(function () { if (receiptBuf[sid] === captured) flushReceipts(sid) }).catch(function () {}) }
-        else flushReceipts(sid)
-      }
-    }
-    // 系统级异常通知队列（易失，随回执冲刷）：模型熔断/spawn 失败/孤儿回收/看门狗标记
-    var sysNotesBuf = {}
-    // taskId 可选：告警类通知（软超时提醒等）语义只对「任务仍在执行中」成立，
-    // 带上任务 id 后 flush 投递前可重读看板校验，任务已落定的过期告警直接丢弃
-    function pushSysNote(sid, text, taskId) {
-      var arr = (sysNotesBuf[sid] = sysNotesBuf[sid] || [])
-      arr.push({ text: text, at: new Date().toISOString(), taskId: taskId || null })
-      if (arr.length > 10) arr.splice(0, arr.length - 10)
-    }
-    function flushReceipts(sid) {
-      var buf = receiptBuf[sid]
-      var notes = sysNotesBuf[sid] || []
-      if ((!buf || !buf.items.length) && !notes.length) return
-      receiptBuf[sid] = null
-      sysNotesBuf[sid] = []
-      var root = rootForSession(sid); if (!root) return
-      var items = (buf && buf.items) ? buf.items.slice() : []
-      function noteOf(status) { return status === 'verifying' ? '验证中' : '进行中' }
-      // 组装投递文本（入参已是过滤后的存活项，避免用已丢弃项的计数）
-      function composeText(items, notes) {
-        var done = [], blocked = []
-        for (var i = 0; i < items.length; i++) { (items[i].kind === 'resolved' ? done : blocked).push(items[i]) }
-        var lines = [done.length || blocked.length ? '📋 [任务看板] 回执摘要（' + items.length + ' 条）' : '📋 [任务看板] 系统通知', '']
-        if (done.length) {
-          lines.push('✅ 完成 ' + done.length + ' 个：')
-          for (var j = 0; j < done.length && j < 8; j++) lines.push('  · ' + done[j].title + ' (' + done[j].id + ')' + (done[j].summary ? ' — ' + done[j].summary.slice(0, 120) : ''))
-        }
-        if (blocked.length) {
-          lines.push('🛑 阻塞 ' + blocked.length + ' 个（需关注）：')
-          for (var k = 0; k < blocked.length && k < 8; k++) lines.push('  · ' + blocked[k].title + ' (' + blocked[k].id + ')' + (blocked[k].note ? ' — ' + blocked[k].note.slice(0, 150) : ''))
-        }
-        if (notes.length) {
-          lines.push('', '⚠️ 系统异常 ' + notes.length + ' 条：')
-          for (var n = 0; n < notes.length && n < 8; n++) lines.push('  · ' + notes[n].text)
-        }
-        lines.push('', '可用 task_list 查看全部；阻塞项可在看板拖回待办重新投放。')
-        return lines.join('\n')
-      }
-      // 投递前状态过滤：入队到投递之间隔着 45s 聚合窗口 + 等主窗口空闲（最长 5 分钟），
-      // 期间任务可能已经完成/归档——过期告警与死回执会误报（实测软超时告警 6/6 全误报）。
-      // 所以 send 之前重读一次看板，按任务现状决定丢哪些项。
-      function deliver() {
-        return Promise.resolve().then(function () { return rt(sid) }).catch(function () { return null }).then(function (snap) {
-          var tasks = (snap && snap.tasks) || []
-          function findTask(id) { for (var i = 0; i < tasks.length; i++) { if (tasks[i].id === id) return tasks[i] } return null }
-          // a. 带 taskId 的告警项：任务状态不在 in-progress/verifying 即已落定 → 丢弃；
-          //    保留的项在文本前标注投递时状态（读到的是发送瞬间的真实状态，人可据此判断时效）
-          var keptNotes = []
-          for (var i = 0; i < notes.length; i++) {
-            var nt = notes[i]
-            if (nt.taskId) {
-              var t = findTask(nt.taskId)
-              if (!t || (t.status !== 'in-progress' && t.status !== 'verifying')) continue
-              keptNotes.push({ text: '（投递时状态：' + noteOf(t.status) + '）' + nt.text })
-            } else keptNotes.push(nt)
-          }
-          // b. 回执项：任务已 archived（人已手动归档 = 已知悉）→ 丢弃；
-          //    resolved/blocked 保留（回执是主通道，任务查不到也保留，不能因读盘失败丢回执）
-          var keptItems = []
-          for (var j = 0; j < items.length; j++) {
-            var it = items[j]
-            var tt = findTask(it.id)
-            if (tt && tt.status === 'archived') continue
-            keptItems.push(it)
-          }
-          // c. 过滤后全空 → 不再打扰主窗口
-          if (!keptItems.length && !keptNotes.length) return
-          try { root.followup(makeMsg(composeText(keptItems, keptNotes), 'recall')) } catch (e) { console.error('[task-board] receipt flush failed:', String(e)) }
-        })
-      }
-      if (typeof root.whenIdle === 'function') {
-        var waited = withTimeout(root.whenIdle(), 300000, 'receipt-idle-wait') // 最多等 5 分钟，超时也发（不能丢回执）
-        Promise.resolve(waited).then(deliver, deliver).catch(function (e) { console.error('[task-board] receipt flush failed:', String(e)) })
-      } else deliver().catch(function (e) { console.error('[task-board] receipt flush failed:', String(e)) })
     }
 
     // ===== 派发周期（15s 心跳 + 写入后 kickCycle 触发）=====
