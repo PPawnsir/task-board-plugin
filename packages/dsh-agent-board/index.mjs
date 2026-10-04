@@ -63,6 +63,7 @@ export function apply(ctx) {
       rootForSession: session.rootForSession, deriveWorkMode: session.deriveWorkMode, runsFor: session.runsFor,
       rt: store.rt, mutateLocked: store.mutateLocked,
       maybeNotify: notify.maybeNotify, notifyTaskDone: notify.notifyTaskDone,
+      pushSysNote: notify.pushSysNote, sessionCwd: session.sessionCwd, // 调研门禁③：epic 发布预检汇总投递 + 预研路径相对解析根
       spawnOneShot: dispatch.spawnOneShot, accumulateRunUsage: dispatch.accumulateRunUsage, readContextPack: dispatch.readContextPack,
     })
 

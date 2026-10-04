@@ -705,17 +705,19 @@ test('粒度治理接线：工具描述/Team 提示词/双出口返回体均已�
 
 // ===== create-task 空 description 软警告（E 卡）=====
 // 轻量 RPC 直调 harness：mock ctx（tools/effect/webServer）+ deps 最小面，直接调 handlers['create-task']
-function mkRpcHandlers(board) {
+// extra 可覆盖默认 deps（如 epic 预检用例注入 pushSysNote 捕获 / sessionCwd 解析根）
+function mkRpcHandlers(board, extra) {
   const state = { handlers: {}, teamModeCache: {}, feedbackCache: {} }
   const ctx = { tools: { register() {} }, effect() {}, webServer: { register() { return () => {} } } }
-  const deps = {
+  const deps = Object.assign({
     getActorId: () => 'tester', resolveRoot: (x) => x,
     toolSessionId: () => 's1', rpcSessionId: () => 's1',
     rootForSession: () => null, deriveWorkMode: () => 'solo', runsFor: () => [],
     rt: async () => board, mutateLocked: (sid, fn) => fn(board),
     maybeNotify: () => {}, notifyTaskDone: () => {},
     spawnOneShot: () => {}, accumulateRunUsage: () => {}, readContextPack: async () => null,
-  }
+    pushSysNote: () => {}, sessionCwd: () => '',
+  }, extra || {})
   createRpc(ctx, state, deps)
   return state.handlers
 }
@@ -738,6 +740,131 @@ test('create-task RPC: description 非空 → 响应无 warning 字段（返回�
   assert.equal(r.ok, true)
   assert.equal('warning' in r, false)
   assert.equal(board.tasks.length, 1)
+})
+
+// ===== 调研门禁（task-mute6zpw）：warning 族扩展 + epic 发布预检 + 读包失败落卡 =====
+// 纯函数口径在 core.mjs（isTreeGlob/createTaskWarnings/epicPrecheck/epicPrecheckNote）；
+// 这里既测纯函数矩阵，也经 mkRpcHandlers 直调验证双通道接线（warning 合并、publish 预检投递）。
+
+test('isTreeGlob: 仅「以 /** 结尾或恰为 **」算整树 glob', () => {
+  for (const p of ['**', 'src/**', './src/**', 'src\\**', 'a/b/**']) assert.equal(core.isTreeGlob(p), true, p)
+  for (const p of ['src/*', 'src/**/*.mjs', '*.mjs', 'src/x.mjs', '', '**x']) assert.equal(core.isTreeGlob(p), false, p)
+})
+
+test('createTaskWarnings: 触发/不触发矩阵（pipeline × touches × 调研上下文）', () => {
+  // ① description 空白（沿用 E 卡既有文案，逐字一致）
+  assert.deepEqual(core.createTaskWarnings(mkTask({ description: ' ' })), [EMPTY_DESC_WARNING])
+  // ② full/work + touches 非空 + contextFiles/contextNotes 皆空 → 无调研上下文警告
+  const noCtx = core.createTaskWarnings(mkTask({ description: 'd', pipeline: 'full', touches: ['lib/a.mjs'] }))
+  assert.equal(noCtx.length, 1); assert.match(noCtx[0], /未附调研上下文/)
+  const work = core.createTaskWarnings(mkTask({ description: 'd', pipeline: 'work', touches: ['lib/a.mjs'] }))
+  assert.equal(work.length, 1); assert.match(work[0], /未附调研上下文/)
+  // 有 contextFiles 或 contextNotes 任一 → ②不触发
+  assert.deepEqual(core.createTaskWarnings(mkTask({ description: 'd', touches: ['lib/a.mjs'], context: { files: ['lib/a.mjs'], notes: '' } })), [])
+  assert.deepEqual(core.createTaskWarnings(mkTask({ description: 'd', touches: ['lib/a.mjs'], context: { files: [], notes: '结论' } })), [])
+  // pipeline=direct 或 touches 为空 → ②③都不触发
+  assert.deepEqual(core.createTaskWarnings(mkTask({ description: 'd', pipeline: 'direct', touches: ['src/**'] })), [])
+  assert.deepEqual(core.createTaskWarnings(mkTask({ description: 'd', touches: [] })), [])
+  // ③ 整树 glob（与 ② 同现时的数组序：② 在前 ③ 在后）
+  const both = core.createTaskWarnings(mkTask({ description: 'd', touches: ['src/**'] }))
+  assert.equal(both.length, 2); assert.match(both[0], /未附调研上下文/); assert.match(both[1], /整树 glob/)
+  // 有调研上下文时只剩 ③
+  const globOnly = core.createTaskWarnings(mkTask({ description: 'd', touches: ['src/**'], context: { files: [], notes: 'n' } }))
+  assert.equal(globOnly.length, 1); assert.match(globOnly[0], /整树 glob/)
+})
+
+test('create-task RPC: touches 非空且无调研上下文 → warning 附「未附调研上下文」（软提示不拦截）', async () => {
+  const board = mkBoard([])
+  const r = await mkRpcHandlers(board)['create-task']({ title: '改 lib/x.mjs 的返回值', description: '明确描述', touches: ['lib/x.mjs'] })
+  assert.equal(r.ok, true); assert.match(r.warning, /未附调研上下文/); assert.equal(board.tasks.length, 1)
+})
+
+test('create-task RPC: 整树 glob → warning 附「整树 glob」；pipeline=direct 不触发 a/b', async () => {
+  let board = mkBoard([])
+  let r = await mkRpcHandlers(board)['create-task']({ title: '调整 src 目录的一批样式', description: 'd', touches: ['src/**'], contextNotes: '已调研' })
+  assert.equal(r.ok, true); assert.match(r.warning, /整树 glob/); assert.ok(!/未附调研上下文/.test(r.warning))
+  board = mkBoard([])
+  r = await mkRpcHandlers(board)['create-task']({ title: '改 src 下某个开关', description: 'd', pipeline: 'direct', touches: ['src/**'] })
+  assert.equal(r.ok, true); assert.equal('warning' in r, false)
+})
+
+test('create-task RPC: 空描述 + 无调研上下文 + 整树 glob → 三条合并为一条 warning（；分隔）', async () => {
+  const board = mkBoard([])
+  const r = await mkRpcHandlers(board)['create-task']({ title: '改 src 一批文件', description: '', touches: ['src/**'] })
+  assert.equal(r.ok, true)
+  assert.match(r.warning, /任务描述为空/); assert.match(r.warning, /未附调研上下文/); assert.match(r.warning, /整树 glob/)
+  assert.equal(r.warning.split('；').length, 3)
+})
+
+test('epicPrecheck: 字段有无 + 路径存在性（exists 注入），direct/归档子任务不参与', () => {
+  const kids = [
+    mkTask({ id: 'k1', title: '无材料', parentId: 'ep', context: { files: [], notes: '' } }),
+    mkTask({ id: 'k2', title: '有笔记', parentId: 'ep', context: { files: [], notes: '结论' } }),
+    mkTask({ id: 'k3', title: '路径全不存在', parentId: 'ep', context: { files: ['a.mjs', 'b.mjs:L3-L9'], notes: '' } }),
+    mkTask({ id: 'k4', title: '路径存在', parentId: 'ep', context: { files: ['c.mjs'], notes: '' } }),
+    mkTask({ id: 'k5', title: 'direct 跳过', parentId: 'ep', pipeline: 'direct', context: { files: [], notes: '' } }),
+    mkTask({ id: 'k6', title: '归档跳过', parentId: 'ep', status: 'archived', context: { files: [], notes: '' } }),
+  ]
+  const pre = core.epicPrecheck(kids, 'ep', (p) => p === 'c.mjs')
+  assert.equal(pre.total, 4) // direct/归档不计入 N
+  assert.deepEqual(pre.missing.map((m) => m.id), ['k1', 'k3'])
+  assert.match(pre.missing[0].reason, /无 contextFiles/)
+  assert.match(pre.missing[1].reason, /全部不存在/)
+  // 锚点 :L 段先剥掉再查存在性（'b.mjs:L3-L9' 以 'b.mjs' 查 exists）
+  const seen = []
+  core.epicPrecheck([mkTask({ id: 'x', parentId: 'ep', context: { files: ['b.mjs:L3-L9'], notes: '' } })], 'ep', (p) => { seen.push(p); return true })
+  assert.deepEqual(seen, ['b.mjs'])
+})
+
+test('epicPrecheckNote: 全部有材料 → 空串（不打扰）；有缺失 → N/M 汇总文案（超 5 条折叠）', () => {
+  assert.equal(core.epicPrecheckNote({ total: 3, missing: [] }), '')
+  assert.equal(core.epicPrecheckNote(null), '')
+  const note = core.epicPrecheckNote({ total: 3, missing: [{ id: 'k1', title: '无材料', reason: '无 contextFiles/contextNotes' }] })
+  assert.match(note, /epic 发布预检：3 个子任务中 1 个无调研注入/)
+  assert.match(note, /k1「无材料」/)
+  const many = { total: 7, missing: [1, 2, 3, 4, 5, 6].map((i) => ({ id: 'k' + i, title: 't' + i, reason: 'r' })) }
+  const note2 = core.epicPrecheckNote(many)
+  assert.match(note2, /7 个子任务中 6 个无调研注入/); assert.match(note2, /等/)
+})
+
+test('update-task RPC: 发布 epic（有子任务缺调研注入）→ pushSysNote 汇总 + 响应挂 epicPrecheck；全有材料不打扰', async () => {
+  const notes = []
+  const board = mkBoard([
+    mkTask({ id: 'ep', title: '史诗', status: 'draft' }),
+    mkTask({ id: 'c1', title: '子任务1', parentId: 'ep', status: 'draft', context: { files: [], notes: '' } }),
+    mkTask({ id: 'c2', title: '子任务2', parentId: 'ep', status: 'draft', context: { files: [], notes: 'n' } }),
+  ])
+  const handlers = mkRpcHandlers(board, { pushSysNote: (sid, text, taskId) => notes.push({ text, taskId }) })
+  const r = await handlers['update-task']({ taskId: 'ep', publish: true })
+  assert.equal(r.ok, true)
+  assert.equal(board.tasks[0].status, 'pending') // 照常发布，预检不阻断
+  assert.equal(notes.length, 1)
+  assert.match(notes[0].text, /epic 发布预检：2 个子任务中 1 个无调研注入/)
+  assert.match(notes[0].text, /c1「子任务1」/)
+  assert.equal(notes[0].taskId, 'ep')
+  assert.ok(r.epicPrecheck && r.epicPrecheck.missing.length === 1)
+  // 全部有材料 → 不投递、响应不挂字段（「不打扰」口径）
+  const notes2 = []
+  const board2 = mkBoard([
+    mkTask({ id: 'ep2', title: '史诗2', status: 'draft' }),
+    mkTask({ id: 'c3', title: '子任务3', parentId: 'ep2', status: 'draft', context: { files: [], notes: 'n' } }),
+  ])
+  const h2 = mkRpcHandlers(board2, { pushSysNote: (sid, text) => notes2.push(text) })
+  const r2 = await h2['update-task']({ taskId: 'ep2', publish: true })
+  assert.equal(r2.ok, true); assert.equal(notes2.length, 0); assert.equal('epicPrecheck' in r2, false)
+  // 非 draft 发布被拒（not a draft）→ 不预检不投递：ep2 已是 pending，重复 publish 应被拒
+  const r3 = await h2['update-task']({ taskId: 'ep2', publish: true })
+  assert.equal(r3.ok, false); assert.match(r3.error, /not a draft/); assert.equal(notes2.length, 0)
+})
+
+test('调研门禁接线：双通道 warning 调用 / epic 预检投递 / 读包失败落卡（源码级轻量断言）', () => {
+  const src = hostSrc()
+  assert.equal((src.match(/createTaskWarnings\(t\)/g) || []).length, 2) // task_create 工具 + create-task RPC
+  assert.match(src, /pushSysNote: notify\.pushSysNote, sessionCwd: session\.sessionCwd/) // index.mjs 接线
+  assert.match(src, /__pre = epicPrecheck\(d\.tasks, t\.id, existsFn\)/) // publish 预检调用
+  assert.match(src, /afterPublishPrecheck\(sid, args\.taskId, __res\)/) // 锁外 pushSysNote 投递
+  assert.match(src, /t2\.lastError = \('contextPack 读取失败: '/) // dispatch 读包失败落卡（mutateLocked 返回非空才写盘）
+  assert.match(src, /调研门禁：pipeline=full\/work 且 touches 非空/) // task_create 工具描述事前引导
 })
 
 // ===== Token 消耗统计 =====
@@ -1009,9 +1136,9 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
   assert.match(host, /claimApply\(d, t, 'spawn-pending', 'dispatch'\); if \(parentKickOnDispatch\(d, t\)\)/)
   // get-tasks 现算 childStats（零存储）
   assert.match(host, /d\.childStats = aggregateChildStats\(d\.tasks\)/)
-  // 两模块都从 core 解构引入（接线不断）
+  // 两模块都从 core 解构引入（接线不断）；rpc.mjs 解构表尾部随调研门禁（task-mute6zpw）扩展三个纯函数
   assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT \} = core/)
-  assert.match(host, /boardHome, aggregateChildStats \} = core/)
+  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote \} = core/)
   // 既有「全子任务 resolved → 父 verifying」逻辑不动（checkParentAuto 仍在 verifyApply 链路；core.mjs 不在 hostSrc 清单，单独读）
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
   assert.match(coreSrc, /if \(verdict === 'approved' && isb\(t\)\) \{ var p = checkParentAuto\(d, t\)/)
@@ -1033,4 +1160,20 @@ test('notify 单一来源：notifyTaskDone/flushReceipts/deliverEscalation 等�
       assert.ok(!re.test(src), f + ' 不得再定义 ' + name + '（notify 逻辑唯一权威在 lib/notify.mjs，副本是僵尸死代码）')
     }
   }
+})
+
+// ===== 调研门禁·UI：无调研徽章 + 详情注入清单 + 创建表单 warning 展示（源码级断言）=====
+test('调研门禁 UI 接线：卡片「⚠️ 无调研」徽章 + 详情「调研注入」清单 + 创建表单 warning 黄行（源码级断言）', () => {
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(cli, /function noResearch\(t\)/)                        // 徽章判定函数（纯 client 侧现算）
+  assert.match(cli, /pl !== 'full' && pl !== 'work'/)                 // 口径：仅 full/work 管线参与（direct 主窗口自处理）
+  assert.match(cli, /'⚠️ 无调研'/)                                     // 卡片标题行右侧徽章文案
+  assert.match(cli, /本任务未附调研上下文，Worker 需自行定位/)          // 徽章悬停解释（title）
+  assert.match(cli, /var cx = t\.context \|\| \{\}/)                  // context 缺省兼容：老任务无 context 按空处理（预期亮徽章）
+  assert.match(cli, /'📎 调研注入: '/)                                 // 详情页「调研注入」区标题
+  assert.match(cli, /无调研注入——Worker 需自行定位/)                    // 详情空态明示
+  assert.match(cli, /个文件（' \+ files\.map\(function \(f\) \{ return actBase\(f\) \}\)/) // files 清单按 basename 展示
+  assert.match(cli, /调研笔记 ' \+ notes\.length \+ ' 字/)              // notes 字数统计
+  assert.match(cli, /if \(r && r\.warning\)/)                          // 创建表单消费 create-task 响应的 warning 字段
+  assert.match(cli, /'⚠️ ' \+ warn/)                                   // warning 原文黄色行展示（C.warn）
 })

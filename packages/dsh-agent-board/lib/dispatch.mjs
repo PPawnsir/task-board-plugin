@@ -147,7 +147,13 @@ export function createDispatch(ctx, state, deps) {
       if (role === 'verifier') { modelOverride = (typeof dsnap.verifierModel === 'string' && dsnap.verifierModel.trim()) ? dsnap.verifierModel.trim() : ''; if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited, using parent model'); modelOverride = '' } }
       else if (role === 'worker') { modelOverride = (typeof dsnap.workerModel === 'string' && dsnap.workerModel.trim()) ? dsnap.workerModel.trim() : ''; if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited, using parent model'); modelOverride = '' } }
       var pack = ''
-      try { pack = await readContextPack(sid, t) } catch (e) { console.error('[task-board] context pack read failed:', String(e)) }
+      try { pack = await readContextPack(sid, t) } catch (e) {
+        console.error('[task-board] context pack read failed:', String(e))
+        // 调研门禁④：读包失败落卡（t.lastError，复用详情页「最近失败」行展示机制），不再只沉在
+        // host 控制台——主窗口排查「Worker 为什么没拿到预研材料」不用翻日志。
+        // mutateLocked 契约：回调返回 null/undefined 跳过写盘——找到任务才返回非空值；skipKick 免一次无谓 poolCycle。
+        try { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === t.id }); if (!t2) return null; t2.lastError = ('contextPack 读取失败: ' + String(e)).slice(0, 300); return t2 }, true) } catch (_) {}
+      }
       // user prompt 只留一行指引，内容走上下文注入区块
       var packNote = pack ? '本任务附带主窗口预研文件，已通过「上下文注入」区提供（含文件完整内容），直接基于其内容工作，不要重复读取这些文件。' : ''
       var req = { label: role + ':' + t.id, prompt: [{ type: 'text', text: role === 'worker' ? buildWorkerPrompt(t, packNote, cfg(dsnap).feedbackEnabled) : buildVerifierPrompt(t, packNote) }], parent: parent, signal: makeSignal() }

@@ -170,8 +170,24 @@
         React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 3 } }, '任务描述'),
         React.createElement('textarea', { value: editDesc, onChange: function (e) { setEditDesc(e.target.value) }, rows: 3, style: { width: '100%', fontSize: 12, padding: '6px 8px', marginBottom: 6, border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text, resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit' } }),
         task.context && task.context.instructions ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6, padding: '4px 6px', background: C.nested, borderRadius: 4 } }, '指引: ' + task.context.instructions) : null,
-        task.context && Array.isArray(task.context.files) && task.context.files.length > 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6, padding: '4px 6px', background: C.nested, borderRadius: 4, display: 'flex', alignItems: 'flex-start', gap: 4 } }, ic('file-text', 11), React.createElement('span', null, '预研文件（派发时注入子代理）: ' + task.context.files.join('、'))) : null,
-        task.context && task.context.notes ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6, padding: '4px 6px', background: C.nested, borderRadius: 4, whiteSpace: 'pre-wrap', maxHeight: 100, overflowY: 'auto' } }, '调研笔记: ' + task.context.notes) : null,
+        // ===== 调研注入清单（调研门禁·详情侧，与卡片「⚠️ 无调研」徽章同口径）=====
+        // 一行汇总派发时注入给 Worker/Verifier 的调研上下文：files 数量 + basename 清单（悬停看完整路径）、
+        // notes 字数统计（悬停看原文，超 500 字截断标注）；两者皆空 → 明示「无调研注入」。
+        // context 缺省兼容：老任务无 context 对象按空处理——同样亮出空态，这是预期（立单质量问责）。
+        // 行风格对齐上方「最近失败」行（border + color-mix 淡底）：空态 warn 黄调，有内容走中性 nested。
+        (function () {
+          var cx = task.context || {}
+          var files = Array.isArray(cx.files) ? cx.files : []
+          var notes = typeof cx.notes === 'string' ? cx.notes : ''
+          var empty = files.length === 0 && notes.trim().length === 0
+          var parts = []
+          if (files.length) parts.push(files.length + ' 个文件（' + files.map(function (f) { return actBase(f) }).join('、') + '）')
+          if (notes.trim()) parts.push('调研笔记 ' + notes.length + ' 字')
+          var tip = empty ? '本任务未附调研上下文，Worker 需自行定位——建议补 contextFiles/contextNotes'
+            : (files.length ? '完整路径：\n' + files.join('\n') : '') + (notes.trim() ? (files.length ? '\n\n' : '') + '调研笔记原文：\n' + (notes.length > 500 ? notes.slice(0, 500) + '…（共 ' + notes.length + ' 字）' : notes) : '')
+          return React.createElement('div', { style: { fontSize: 11, marginBottom: 8, padding: '4px 8px', border: '1px solid ' + (empty ? C.warn : C.border), borderRadius: 6, background: empty ? 'color-mix(in srgb, ' + C.warn + ' 8%, transparent)' : C.nested, color: empty ? C.warn : C.text2, wordBreak: 'break-word' }, title: tip },
+            '📎 调研注入: ' + (empty ? '无调研注入——Worker 需自行定位，建议补 contextFiles/contextNotes' : parts.join(' · ')))
+        })(),
         React.createElement(FamilySection, { task: task }),
         React.createElement(DepsSection, { task: task }),
         task.acceptance ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, padding: '5px 8px', background: C.nested, borderRadius: 4, borderLeft: '2px solid ' + C.ok, fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 4 } }, ic('flask-conical', 11), '硬性验收: ' + task.acceptance) : null,

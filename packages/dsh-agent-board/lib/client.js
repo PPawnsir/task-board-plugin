@@ -633,7 +633,20 @@ function apply(ctx) {
     //   父卡 = 元信息行首位「📦 史诗 · resolved/total」徽章 + 3px 迷你进度条 + activeTitle 非空时「▸ 在跑」行；
     //   子卡 = 标题下一行小字「↳ 父任务标题」（从 state.tasks 找父卡，找不到回退 shortId）；
     //   依赖未满足的待办卡 = 卡片底部灰字「⛓ 等待「第一个未满足依赖标题」」（多个时附「 等 N 个」）。
-    function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); var delOk = !state.selectMode && canDelete(t); var cs = (state.childStats && state.childStats[t.id]) || null; var epic = !!(cs && cs.total > 0); var parentT = t.parentId ? getTask(t.parentId) : null; var depWaitTitle = ''; var depWaitN = 0; if (depBlock) { t.dependsOn.forEach(function (id) { var d = getTask(id); if (!d || (d.status !== 'resolved' && d.status !== 'archived')) { depWaitN++; if (!depWaitTitle) depWaitTitle = d && d.title ? d.title : id } }) } var durB = cardDur(t); return React.createElement('div', { draggable: !state.selectMode, onDragStart: function (e) { onDragStart(e, t) }, onDragEnd: onDragEnd, onMouseEnter: function () { if (delOk) setHover(t.id, 'del') }, onMouseLeave: function () { if (delOk) setHover('', '') }, onClick: function () { if (state.selectMode) { if (state.selected[t.id]) delete state.selected[t.id]; else state.selected[t.id] = true; notify() } else { state.detailId = t.id; notify() } }, style: { border: '1px solid ' + (sel ? C.brand : (t.escalation ? C.err : (critGlow ? C.err : C.border))), borderRadius: 6, padding: '6px 8px', marginBottom: 6, background: sel ? C.nested : C.card, borderLeft: '3px solid ' + (t.escalation ? C.err : pc), cursor: state.selectMode ? 'pointer' : 'grab', fontSize: 12, opacity: dragging ? 0.4 : (depBlock ? 0.65 : 1), transition: 'opacity .15s', animation: critGlow ? 'tskb-crit 2s ease-in-out infinite' : 'none' } }, React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 4 } }, state.selectMode ? React.createElement('span', { style: { color: sel ? C.brand : C.text2, flexShrink: 0, marginTop: 1, display: 'inline-flex' } }, ic(sel ? 'square-check-big' : 'square', 12)) : null, React.createElement('div', { style: { fontWeight: 600, color: C.text, marginBottom: 2, wordBreak: 'break-word', flex: 1 } }, t.title), React.createElement('span', { style: { flexShrink: 0, marginTop: 1, display: 'inline-flex', color: C.text2 }, title: pm.label }, ic(pm.icon, 10)), React.createElement('span', { style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + pc + ' 20%, transparent)', color: pc, flexShrink: 0, marginTop: 1 } }, prioLabel[t.priority] || '中'), (t.usage && t.usage.total) ? React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0, marginTop: 1 }, title: '本任务累计 token：' + String(t.usage.total) + '（' + (t.usage.runs || 0) + ' 次 run）' }, '⛁ ' + fmtTokens(t.usage.total)) : null), t.parentId ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: parentT ? '父任务：' + parentT.title + ' (' + t.parentId + ')' : t.parentId }, '↳ ' + (parentT && parentT.title ? parentT.title : shortId(t.parentId))) : null, t.escalation ? React.createElement('div', { style: { fontSize: 10, color: C.err, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 3 } }, ic('alert-triangle', 10), '待裁决 — 点击查看疑问') : null, t.stuckSince ? React.createElement('div', { style: { fontSize: 10, color: C.warn, fontWeight: 600, marginBottom: 2, animation: 'tskb-pulse 1.5s ease-in-out infinite' } }, '⏱ 疑似卡死 · ' + ago(t.stuckSince) + ' — 点击处理') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2, display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' } },
+    // ===== 调研门禁·UI：「⚠️ 无调研」徽章判定（纯 client 侧现算，host 不下发该字段）=====
+    // 口径：pipeline ∈ {full, work}（direct 主窗口自处理，无需调研注入）且 touches 非空（声明了要改文件）
+    //   且 context.files / context.notes 皆空。context 缺省兼容：老任务无 context 对象按空处理——
+    //   即老任务也会亮徽章，这是预期行为（立单质量可见即问责；draft/pending 等状态照常显示，与状态无关）。
+    function noResearch(t) {
+      var pl = t.pipeline || 'full'
+      if (pl !== 'full' && pl !== 'work') return false
+      if (!Array.isArray(t.touches) || t.touches.length === 0) return false
+      var cx = t.context || {}
+      var files = Array.isArray(cx.files) ? cx.files : []
+      var notes = typeof cx.notes === 'string' ? cx.notes.trim() : ''
+      return files.length === 0 && notes.length === 0
+    }
+    function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); var delOk = !state.selectMode && canDelete(t); var cs = (state.childStats && state.childStats[t.id]) || null; var epic = !!(cs && cs.total > 0); var parentT = t.parentId ? getTask(t.parentId) : null; var depWaitTitle = ''; var depWaitN = 0; if (depBlock) { t.dependsOn.forEach(function (id) { var d = getTask(id); if (!d || (d.status !== 'resolved' && d.status !== 'archived')) { depWaitN++; if (!depWaitTitle) depWaitTitle = d && d.title ? d.title : id } }) } var durB = cardDur(t); return React.createElement('div', { draggable: !state.selectMode, onDragStart: function (e) { onDragStart(e, t) }, onDragEnd: onDragEnd, onMouseEnter: function () { if (delOk) setHover(t.id, 'del') }, onMouseLeave: function () { if (delOk) setHover('', '') }, onClick: function () { if (state.selectMode) { if (state.selected[t.id]) delete state.selected[t.id]; else state.selected[t.id] = true; notify() } else { state.detailId = t.id; notify() } }, style: { border: '1px solid ' + (sel ? C.brand : (t.escalation ? C.err : (critGlow ? C.err : C.border))), borderRadius: 6, padding: '6px 8px', marginBottom: 6, background: sel ? C.nested : C.card, borderLeft: '3px solid ' + (t.escalation ? C.err : pc), cursor: state.selectMode ? 'pointer' : 'grab', fontSize: 12, opacity: dragging ? 0.4 : (depBlock ? 0.65 : 1), transition: 'opacity .15s', animation: critGlow ? 'tskb-crit 2s ease-in-out infinite' : 'none' } }, React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 4 } }, state.selectMode ? React.createElement('span', { style: { color: sel ? C.brand : C.text2, flexShrink: 0, marginTop: 1, display: 'inline-flex' } }, ic(sel ? 'square-check-big' : 'square', 12)) : null, React.createElement('div', { style: { fontWeight: 600, color: C.text, marginBottom: 2, wordBreak: 'break-word', flex: 1 } }, t.title), React.createElement('span', { style: { flexShrink: 0, marginTop: 1, display: 'inline-flex', color: C.text2 }, title: pm.label }, ic(pm.icon, 10)), React.createElement('span', { style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + pc + ' 20%, transparent)', color: pc, flexShrink: 0, marginTop: 1 } }, prioLabel[t.priority] || '中'), noResearch(t) ? React.createElement('span', { title: '本任务未附调研上下文，Worker 需自行定位——建议补 contextFiles/contextNotes', style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + C.warn + ' 18%, transparent)', color: C.warn, fontWeight: 600, flexShrink: 0, marginTop: 1, whiteSpace: 'nowrap' } }, '⚠️ 无调研') : null, (t.usage && t.usage.total) ?React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0, marginTop: 1 }, title: '本任务累计 token：' + String(t.usage.total) + '（' + (t.usage.runs || 0) + ' 次 run）' }, '⛁ ' + fmtTokens(t.usage.total)) : null), t.parentId ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: parentT ? '父任务：' + parentT.title + ' (' + t.parentId + ')' : t.parentId }, '↳ ' + (parentT && parentT.title ? parentT.title : shortId(t.parentId))) : null, t.escalation ? React.createElement('div', { style: { fontSize: 10, color: C.err, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 3 } }, ic('alert-triangle', 10), '待裁决 — 点击查看疑问') : null, t.stuckSince ? React.createElement('div', { style: { fontSize: 10, color: C.warn, fontWeight: 600, marginBottom: 2, animation: 'tskb-pulse 1.5s ease-in-out infinite' } }, '⏱ 疑似卡死 · ' + ago(t.stuckSince) + ' — 点击处理') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2, display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' } },
             epic ? React.createElement('span', { title: '史诗父卡：' + cs.resolved + '/' + cs.total + ' 个子任务已完成', style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.brand + ' 14%, transparent)', color: C.brand, fontWeight: 600 } }, '📦 史诗 · ' + cs.resolved + '/' + cs.total) : null,
             t.frozen ? React.createElement('span', { title: '已冻结：不参与自动派发（详情页可「解除冻结」）', style: { color: C.brand, fontWeight: 600 } }, '❄ 冻结') : null,
             (Array.isArray(t.waitingForTouches) && t.waitingForTouches.length) ? React.createElement('span', { title: '等文件锁释放：' + t.waitingForTouches.join('、') + '（touches 冲突，详情页可 force 越权派发）', style: { color: C.warn, fontWeight: 600 } }, '🔒 等文件释放') : null,
@@ -717,6 +730,8 @@ function apply(ctx) {
       var _dr = useState(wm === 'team'), asDraft = _dr[0], setAsDraft = _dr[1]
       var _bs = useState(false), busy = _bs[0], setBusy = _bs[1]
       var _er = useState(''), err = _er[0], setErr = _er[1]
+      var _ok = useState(''), okMsg = _ok[0], setOkMsg = _ok[1] // 成功行（仅「创建成功但响应带 warning」的不关窗路径展示）
+      var _wn = useState(''), warn = _wn[0], setWarn = _wn[1] // host create-task 成功路径附带的 warning 原文（可能多条合并，原样黄色展示）
       // 依赖候选：当前看板 status 为 draft/pending 的任务
       var cands = state.tasks.filter(function (t) { return t.status === 'draft' || t.status === 'pending' })
       function close() { state.createOpen = false; notify() }
@@ -727,13 +742,17 @@ function apply(ctx) {
         if (!t) { setErr('⚠️ 请先填写标题'); return }
         var touches = touchesRaw.split(/[\n,，;；]/).map(function (s) { return s.trim() }).filter(function (s) { return s.length > 0 })
         var deps = cands.filter(function (x) { return depSel[x.id] }).map(function (x) { return x.id })
-        setBusy(true); setErr('')
+        setBusy(true); setErr(''); setOkMsg(''); setWarn('')
         rpc('create-task', { title: t, description: desc, priority: prio, pipeline: pipe, touches: touches, dependsOn: deps, acceptance: acc.trim(), draft: asDraft }).then(function (r) {
           setBusy(false)
           if (r && r.ok === false) { setErr('⚠️ ' + (r.error || '创建失败')); return }
+          fetchTasks()
+          // 调研门禁·软警告：host 成功路径可附 warning 字符串（如空描述提醒，可能多条合并）——不拦截创建、
+          // 也不打断成功提示：表单保持打开，成功行 + ⚠️ 黄色 warning 原文行同屏展示，读完自行关闭；
+          // 清掉标题防「再点一次创建」连击出重复卡（空标题会被校验拦住）。无 warning 维持原关窗 + 头部 flash 行为。
+          if (r && r.warning) { setOkMsg(asDraft ? '✅ 已存草稿' : '✅ 已创建任务'); setWarn(String(r.warning)); setTitle(''); return }
           state.createOpen = false
           flashCreated(asDraft ? '✅ 已存草稿' : '✅ 已创建任务')
-          fetchTasks()
           notify()
         }).catch(function (e) { setBusy(false); setErr('⚠️ ' + String(e)) })
       }
@@ -775,6 +794,8 @@ function apply(ctx) {
             React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, wm === 'team' ? '（Team 托管默认草稿；取消勾选 = 立即派发）' : '（先补依赖/上下文，稍后统一发布）'))),
           // 底部：错误行 + 按钮区吸底常驻（flexShrink:0，不随字段区滚动）
           React.createElement('div', { style: { flexShrink: 0, padding: '8px 12px 12px', borderTop: '1px solid ' + C.border, background: C.bg } },
+            okMsg ? React.createElement('div', { style: { fontSize: 11, color: C.ok, marginBottom: 6 } }, okMsg) : null,
+            warn ? React.createElement('div', { style: { fontSize: 11, color: C.warn, marginBottom: 6, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, '⚠️ ' + warn) : null,
             err ? React.createElement('div', { style: { fontSize: 11, color: C.err, marginBottom: 6 } }, err) : null,
             React.createElement('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 6 } },
               React.createElement('button', { onClick: close, style: btnGhost }, '取消'),
@@ -953,8 +974,24 @@ function apply(ctx) {
         React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 3 } }, '任务描述'),
         React.createElement('textarea', { value: editDesc, onChange: function (e) { setEditDesc(e.target.value) }, rows: 3, style: { width: '100%', fontSize: 12, padding: '6px 8px', marginBottom: 6, border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text, resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit' } }),
         task.context && task.context.instructions ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6, padding: '4px 6px', background: C.nested, borderRadius: 4 } }, '指引: ' + task.context.instructions) : null,
-        task.context && Array.isArray(task.context.files) && task.context.files.length > 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6, padding: '4px 6px', background: C.nested, borderRadius: 4, display: 'flex', alignItems: 'flex-start', gap: 4 } }, ic('file-text', 11), React.createElement('span', null, '预研文件（派发时注入子代理）: ' + task.context.files.join('、'))) : null,
-        task.context && task.context.notes ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6, padding: '4px 6px', background: C.nested, borderRadius: 4, whiteSpace: 'pre-wrap', maxHeight: 100, overflowY: 'auto' } }, '调研笔记: ' + task.context.notes) : null,
+        // ===== 调研注入清单（调研门禁·详情侧，与卡片「⚠️ 无调研」徽章同口径）=====
+        // 一行汇总派发时注入给 Worker/Verifier 的调研上下文：files 数量 + basename 清单（悬停看完整路径）、
+        // notes 字数统计（悬停看原文，超 500 字截断标注）；两者皆空 → 明示「无调研注入」。
+        // context 缺省兼容：老任务无 context 对象按空处理——同样亮出空态，这是预期（立单质量问责）。
+        // 行风格对齐上方「最近失败」行（border + color-mix 淡底）：空态 warn 黄调，有内容走中性 nested。
+        (function () {
+          var cx = task.context || {}
+          var files = Array.isArray(cx.files) ? cx.files : []
+          var notes = typeof cx.notes === 'string' ? cx.notes : ''
+          var empty = files.length === 0 && notes.trim().length === 0
+          var parts = []
+          if (files.length) parts.push(files.length + ' 个文件（' + files.map(function (f) { return actBase(f) }).join('、') + '）')
+          if (notes.trim()) parts.push('调研笔记 ' + notes.length + ' 字')
+          var tip = empty ? '本任务未附调研上下文，Worker 需自行定位——建议补 contextFiles/contextNotes'
+            : (files.length ? '完整路径：\n' + files.join('\n') : '') + (notes.trim() ? (files.length ? '\n\n' : '') + '调研笔记原文：\n' + (notes.length > 500 ? notes.slice(0, 500) + '…（共 ' + notes.length + ' 字）' : notes) : '')
+          return React.createElement('div', { style: { fontSize: 11, marginBottom: 8, padding: '4px 8px', border: '1px solid ' + (empty ? C.warn : C.border), borderRadius: 6, background: empty ? 'color-mix(in srgb, ' + C.warn + ' 8%, transparent)' : C.nested, color: empty ? C.warn : C.text2, wordBreak: 'break-word' }, title: tip },
+            '📎 调研注入: ' + (empty ? '无调研注入——Worker 需自行定位，建议补 contextFiles/contextNotes' : parts.join(' · ')))
+        })(),
         React.createElement(FamilySection, { task: task }),
         React.createElement(DepsSection, { task: task }),
         task.acceptance ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, padding: '5px 8px', background: C.nested, borderRadius: 4, borderLeft: '2px solid ' + C.ok, fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 4 } }, ic('flask-conical', 11), '硬性验收: ' + task.acceptance) : null,

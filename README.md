@@ -138,7 +138,7 @@ draft → pending → in-progress → verifying → resolved → archived
 ### 一次性派发（v74 去池化）
 
 - 每个任务 spawn 一个**一次性子代理**（Worker/Verifier），上下文全量注入 prompt，做完即销毁——无常驻池、无池化状态残留
-- **预研上下文注入（contextFiles/contextNotes）**：主窗口调研时读过的文件与笔记，由 host 在派发时读盘取最新内容，经「上下文注入」区块提供给 Worker/Verifier（不混进 user prompt）；预算口径单文件 8KB、总包 40KB
+- **预研上下文注入（contextFiles/contextNotes）**：主窗口调研时读过的文件与笔记，由 host 在派发时读盘取最新内容，经「上下文注入」区块提供给 Worker/Verifier（不混进 user prompt）；预算口径单文件 8KB、总包 40KB；UI 侧调研门禁——full/work 且声明了 touches 却未附调研的卡片亮「⚠️ 无调研」徽章，详情页「调研注入」区列 files 清单 + notes 字数（无则明示）
   - **锚点行段**：`contextFiles` 支持 `path:L2350-L2420` / `path:L2350` 行段语法（只认尾部 `:L<行号>`，兼容 Windows 盘符），只注入该段（段长上限 400 行，超出截断并标注）；锚点无效（越界/写法错）自动回退头部注入并标注「锚点无效，已回退头部」
   - **截断结构索引**：头部注入被预算截断时，标注升级为「截断：共 N 行，已注入 1–M 行」，并附结构索引块（JS/TS 顶层函数/类/箭头赋值、Markdown 标题及行号，上限 40 条）——Worker 照索引用锚点语法补读目标段即可，不用全文盘点
 - **Worker/Verifier 均可配置异构模型**（⚙️ 弹出层下拉选择，空 = 继承父级），避免同源盲点；模型故障自动熔断回退父级模型

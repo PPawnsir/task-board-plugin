@@ -442,3 +442,66 @@ export function pickDispatch(d, capW, capV, busyTaskIds) {
 export function isOrphan(d, t, runs, now) {
   return t.status === 'in-progress' && t.claimedBy && t.claimedBy !== d.ownerSession && !(runs && runs[t.id]) && !t.escalation && (now - new Date(t.claimedAt || 0).getTime()) > 120000
 }
+
+// ===== 调研门禁（warning 族 + epic 发布预检；proposal n-mutduqaen6q9 收窄采纳）=====
+// 背景：调研上下文（contextFiles/contextNotes）是 Worker 效率的最大变量——缺材料时 Worker
+// 要花 10-15 分钟自行 grep 定位，甚至跑偏方向。这里只放纯函数：建卡 warning（软提示不阻断）
+// 与 epic 发布预检汇总；IO（existsSync）由调用方注入，本体零依赖可单测。
+
+// 整树 glob 判定：归一化后以 '/**' 结尾或恰为 '**'（'src/**'、'./src/**'、'src\**' 都算）——
+// 整树锁会让同批次所有碰该目录的任务串行化。'src/*'、'src/**/*.mjs' 不算（结尾不是 '/**'）。
+export function isTreeGlob(p) { var v = normTouch(p); return v === '**' || /\/\*\*$/.test(v) }
+
+// 建卡 warning 族（task_create 工具与 create-task RPC 共用同一口径，软提示不阻断创建）：
+//   ① description trim 后空白 → 提醒补目标/约束（沿用 E 卡既有文案，逐字不变）
+//   ② pipeline∈{full,work} 且 touches 非空且 contextFiles/contextNotes 皆空 → 提醒补调研上下文
+//   ③ touches 含整树 glob → 提醒精确到文件级
+// ②③ 的触发前提：pipeline≠'direct' 且 touches 非空（direct 主窗口直接处理、无 touches 不指望调研材料）。
+// 返回 string[]；调用方自行合并为一条 warning 字段（可选字段，老调用方无感）。
+export var EMPTY_DESC_WARNING = '任务描述为空——Worker 只能凭标题猜需求，建议补一句目标/约束'
+export function createTaskWarnings(t) {
+  var out = []
+  if (!t || typeof t !== 'object') return out
+  if (!String(t.description || '').trim()) out.push(EMPTY_DESC_WARNING)
+  var touches = Array.isArray(t.touches) ? t.touches : []
+  if ((t.pipeline || 'full') !== 'direct' && touches.length) {
+    var cx = t.context || {}
+    var hasFiles = Array.isArray(cx.files) && cx.files.length > 0
+    var hasNotes = !!(cx.notes && String(cx.notes).trim())
+    if (!hasFiles && !hasNotes) out.push('未附调研上下文（contextFiles/contextNotes）——Worker 将自行 grep 定位，建议补上预研文件路径或勾选无需调研')
+    if (touches.some(isTreeGlob)) out.push('touches 含整树 glob 会串行化整个批次——修复类任务建议精确到文件级')
+  }
+  return out
+}
+
+// epic 发布预检：父卡 publish 时对其子任务做轻量调研注入预检。
+// 口径：只看 pipeline≠direct 的非归档子任务；「无调研注入」= context.files/context.notes 皆空，
+//   或 files 列了路径但全部不存在（exists 回调判定，锚点 :L 段先剥掉再查——存在性是对文件而言的）。
+// exists(path) 由调用方注入（fs.existsSync + 会话工作区相对解析包装）；缺省时退化为只查字段有无。
+// 返回 { total, missing: [{id, title, reason}] }；total=参与预检的子任务数（供汇总文案 N/M）。
+export function epicPrecheck(tasks, parentId, exists) {
+  var kids = gsb(parentId, Array.isArray(tasks) ? tasks : []).filter(function (x) { return x && x.status !== 'archived' && x.pipeline !== 'direct' })
+  var missing = []
+  for (var i = 0; i < kids.length; i++) {
+    var k = kids[i]
+    var cx = (k && k.context) || {}
+    var files = Array.isArray(cx.files) ? cx.files.filter(function (p) { return typeof p === 'string' && p.trim() }) : []
+    var hasNotes = !!(cx.notes && String(cx.notes).trim())
+    var reason = ''
+    if (!files.length && !hasNotes) reason = '无 contextFiles/contextNotes'
+    else if (files.length && typeof exists === 'function') {
+      var anyExist = files.some(function (p) { try { return !!exists(parseAnchorPath(p).file) } catch (_) { return false } })
+      if (!anyExist) reason = '预研文件路径全部不存在（注入将全是读取失败）'
+    }
+    if (reason) missing.push({ id: String(k.id || ''), title: String(k.title || '').slice(0, 40), reason: reason })
+  }
+  return { total: kids.length, missing: missing }
+}
+
+// 汇总文案：全部有材料 → 空串（不打扰）；否则 'epic 发布预检：N 个子任务中 M 个无调研注入：…'。
+// 列表最多列 5 条（id「title」（原因）），超出折叠为「等」——pushSysNote 队列单条不宜过长。
+export function epicPrecheckNote(pre) {
+  if (!pre || !Array.isArray(pre.missing) || !pre.missing.length) return ''
+  var list = pre.missing.slice(0, 5).map(function (m) { return m.id + '「' + m.title + '」' + (m.reason ? '（' + m.reason + '）' : '') }).join('、')
+  return 'epic 发布预检：' + pre.total + ' 个子任务中 ' + pre.missing.length + ' 个无调研注入：' + list + (pre.missing.length > 5 ? ' 等' : '') + '——建议先补 contextFiles/contextNotes 再发布'
+}
