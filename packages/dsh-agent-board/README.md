@@ -101,6 +101,7 @@ dsh plugin --profile web remove dsh-agent-board
 
 - 仪表盘视图新增「Token 消耗」区：本看板累计总量 + 输入 / 输出 / 缓存读（缓存写非零时一并展示）拆分、按模型分布条形图、任务消耗 **Top 8**（标题可点击直达该任务详情）；进行中的卡片右上角显示本任务已累计消耗（`⛁ 数字`）
 - 数据来源：每次 Worker/Verifier run 结算时读该 run 的 v4 会话日志（`~/.dsh/sessions/*/<runId>/session.v4.jsonl.zstd`），把 `assistant/message` 事件的 `usage`（`inputTokens` / `outputTokens` / `cacheReadTokens` / `cacheWriteTokens` / `totalTokens`，字段形状以真实日志为准）按 zstd 帧逐帧累加到任务 `usage`（含按模型小计与 `runs` 计数，多轮重跑/驳回重做自动累加），`get-tasks` 再现算 board 级 `usageSummary`（总量 / 按模型 / Top8，不落盘额外表）——**只做展示、不做计费断言**，日志读不到或没有 usage 时一律显示「暂无数据」
+- 「架构健康」区（架构自省 L1）：`get-tasks` 顺带对**近 50 张卡**现算四信号（纯函数零存储：touches 声明热度 ≥8 次且占比 ≥40% / 带 touches 任务滞留中位数 >2 倍 / 任务时长 p90 >45min / 同路径驳回 ≥2 次），命中才在仪表盘渲染提示条（⚠️/ℹ️ 两级，最多 3 条）——让运行数据主动提示"该优化架构了"（如某文件反复成为锁热点=该拆），信号只建议不裁判
 
 ### 学习反馈（候选教训信号 → 主窗口沉淀）
 
