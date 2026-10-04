@@ -12,7 +12,7 @@ var TOUCH_HOT_MIN = 8      // 信号 a：单路径 touches 声明次数阈值
 var TOUCH_HOT_RATIO = 0.4  // 信号 a：声明次数占窗口内「有 touches 任务」的比例阈值
 var SERIAL_MIN_TOUCH = 5   // 信号 b：有 touches 任务的最小样本数（不足则不判定，防小样本噪声）
 var SERIAL_RATIO = 2       // 信号 b：有 touches 任务滞留中位数 > 无 touches 任务的 N 倍
-var P90_LIMIT_MIN = 45     // 信号 c：resolved 任务时长 p90 阈值（分钟）
+var P90_LIMIT_MIN = 45     // 信号 c：resolved 任务执行时长（claimedAt→resolvedAt）p90 阈值（分钟）
 var REJECT_HOT_MIN = 2     // 信号 d：单路径累计驳回次数阈值
 var MAX_HINTS = 3          // 返回提示上限（warn 信号优先排列）
 
@@ -44,10 +44,11 @@ function waitMsOf(t) {
   return (isNaN(ms) || ms < 0) ? -1 : ms
 }
 
-// 任务时长：resolvedAt - createdAt。无法计算返回 -1。
+// 执行时长：claimedAt → resolvedAt（纯干活耗时，不含排队；task-mutdnitw 口径修正）。
+// 无 claimedAt（手工/direct 卡没有领取动作）或无法计算返回 -1，不参与聚合。
 function durationMsOf(t) {
-  if (!t.resolvedAt || !t.createdAt) return -1
-  var ms = Date.parse(t.resolvedAt) - Date.parse(t.createdAt)
+  if (!t.resolvedAt || !t.claimedAt) return -1
+  var ms = Date.parse(t.resolvedAt) - Date.parse(t.claimedAt)
   return (isNaN(ms) || ms < 0) ? -1 : ms
 }
 
@@ -87,7 +88,7 @@ export function computeHealthHints(tasks) {
   var waitWith = []     // 信号 b：有 touches 任务的滞留毫秒
   var waitWithout = []  // 信号 b：无 touches 任务的滞留毫秒
   var withTouchN = 0    // 窗口内有 touches 的任务数（信号 a 占比分母）
-  var durations = []    // 信号 c：resolved 任务时长毫秒
+  var durations = []    // 信号 c：resolved 任务执行时长毫秒（claimedAt→resolvedAt）
   for (var i = 0; i < win.length; i++) {
     var t = win[i] || {}
     var paths = normPathsOf(t)
@@ -121,10 +122,10 @@ export function computeHealthHints(tasks) {
       hints.push({ level: 'info', text: '带 touches 任务平均等待明显更长（中位数 ' + toMin(medW) + 'min vs ' + toMin(medWo) + 'min），并行度受锁限制' })
     }
   }
-  // --- 信号 c：时长 p90（resolved 任务时长尾部抬升 = 粒度/架构成本恶化）---
+  // --- 信号 c：执行时长 p90（resolved 任务执行时长尾部抬升 = 粒度/架构成本恶化）---
   var p90 = percentileOf(durations, 0.9)
   if (p90 !== null && p90 > P90_LIMIT_MIN * 60000) {
-    hints.push({ level: 'info', text: '任务时长 p90 已达 ' + toMin(p90) + 'min——超长任务占比升高，考虑拆分粒度或检查架构热点' })
+    hints.push({ level: 'info', text: '任务执行时长 p90 已达 ' + toMin(p90) + 'min——超长任务占比升高，考虑拆分粒度或检查架构热点' })
   }
   return hints.slice(0, MAX_HINTS)
 }

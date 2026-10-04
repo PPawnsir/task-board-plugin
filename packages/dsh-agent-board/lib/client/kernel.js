@@ -423,7 +423,21 @@
     function depsBlocked(t) { if (!Array.isArray(t.dependsOn) || t.dependsOn.length === 0) return false; return t.dependsOn.some(function (id) { var d = getTask(id); return !d || (d.status !== 'resolved' && d.status !== 'archived') }) }
     // #19 管线档位元数据
     var pipeMeta = { full: { icon: 'flask-conical', label: '全流程（执行+验证）', short: '全流程' }, work: { icon: 'file-text', label: '免验证（只做不验）', short: '免验' }, direct: { icon: 'message-square', label: '主窗口直接处理', short: '直办' } }
-    function durOf(t) { try { var s = t.createdAt ? new Date(t.createdAt).getTime() : 0; if (!s) return ''; var eRaw = t.resolvedAt || t.archivedAt; var e = eRaw ? new Date(eRaw).getTime() : Date.now(); var m = Math.max(0, Math.round((e - s) / 60000)); if (m < 1) return '<1m'; if (m < 60) return m + 'm'; var h = Math.floor(m / 60); return h + 'h' + (m % 60 ? (m % 60) + 'm' : '') } catch (_) { return '' } }
+    // ===== 耗时口径三分离（task-mutdnitw）：排队 ≠ 执行 ≠ 验收，不再把排队算进耗时 =====
+    // waitOf：⏳ 排队时长 = createdAt → claimedAt（未领取则统计到 now）——"等了多久"
+    // execOf：⏱ 执行时长 = claimedAt → resolvedAt/archivedAt（未定则统计到 now）——"干了多久"
+    //   无 claimedAt（手工/direct 卡没有领取动作）回退原口径 createdAt → resolvedAt/archivedAt/now
+    // （验收时长 = resolvedAt → verifiedAt，仪表盘 verifyTimes 已有此口径，卡片不展示）
+    function fmtDur(s, e) { var m = Math.max(0, Math.round((e - s) / 60000)); if (m < 1) return '<1m'; if (m < 60) return m + 'm'; var h = Math.floor(m / 60); return h + 'h' + (m % 60 ? (m % 60) + 'm' : '') }
+    function waitOf(t) { try { var s = t.createdAt ? new Date(t.createdAt).getTime() : 0; if (!s) return ''; var e = t.claimedAt ? new Date(t.claimedAt).getTime() : Date.now(); return fmtDur(s, e) } catch (_) { return '' } }
+    function execOf(t) { try { var sRaw = t.claimedAt || t.createdAt; var s = sRaw ? new Date(sRaw).getTime() : 0; if (!s) return ''; var eRaw = t.resolvedAt || t.archivedAt; var e = eRaw ? new Date(eRaw).getTime() : Date.now(); return fmtDur(s, e) } catch (_) { return '' } }
+    // 卡片耗时徽章：draft/pending（还在排队）显「⏳ 等待」；执行后（含 blocked/归档）显「⏱ 执行」；tooltip 写清口径
+    function cardDur(t) {
+      var st = t.status
+      if (st === 'draft' || st === 'pending') { var w = waitOf(t); return w ? { txt: '⏳ 等待 ' + w, tip: '⏳ 排队时长：创建 → 被领取（还没被领取则统计创建至今）——"等了多久"，不含执行' } : null }
+      var x = execOf(t)
+      return x ? { txt: '⏱ 执行 ' + x, tip: '⏱ 执行时长：被领取 → 完成/归档（进行中则统计领取至今）——"干了多久"，不含排队与验收' + (t.claimedAt ? '' : '；本卡无领取记录（手工/直办），按创建起算') } : null
+    }
     function elapsedMin(iso) { var s = iso ? new Date(iso).getTime() : 0; if (!s) return 0; return Math.max(0, Math.round((Date.now() - s) / 60000)) }
     // 历史会话列表：优先用 host 留档的 t.runs（含全部重试）；老任务回退到 claimedBy/verifierRun
     function historyRuns(t) {

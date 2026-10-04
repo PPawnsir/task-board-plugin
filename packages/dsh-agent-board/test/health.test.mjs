@@ -77,11 +77,11 @@ test('信号 b 不命中：有 touches 任务样本 <5', function () {
   assert.deepEqual(computeHealthHints(ts), [])
 })
 
-// ===== 信号 c：时长 p90 =====
-test('信号 c 命中：resolved 任务时长 p90 > 45min', function () {
+// ===== 信号 c：执行时长 p90（口径 = claimedAt→resolvedAt，task-mutdnitw 修正后不含排队）=====
+test('信号 c 命中：resolved 任务执行时长 p90 > 45min', function () {
   var ts = []
-  for (var i = 0; i < 8; i++) ts.push(mk(i, { claimedAt: iso(BASE + i * MIN + MIN), resolvedAt: iso(BASE + i * MIN + 10 * MIN) }))
-  for (var j = 0; j < 2; j++) ts.push(mk(100 + j, { claimedAt: iso(BASE + (100 + j) * MIN + MIN), resolvedAt: iso(BASE + (100 + j) * MIN + 120 * MIN) }))
+  for (var i = 0; i < 8; i++) ts.push(mk(i, { claimedAt: iso(BASE + i * MIN + MIN), resolvedAt: iso(BASE + i * MIN + 11 * MIN) })) // 执行 10min
+  for (var j = 0; j < 2; j++) ts.push(mk(100 + j, { claimedAt: iso(BASE + (100 + j) * MIN + MIN), resolvedAt: iso(BASE + (100 + j) * MIN + 121 * MIN) })) // 执行 120min
   // n=10，p90 = 升序第 ceil(0.9*10)=9 位 = 120min
   var hints = computeHealthHints(ts)
   assert.equal(hints.length, 1)
@@ -91,8 +91,19 @@ test('信号 c 命中：resolved 任务时长 p90 > 45min', function () {
 
 test('信号 c 不命中：p90 未超阈值', function () {
   var ts = []
-  for (var i = 0; i < 10; i++) ts.push(mk(i, { claimedAt: iso(BASE + i * MIN + MIN), resolvedAt: iso(BASE + i * MIN + 30 * MIN) }))
+  for (var i = 0; i < 10; i++) ts.push(mk(i, { claimedAt: iso(BASE + i * MIN + MIN), resolvedAt: iso(BASE + i * MIN + 31 * MIN) })) // 执行 30min
   assert.deepEqual(computeHealthHints(ts), [])
+})
+
+test('信号 c 口径：排队不计入执行时长；无 claimedAt 的卡不参与聚合', function () {
+  // 排队 119min + 执行 1min：旧口径（创建起算 120min）会误报，新口径不报警
+  var ts = []
+  for (var i = 0; i < 10; i++) ts.push(mk(i, { claimedAt: iso(BASE + i * MIN + 119 * MIN), resolvedAt: iso(BASE + i * MIN + 120 * MIN) }))
+  assert.deepEqual(computeHealthHints(ts), [])
+  // 无 claimedAt 的手工/直办卡：resolvedAt 再晚也不参与 p90（durationMsOf 返回 -1）
+  var ts2 = []
+  for (var j = 0; j < 10; j++) ts2.push(mk(j, { resolvedAt: iso(BASE + j * MIN + 500 * MIN) }))
+  assert.deepEqual(computeHealthHints(ts2), [])
 })
 
 // ===== 信号 d：驳回热点 =====
@@ -129,11 +140,11 @@ test('窗口边界：热点滑出近 50 张窗口后不再报警', function () {
 // ===== 提示上限：最多 3 条，warn 优先 =====
 test('四信号同时命中时截断为 3 条（warn 优先）', function () {
   var ts = []
-  // 8 张热点卡：touches src/hot.js（信号 a：8/14=57%）、各驳回 1 次（信号 d：累计 8 次）、滞留 30min、时长 100min
+  // 8 张热点卡：touches src/hot.js（信号 a：8/14=57%）、各驳回 1 次（信号 d：累计 8 次）、滞留 30min、执行 70min
   for (var i = 0; i < 8; i++) ts.push(mk(i, { touches: ['src/hot.js'], rejectCount: 1, claimedAt: iso(BASE + i * MIN + 30 * MIN), resolvedAt: iso(BASE + i * MIN + 100 * MIN) }))
-  // 6 张其他 touches 卡：滞留 30min、时长 100min（凑信号 b 样本与信号 c）
+  // 6 张其他 touches 卡：滞留 30min、执行 70min（凑信号 b 样本与信号 c）
   for (var j = 0; j < 6; j++) ts.push(mk(100 + j, { touches: ['src/other.js'], claimedAt: iso(BASE + (100 + j) * MIN + 30 * MIN), resolvedAt: iso(BASE + (100 + j) * MIN + 100 * MIN) }))
-  // 6 张无 touches 卡：滞留 3min、时长 100min（信号 b 对照组）
+  // 6 张无 touches 卡：滞留 3min、执行 97min（信号 b 对照组）
   for (var k = 0; k < 6; k++) ts.push(mk(200 + k, { claimedAt: iso(BASE + (200 + k) * MIN + 3 * MIN), resolvedAt: iso(BASE + (200 + k) * MIN + 100 * MIN) }))
   var hints = computeHealthHints(ts)
   assert.equal(hints.length, 3)
