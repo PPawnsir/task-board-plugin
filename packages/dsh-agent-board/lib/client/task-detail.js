@@ -125,9 +125,34 @@
       function submitIntervene() { if (!interveneMsg.trim()) return; rpc('intervene-agent', { taskId: task.id, message: interveneMsg }).then(function (r) { setActionMsg(r && r.ok ? '✅ 高优指令已插入 ' + shortId(r.agent) + ' 队首' : '⚠️ ' + ((r && r.error) || '无活动 Agent')); setInterveneMsg(''); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) }) }
       var isManual = task.assignMode === 'manual'; var canJump = (task.status === 'in-progress' || task.status === 'verifying') && task.claimedBy && task.claimedBy !== state.sessionId
       var canIntervene = task.status === 'in-progress' || task.status === 'verifying'
+      // ===== 无障碍·「流转到」按钮组（反馈 n-mut9rzpyc7p1）：状态流转不再只有拖拽一条路 =====
+      // 合法迁移与拖拽 transition()（kernel.js）逐条对齐——host 门禁不变，失败原因 ⚠️ 回显 actionMsg 行；
+      // 原生 button 元素天然键盘可达（Tab 聚焦 + Enter/Space 触发），读屏可报组名与按钮名
+      var FLOW_DEF = {
+        'pending': [{ to: 'in-progress', label: '▶ 开始处理', color: C.brand, tip: '领取并开始处理（待办 → 进行中）' }],
+        'in-progress': [{ to: 'verifying', label: '✅ 提交验收', color: C.ok, tip: '提交验证（进行中 → 验证中），需填解决说明' }, { to: 'blocked', label: '⛔ 标记阻塞', color: C.warn, tip: '标记为阻塞（进行中 → 阻塞）' }],
+        'blocked': [{ to: 'pending', label: '↩ 重投待办', color: C.brand, tip: '解除阻塞重新投放（阻塞 → 待办）' }, { to: 'in-progress', label: '▶ 开始处理', color: C.brand, tip: '领取并开始处理（阻塞 → 进行中）' }],
+        'verifying': [{ to: 'resolved', label: '✔ 验收通过', color: C.ok, tip: '验收通过（验证中 → 已完成）' }, { to: 'in-progress', label: '↩ 驳回重投', color: C.err, tip: '驳回回执行中（验证中 → 进行中）' }]
+      }
+      var flowBtns = FLOW_DEF[task.status] || []
+      function flowTo(to) {
+        var p = null
+        if (to === 'in-progress' && (task.status === 'pending' || task.status === 'blocked')) p = rpc('claim-task', { taskId: task.id })
+        else if (to === 'pending' && task.status === 'blocked') p = rpc('update-task', { taskId: task.id, resetToPending: true })
+        else if (to === 'verifying' && task.status === 'in-progress') { var res = window.prompt('提交验证 — 解决说明（必填）：'); if (!res) return; p = rpc('resolve-task', { taskId: task.id, status: 'verifying', resolution: res }) }
+        else if (to === 'blocked' && task.status === 'in-progress') { var rs = window.prompt('阻塞原因（可选）：') || ''; p = rpc('resolve-task', { taskId: task.id, status: 'blocked', resolution: rs }) }
+        else if (to === 'resolved' && task.status === 'verifying') p = rpc('verify-task', { taskId: task.id, verdict: 'approved' })
+        else if (to === 'in-progress' && task.status === 'verifying') { var cm = window.prompt('驳回原因（可选）：'); p = rpc('verify-task', { taskId: task.id, verdict: 'rejected', comment: cm || '' }) }
+        if (!p) return
+        p.then(function (r) { if (r && r.ok === false) setActionMsg('⚠️ 流转失败：' + (r.error || '未知错误')); else setActionMsg('✅ 已流转到「' + (statusLabels[to] || to) + '」'); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) })
+      }
       return React.createElement('div', { style: { padding: '4px 2px' } },
         React.createElement('div', { onClick: function () { state.detailId = null; notify() }, style: { fontSize: 11, color: C.brand, cursor: 'pointer', marginBottom: 8 } }, '← 返回看板'),
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 } }, React.createElement('span', { style: { fontSize: 10, padding: '1px 6px', borderRadius: 3, background: 'color-mix(in srgb, ' + (prioColor[task.priority] || prioColor.low) + ' 20%, transparent)', color: (prioColor[task.priority] || prioColor.low) } }, prioLabel[task.priority] || '中'), React.createElement('span', { style: { fontSize: 11, padding: '1px 8px', borderRadius: 3, background: C.nested, color: C.text } }, statusLabels[task.status] || task.status), React.createElement('select', { value: task.pipeline || 'full', onChange: function (e) { rpc('update-task', { taskId: task.id, pipeline: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '管线档位', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'full' }, '全流程（执行+验证）'), React.createElement('option', { value: 'work' }, '免验证（只做不验）'), React.createElement('option', { value: 'direct' }, '主窗口处理')), task.pipelineAuto ? React.createElement('span', { style: { fontSize: 9, color: C.text2 }, title: '由规则自动分类，可手动覆盖' }, 'auto') : null, isManual ? React.createElement('span', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('user', 10), '手动派发') : null),
+        // 流转到按钮组（键盘可达的状态迁移入口，替代拖拽；无合法迁移的状态（draft/resolved 等）整块不渲染）
+        flowBtns.length > 0 ? React.createElement('div', { role: 'group', 'aria-label': '状态流转', style: { display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginBottom: 8, padding: '5px 8px', border: '1px solid ' + C.border, borderRadius: 6, background: C.card } },
+          React.createElement('span', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '⇄ 流转到：'),
+          flowBtns.map(function (b) { return React.createElement('button', { key: b.to, onClick: function () { flowTo(b.to) }, title: b.tip, style: { fontSize: 10, padding: '3px 9px', border: '1px solid ' + b.color, borderRadius: 3, background: 'transparent', color: b.color, cursor: 'pointer', fontWeight: 600 } }, b.label) })) : null,
         // 最近失败（host settle 失败路径写入 task.lastError；缺字段静默不渲染，≤2 行截断，悬停看全文）
         task.lastError ? React.createElement('div', { style: { fontSize: 11, color: C.err, marginBottom: 8, padding: '4px 8px', border: '1px solid ' + C.err, borderRadius: 6, background: 'color-mix(in srgb, ' + C.err + ' 8%, transparent)', display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden', wordBreak: 'break-all' }, title: String(task.lastError) }, '最近失败: ' + String(task.lastError)) : null,
         task.frozen ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 8, padding: '6px 8px', border: '1px solid ' + C.brand, borderRadius: 6, background: 'color-mix(in srgb, ' + C.brand + ' 8%, transparent)', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },

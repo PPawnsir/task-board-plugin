@@ -563,3 +563,38 @@ export function epicPrecheckNote(pre) {
   var list = pre.missing.slice(0, 5).map(function (m) { return m.id + '「' + m.title + '」' + (m.reason ? '（' + m.reason + '）' : '') }).join('、')
   return 'epic 发布预检：' + pre.total + ' 个子任务中 ' + pre.missing.length + ' 个无调研注入：' + list + (pre.missing.length > 5 ? ' 等' : '') + '——建议先补 contextFiles/contextNotes 再发布'
 }
+
+// ===== tasksHash：任务列表渲染的变更检测（轮询渲染节约，反馈 n-mut9rzs2mkhg）=====
+// 背景：客户端 3s 固定全量轮询 get-tasks，任务没变也全量重渲染（实测单卡 12.7KB×20/min）。
+// host 在 get-tasks 响应附 tasksHash，kernel 存 state.tasksHash，hash 相同则跳过
+// state.tasks 赋值 + notify（传输仍全量，省的是渲染；短期方案）。
+// 序列化口径（单测锁定）：
+//   - 只挑「驱动列表/详情渲染」的字段：id/status/priority/title/description/parentId/tags/
+//     claimedBy/claimedAt/resolvedAt/verifiedAt/archivedAt/lastError/lastProgress.text/
+//     frozen/stuckSince/escalation.question。
+//     escalation 必须在内：新歧义要触发面板自动弹开，而 board_report escalate 只写
+//     escalation/messages/history，不动其他任何字段——漏掉它自动弹开就死了。
+//     childStats 由 tasks 现算，其输入（子任务 status/parentId）已随上述字段覆盖。
+//   - history/messages/usage/context 不参与：不驱动列表渲染，结算写账/进展消息若参与
+//     会让 hash 频繁抖动，短路失效。
+//   - 顺序有关：按数组序拼接——看板渲染本就按数组序，顺序变化也该重渲染。
+//   - hash 用 djb2-xor（32 位无符号，base36 输出）：实现极小零依赖。hash 只承担
+//     「渲染短路」语义，不承担正确性——极低概率碰撞的最坏后果是少渲染一轮。
+export function tasksHash(tasks) {
+  var list = Array.isArray(tasks) ? tasks : []
+  var parts = []
+  for (var i = 0; i < list.length; i++) {
+    var t = list[i] || {}
+    parts.push([
+      t.id, t.status, t.priority, t.title, t.description, t.parentId,
+      Array.isArray(t.tags) ? t.tags.join(',') : '',
+      t.claimedBy, t.claimedAt, t.resolvedAt, t.verifiedAt, t.archivedAt,
+      t.lastError, t.lastProgress && t.lastProgress.text,
+      t.frozen ? '1' : '', t.stuckSince, t.escalation && t.escalation.question
+    ].join('\u0001'))
+  }
+  var s = parts.join('\u0002')
+  var h = 5381
+  for (var j = 0; j < s.length; j++) h = (((h << 5) + h) ^ s.charCodeAt(j)) >>> 0
+  return h.toString(36)
+}

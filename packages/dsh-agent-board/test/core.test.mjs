@@ -1251,9 +1251,9 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
   assert.match(host, /claimApply\(d, t, 'spawn-pending', 'dispatch'\); if \(parentKickOnDispatch\(d, t\)\)/)
   // get-tasks 现算 childStats（零存储）
   assert.match(host, /d\.childStats = aggregateChildStats\(d\.tasks\)/)
-  // 两模块都从 core 解构引入（接线不断）；rpc.mjs 解构表尾部随调研门禁（task-mute6zpw）与调研遵循三件套（task-mutnj3a4）扩展
+  // 两模块都从 core 解构引入（接线不断）；rpc.mjs 解构表尾部随调研门禁（task-mute6zpw）、调研遵循三件套（task-mutnj3a4）、tasksHash（task-mutrtwin）扩展
   assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT \} = core/)
-  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT \} = core/)
+  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash \} = core/)
   // 既有「全子任务 resolved → 父 verifying」逻辑不动（checkParentAuto 仍在 verifyApply 链路；core.mjs 不在 hostSrc 清单，单独读）
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
   assert.match(coreSrc, /if \(verdict === 'approved' && isb\(t\)\) \{ var p = checkParentAuto\(d, t\)/)
@@ -1291,4 +1291,137 @@ test('调研门禁 UI 接线：卡片「⚠️ 无调研」徽章 + 详情「调
   assert.match(cli, /调研笔记 ' \+ notes\.length \+ ' 字/)              // notes 字数统计
   assert.match(cli, /if \(r && r\.warning\)/)                          // 创建表单消费 create-task 响应的 warning 字段
   assert.match(cli, /'⚠️ ' \+ warn/)                                   // warning 原文黄色行展示（C.warn）
+})
+
+// ===== 反馈修复（task-mutrtwin）：僵尸 epic 归档放行 + get-tasks tasksHash =====
+// ① archive-task 对「无活跃 run 的 in-progress」放行（parentKick 僵尸态出清，反馈 n-mutma3mmwceq）；
+// ② get-tasks 附 tasksHash（core 纯函数 djb2），kernel hash 相同跳渲染（反馈 n-mut9rzs2mkhg）。
+
+test('tasksHash: 同输入同 hash（纯函数稳定；JSON 重解析的等价形态 hash 相同）', () => {
+  const a = [mkTask({ id: 'a', title: '甲' }), mkTask({ id: 'b', status: 'in-progress' })]
+  assert.equal(core.tasksHash(a), core.tasksHash(a))
+  // 跨轮询 rt() 重新 JSON.parse 的同内容对象 → hash 相同（短路生效的前提）
+  assert.equal(core.tasksHash(a), core.tasksHash(JSON.parse(JSON.stringify(a))))
+  assert.equal(core.tasksHash([]), core.tasksHash([]))
+  assert.equal(core.tasksHash(undefined), core.tasksHash(null)) // 非数组一律按空板兜底
+})
+
+test('tasksHash: 关键字段变 → hash 变；非关键字段（history/messages/usage）变 → hash 不变', () => {
+  const h0 = core.tasksHash([mkTask({ id: 'a' })])
+  // 关键字段逐一变化（驱动列表/详情渲染的字段）
+  assert.notEqual(core.tasksHash([mkTask({ id: 'a', status: 'in-progress' })]), h0)
+  assert.notEqual(core.tasksHash([mkTask({ id: 'a', title: '改名' })]), h0)
+  assert.notEqual(core.tasksHash([mkTask({ id: 'a', priority: 'high' })]), h0)
+  assert.notEqual(core.tasksHash([mkTask({ id: 'a', lastError: 'boom' })]), h0)
+  assert.notEqual(core.tasksHash([mkTask({ id: 'a', lastProgress: { text: '过半', at: 'x' } })]), h0)
+  assert.notEqual(core.tasksHash([mkTask({ id: 'a', resolvedAt: '2026-01-02T00:00:00Z' })]), h0)
+  assert.notEqual(core.tasksHash([mkTask({ id: 'a', frozen: true })]), h0)
+  // escalation 必须入 hash：board_report escalate 只写 escalation/messages/history、
+  // 不动其他任何字段——漏掉它「新歧义自动弹开面板」会被 hash 短路吞掉
+  assert.notEqual(core.tasksHash([mkTask({ id: 'a', escalation: { question: '歧义', at: 'x', by: 'w' } })]), h0)
+  // 非关键字段不动 hash（不驱动列表渲染，参与会让结算写账/进展消息引发空渲染抖动）
+  const t1 = mkTask({ id: 'a' }); t1.history.push({ from: 'pending', to: 'in-progress', timestamp: 'x', actor: 'y', note: '' })
+  assert.equal(core.tasksHash([t1]), h0)
+  const t2 = mkTask({ id: 'a' }); t2.messages.push({ kind: 'progress', text: 'p', at: 'x', by: 'w' })
+  assert.equal(core.tasksHash([t2]), h0)
+  const t3 = mkTask({ id: 'a' }); t3.usage = { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10, runs: 1, models: {} }
+  assert.equal(core.tasksHash([t3]), h0)
+})
+
+test('tasksHash: 顺序有关（数组序变化 → hash 变；看板按数组序渲染，口径写清）', () => {
+  const a = mkTask({ id: 'a' }), b = mkTask({ id: 'b' })
+  assert.notEqual(core.tasksHash([a, b]), core.tasksHash([b, a]))
+})
+
+test('archive-task RPC: resolved/cancelled 放行（既有行为不破）', async () => {
+  const board = mkBoard([mkTask({ id: 'r1', status: 'resolved' }), mkTask({ id: 'c1', status: 'cancelled' })])
+  const h = mkRpcHandlers(board)
+  assert.equal((await h['archive-task']({ taskId: 'r1' })).ok, true)
+  assert.equal((await h['archive-task']({ taskId: 'c1' })).ok, true)
+  assert.equal(board.tasks[0].status, 'archived')
+  assert.equal(board.tasks[1].status, 'archived')
+})
+
+test('archive-task RPC: in-progress 无活跃 run 放行（parentKick 僵尸 epic 出清）', async () => {
+  // 僵尸态还原：direct epic 被 parentKickOnDispatch 推进到 in-progress，子任务已归档、无 run、claimedBy=null
+  const zombie = mkTask({ id: 'z1', status: 'in-progress', claimedBy: null, pipeline: 'direct' })
+  const board = mkBoard([zombie])
+  const h = mkRpcHandlers(board, { hasActiveRun: () => false })
+  const r = await h['archive-task']({ taskId: 'z1' })
+  assert.equal(r.ok, true); assert.equal(zombie.status, 'archived'); assert.ok(zombie.archivedAt)
+})
+
+test('archive-task RPC: in-progress 有活跃 run 拒绝；已 settled run 放行；未注入 hasActiveRun 按活跃兜底', async () => {
+  // 有活跃 run → 拒绝（不能归在跑的任务）
+  let t = mkTask({ id: 'a1', status: 'in-progress' })
+  let h = mkRpcHandlers(mkBoard([t]), { hasActiveRun: () => true })
+  let r = await h['archive-task']({ taskId: 'a1' })
+  assert.equal(r.ok, false); assert.match(r.error, /cannot archive/); assert.equal(t.status, 'in-progress')
+  // 有 run 记录但已 settled（finish→settleRun 过渡窗口，Worker 已结束）→ 放行
+  // （hasActiveRun 的 !settled 口径由 index.mjs 实现，此处 mock 其结论）
+  t = mkTask({ id: 'a2', status: 'in-progress' })
+  h = mkRpcHandlers(mkBoard([t]), { hasActiveRun: () => false })
+  r = await h['archive-task']({ taskId: 'a2' })
+  assert.equal(r.ok, true); assert.equal(t.status, 'archived')
+  // deps 未注入 hasActiveRun → 保守兜底视为有活跃 run → 拒绝（保持旧门禁行为，不误放在跑任务）
+  t = mkTask({ id: 'a3', status: 'in-progress' })
+  h = mkRpcHandlers(mkBoard([t]))
+  r = await h['archive-task']({ taskId: 'a3' })
+  assert.equal(r.ok, false); assert.match(r.error, /cannot archive/)
+  // 其余状态（verifying 等）仍拒绝——放行面只扩到「无活跃 run 的 in-progress」
+  t = mkTask({ id: 'a4', status: 'verifying' })
+  h = mkRpcHandlers(mkBoard([t]), { hasActiveRun: () => false })
+  r = await h['archive-task']({ taskId: 'a4' })
+  assert.equal(r.ok, false); assert.match(r.error, /cannot archive/)
+})
+
+test('task_archive 工具：与 archive-task RPC 同一门禁口径（僵尸放行/活跃拒绝）', async () => {
+  let t = mkTask({ id: 'z2', status: 'in-progress', claimedBy: null })
+  let h = mkRpcHandlers(mkBoard([t]), { hasActiveRun: () => false })
+  let r = await h.__tools['task_archive'].execute({ taskId: 'z2' }, {})
+  assert.equal(r.ok, true); assert.equal(t.status, 'archived')
+  t = mkTask({ id: 'z3', status: 'in-progress' })
+  h = mkRpcHandlers(mkBoard([t]), { hasActiveRun: () => true })
+  r = await h.__tools['task_archive'].execute({ taskId: 'z3' }, {})
+  assert.equal(r.ok, false); assert.match(r.error, /cannot archive/)
+})
+
+test('反馈修复接线断言：index.mjs 注入 hasActiveRun + get-tasks 附 tasksHash + kernel 短路分支（源码级）', () => {
+  const host = hostSrc()
+  // index.mjs：hasActiveRun 定义（runsFor 表有记录且 !settled 即活跃）并注入 createRpc deps
+  assert.match(host, /function hasActiveRun\(sid, taskId\) \{ var rec = session\.runsFor\(sid\)\[taskId\]; return !!\(rec && !rec\.settled\) \}/)
+  assert.match(host, /hasActiveRun: hasActiveRun,/)
+  // rpc.mjs：get-tasks 响应附 tasksHash（现算不落盘）；archiveErr 门禁 = 定义1 + RPC1 + 工具1
+  assert.match(host, /d\.tasksHash = tasksHash\(d\.tasks\)/)
+  const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  assert.equal((rpcSrc.match(/archiveErr\(sid, t\)/g) || []).length, 3)
+  // kernel：hash 短路分支存在（hash 相同跳过 tasks 赋值 + notify；老 host 无 hash 恒视为变化）
+  const ksrc = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
+  assert.match(ksrc, /var newHash = \(d && d\.tasksHash\) \|\| ''/)
+  assert.match(ksrc, /var tasksChanged = !newHash \|\| newHash !== state\.tasksHash/)
+  assert.match(ksrc, /if \(tasksChanged\) \{[\s\S]*?notify\(\)/)
+})
+
+// ===== 无障碍两件套（task-mutrubay，反馈 n-mut9rzpyc7p1）：卡片键盘可达 + 详情页「流转到」按钮组（源码级断言）=====
+test('无障碍接线：卡片 role/tabIndex/aria-label/onKeyDown/焦点框 + 详情页流转按钮组（源码级）', () => {
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // ① 卡片键盘可达：button 角色 + Tab 序 + 读屏标签（标题+状态）+ Enter/Space 与点击共用同一激活函数 + 主题色焦点框
+  assert.match(cli, /role: 'button', tabIndex: 0, 'aria-label': t\.title \+ '（' \+ \(statusLabels\[t\.status\] \|\| t\.status\) \+ '）'/)
+  assert.match(cli, /onKeyDown: function \(e\) \{ if \(e\.key === 'Enter' \|\| e\.key === ' '\) \{ e\.preventDefault\(\); activate\(\) \} \}/)
+  assert.match(cli, /onClick: activate,/) // 点击与键盘同一条激活路径（多选=切换选中，否则开详情）
+  assert.match(cli, /outline: isCardFocus\(t\.id\) \? '2px solid ' \+ C\.brand : 'none'/) // 主题色焦点框（非浏览器默认蓝框）
+  assert.match(cli, /function isCardFocus\(id\)/) // 焦点态走 state 现算（轮询重渲染不丢焦点框）
+  // ② 详情页「流转到」按钮组：合法迁移表 + 组容器（读屏可报组名）+ 四状态按钮文案
+  assert.match(cli, /var FLOW_DEF = \{/)
+  assert.match(cli, /role: 'group', 'aria-label': '状态流转'/)
+  assert.match(cli, /'⇄ 流转到：'/)
+  assert.match(cli, /'▶ 开始处理'/); assert.match(cli, /'✅ 提交验收'/); assert.match(cli, /'⛔ 标记阻塞'/)
+  assert.match(cli, /'↩ 重投待办'/); assert.match(cli, /'✔ 验收通过'/); assert.match(cli, /'↩ 驳回重投'/)
+  // 迁移通道与拖拽 transition() 同 RPC 族（host 门禁不变）；失败原因 ⚠️ 回显 actionMsg 行
+  assert.match(cli, /function flowTo\(to\)/)
+  assert.match(cli, /p = rpc\('claim-task', \{ taskId: task\.id \}\)/)
+  assert.match(cli, /p = rpc\('update-task', \{ taskId: task\.id, resetToPending: true \}\)/)
+  assert.match(cli, /p = rpc\('resolve-task', \{ taskId: task\.id, status: 'verifying', resolution: res \}\)/)
+  assert.match(cli, /p = rpc\('verify-task', \{ taskId: task\.id, verdict: 'approved' \}\)/)
+  assert.match(cli, /setActionMsg\('⚠️ 流转失败：' \+ \(r\.error \|\| '未知错误'\)\)/)
 })

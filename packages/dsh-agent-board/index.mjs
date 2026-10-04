@@ -58,6 +58,10 @@ export function apply(ctx) {
       pushSysNote: notify.pushSysNote, maybeNotify: notify.maybeNotify, notifyTaskDone: notify.notifyTaskDone,
     })
     storeDeps.poolCycle = dispatch.poolCycle // 晚绑定收口
+    // 僵尸 epic 出清配套（反馈 n-mutma3mmwceq）：archive-task 门禁的活性判定。
+    // 口径：runsFor 表内有记录且未 settled 即活跃。settleRun/手动终止都会摘除表项；
+    // settled=true 是 finish→settleRun 的结算过渡窗口（Worker 已结束），视为不活跃放行。
+    function hasActiveRun(sid, taskId) { var rec = session.runsFor(sid)[taskId]; return !!(rec && !rec.settled) }
     createRpc(ctx, state, {
       getActorId: session.getActorId, resolveRoot: session.resolveRoot, toolSessionId: session.toolSessionId, rpcSessionId: session.rpcSessionId,
       rootForSession: session.rootForSession, deriveWorkMode: session.deriveWorkMode, runsFor: session.runsFor,
@@ -65,6 +69,7 @@ export function apply(ctx) {
       maybeNotify: notify.maybeNotify, notifyTaskDone: notify.notifyTaskDone,
       pushSysNote: notify.pushSysNote, sessionCwd: session.sessionCwd, // 调研门禁③：epic 发布预检汇总投递 + 预研路径相对解析根
       spawnOneShot: dispatch.spawnOneShot, accumulateRunUsage: dispatch.accumulateRunUsage, readContextPack: dispatch.readContextPack,
+      hasActiveRun: hasActiveRun,
     })
 
     console.log('[task-board] v74 loaded (pool removed: one-shot dispatch, context injected per task, dispose on settle)')

@@ -219,7 +219,7 @@
 
     var COLUMNS = ['draft', 'pending', 'in-progress', 'verifying', 'resolved', 'blocked']
     var reqEpoch = 0 // 会话切换纪元：切会话时自增，旧会话在途响应按纪元丢弃
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, lessonPushed: {}, isRoot: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', usageSummary: null, childStats: {}, tasksErr: '' }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, lessonPushed: {}, isRoot: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
 
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
@@ -265,7 +265,17 @@
         if (epoch !== reqEpoch) return // 会话已切换，丢弃过期响应
         if (d && d.error) { reportReadErr('看板数据刷新失败：' + d.error); return } // error 分支：保留旧 tasks/设置，绝不当空板渲染
         clearReadErr()
-        state.tasks = (d && d.tasks) || []
+        // 渲染节约（反馈 n-mut9rzs2mkhg）：host 附 tasksHash（任务关键字段的稳定 hash，口径见 host core.tasksHash）。
+        // hash 相同 → 任务列表实质没变：跳过 state.tasks 赋值与 notify（3s 轮询大头是空转重渲染）。
+        // 注意区分：tasksErr 清除、boardMode/usageSummary/healthHints/childStats 等轻量字段照常赋值
+        // （hash 只管任务列表渲染；这些字段随下次任意 notify 生效，不为它们单独渲染）。
+        // 老 host 不返回 tasksHash → 恒视为变化，行为与旧版完全一致。
+        var newHash = (d && d.tasksHash) || ''
+        var tasksChanged = !newHash || newHash !== state.tasksHash
+        if (tasksChanged) {
+          state.tasksHash = newHash
+          state.tasks = (d && d.tasks) || []
+        }
         state.boardMode = (d && d.boardMode) || 'auto'
         state.teamMode = !!(d && d.teamMode)
         // 工作模式（三档）读取：优先用服务端派生字段 workMode，缺失时按同口径本地兜底派生
@@ -293,10 +303,13 @@
         if (state.isRoot === false && state.open) { state.open = false; state.detailId = null } // 子代理会话：强制收起看板
         if (d && d.dispatchInfo && d.dispatchInfoAt && Date.now() - new Date(d.dispatchInfoAt).getTime() < 120000) { state.dispatchInfo = d.dispatchInfo } else { state.dispatchInfo = '' } // 瞬时通知 2min 内有效，过期强制清空（服务端写后不清曾致残留数天）
         // escalation 一等公民：出现新的待裁决任务 → 面板自动弹开直达该任务详情
-        var newEsc = state.tasks.filter(function (t) { return t.escalation && state.escalatedIds.indexOf(t.id) < 0 })
-        state.escalatedIds = state.tasks.filter(function (t) { return t.escalation }).map(function (t) { return t.id })
-        if (newEsc.length > 0) { state.open = true; state.view = 'board'; state.detailId = newEsc[0].id }
-        notify()
+        // （escalation.question 在 tasksHash 序列化口径内：新歧义必然改变 hash → 必然走变化分支，不会漏弹）
+        if (tasksChanged) {
+          var newEsc = state.tasks.filter(function (t) { return t.escalation && state.escalatedIds.indexOf(t.id) < 0 })
+          state.escalatedIds = state.tasks.filter(function (t) { return t.escalation }).map(function (t) { return t.id })
+          if (newEsc.length > 0) { state.open = true; state.view = 'board'; state.detailId = newEsc[0].id }
+          notify()
+        }
       }).catch(function (e) { if (epoch !== reqEpoch) return; reportReadErr('看板数据刷新失败：' + readErrText(e)) }) // 网络 reject 同口径
     }
 
@@ -456,7 +469,7 @@
     function BoardButton(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
       var _a = useState(0), pendingCount = _a[0], setPendingCount = _a[1]; var _b = useState(false), isOpen = _b[0], setIsOpen = _b[1]; var _c = useState(0), escCount = _c[0], setEscCount = _c[1]; var _d2 = useState(true), isRoot = _d2[0], setIsRoot = _d2[1]
-      useEffect(function () { if (props && props.sessionId) { var sid = String(props.sessionId); if (state.sessionId !== sid) { state.sessionId = sid; reqEpoch++; state.tasks = []; state.children = []; state.activity = {}; state.archived = []; state.detailId = null; state.childStats = {}; state.tasksErr = ''; notify(); fetchTasks(); fetchChildren() } } }, [props && props.sessionId])
+      useEffect(function () { if (props && props.sessionId) { var sid = String(props.sessionId); if (state.sessionId !== sid) { state.sessionId = sid; reqEpoch++; state.tasks = []; state.tasksHash = ''; state.children = []; state.activity = {}; state.archived = []; state.detailId = null; state.childStats = {}; state.tasksErr = ''; notify(); fetchTasks(); fetchChildren() } } }, [props && props.sessionId])
       useEffect(function () { function update() { var n = 0, e = 0; for (var i = 0; i < state.tasks.length; i++) { if (state.tasks[i].status === 'pending') n++; if (state.tasks[i].escalation) e++ }; setPendingCount(n); setEscCount(e); setIsOpen(state.open); setIsRoot(state.isRoot) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!isRoot) return null // 子代理会话不显示看板入口
       return React.createElement('button', { onClick: function () { state.open = !state.open; notify() }, title: '智能看板' + (pendingCount > 0 ? '（' + pendingCount + ' 待办）' : '') + (escCount > 0 ? '（' + escCount + ' 待裁决）' : ''), style: { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', border: '1px solid ' + (escCount > 0 ? C.err : C.border), borderRadius: 6, background: isOpen ? C.nested : 'transparent', color: C.text, cursor: 'pointer', fontSize: 12 } }, React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center' } }, ic('clipboard-list', 14)), React.createElement('span', null, '智能看板'), escCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.err, color: C_INV, fontSize: 10, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 1, animation: 'tskb-pulse 1s ease-in-out infinite' }, title: escCount + ' 个任务待裁决' }, ic('alert-triangle', 10), escCount) : null, pendingCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.brand, color: C_INV, fontSize: 10, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' } }, String(pendingCount)) : null)
