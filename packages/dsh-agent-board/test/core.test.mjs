@@ -878,3 +878,103 @@ test('架构健康接线：get-tasks 返回 healthHints + 仪表盘 HealthHints 
   assert.match(cli, /warn \? C\.warn : infoColor/)                       // warn=琥珀 / info=蓝灰 两级配色
   assert.match(cli, /dsw-alias-state-business-primary/)                  // info 蓝灰用 DSH 现有 business 信息色（色板无独立 info 档）
 })
+
+// ===== 史诗父卡语义层：父卡自动流转 + childStats 聚合 =====
+test('parentKickOnDispatch: 子任务派发时 pending 父卡 → in-progress（记 ah），返回父卡', () => {
+  const p = mkTask({ id: 'epic', status: 'pending' })
+  const c = mkTask({ id: 'c1', parentId: 'epic' })
+  const d = mkBoard([p, c])
+  const r = core.parentKickOnDispatch(d, c)
+  assert.equal(r, p)
+  assert.equal(p.status, 'in-progress')
+  const h = p.history[p.history.length - 1]
+  assert.equal(h.from, 'pending'); assert.equal(h.to, 'in-progress')
+  assert.match(h.note, /首个子任务派发，史诗进入推进态/)
+})
+
+test('parentKickOnDispatch: 已在 in-progress 不重放 / verifying 不动', () => {
+  const p = mkTask({ id: 'epic', status: 'in-progress' })
+  const c1 = mkTask({ id: 'c1', parentId: 'epic' }); const c2 = mkTask({ id: 'c2', parentId: 'epic' })
+  const d = mkBoard([p, c1, c2])
+  assert.equal(core.parentKickOnDispatch(d, c1), null) // 已推进态 → 不重放
+  assert.equal(p.history.length, 0)
+  assert.equal(p.status, 'in-progress')
+  // verifying 父卡（全子任务 resolved 后的验收态）同样不动
+  const pv = mkTask({ id: 'epic2', status: 'verifying' })
+  const cv = mkTask({ id: 'c3', parentId: 'epic2' })
+  const d2 = mkBoard([pv, cv])
+  assert.equal(core.parentKickOnDispatch(d2, cv), null)
+  assert.equal(pv.status, 'verifying'); assert.equal(pv.history.length, 0)
+})
+
+test('parentKickOnDispatch: draft 父卡不动（草稿是刻意的人工态）', () => {
+  const p = mkTask({ id: 'epic', status: 'draft' })
+  const c = mkTask({ id: 'c1', parentId: 'epic' })
+  const d = mkBoard([p, c])
+  assert.equal(core.parentKickOnDispatch(d, c), null)
+  assert.equal(p.status, 'draft'); assert.equal(p.history.length, 0)
+})
+
+test('parentKickOnDispatch: 无 parentId / 父卡不存在 → null，无副作用', () => {
+  const solo = mkTask({ id: 'solo' }); const d = mkBoard([solo])
+  assert.equal(core.parentKickOnDispatch(d, solo), null)
+  const orphan = mkTask({ id: 'c1', parentId: 'ghost' }); const d2 = mkBoard([orphan])
+  assert.equal(core.parentKickOnDispatch(d2, orphan), null)
+})
+
+test('aggregateChildStats: 空板 / 无父子关系 → 空对象（不出键）', () => {
+  assert.deepEqual(core.aggregateChildStats([]), {})
+  assert.deepEqual(core.aggregateChildStats(null), {})
+  assert.deepEqual(core.aggregateChildStats(undefined), {})
+  const d = [mkTask({ id: 'a' }), mkTask({ id: 'b', status: 'in-progress' })]
+  assert.deepEqual(core.aggregateChildStats(d), {})
+})
+
+test('aggregateChildStats: 聚合口径 total/resolved/active/activeTitle', () => {
+  const kids = [
+    mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' }),
+    mkTask({ id: 'c2', parentId: 'epic', status: 'in-progress', title: '进行中甲' }),
+    mkTask({ id: 'c3', parentId: 'epic', status: 'pending' }),
+    mkTask({ id: 'c4', parentId: 'epic', status: 'in-progress', title: '进行中乙' }),
+    mkTask({ id: 'c5', parentId: 'epic', status: 'verifying' }),
+    mkTask({ id: 'c6', parentId: 'epic', status: 'blocked' }),
+  ]
+  const s = core.aggregateChildStats(kids).epic
+  assert.equal(s.total, 6)      // 非归档子任务全计
+  assert.equal(s.resolved, 1)   // 仅 resolved（verifying 不算完成）
+  assert.equal(s.active, 2)     // in-progress 数
+  assert.equal(s.activeTitle, '进行中甲') // 第一个 in-progress 子任务标题（看板顺序）
+})
+
+test('aggregateChildStats: 归档子任务不计入；全归档 → 不出键；多父卡各自成键', () => {
+  const tasks = [
+    // 父卡 p1：1 resolved + 1 archived（归档不计）+ 1 in-progress
+    mkTask({ id: 'a1', parentId: 'p1', status: 'resolved' }),
+    mkTask({ id: 'a2', parentId: 'p1', status: 'archived' }),
+    mkTask({ id: 'a3', parentId: 'p1', status: 'in-progress', title: 'p1活跃' }),
+    // 父卡 p2：全部 archived → 不出键
+    mkTask({ id: 'b1', parentId: 'p2', status: 'archived' }),
+    mkTask({ id: 'b2', parentId: 'p2', status: 'archived' }),
+    // 父卡 p3：无活跃子任务 → activeTitle 空串
+    mkTask({ id: 'd1', parentId: 'p3', status: 'pending' }),
+    mkTask({ id: 'd2', parentId: 'p3', status: 'resolved' }),
+  ]
+  const stats = core.aggregateChildStats(tasks)
+  assert.deepEqual(Object.keys(stats).sort(), ['p1', 'p3']) // p2 全归档不出键；父卡自身不在 tasks 也照算（按键聚合）
+  assert.deepEqual(stats.p1, { total: 2, resolved: 1, active: 1, activeTitle: 'p1活跃' }) // archived 的 a2 不进 total
+  assert.deepEqual(stats.p3, { total: 2, resolved: 1, active: 0, activeTitle: '' })
+})
+
+test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tasks 返回 childStats（源码级断言）', () => {
+  const host = hostSrc()
+  // poolCycle 占位 claim 的 dispatch 分支：claimApply 后紧跟 parentKickOnDispatch
+  assert.match(host, /claimApply\(d, t, 'spawn-pending', 'dispatch'\); if \(parentKickOnDispatch\(d, t\)\)/)
+  // get-tasks 现算 childStats（零存储）
+  assert.match(host, /d\.childStats = aggregateChildStats\(d\.tasks\)/)
+  // 两模块都从 core 解构引入（接线不断）
+  assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT \} = core/)
+  assert.match(host, /boardHome, aggregateChildStats \} = core/)
+  // 既有「全子任务 resolved → 父 verifying」逻辑不动（checkParentAuto 仍在 verifyApply 链路；core.mjs 不在 hostSrc 清单，单独读）
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  assert.match(coreSrc, /if \(verdict === 'approved' && isb\(t\)\) \{ var p = checkParentAuto\(d, t\)/)
+})

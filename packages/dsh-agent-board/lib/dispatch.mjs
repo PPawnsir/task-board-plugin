@@ -5,7 +5,7 @@
 import * as core from './core.mjs'
 import { readRunUsage } from './usage.mjs'
 import { TEAM_SPLIT_RULE, pushRejectLesson } from './policy.mjs'
-const { ah, cfg, claimApply, resolveApply, verifyApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseAnchorPath, sliceLines, buildFileOutline, LESSON_RECALL_HINT } = core
+const { ah, cfg, claimApply, resolveApply, verifyApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseAnchorPath, sliceLines, buildFileOutline, parentKickOnDispatch, LESSON_RECALL_HINT } = core
 
 export function createDispatch(ctx, state, deps) {
     const fs = ctx.fs
@@ -488,7 +488,7 @@ export function createDispatch(ctx, state, deps) {
         // worker 派发仅 auto；verifier 派发两种模式都跑（manual 模式主窗口 claim 做完的 full 档任务需要验收）
         var capW = isAuto ? Math.max(0, c.maxWorkers - activeW) : 0
         var picked = pickDispatch(d, capW, Math.max(0, c.maxVerifiers - activeV), runs)
-        picked.pendings.forEach(function (t) { claimApply(d, t, 'spawn-pending', 'dispatch'); toSpawn.push({ role: 'worker', t: t }); info.push('dispatch ' + t.id) })
+        picked.pendings.forEach(function (t) { claimApply(d, t, 'spawn-pending', 'dispatch'); if (parentKickOnDispatch(d, t)) info.push('epic-kick ' + t.parentId); toSpawn.push({ role: 'worker', t: t }); info.push('dispatch ' + t.id) })
         picked.verifs.forEach(function (t) { t.verifierRun = 'spawn-pending'; t.verifierRunAt = new Date().toISOString(); toSpawn.push({ role: 'verifier', t: t }); info.push('verify ' + t.id) })
         // touches 文件级排他展示态：被拦候选写 t.waitingForTouches = [持有者任务id...]，
         // 未被拦/已派发/已落定的任务清除该字段（每心跳刷新的 UI 展示态，不参与任何派发逻辑，

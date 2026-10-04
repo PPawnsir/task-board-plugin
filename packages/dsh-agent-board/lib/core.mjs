@@ -162,6 +162,35 @@ export function checkParentAuto(d, t) { if (!isb(t)) return null; var p = gpt(t,
 export function resolveApply(d, t, sid, status, resolution, note) { var ps = t.status; if (status === 'verifying' && t.pipeline && t.pipeline !== 'full') { status = 'resolved' } t.status = status; t.resolution = resolution || null; t.resolvedAt = new Date().toISOString(); ah(t, ps, status, sid, note); var r = { ok: true, task: t }; if (status === 'verifying' && isb(t)) { var s = gsb(t.parentId, d.tasks); if (s.every(function (x) { return x.status === 'resolved' || x.id === t.id })) { var p = gpt(t, d.tasks); if (p && p.status === 'in-progress') { p.status = 'verifying'; p.resolvedAt = new Date().toISOString(); p.resolution = 'all subtasks done'; ah(p, 'in-progress', 'verifying', 'system', 'auto'); r.parentUpdated = true } } }; return r }
 export function verifyApply(d, t, sid, verdict, comment) { var ps = t.status; if (verdict === 'approved') { t.status = 'resolved'; t.verifiedAt = new Date().toISOString(); t.verifiedBy = sid; delete t.frozen; delete t.frozenAt; delete t.frozenBy; ah(t, ps, 'resolved', sid, 'approved' + (comment ? ': ' + comment : '')) } else { t.status = 'in-progress'; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'in-progress', sid, 'rejected' + (comment ? ': ' + comment : '')) }; var r = { ok: true, task: t }; if (verdict === 'approved' && isb(t)) { var p = checkParentAuto(d, t); if (p) { r.parentUpdated = true } }; return r }
 
+// ===== 史诗父卡语义层 =====
+// 父卡自动流转：子任务被派发时（poolCycle 占位 claim 的 dispatch 分支调用），
+// 若父卡 status 为 pending → 父卡转 in-progress（ah 记「首个子任务派发，史诗进入推进态」），
+// 让史诗卡离开待办列、给出「正在推进」的列位置信号；同时打通既有 checkParentAuto
+// （全子任务 resolved → 父 verifying 要求父卡在 in-progress，此前 pending 父卡永远到不了）。
+// draft 父卡不动（草稿是刻意的人工态）；已在 in-progress/verifying 的不重放（返回 null）。
+// 返回被推进的父卡（无 parentId / 父卡不存在 / 父卡非 pending → null）。
+export function parentKickOnDispatch(d, t) { if (!isb(t)) return null; var p = gpt(t, d.tasks); if (!p || p.status !== 'pending') return null; p.status = 'in-progress'; ah(p, 'pending', 'in-progress', 'system', '首个子任务派发，史诗进入推进态'); return p }
+
+// childStats 聚合（get-tasks 返回体字段，按 tasks 现算零存储）：
+// { <parentId>: { total, resolved, active, activeTitle } }
+// 口径：total=该 parentId 的非归档子任务数；resolved=其中 resolved/archived（归档子任务
+// 已在 total 口径被排除，archived 分支保留仅为防御性写明口径）；active=in-progress 数；
+// activeTitle=第一个 in-progress 子任务标题（按看板顺序，无则空串）。
+// 无非归档子任务的父卡不出键（史诗归档时子任务级联归档，键自然消失）。
+export function aggregateChildStats(tasks) {
+  var out = {}
+  var list = Array.isArray(tasks) ? tasks : []
+  for (var i = 0; i < list.length; i++) {
+    var t = list[i]
+    if (!t || !isb(t) || t.status === 'archived') continue
+    var s = out[t.parentId] || (out[t.parentId] = { total: 0, resolved: 0, active: 0, activeTitle: '' })
+    s.total++
+    if (t.status === 'resolved' || t.status === 'archived') s.resolved++
+    if (t.status === 'in-progress') { s.active++; if (!s.activeTitle) s.activeTitle = String(t.title || '') }
+  }
+  return out
+}
+
 // ===== 输出解析（文本降级路径）=====
 // parseSections: 解析 ## 分段输出为结构化字段（容错：无分段时返回空对象，调用方降级）
 export function parseSections(text) {
