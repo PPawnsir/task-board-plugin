@@ -140,6 +140,8 @@ export function createDispatch(ctx, state, deps) {
 
     async function spawnOneShot(sid, t, role) {
       var subagents = ctx.subagents; if (!subagents) return null
+      // 兜底保留（真异常时有用）：poolCycle 入口已有 root 存活早闸门，正常派发路径不会到达这里；
+      // 只有闸门外的直接调用（如 dispatch-task RPC 指定了无 root 的 sid）才会触发此报错。
       var parent = rootForSession(sid); if (!parent) { console.error('[task-board] no root agent for session ' + sid + ', skip spawn'); return null }
       var providerName = pickProvider(); if (!providerName) { console.error('[task-board] no subagent provider'); return null }
       var modelOverride = ''
@@ -330,6 +332,14 @@ export function createDispatch(ctx, state, deps) {
 
     // ===== 派发周期（15s 心跳 + 写入后 kickCycle 触发）=====
     async function poolCycle(sid) {
+      // root 存活早闸门（根治 no-root 刷屏，task-muuf0o7a）：无活 root 的会话板根本不进派发循环——
+      // 不读盘、不 claim、不回收、不写盘、零日志。幻影板（裸短 id 建的 tasks-<短id>.json，真实会话
+      // id 带 session- 前缀与后缀，rootForSession 永远匹配不到）或已关闭会话的残留板若进循环，
+      // 每 15s 心跳都会 pickDispatch→占位 claim→spawnOneShot 才发现无 root→console.error→占位
+      // 超时回收→下轮再来，永久 spam。死会话的 pending 卡等会话重开后自然恢复派发
+      // （这正是孤儿板接管语义），此处无需任何动作。
+      // 返回值说明：调用方（store.kickCycle / 15s 心跳）均忽略返回值，返回 undefined 签名兼容。
+      if (!rootForSession(sid)) return undefined
       var info = []
       var runs = runsFor(sid)
       var snap = await rt(sid)

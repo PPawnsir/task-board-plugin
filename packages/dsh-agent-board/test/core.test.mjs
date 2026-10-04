@@ -13,6 +13,9 @@ import * as core from '../lib/core.mjs'
 import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE } from '../index.mjs'
 import { aggregateUsageSummary, readRunUsage, findRunLog } from '../index.mjs'
 import { createRpc } from '../lib/rpc.mjs'
+// no-root 刷屏根治（task-muuf0o7a）专项：会话层幻影板防线 + 派发层 root 闸门直调断言
+import { createSession, isFullSessionId } from '../lib/session.mjs'
+import { createDispatch } from '../lib/dispatch.mjs'
 // host 端源码拼接（Phase 2 模块化后：薄壳 index.mjs + lib/*.mjs 领域模块），供源码级接线断言
 const HOST_SOURCES = ['../index.mjs', '../lib/policy.mjs', '../lib/usage.mjs', '../lib/session.mjs', '../lib/store.mjs', '../lib/notify.mjs', '../lib/dispatch.mjs', '../lib/rpc.mjs']
 function hostSrc() { return HOST_SOURCES.map(function (f) { return readFileSync(new URL(f, import.meta.url), 'utf8') }).join('\n') }
@@ -706,13 +709,16 @@ test('粒度治理接线：工具描述/Team 提示词/双出口返回体均已�
 // ===== create-task 空 description 软警告（E 卡）=====
 // 轻量 RPC 直调 harness：mock ctx（tools/effect/webServer）+ deps 最小面，直接调 handlers['create-task']
 // extra 可覆盖默认 deps（如 epic 预检用例注入 pushSysNote 捕获 / sessionCwd 解析根）
+// 幻影板防线（task-muuf0o7a）落地后，create-task 对不完整短 id 直接报错——mock 默认 sid
+// 必须是完整形态（session-xxxx-xxxx-...），否则全量 create-task 用例会被防线拦住。
+const FULL_SID = 'session-test-0000-0000-000000000000'
 function mkRpcHandlers(board, extra) {
   const state = { handlers: {}, teamModeCache: {}, feedbackCache: {} }
   const tools = {} // 工具通道捕获：双通道接线测试经 __tools['task_create'].execute(...) 直调
   const ctx = { tools: { register(t) { tools[t.name] = t } }, effect() {}, webServer: { register() { return () => {} } } }
   const deps = Object.assign({
     getActorId: () => 'tester', resolveRoot: (x) => x,
-    toolSessionId: () => 's1', rpcSessionId: () => 's1',
+    toolSessionId: () => FULL_SID, rpcSessionId: () => FULL_SID,
     rootForSession: () => null, deriveWorkMode: () => 'solo', runsFor: () => [],
     rt: async () => board, mutateLocked: (sid, fn) => fn(board),
     maybeNotify: () => {}, notifyTaskDone: () => {},
@@ -1424,4 +1430,113 @@ test('无障碍接线：卡片 role/tabIndex/aria-label/onKeyDown/焦点框 + �
   assert.match(cli, /p = rpc\('resolve-task', \{ taskId: task\.id, status: 'verifying', resolution: res \}\)/)
   assert.match(cli, /p = rpc\('verify-task', \{ taskId: task\.id, verdict: 'approved' \}\)/)
   assert.match(cli, /setActionMsg\('⚠️ 流转失败：' \+ \(r\.error \|\| '未知错误'\)\)/)
+})
+
+// ===== no-root 刷屏根治（task-muuf0o7a）：poolCycle root 闸门 + 短 id 幻影板防线 =====
+// 事故链：幻影板 tasks-cc24eb5c.json（裸短 id 建出）滞留 pending 卡 → poolCycle 每 15s
+// pickDispatch 成功→占位 claim→spawnOneShot 才发现无活 root→console.error→占位超时回收
+// →下轮再来，永久 spam。根治 = ①poolCycle 入口 root 闸门（无 root 不派发不写盘零日志）
+// + ②touchSession/create-task 拒绝不完整短 id（import- 前缀放行）。
+
+test('isFullSessionId：裸短 id/空值/unknown 拒绝；完整 root id 与 import- 前缀放行', () => {
+  assert.equal(isFullSessionId('cc24eb5c'), false)           // 裸短 id（本次幻影板元凶）
+  assert.equal(isFullSessionId(''), false)
+  assert.equal(isFullSessionId(null), false)
+  assert.equal(isFullSessionId(undefined), false)
+  assert.equal(isFullSessionId('unknown'), false)
+  assert.equal(isFullSessionId('abcdefghij-k'), false)       // 长度 <20
+  assert.equal(isFullSessionId('abcdefghijklmno-pqrst'), false) // ≥20 但只有一个 '-'
+  assert.equal(isFullSessionId('-abcdefghij-klmnopqr'), false)  // 首字符即 '-' 不算结构
+  assert.equal(isFullSessionId('session-cc24eb5c-702c-4f7d-a1b2c3d4e5f6'), true)
+  assert.equal(isFullSessionId('import-sess_df0837fa-1'), true) // import- 前缀板合法放行
+})
+
+test('touchSession：不完整短 id 不注册进已知会话集合（幻影板不进心跳轮询）', () => {
+  const known = {}
+  const session = createSession({}, { knownSessions: known, feedbackCache: {}, activeRuns: {}, dispatchedEver: {} })
+  session.touchSession('cc24eb5c')     // 裸短 id → 拒绝
+  session.touchSession('unknown')      // 既有排除项不变
+  session.touchSession(null)
+  session.touchSession('session-cc24eb5c-702c-4f7d-a1b2c3d4e5f6') // 完整 id → 注册
+  session.touchSession('import-sess_df0837fa-1')                  // import- 前缀 → 放行
+  assert.deepEqual(Object.keys(known).sort(), ['import-sess_df0837fa-1', 'session-cc24eb5c-702c-4f7d-a1b2c3d4e5f6'].sort())
+})
+
+// poolCycle 直调 harness：ctx 不给 timer（15s 心跳 IIFE 跳过），deps 全 mock，计数读/写/日志
+function mkDispatch(board, over) {
+  const counters = { reads: 0, writes: 0, errs: [] }
+  const dispatch = createDispatch(
+    // 创建期无条件触达：effect（卸载清理注册）/ get('systemPrompt' 引导段)；不给 timer/agents/subagents
+    { fs: {}, effect: function () {}, get: function () { return null } },
+    { knownSessions: {}, dispatchedEver: {}, badModels: {}, packByChild: {}, pendingPacks: [], teamModeCache: {}, activeRuns: {} },
+    Object.assign({
+      rt: async () => { counters.reads++; return board },
+      wt: async () => { counters.writes++ },
+      mutateLocked: async (sid, fn) => { counters.writes++; return fn(board) },
+      kickCycle: () => {},
+      rootForSession: () => undefined, // 默认无活 root（幻影板/死会话场景）
+      sessionCwd: () => '', withTimeout: (p) => p, runsFor: () => ({}), feedbackOn: () => true,
+      pushSysNote: () => {}, maybeNotify: () => {}, notifyTaskDone: () => {},
+    }, over || {}))
+  return { dispatch, counters }
+}
+
+test('poolCycle root 闸门：无活 root → 直接返回 undefined，不读盘/不写盘/零日志（根治 15s 刷屏）', async () => {
+  const { dispatch, counters } = mkDispatch(mkBoard([mkTask()])) // 板上有 pending 卡也不进循环
+  const origErr = console.error
+  console.error = function () { counters.errs.push(Array.prototype.join.call(arguments, ' ')) }
+  try {
+    const r = await dispatch.poolCycle('cc24eb5c')
+    assert.equal(r, undefined) // 调用方（kickCycle/15s 心跳）忽略返回值，签名兼容
+    assert.equal(counters.reads, 0)  // rt 都没跑：零读盘
+    assert.equal(counters.writes, 0) // 零写盘
+    assert.deepEqual(counters.errs, []) // 零日志
+  } finally { console.error = origErr }
+})
+
+test('poolCycle root 闸门：有活 root → 正常进循环（空板走空闲快进返回 snap，不写盘）', async () => {
+  const board = mkBoard([])
+  const { dispatch, counters } = mkDispatch(board, { rootForSession: () => ({ id: FULL_SID }) })
+  const r = await dispatch.poolCycle(FULL_SID)
+  assert.ok(r && Array.isArray(r.tasks)) // 空闲快进返回 snap（闸门未误伤正常路径）
+  assert.equal(counters.reads, 1)
+  assert.equal(counters.writes, 0) // 空板无残留 poolStatus/dispatchInfo → 快进不写盘
+})
+
+test('create-task RPC：不完整短 id sessionId → 报错不建板；import- 前缀与正常路径放行', async () => {
+  // rpcSessionId 覆写为「尊重显式 sessionId 入参」（生产行为：args.sessionId 优先于 actor 归一）
+  const honorSid = { rpcSessionId: (args) => (args && args.sessionId) || FULL_SID }
+  // ① 裸短 id → 拒绝且不落任务（防幻影板）
+  const board = mkBoard([])
+  const r = await mkRpcHandlers(board, honorSid)['create-task']({ title: 'T', description: 'd', sessionId: 'cc24eb5c' })
+  assert.equal(r.ok, false)
+  assert.match(r.error, /sessionId 不完整/)
+  assert.equal(board.tasks.length, 0)
+  // ② import- 前缀板 → 放行（导入会话是合法板，别误伤）
+  const board2 = mkBoard([])
+  const r2 = await mkRpcHandlers(board2, honorSid)['create-task']({ title: 'T', description: 'd', sessionId: 'import-sess_df0837fa-1' })
+  assert.equal(r2.ok, true)
+  assert.equal(board2.tasks.length, 1)
+  // ③ 不传 sessionId（正常路径，归一为完整 root id）→ 放行，返回体形态不变
+  const board3 = mkBoard([])
+  const r3 = await mkRpcHandlers(board3, honorSid)['create-task']({ title: 'T', description: 'd' })
+  assert.equal(r3.ok, true)
+  assert.equal(board3.tasks.length, 1)
+})
+
+test('no-root 刷屏根治接线断言（源码级）：闸门/防线/兜底注释均在位', () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const ses = readFileSync(new URL('../lib/session.mjs', import.meta.url), 'utf8')
+  const rpc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  // ① poolCycle 入口即 root 闸门（闸门必须在 rt 读盘之前——不读盘才谈得上零 IO）
+  assert.match(dsp, /async function poolCycle\(sid\) \{[\s\S]{0,900}if \(!rootForSession\(sid\)\) return undefined[\s\S]{0,200}var snap = await rt\(sid\)/)
+  // spawnOneShot 的 console.error 兜底保留 + 注释说明闸门在上游
+  assert.match(dsp, /console\.error\('\[task-board\] no root agent for session ' \+ sid \+ ', skip spawn'\)/)
+  assert.match(dsp, /poolCycle 入口已有 root 存活早闸门/)
+  // ② touchSession 注册口接入 isFullSessionId；纯函数出口 + rpc.mjs 直引
+  assert.match(ses, /export function isFullSessionId\(sid\)/)
+  assert.match(ses, /sid !== 'unknown' && isFullSessionId\(sid\)\) knownSessions\[sid\]/)
+  assert.match(rpc, /import \{ isFullSessionId \} from '\.\/session\.mjs'/)
+  // create-task handler 校验在 mutateLocked 之前（拒绝时不建板）
+  assert.match(rpc, /handle\('create-task', async function \(args\) \{ var sid = rpcSessionId\(args\);[\s\S]{0,400}if \(!isFullSessionId\(sid\)\) return \{ ok: false, error: 'sessionId 不完整[\s\S]{0,120}return mutateLocked/)
 })
