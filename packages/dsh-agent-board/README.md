@@ -141,9 +141,11 @@ draft → pending → in-progress → verifying → resolved → archived
 - **面板轮询渲染短路**：`get-tasks` 响应附 `tasksHash`，任务列表无变化时前端跳过重渲染（usage/池状态等轻量字段照常刷新）
   - 卡片识别层：父卡显示「📦 史诗 · settled/total」徽章 + 3px 迷你进度条（`settled = resolved | cancelled | archived`，total 同口径含归档；有在跑子任务时附「▸ 在跑：标题」行）；子卡标题下显示「↳ 父任务标题」；依赖未满足的待办卡底部灰字「⛓ 等待「依赖标题」」（childStats 由 host 现算，缺字段一律不渲染）
   - 详情父子区块：父卡详情列子任务清单（状态色点 + 标题，**含已归档留档**——归档行灰化 + 行尾「已归档」徽章并沉底，点击直达子卡详情，标题行汇总 settled/total）；子卡详情顶行「↳ 史诗：父标题」点击回跳父卡
+- **可选 hooks（史诗可选点位：前置/后置各是一次真实 agent 运行）**：`epic.hooks = { pre: { enabled, prompt, state, runId }, post: 同构 }`——**前置**让子任务具备开跑条件（串行闸门：未完成前该史诗的子任务一张都不派），**后置**把这批活收口（全部子任务了结后跑一遍，完成后史诗才转验证中）；prompt 只给薄框架契约，具体动作由 hook agent **自行决策**，**吃不准就走歧义上报**（失败即转阻塞等人裁决：重试/跳过/放弃，不自动重跑）。hook run 记在 `epic.runs[]`（role `hook-pre`/`hook-post`），卡片带相位徽章（`⏳ 前置准备中` / `🧪 收尾中` / `⚠️ hook 失败待裁决`，无 hooks 的老卡零渲染），详情页 hooks 区可编辑 enabled+prompt、查看 state/耗时并跳转 run 会话、失败一键跳裁决区；**hooks 仅主窗口可设**（工具与 RPC 双通道门禁），commit/push 不入任何默认形态
 - **删除通道（真删，无 undo）**：`delete-task` RPC（卡片 hover 垃圾桶按钮 / 详情页「删除」按钮，均先 `confirm('删除不可恢复，确认删除「标题」？')`）+ `batch-op op='delete'`（多选模式底部「批量删除」，同样 confirm）。状态门禁：**草稿/待办/阻塞可删**；进行中/验证中拒绝并提示先用 `terminate-agent` 终止（避免在跑的 run 变孤儿）；已完成/取消引导改用归档（`archive-task`，留档可检索）；有**未归档子任务**时拒删（防 `parentId` 悬空破坏父任务自动流转）；已归档任务幂等返回 ok。是真删（从 `tasks` 数组移除），因此**不产生 `batch-undo` 撤销快照**（批量条对 delete 不显示「↩️ 撤销」），删除操作在 host 端 `console.error` 留一行日志便于溯源
 - **任务粒度建议**：单任务 **10~30 分钟**可独立完成为甜区；预计超过 30 分钟的大任务先建一张 **epic 父卡**（`pipeline: direct`，不进池派发），再挂若干 10~30 分钟的子任务（`task_create` 传 `parentId=父卡 id`，有先后顺序用 `dependsOn` 串联），子任务全部完成后父卡自动流转（`checkParentAuto`）——`task_create` 工具描述与 Team 模式提示词都写了这条契约
 - **suggestSplit 软提示**：`task_create` / `create-task` 发现描述超 500 字符、或标题/描述命中「全量 / 整体 / 系统级 / 全面 / 重构 / 所有模块 / 整个」等史诗特征词时，返回体附带一行 `suggestSplit` 建议文案（**只提示，不阻断创建与派发**；未命中则不出现该字段，老调用方无感）
+- **开关 `epicSplit`（史诗拆分总开关）**（⚙️ 入池配置弹层「**功能**」小节，默认**开**）：关掉只停**引导**——Team 提示词第 6 条拆分条款整条不注入、`create-task`/`task_create` 响应不再附 `suggestSplit` 软提示；**机制不禁**（显式传 `parentId` 建子卡、史诗自动收口与 hooks 状态机照常工作，明确要拆时不受阻）；老看板文件没有该字段 → 读路径自动补 `true`（与升级前行为一致）。工具描述里的粒度契约是静态工具定义（随 request header 快照），不在开关范围
 
 ### 一次性派发（v74 去池化）
 
@@ -180,7 +182,7 @@ Team 托管档独有（调度员体验）：
 - 主窗口 system prompt 注入派发引导（提示词层面建议实质性改动走看板，不硬拦截）；引导含**上下文书写提示**——子代理是全新会话、无会话记忆，description 写不够会自行调研跑偏
 - **默认草稿护栏**：`task_create` / `create-task` 缺省建为草稿（草稿不派发），先把所有任务的 dependsOn、contextNotes/contextFiles 补齐，再逐个 `task_update publish=true` 统一发布；确实要立即派发的单个任务才显式传 `draft:false`
 - **歧义通知 25s 去抖**：通知延迟 25s 投递，投递前重读看板——歧义已被裁决、或任务已 resolved/archived 就静默跳过（消除主窗口 turn 排队导致的过期回声）；同一任务连续多次上报只投最新一条
-- 任务完成/阻塞时主窗口收到**批量聚合回执**（45s 窗口或满 5 条聚合，等主窗口空闲再发，不打断对话）
+- 任务完成/阻塞时主窗口收到**批量聚合回执**（45s 窗口或满 5 条聚合，等主窗口空闲再发，不打断对话）；⚙️ 设置区「通知」小节有两个回执开关——`notifyDispatch`（⚡ 派发回执：任务被 Worker/Verifier 领走时播报）与 `notifyDone`（✅ 完成回执：完成/阻塞时聚合播报），缺省均**开**（老看板文件缺字段自动补 `true`）；**歧义裁决通知不受开关影响**（裁决通道不是回执，任务等人裁决必须提醒）
 
 > 兼容：旧的 `set-board-mode` / `set-team-mode` 两个 RPC 原样保留（旧客户端与脚本不受影响），
 > 内部仍以 `boardMode` + `teamMode` 两个字段落盘，老看板文件无损；`get-tasks` 额外返回派生字段 `workMode` 供 UI 单点读取。

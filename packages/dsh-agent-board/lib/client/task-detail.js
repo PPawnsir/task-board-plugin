@@ -104,6 +104,119 @@
           })) : null)
     }
 
+    // ===== Hooks（可选点位）· 史诗前置/后置 agent run 的编辑与状态面板（task-muuw56yf）=====
+    // 契约以 host core.normalizeHooks / mergeHooks 为准（勿凭记忆改字段名）：
+    //   epic.hooks = { pre: { enabled, prompt, state, runId, pending? }, post: 同构 }，state ∈ idle|running|done|failed；
+    //   hook run 记在 epic.runs[]（role 'hook-pre'/'hook-post'，字段 { role, id, at, endedAt, outcome, model }）。
+    // 写入通道 = update-task RPC 的 hooks 字段（浅合并：未提交的点位保留原值，传 null 撤点位）。
+    // 三条 UI 口径：
+    //   ① 老卡零渲染：既无子任务、也未声明 hooks 的普通卡整块不出现（与卡片相位徽章同一门禁）；
+    //   ② 权限不在 UI 判断——「hooks 仅主窗口可设」由 host 双重门禁裁决，失败原因原样 ⚠️ 回显；
+    //      客户端预判角色只会把真实错误变成灰按钮，反而更难查；
+    //   ③ state 只读展示（host 状态机推进，重启可恢复）；重试=把 state 置回 idle，走裁决通道，
+    //      这里只负责给 failed 一个「前往裁决」锚点，不另造裁决入口。
+    function hookRunOf(task, phase, runId) {
+      var role = 'hook-' + phase
+      // host 侧 run id 落位不对称：pre 在 spawn 成功时回填 hooks.pre.runId，post 复用 verifierRun 位
+      // （claim 占位换真 id）；且两端结算都把 runId 归零——所以取不到时按角色回退「最后一条」。
+      var rid = runId || (phase === 'post' ? task.verifierRun : null)
+      var runs = Array.isArray(task.runs) ? task.runs : []
+      var hit = null
+      for (var i = 0; i < runs.length; i++) {
+        if (!runs[i] || runs[i].role !== role) continue
+        if (rid && runs[i].id !== rid) continue
+        hit = runs[i] // 顺序遍历取最后一条匹配：重试后的新 run 覆盖旧展示
+      }
+      return hit
+    }
+    function hookStateMeta(task, phase) {
+      var h = (task.hooks && task.hooks[phase]) || null
+      var st = (h && h.state) || 'idle'
+      var off = !h || !h.enabled
+      var run = hookRunOf(task, phase, h && h.runId)
+      var meta = { idle: { label: off ? '未启用' : '待运行', color: C.text2 }, running: { label: '运行中', color: C.brand }, done: { label: '已完成', color: C.ok }, failed: { label: '失败', color: C.err } }[st] || { label: String(st), color: C.text2 }
+      // 耗时：运行中 = 距 spawn 的已跑时长；已落定 = spawn → endedAt 净耗时（老 run 无 endedAt 则不显示）
+      var dur = ''
+      if (run && run.at) {
+        if (st === 'running') dur = '已跑 ' + elapsedSince(run.at)
+        else if (run.endedAt) dur = '耗时 ' + fmtDur(new Date(run.at).getTime(), new Date(run.endedAt).getTime())
+      }
+      return { state: st, off: off, label: meta.label, color: meta.color, run: run, dur: dur }
+    }
+    function HooksSection(props) {
+      var task = props.task
+      var kHooks = task.hooks || null
+      var _a = useState(''), msg = _a[0], setMsg = _a[1]
+      var _b = useState(false), saving = _b[0], setSaving = _b[1]
+      // 编辑缓冲以「卡上现值」为初值；父层以 key=task.id 挂载 → 切换任务自动重挂，缓冲不会串卡
+      var _c = useState({ pre: { enabled: !!(kHooks && kHooks.pre && kHooks.pre.enabled), prompt: (kHooks && kHooks.pre && kHooks.pre.prompt) || '' }, post: { enabled: !!(kHooks && kHooks.post && kHooks.post.enabled), prompt: (kHooks && kHooks.post && kHooks.post.prompt) || '' } }), buf = _c[0], setBuf = _c[1]
+      var kids = state.tasks.filter(function (x) { return x.parentId === task.id })
+      var declared = !!(kHooks && (kHooks.pre || kHooks.post))
+      if (kids.length === 0 && !declared) return null
+      function setPhase(ph, patch) { var nb = { pre: buf.pre, post: buf.post }; nb[ph] = Object.assign({}, nb[ph], patch); setBuf(nb) }
+      // 提交体组装（三条口径缺一都踩坑）：
+      //   a) prompt 清空 = 撤掉该点位：host normalizeHooks 明确拒绝空 prompt，撤点位用 null 表达才在契约内
+      //      （不该把「我不想要这个 hook 了」变成一条报错）；**例外**——该点位 state='running' 时不清空：
+      //      run 还在飞，撤掉声明会让它的结算落到空点位（表现为白跑一轮），删除意图原样保留并回一行提示；
+      //   b) 已声明点位的 state/runId/pending 原样回传：normalizeHooks 对缺省 state 归零成 idle，
+      //      不透传就等于「改一下 prompt 把在跑/已落定的 hook 打回待运行」；
+      //   c) 凑不出 prompt 的点位一律提交 null（幂等删除，不凭空造点位）。
+      function payloadFor(ph) {
+        var cur = (task.hooks && task.hooks[ph]) || null
+        var b = buf[ph] || { enabled: false, prompt: '' }
+        function keep(h) { var it = { enabled: !!h.enabled, prompt: String(h.prompt || '') }; if (h.state) it.state = h.state; if (h.runId) it.runId = h.runId; if (h.pending) it.pending = true; return it }
+        if (!String(b.prompt || '').trim()) {
+          if (cur && cur.state === 'running') return { item: keep(cur), warn: ph + ' 运行中：本次不清空该点位（run 还在跑），等它跑完再撤' }
+          return { item: null }
+        }
+        var item = { enabled: !!b.enabled, prompt: String(b.prompt).slice(0, 4000) }
+        if (cur) {
+          if (cur.state) item.state = cur.state
+          if (cur.runId) item.runId = cur.runId
+          if (cur.pending) item.pending = true
+        }
+        return { item: item }
+      }
+      function save() {
+        if (saving) return
+        var pre = payloadFor('pre'), post = payloadFor('post')
+        var warns = [pre.warn, post.warn].filter(Boolean)
+        setSaving(true); setMsg('')
+        rpc('update-task', { taskId: task.id, hooks: { pre: pre.item, post: post.item } }).then(function (r) {
+          setSaving(false)
+          if (r && r.ok === false) { setMsg('⚠️ ' + (r.error || '保存失败')); return }
+          setMsg(warns.length ? '⚠️ ' + warns.join('；') : '✅ 已保存 hooks 配置')
+          fetchTasks()
+        }).catch(function (e) { setSaving(false); setMsg('⚠️ ' + String(e)) })
+      }
+      // 「前往裁决」= 同页锚点跳转（裁决区 id 固定 tskb-escalation，由 DetailView 渲染）；
+      // hook 失败时 host 已把 epic 转 blocked 并挂好 escalation，这里只把视线送过去。
+      function goArbitration() { var el = document.getElementById('tskb-escalation'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' }) }
+      function phaseRow(ph, title, hint) {
+        var m = hookStateMeta(task, ph)
+        var b = buf[ph] || { enabled: false, prompt: '' }
+        return React.createElement('div', { key: ph, style: { marginBottom: 6, padding: '5px 7px', border: '1px solid ' + C.border, borderRadius: 5, background: C.nested } },
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 4 } },
+            React.createElement('label', { style: { fontSize: 11, fontWeight: 600, color: C.text, display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' } },
+              React.createElement('input', { type: 'checkbox', checked: !!b.enabled, onChange: function (e) { setPhase(ph, { enabled: e.target.checked }) }, title: '启用该点位（停用后 host 全链路跳过它）' }),
+              title),
+            React.createElement('span', { title: 'state 由 host 状态机推进（写在卡上，重启可恢复）；失败后重试=把 state 置回 idle，走裁决通道', style: { fontSize: 9, padding: '0 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + m.color + ' 16%, transparent)', color: m.color, fontWeight: 600 } }, m.label),
+            m.dur ? React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, m.dur) : null,
+            m.run && m.run.id ? React.createElement('button', { onClick: function () { if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(m.run.id) }, title: '查看该 hook run 的会话（' + m.run.id + (m.run.model ? ' · ' + m.run.model : '') + '）', style: { fontSize: 9, padding: '1px 6px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '→ 查看会话') : null,
+            m.state === 'failed' ? React.createElement('button', { onClick: goArbitration, title: '跳到本页裁决区：重试（置回 idle）/ 跳过（置 done 放行）/ 放弃（终止史诗）', style: { fontSize: 9, padding: '1px 6px', border: 'none', borderRadius: 3, background: C.err, color: C_INV, cursor: 'pointer', fontWeight: 600 } }, '前往裁决') : null),
+          React.createElement('textarea', { value: b.prompt, onChange: function (e) { setPhase(ph, { prompt: e.target.value }) }, rows: 2, placeholder: '补充指令（可选）——前置=让子任务具备开跑条件；后置=把这批活收口。具体动作由 hook agent 自行决策', style: { width: '100%', fontSize: 11, padding: '4px 6px', border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text, resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit' } }),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, lineHeight: 1.6 } }, hint))
+      }
+      return React.createElement('div', { style: { marginBottom: 8, padding: '6px 8px', border: '1px solid ' + C.border, borderRadius: 6, background: C.card } },
+        React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('zap', 11), 'Hooks（可选点位）'),
+        phaseRow('pre', '⏳ 前置（pre）', '让子任务具备开跑条件：未完成前该史诗的子任务一张都不派（串行闸门）。'),
+        phaseRow('post', '🧪 收尾（post）', '把这批活收口：全部子任务了结后跑一遍，完成后史诗才转验证中。'),
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+          React.createElement('button', { onClick: save, disabled: saving, title: '保存到卡上（update-task RPC，hooks 字段浅合并）', style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.brand, color: C_INV, cursor: saving ? 'default' : 'pointer', opacity: saving ? 0.6 : 1, fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, saving ? '保存中…' : [ic('save', 10), ' 保存 hooks']),
+          msg ? React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, msg) : null),
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 4, lineHeight: 1.6 } }, '每个点位是一次真实 agent 运行（不是声明式命令）：prompt 只给薄框架契约与上下文，动作由 hook agent 自行决策，吃不准会歧义上报；失败即转阻塞等人裁决（重试/跳过/放弃），不会自动重跑。清空 prompt 保存 = 撤掉该点位。hooks 仅主窗口可设（host 门禁，失败原因原样回显）。'))
+    }
+
     function DetailView() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect; var task = getTask(state.detailId)
       var _a = useState(task ? task.title : ''), editTitle = _a[0], setEditTitle = _a[1]; var _b = useState(task ? task.description || '' : ''), editDesc = _b[0], setEditDesc = _b[1]; var _c = useState(false), saving = _c[0], setSaving = _c[1]; var _d = useState(state.boardMode), mode = _d[0], setMode = _d[1]
@@ -182,7 +295,7 @@
           React.createElement('span', null, '已运行 ' + elapsedSince(task.claimedAt) + '（软超时 ' + state.softTimeoutMin + ' 分提醒 · 硬超时 ' + state.hardTimeoutMin + ' 分自动终止）'),
           elapsedMin(task.claimedAt) > state.softTimeoutMin ? React.createElement('span', { style: { color: C.warn, fontWeight: 600 } }, '⏱ 已超软超时') : null,
           React.createElement('button', { onClick: doTerminate, title: '终止该执行 Agent，任务回 pending 重新排队', style: { fontSize: 10, padding: '2px 8px', border: '1px solid ' + C.err, borderRadius: 3, background: 'transparent', color: C.err, cursor: 'pointer', marginLeft: 'auto' } }, '⏹ 立即终止')) : null,
-        task.escalation ? React.createElement('div', { style: { marginBottom: 8, padding: '8px 10px', border: '1px solid ' + C.err, borderRadius: 6, background: 'color-mix(in srgb, ' + C.err + ' 8%, transparent)' } },
+        task.escalation ? React.createElement('div', { id: 'tskb-escalation', style: { marginBottom: 8, padding: '8px 10px', border: '1px solid ' + C.err, borderRadius: 6, background: 'color-mix(in srgb, ' + C.err + ' 8%, transparent)' } },
           React.createElement('div', { style: { fontSize: 12, fontWeight: 700, color: C.err, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('alert-triangle', 13), 'Worker 上报歧义 — 等待主窗口裁决'),
           React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, whiteSpace: 'pre-wrap', maxHeight: 160, overflowY: 'auto' } }, task.escalation.question),
           React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, '上报于 ' + ago(task.escalation.at) + ' · ' + (task.escalation.by || '')),
@@ -225,6 +338,8 @@
             '📎 调研注入: ' + (empty ? '无调研注入——Worker 需自行定位，建议补 contextFiles/contextNotes' : parts.join(' · ')))
         })(),
         React.createElement(FamilySection, { task: task }),
+        // Hooks 区（史诗可选点位）：key=task.id 保证切换任务时重挂，编辑缓冲不串卡
+        React.createElement(HooksSection, { key: task.id, task: task }),
         React.createElement(DepsSection, { task: task }),
         task.acceptance ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, padding: '5px 8px', background: C.nested, borderRadius: 4, borderLeft: '2px solid ' + C.ok, fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 4 } }, ic('flask-conical', 11), '硬性验收: ' + task.acceptance) : null,
         task.resolution ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, padding: '5px 8px', background: C.nested, borderRadius: 4, borderLeft: '2px solid ' + C.warn, maxHeight: 120, overflowY: 'auto', whiteSpace: 'pre-wrap' } }, '📝 ' + task.resolution) : null,

@@ -232,7 +232,7 @@ function apply(ctx) {
 
     var COLUMNS = ['draft', 'pending', 'in-progress', 'verifying', 'resolved', 'blocked']
     var reqEpoch = 0 // 会话切换纪元：切会话时自增，旧会话在途响应按纪元丢弃
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
 
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
@@ -338,6 +338,11 @@ function apply(ctx) {
         state.childStats = (d && d.childStats) || {}
         // 学习飞轮 v1 能力检测：老 host 不返回该字段 → 视为开启（默认开）；只有显式 false 才关。
         state.feedbackEnabled = !(d && d.feedbackEnabled === false)
+        // 回执开关（设置区「通知」）：同口径——老 host 不返回 → 视为开，只有显式 false 才关
+        state.notifyDispatch = !(d && d.notifyDispatch === false)
+        state.notifyDone = !(d && d.notifyDone === false)
+        // 史诗拆分总开关（设置区「功能」）：同上——老 host 不返回 = 开（引导照旧），只有显式 false 才关
+        state.epicSplit = !(d && d.epicSplit === false)
         applyIsRoot(!d || d.isRoot !== false) // 原始值只喂给防抖器，消费点一律读 isRootStable
         if (!state.isRootStable && state.open) { state.open = false; state.detailId = null } // 子代理会话（含连续 3 次 false 的真降级）：强制收起看板
         if (d && d.dispatchInfo && d.dispatchInfoAt && Date.now() - new Date(d.dispatchInfoAt).getTime() < 120000) { state.dispatchInfo = d.dispatchInfo } else { state.dispatchInfo = '' } // 瞬时通知 2min 内有效，过期强制清空（服务端写后不清曾致残留数天）
@@ -526,7 +531,9 @@ function apply(ctx) {
       var _te = useState(state.tasksErr), tasksErr = _te[0], setTasksErr = _te[1] // 读路径错误条（无错不渲染）
       var _sto = useState(state.softTimeoutMin), softT = _sto[0], setSoftT = _sto[1]; var _hto = useState(state.hardTimeoutMin), hardT = _hto[0], setHardT = _hto[1]
       var _fbo = useState(state.feedbackEnabled), fbEnabled = _fbo[0], setFbEnabled = _fbo[1]
-      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
+      var _ndo = useState(state.notifyDispatch), ndOn = _ndo[0], setNdOn = _ndo[1]; var _nno = useState(state.notifyDone), nnOn = _nno[0], setNnOn = _nno[1]
+      var _eso = useState(state.epicSplit), esOn = _eso[0], setEsOn = _eso[1] // 史诗拆分总开关勾选态（设置区「功能」）
+      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setNdOn(state.notifyDispatch); setNnOn(state.notifyDone); setEsOn(state.epicSplit); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!open) return null
       if (!state.isRootStable) return null // 子代理会话不渲染看板面板（读 isRootStable：瞬态 false 不闪，见 isRoot 蝶变防抖）
       var active = tasks.filter(function (t) { return t.status !== 'archived' }); var archived = tasks.filter(function (t) { return t.status === 'archived' })
@@ -552,7 +559,7 @@ function apply(ctx) {
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', borderBottom: '1px solid ' + C.border, flexShrink: 0, flexWrap: 'wrap', gap: 4 } },
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, React.createElement('span', { style: { fontWeight: 600, fontSize: 13, color: C.text, display: 'inline-flex', alignItems: 'center', gap: 5 } }, ic('clipboard-list', 15), '智能看板'), React.createElement(ViewTab, null), React.createElement(PoolStatus, null)),
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' } },
-            React.createElement(PoolCfgPopover, { minW: minW, maxW: maxW, minV: minV, maxV: maxV, workerModel: workerModel, verifierModel: verifierModel, softT: softT, hardT: hardT, feedbackEnabled: fbEnabled }),
+            React.createElement(PoolCfgPopover, { minW: minW, maxW: maxW, minV: minV, maxV: maxV, workerModel: workerModel, verifierModel: verifierModel, softT: softT, hardT: hardT, feedbackEnabled: fbEnabled, notifyDispatch: ndOn, notifyDone: nnOn, epicSplit: esOn }),
             dispatchInfo ? React.createElement('span', { style: { fontSize: 9, color: C.brand, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: dispatchInfo }, dispatchInfo) : null,
             React.createElement('button', { onClick: function () { state.createOpen = true; notify() }, title: '新建任务（可存为草稿）', style: { fontSize: 11, padding: '3px 8px', border: '1px solid ' + C.border, borderRadius: 6, cursor: 'pointer', background: 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('plus', 11), '新建任务'),
             createFlash ? React.createElement('span', { style: { fontSize: 10, color: C.ok } }, createFlash) : null,
@@ -692,6 +699,34 @@ function apply(ctx) {
       var notes = typeof cx.notes === 'string' ? cx.notes.trim() : ''
       return files.length === 0 && notes.length === 0
     }
+    // ===== epic hook 相位徽章（hooks=agent run 的卡片侧可见性，task-muuw56yf）=====
+    // 与 host core.normalizeHooks 契约同源：epic.hooks = { pre: { enabled, prompt, state, runId, pending? }, post: 同构 }，
+    // state ∈ idle | running | done | failed（host 状态机推进，UI 只读展示，不在这里改状态）。
+    // 缺省兼容硬约束：卡上无 hooks / 该点位未启用 → 返回 null，老卡渲染逐字不变（零额外 DOM）。
+    // 优先级与文案（同一时刻只可能有一个相位有话说）：
+    //   pre|post failed  → 「⚠️ hook 失败待裁决」（err 色）：史诗已被 host 转 blocked 挂歧义，过程态文案都让位；
+    //   pre  running     → 「⏳ 前置准备中」：串行闸门期内，该 epic 的子任务一张都不派；
+    //   post running     → 「🧪 收尾中」：子任务已全部了结、epic 仍 in-progress，等收口 run 归还；
+    //   idle / done      → 不渲染（普通进行中维持「📦 史诗 · x/y」原样，稳定态不加噪音）。
+    function hookBadgeOf(t) {
+      var h = t && t.hooks
+      if (!h) return null
+      var pre = (h.pre && h.pre.enabled) ? h.pre : null
+      var post = (h.post && h.post.enabled) ? h.post : null
+      if ((pre && pre.state === 'failed') || (post && post.state === 'failed')) {
+        var ph = (pre && pre.state === 'failed') ? 'pre' : 'post'
+        return { txt: '⚠️ hook 失败待裁决', color: C.err, tip: 'hooks.' + ph + '（' + (ph === 'pre' ? '前置准备' : '收口') + '）运行失败：史诗已转阻塞等人裁决（重试/跳过/放弃），详情页可跳裁决区' }
+      }
+      if (pre && pre.state === 'running') return { txt: '⏳ 前置准备中', color: C.brand, tip: '前置 hook run 正在跑：完成前该史诗的子任务一张都不派（串行闸门）' }
+      if (post && post.state === 'running') return { txt: '🧪 收尾中', color: C.brand, tip: '收口 hook run 正在跑：子任务已全部了结，史诗仍 in-progress，收口完成后才转验证中' }
+      return null
+    }
+    function hookPhaseBadge(t) {
+      var b = hookBadgeOf(t)
+      if (!b) return null
+      return React.createElement('span', { title: b.tip, style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + b.color + ' 14%, transparent)', color: b.color, fontWeight: 600, whiteSpace: 'nowrap' } }, b.txt)
+    }
+
     function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); var delOk = !state.selectMode && canDelete(t); var cs = (state.childStats && state.childStats[t.id]) || null; var csDone = cs ? (typeof cs.settled === 'number' ? cs.settled : cs.resolved) : 0; var epic = !!(cs && cs.total > 0); var parentT = t.parentId ? getTask(t.parentId) : null; var depWaitTitle = ''; var depWaitN = 0; if (depBlock) { t.dependsOn.forEach(function (id) { var d = getTask(id); if (!d || (d.status !== 'resolved' && d.status !== 'archived')) { depWaitN++; if (!depWaitTitle) depWaitTitle = d && d.title ? d.title : id } }) } var durB = cardDur(t);
       // 无障碍（反馈 n-mut9rzpyc7p1）：卡片根以 button 角色进 Tab 序（aria-label=标题+状态），
       // Enter/Space 触发与点击相同的激活行为（多选=切换选中，否则开详情）；
@@ -699,6 +734,8 @@ function apply(ctx) {
       function activate() { if (state.selectMode) { if (state.selected[t.id]) delete state.selected[t.id]; else state.selected[t.id] = true; notify() } else { state.detailId = t.id; notify() } }
       return React.createElement('div', { role: 'button', tabIndex: 0, 'aria-label': t.title + '（' + (statusLabels[t.status] || t.status) + '）', draggable: !state.selectMode, onDragStart: function (e) { onDragStart(e, t) }, onDragEnd: onDragEnd, onMouseEnter: function () { if (delOk) setHover(t.id, 'del') }, onMouseLeave: function () { if (delOk) setHover('', '') }, onFocus: function () { setCardFocus(t.id) }, onBlur: function () { setCardFocus('') }, onKeyDown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate() } }, onClick: activate, style: { outline: isCardFocus(t.id) ? '2px solid ' + C.brand : 'none', outlineOffset: 2, border: '1px solid ' + (sel ? C.brand : (t.escalation ? C.err : (critGlow ? C.err : C.border))), borderRadius: 6, padding: '6px 8px', marginBottom: 6, background: sel ? C.nested : C.card, borderLeft: '3px solid ' + (t.escalation ? C.err : pc), cursor: state.selectMode ? 'pointer' : 'grab', fontSize: 12, opacity: dragging ? 0.4 : (depBlock ? 0.65 : 1), transition: 'opacity .15s', animation: critGlow ? 'tskb-crit 2s ease-in-out infinite' : 'none' } }, React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 4 } }, state.selectMode ? React.createElement('span', { style: { color: sel ? C.brand : C.text2, flexShrink: 0, marginTop: 1, display: 'inline-flex' } }, ic(sel ? 'square-check-big' : 'square', 12)) : null, React.createElement('div', { style: { fontWeight: 600, color: C.text, marginBottom: 2, wordBreak: 'break-word', flex: 1 } }, t.title), React.createElement('span', { style: { flexShrink: 0, marginTop: 1, display: 'inline-flex', color: C.text2 }, title: pm.label }, ic(pm.icon, 10)), React.createElement('span', { style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + pc + ' 20%, transparent)', color: pc, flexShrink: 0, marginTop: 1 } }, prioLabel[t.priority] || '中'), noResearch(t) ? React.createElement('span', { title: '本任务未附调研上下文，Worker 需自行定位——建议补 contextFiles/contextNotes', style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + C.warn + ' 18%, transparent)', color: C.warn, fontWeight: 600, flexShrink: 0, marginTop: 1, whiteSpace: 'nowrap' } }, '⚠️ 无调研') : null, (t.usage && t.usage.total) ?React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0, marginTop: 1 }, title: '本任务累计 token：' + String(t.usage.total) + '（' + (t.usage.runs || 0) + ' 次 run）' }, '⛁ ' + fmtTokens(t.usage.total)) : null), t.parentId ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: parentT ? '父任务：' + parentT.title + ' (' + t.parentId + ')' : t.parentId }, '↳ ' + (parentT && parentT.title ? parentT.title : shortId(t.parentId))) : null, t.escalation ? React.createElement('div', { style: { fontSize: 10, color: C.err, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 3 } }, ic('alert-triangle', 10), '待裁决 — 点击查看疑问') : null, t.stuckSince ? React.createElement('div', { style: { fontSize: 10, color: C.warn, fontWeight: 600, marginBottom: 2, animation: 'tskb-pulse 1.5s ease-in-out infinite' } }, '⏱ 疑似卡死 · ' + ago(t.stuckSince) + ' — 点击处理') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2, display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' } },
             epic ? React.createElement('span', { title: '史诗父卡：' + csDone + '/' + cs.total + ' 个子任务已了结（完成/取消/归档）', style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.brand + ' 14%, transparent)', color: C.brand, fontWeight: 600 } }, '📦 史诗 · ' + csDone + '/' + cs.total) : null,
+            // hook 相位徽章：与 📦 徽章**并存**（相位是 epic 的附加过程态，不是替代进度）
+            epic ? hookPhaseBadge(t) : null,
             t.frozen ? React.createElement('span', { title: '已冻结：不参与自动派发（详情页可「解除冻结」）', style: { color: C.brand, fontWeight: 600 } }, '❄ 冻结') : null,
             (Array.isArray(t.waitingForTouches) && t.waitingForTouches.length) ? React.createElement('span', { title: '等文件锁释放：' + t.waitingForTouches.join('、') + '（touches 冲突，详情页可 force 越权派发）', style: { color: C.warn, fontWeight: 600 } }, '🔒 等文件释放') : null,
             React.createElement('span', { title: pm.label, style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: C.nested, border: '1px solid ' + C.border } }, pm.short),
@@ -959,6 +996,119 @@ function apply(ctx) {
           })) : null)
     }
 
+    // ===== Hooks（可选点位）· 史诗前置/后置 agent run 的编辑与状态面板（task-muuw56yf）=====
+    // 契约以 host core.normalizeHooks / mergeHooks 为准（勿凭记忆改字段名）：
+    //   epic.hooks = { pre: { enabled, prompt, state, runId, pending? }, post: 同构 }，state ∈ idle|running|done|failed；
+    //   hook run 记在 epic.runs[]（role 'hook-pre'/'hook-post'，字段 { role, id, at, endedAt, outcome, model }）。
+    // 写入通道 = update-task RPC 的 hooks 字段（浅合并：未提交的点位保留原值，传 null 撤点位）。
+    // 三条 UI 口径：
+    //   ① 老卡零渲染：既无子任务、也未声明 hooks 的普通卡整块不出现（与卡片相位徽章同一门禁）；
+    //   ② 权限不在 UI 判断——「hooks 仅主窗口可设」由 host 双重门禁裁决，失败原因原样 ⚠️ 回显；
+    //      客户端预判角色只会把真实错误变成灰按钮，反而更难查；
+    //   ③ state 只读展示（host 状态机推进，重启可恢复）；重试=把 state 置回 idle，走裁决通道，
+    //      这里只负责给 failed 一个「前往裁决」锚点，不另造裁决入口。
+    function hookRunOf(task, phase, runId) {
+      var role = 'hook-' + phase
+      // host 侧 run id 落位不对称：pre 在 spawn 成功时回填 hooks.pre.runId，post 复用 verifierRun 位
+      // （claim 占位换真 id）；且两端结算都把 runId 归零——所以取不到时按角色回退「最后一条」。
+      var rid = runId || (phase === 'post' ? task.verifierRun : null)
+      var runs = Array.isArray(task.runs) ? task.runs : []
+      var hit = null
+      for (var i = 0; i < runs.length; i++) {
+        if (!runs[i] || runs[i].role !== role) continue
+        if (rid && runs[i].id !== rid) continue
+        hit = runs[i] // 顺序遍历取最后一条匹配：重试后的新 run 覆盖旧展示
+      }
+      return hit
+    }
+    function hookStateMeta(task, phase) {
+      var h = (task.hooks && task.hooks[phase]) || null
+      var st = (h && h.state) || 'idle'
+      var off = !h || !h.enabled
+      var run = hookRunOf(task, phase, h && h.runId)
+      var meta = { idle: { label: off ? '未启用' : '待运行', color: C.text2 }, running: { label: '运行中', color: C.brand }, done: { label: '已完成', color: C.ok }, failed: { label: '失败', color: C.err } }[st] || { label: String(st), color: C.text2 }
+      // 耗时：运行中 = 距 spawn 的已跑时长；已落定 = spawn → endedAt 净耗时（老 run 无 endedAt 则不显示）
+      var dur = ''
+      if (run && run.at) {
+        if (st === 'running') dur = '已跑 ' + elapsedSince(run.at)
+        else if (run.endedAt) dur = '耗时 ' + fmtDur(new Date(run.at).getTime(), new Date(run.endedAt).getTime())
+      }
+      return { state: st, off: off, label: meta.label, color: meta.color, run: run, dur: dur }
+    }
+    function HooksSection(props) {
+      var task = props.task
+      var kHooks = task.hooks || null
+      var _a = useState(''), msg = _a[0], setMsg = _a[1]
+      var _b = useState(false), saving = _b[0], setSaving = _b[1]
+      // 编辑缓冲以「卡上现值」为初值；父层以 key=task.id 挂载 → 切换任务自动重挂，缓冲不会串卡
+      var _c = useState({ pre: { enabled: !!(kHooks && kHooks.pre && kHooks.pre.enabled), prompt: (kHooks && kHooks.pre && kHooks.pre.prompt) || '' }, post: { enabled: !!(kHooks && kHooks.post && kHooks.post.enabled), prompt: (kHooks && kHooks.post && kHooks.post.prompt) || '' } }), buf = _c[0], setBuf = _c[1]
+      var kids = state.tasks.filter(function (x) { return x.parentId === task.id })
+      var declared = !!(kHooks && (kHooks.pre || kHooks.post))
+      if (kids.length === 0 && !declared) return null
+      function setPhase(ph, patch) { var nb = { pre: buf.pre, post: buf.post }; nb[ph] = Object.assign({}, nb[ph], patch); setBuf(nb) }
+      // 提交体组装（三条口径缺一都踩坑）：
+      //   a) prompt 清空 = 撤掉该点位：host normalizeHooks 明确拒绝空 prompt，撤点位用 null 表达才在契约内
+      //      （不该把「我不想要这个 hook 了」变成一条报错）；**例外**——该点位 state='running' 时不清空：
+      //      run 还在飞，撤掉声明会让它的结算落到空点位（表现为白跑一轮），删除意图原样保留并回一行提示；
+      //   b) 已声明点位的 state/runId/pending 原样回传：normalizeHooks 对缺省 state 归零成 idle，
+      //      不透传就等于「改一下 prompt 把在跑/已落定的 hook 打回待运行」；
+      //   c) 凑不出 prompt 的点位一律提交 null（幂等删除，不凭空造点位）。
+      function payloadFor(ph) {
+        var cur = (task.hooks && task.hooks[ph]) || null
+        var b = buf[ph] || { enabled: false, prompt: '' }
+        function keep(h) { var it = { enabled: !!h.enabled, prompt: String(h.prompt || '') }; if (h.state) it.state = h.state; if (h.runId) it.runId = h.runId; if (h.pending) it.pending = true; return it }
+        if (!String(b.prompt || '').trim()) {
+          if (cur && cur.state === 'running') return { item: keep(cur), warn: ph + ' 运行中：本次不清空该点位（run 还在跑），等它跑完再撤' }
+          return { item: null }
+        }
+        var item = { enabled: !!b.enabled, prompt: String(b.prompt).slice(0, 4000) }
+        if (cur) {
+          if (cur.state) item.state = cur.state
+          if (cur.runId) item.runId = cur.runId
+          if (cur.pending) item.pending = true
+        }
+        return { item: item }
+      }
+      function save() {
+        if (saving) return
+        var pre = payloadFor('pre'), post = payloadFor('post')
+        var warns = [pre.warn, post.warn].filter(Boolean)
+        setSaving(true); setMsg('')
+        rpc('update-task', { taskId: task.id, hooks: { pre: pre.item, post: post.item } }).then(function (r) {
+          setSaving(false)
+          if (r && r.ok === false) { setMsg('⚠️ ' + (r.error || '保存失败')); return }
+          setMsg(warns.length ? '⚠️ ' + warns.join('；') : '✅ 已保存 hooks 配置')
+          fetchTasks()
+        }).catch(function (e) { setSaving(false); setMsg('⚠️ ' + String(e)) })
+      }
+      // 「前往裁决」= 同页锚点跳转（裁决区 id 固定 tskb-escalation，由 DetailView 渲染）；
+      // hook 失败时 host 已把 epic 转 blocked 并挂好 escalation，这里只把视线送过去。
+      function goArbitration() { var el = document.getElementById('tskb-escalation'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' }) }
+      function phaseRow(ph, title, hint) {
+        var m = hookStateMeta(task, ph)
+        var b = buf[ph] || { enabled: false, prompt: '' }
+        return React.createElement('div', { key: ph, style: { marginBottom: 6, padding: '5px 7px', border: '1px solid ' + C.border, borderRadius: 5, background: C.nested } },
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 4 } },
+            React.createElement('label', { style: { fontSize: 11, fontWeight: 600, color: C.text, display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' } },
+              React.createElement('input', { type: 'checkbox', checked: !!b.enabled, onChange: function (e) { setPhase(ph, { enabled: e.target.checked }) }, title: '启用该点位（停用后 host 全链路跳过它）' }),
+              title),
+            React.createElement('span', { title: 'state 由 host 状态机推进（写在卡上，重启可恢复）；失败后重试=把 state 置回 idle，走裁决通道', style: { fontSize: 9, padding: '0 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + m.color + ' 16%, transparent)', color: m.color, fontWeight: 600 } }, m.label),
+            m.dur ? React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, m.dur) : null,
+            m.run && m.run.id ? React.createElement('button', { onClick: function () { if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(m.run.id) }, title: '查看该 hook run 的会话（' + m.run.id + (m.run.model ? ' · ' + m.run.model : '') + '）', style: { fontSize: 9, padding: '1px 6px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '→ 查看会话') : null,
+            m.state === 'failed' ? React.createElement('button', { onClick: goArbitration, title: '跳到本页裁决区：重试（置回 idle）/ 跳过（置 done 放行）/ 放弃（终止史诗）', style: { fontSize: 9, padding: '1px 6px', border: 'none', borderRadius: 3, background: C.err, color: C_INV, cursor: 'pointer', fontWeight: 600 } }, '前往裁决') : null),
+          React.createElement('textarea', { value: b.prompt, onChange: function (e) { setPhase(ph, { prompt: e.target.value }) }, rows: 2, placeholder: '补充指令（可选）——前置=让子任务具备开跑条件；后置=把这批活收口。具体动作由 hook agent 自行决策', style: { width: '100%', fontSize: 11, padding: '4px 6px', border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text, resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit' } }),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, lineHeight: 1.6 } }, hint))
+      }
+      return React.createElement('div', { style: { marginBottom: 8, padding: '6px 8px', border: '1px solid ' + C.border, borderRadius: 6, background: C.card } },
+        React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('zap', 11), 'Hooks（可选点位）'),
+        phaseRow('pre', '⏳ 前置（pre）', '让子任务具备开跑条件：未完成前该史诗的子任务一张都不派（串行闸门）。'),
+        phaseRow('post', '🧪 收尾（post）', '把这批活收口：全部子任务了结后跑一遍，完成后史诗才转验证中。'),
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+          React.createElement('button', { onClick: save, disabled: saving, title: '保存到卡上（update-task RPC，hooks 字段浅合并）', style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.brand, color: C_INV, cursor: saving ? 'default' : 'pointer', opacity: saving ? 0.6 : 1, fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, saving ? '保存中…' : [ic('save', 10), ' 保存 hooks']),
+          msg ? React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, msg) : null),
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 4, lineHeight: 1.6 } }, '每个点位是一次真实 agent 运行（不是声明式命令）：prompt 只给薄框架契约与上下文，动作由 hook agent 自行决策，吃不准会歧义上报；失败即转阻塞等人裁决（重试/跳过/放弃），不会自动重跑。清空 prompt 保存 = 撤掉该点位。hooks 仅主窗口可设（host 门禁，失败原因原样回显）。'))
+    }
+
     function DetailView() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect; var task = getTask(state.detailId)
       var _a = useState(task ? task.title : ''), editTitle = _a[0], setEditTitle = _a[1]; var _b = useState(task ? task.description || '' : ''), editDesc = _b[0], setEditDesc = _b[1]; var _c = useState(false), saving = _c[0], setSaving = _c[1]; var _d = useState(state.boardMode), mode = _d[0], setMode = _d[1]
@@ -1037,7 +1187,7 @@ function apply(ctx) {
           React.createElement('span', null, '已运行 ' + elapsedSince(task.claimedAt) + '（软超时 ' + state.softTimeoutMin + ' 分提醒 · 硬超时 ' + state.hardTimeoutMin + ' 分自动终止）'),
           elapsedMin(task.claimedAt) > state.softTimeoutMin ? React.createElement('span', { style: { color: C.warn, fontWeight: 600 } }, '⏱ 已超软超时') : null,
           React.createElement('button', { onClick: doTerminate, title: '终止该执行 Agent，任务回 pending 重新排队', style: { fontSize: 10, padding: '2px 8px', border: '1px solid ' + C.err, borderRadius: 3, background: 'transparent', color: C.err, cursor: 'pointer', marginLeft: 'auto' } }, '⏹ 立即终止')) : null,
-        task.escalation ? React.createElement('div', { style: { marginBottom: 8, padding: '8px 10px', border: '1px solid ' + C.err, borderRadius: 6, background: 'color-mix(in srgb, ' + C.err + ' 8%, transparent)' } },
+        task.escalation ? React.createElement('div', { id: 'tskb-escalation', style: { marginBottom: 8, padding: '8px 10px', border: '1px solid ' + C.err, borderRadius: 6, background: 'color-mix(in srgb, ' + C.err + ' 8%, transparent)' } },
           React.createElement('div', { style: { fontSize: 12, fontWeight: 700, color: C.err, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('alert-triangle', 13), 'Worker 上报歧义 — 等待主窗口裁决'),
           React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, whiteSpace: 'pre-wrap', maxHeight: 160, overflowY: 'auto' } }, task.escalation.question),
           React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, '上报于 ' + ago(task.escalation.at) + ' · ' + (task.escalation.by || '')),
@@ -1080,6 +1230,8 @@ function apply(ctx) {
             '📎 调研注入: ' + (empty ? '无调研注入——Worker 需自行定位，建议补 contextFiles/contextNotes' : parts.join(' · ')))
         })(),
         React.createElement(FamilySection, { task: task }),
+        // Hooks 区（史诗可选点位）：key=task.id 保证切换任务时重挂，编辑缓冲不串卡
+        React.createElement(HooksSection, { key: task.id, task: task }),
         React.createElement(DepsSection, { task: task }),
         task.acceptance ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, padding: '5px 8px', background: C.nested, borderRadius: 4, borderLeft: '2px solid ' + C.ok, fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 4 } }, ic('flask-conical', 11), '硬性验收: ' + task.acceptance) : null,
         task.resolution ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, padding: '5px 8px', background: C.nested, borderRadius: 4, borderLeft: '2px solid ' + C.warn, maxHeight: 120, overflowY: 'auto', whiteSpace: 'pre-wrap' } }, '📝 ' + task.resolution) : null,
@@ -1632,7 +1784,25 @@ function apply(ctx) {
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '学习反馈'),
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
             React.createElement('input', { type: 'checkbox', checked: !!props.feedbackEnabled, onChange: function (e) { rpc('set-board-config', { key: 'feedbackEnabled', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
-            React.createElement('span', null, '候选教训（Verifier 驳回/仲裁结论自动生成候选，Worker prompt 提示先检索历史教训）'))) : null)
+            React.createElement('span', null, '候选教训（Verifier 驳回/仲裁结论自动生成候选，Worker prompt 提示先检索历史教训）')),
+          // 回执开关（用户要求「回执可以做一个开关，放到设置里」）：派发/完成两类回执各自可关，缺省都开。
+          // 只影响回执播报，不影响派发与状态机；歧义裁决通知不在此闸门内（见下行说明文案）。
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '通知'),
+          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
+            React.createElement('input', { type: 'checkbox', checked: props.notifyDispatch !== false, onChange: function (e) { rpc('set-board-config', { key: 'notifyDispatch', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('span', null, '⚡ 派发回执（任务被 Worker/Verifier 领走时播报）')),
+          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260, marginTop: 3 } },
+            React.createElement('input', { type: 'checkbox', checked: props.notifyDone !== false, onChange: function (e) { rpc('set-board-config', { key: 'notifyDone', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('span', null, '✅ 完成回执（任务完成或阻塞时聚合播报）')),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '歧义裁决通知不受这两个开关影响（任务等人裁决必须提醒）'),
+          // 史诗拆分总开关（板级 epicSplit，缺省 true）：**只关引导，不禁机制**——关掉后 Team 提示词不再
+          // 注入「大任务必须拆分」第 6 条、create-task 响应不再附 suggestSplit 软提示；显式传 parentId 建
+          // 子卡、史诗自动收口/hooks 状态机照常（用户/主窗口明确要拆时不受阻）。勾选态缺字段=开，与 host 同口径。
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '功能'),
+          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
+            React.createElement('input', { type: 'checkbox', checked: props.epicSplit !== false, onChange: function (e) { rpc('set-board-config', { key: 'epicSplit', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('span', null, '🧩 史诗拆分：大任务引导拆为 epic + 子任务')),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '关掉只停引导：显式 parentId 建子卡与史诗自动收口照常工作')) : null)
     }
 
     function TeamView() {

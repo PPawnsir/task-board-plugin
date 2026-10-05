@@ -113,6 +113,8 @@ task_archive → taskId=<已完成任务ID>
 |---|------|------|
 | 1 | `set-board-config { key:"maxWorkers", value:99 }` | 实际钳制到 10 |
 | 2 | `set-board-config { key:"minVerifiers", value:-1 }` | 实际钳制到 0 |
+| 3 | `set-board-config { key:"notifyDispatch", value:false }`（⚙️ 设置区「通知」小节亦可） | `get-tasks` 返回 `notifyDispatch:false`；此后派发成功的任务**不再**播报「🚀 已派发」（spawn 与状态机照常） |
+| 4 | `set-board-config { key:"notifyDone", value:false }` | 任务完成/阻塞**不再**聚合回执；歧义裁决通知**照常**（裁决通道不接开关） |
 
 ---
 

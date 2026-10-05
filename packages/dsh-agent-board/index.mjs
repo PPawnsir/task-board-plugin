@@ -14,7 +14,7 @@
 // 共享闭包状态全部收进 apply 内的显式 state 对象，逐模块经参数注入（禁止跨模块隐式引用）。
 //
 // 兼容 re-export：对外导出契约不变（单测与历史引用直接 import 自本文件）。
-export { TASK_SIZE_CONTRACT, SUGGEST_SPLIT_TEXT, TEAM_SPLIT_RULE, suggestSplitOf, withSplitHint } from './lib/policy.mjs'
+export { TASK_SIZE_CONTRACT, SUGGEST_SPLIT_TEXT, TEAM_SPLIT_RULE, suggestSplitOf, withSplitHint, splitRuleOf } from './lib/policy.mjs'
 export { findRunLog, readRunUsage, aggregateUsageSummary, effectiveTokens, taskEffectiveTokens } from './lib/usage.mjs'
 import { createSession } from './lib/session.mjs'
 import { createStore } from './lib/store.mjs'
@@ -32,6 +32,7 @@ export function apply(ctx) {
       knownSessions: {},   // 心跳驱动的会话集合（>30 分钟无活跃淘汰）
       teamModeCache: {},   // rt()/set-*-mode 同步，systemPrompt 引导段读取
       feedbackCache: {},   // 学习飞轮开关缓存（rt()/set-board-config 同步）
+      epicSplitCache: {},  // 史诗拆分总开关缓存（rt()/set-board-config 同步，Team 引导段读取）
       fileLocks: {},       // 每会话一条 promise 链，串行化所有 读-改-写
       cyclePending: {},    // kickCycle 50ms 去抖
       activeRuns: {},      // sid -> { taskId: { run, role, taskId, startedAt, model } }
@@ -54,7 +55,7 @@ export function apply(ctx) {
     var dispatch = createDispatch(ctx, state, {
       rt: store.rt, wt: store.wt, mutateLocked: store.mutateLocked, kickCycle: store.kickCycle,
       rootForSession: session.rootForSession, sessionCwd: session.sessionCwd,
-      withTimeout: session.withTimeout, runsFor: session.runsFor, feedbackOn: session.feedbackOn,
+      withTimeout: session.withTimeout, runsFor: session.runsFor, feedbackOn: session.feedbackOn, epicSplitOn: session.epicSplitOn,
       pushSysNote: notify.pushSysNote, maybeNotify: notify.maybeNotify, notifyTaskDone: notify.notifyTaskDone,
       notifyDispatched: notify.notifyDispatched,
     })

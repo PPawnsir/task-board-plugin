@@ -121,6 +121,34 @@
       var notes = typeof cx.notes === 'string' ? cx.notes.trim() : ''
       return files.length === 0 && notes.length === 0
     }
+    // ===== epic hook 相位徽章（hooks=agent run 的卡片侧可见性，task-muuw56yf）=====
+    // 与 host core.normalizeHooks 契约同源：epic.hooks = { pre: { enabled, prompt, state, runId, pending? }, post: 同构 }，
+    // state ∈ idle | running | done | failed（host 状态机推进，UI 只读展示，不在这里改状态）。
+    // 缺省兼容硬约束：卡上无 hooks / 该点位未启用 → 返回 null，老卡渲染逐字不变（零额外 DOM）。
+    // 优先级与文案（同一时刻只可能有一个相位有话说）：
+    //   pre|post failed  → 「⚠️ hook 失败待裁决」（err 色）：史诗已被 host 转 blocked 挂歧义，过程态文案都让位；
+    //   pre  running     → 「⏳ 前置准备中」：串行闸门期内，该 epic 的子任务一张都不派；
+    //   post running     → 「🧪 收尾中」：子任务已全部了结、epic 仍 in-progress，等收口 run 归还；
+    //   idle / done      → 不渲染（普通进行中维持「📦 史诗 · x/y」原样，稳定态不加噪音）。
+    function hookBadgeOf(t) {
+      var h = t && t.hooks
+      if (!h) return null
+      var pre = (h.pre && h.pre.enabled) ? h.pre : null
+      var post = (h.post && h.post.enabled) ? h.post : null
+      if ((pre && pre.state === 'failed') || (post && post.state === 'failed')) {
+        var ph = (pre && pre.state === 'failed') ? 'pre' : 'post'
+        return { txt: '⚠️ hook 失败待裁决', color: C.err, tip: 'hooks.' + ph + '（' + (ph === 'pre' ? '前置准备' : '收口') + '）运行失败：史诗已转阻塞等人裁决（重试/跳过/放弃），详情页可跳裁决区' }
+      }
+      if (pre && pre.state === 'running') return { txt: '⏳ 前置准备中', color: C.brand, tip: '前置 hook run 正在跑：完成前该史诗的子任务一张都不派（串行闸门）' }
+      if (post && post.state === 'running') return { txt: '🧪 收尾中', color: C.brand, tip: '收口 hook run 正在跑：子任务已全部了结，史诗仍 in-progress，收口完成后才转验证中' }
+      return null
+    }
+    function hookPhaseBadge(t) {
+      var b = hookBadgeOf(t)
+      if (!b) return null
+      return React.createElement('span', { title: b.tip, style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + b.color + ' 14%, transparent)', color: b.color, fontWeight: 600, whiteSpace: 'nowrap' } }, b.txt)
+    }
+
     function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); var delOk = !state.selectMode && canDelete(t); var cs = (state.childStats && state.childStats[t.id]) || null; var csDone = cs ? (typeof cs.settled === 'number' ? cs.settled : cs.resolved) : 0; var epic = !!(cs && cs.total > 0); var parentT = t.parentId ? getTask(t.parentId) : null; var depWaitTitle = ''; var depWaitN = 0; if (depBlock) { t.dependsOn.forEach(function (id) { var d = getTask(id); if (!d || (d.status !== 'resolved' && d.status !== 'archived')) { depWaitN++; if (!depWaitTitle) depWaitTitle = d && d.title ? d.title : id } }) } var durB = cardDur(t);
       // 无障碍（反馈 n-mut9rzpyc7p1）：卡片根以 button 角色进 Tab 序（aria-label=标题+状态），
       // Enter/Space 触发与点击相同的激活行为（多选=切换选中，否则开详情）；
@@ -128,6 +156,8 @@
       function activate() { if (state.selectMode) { if (state.selected[t.id]) delete state.selected[t.id]; else state.selected[t.id] = true; notify() } else { state.detailId = t.id; notify() } }
       return React.createElement('div', { role: 'button', tabIndex: 0, 'aria-label': t.title + '（' + (statusLabels[t.status] || t.status) + '）', draggable: !state.selectMode, onDragStart: function (e) { onDragStart(e, t) }, onDragEnd: onDragEnd, onMouseEnter: function () { if (delOk) setHover(t.id, 'del') }, onMouseLeave: function () { if (delOk) setHover('', '') }, onFocus: function () { setCardFocus(t.id) }, onBlur: function () { setCardFocus('') }, onKeyDown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate() } }, onClick: activate, style: { outline: isCardFocus(t.id) ? '2px solid ' + C.brand : 'none', outlineOffset: 2, border: '1px solid ' + (sel ? C.brand : (t.escalation ? C.err : (critGlow ? C.err : C.border))), borderRadius: 6, padding: '6px 8px', marginBottom: 6, background: sel ? C.nested : C.card, borderLeft: '3px solid ' + (t.escalation ? C.err : pc), cursor: state.selectMode ? 'pointer' : 'grab', fontSize: 12, opacity: dragging ? 0.4 : (depBlock ? 0.65 : 1), transition: 'opacity .15s', animation: critGlow ? 'tskb-crit 2s ease-in-out infinite' : 'none' } }, React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 4 } }, state.selectMode ? React.createElement('span', { style: { color: sel ? C.brand : C.text2, flexShrink: 0, marginTop: 1, display: 'inline-flex' } }, ic(sel ? 'square-check-big' : 'square', 12)) : null, React.createElement('div', { style: { fontWeight: 600, color: C.text, marginBottom: 2, wordBreak: 'break-word', flex: 1 } }, t.title), React.createElement('span', { style: { flexShrink: 0, marginTop: 1, display: 'inline-flex', color: C.text2 }, title: pm.label }, ic(pm.icon, 10)), React.createElement('span', { style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + pc + ' 20%, transparent)', color: pc, flexShrink: 0, marginTop: 1 } }, prioLabel[t.priority] || '中'), noResearch(t) ? React.createElement('span', { title: '本任务未附调研上下文，Worker 需自行定位——建议补 contextFiles/contextNotes', style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + C.warn + ' 18%, transparent)', color: C.warn, fontWeight: 600, flexShrink: 0, marginTop: 1, whiteSpace: 'nowrap' } }, '⚠️ 无调研') : null, (t.usage && t.usage.total) ?React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0, marginTop: 1 }, title: '本任务累计 token：' + String(t.usage.total) + '（' + (t.usage.runs || 0) + ' 次 run）' }, '⛁ ' + fmtTokens(t.usage.total)) : null), t.parentId ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: parentT ? '父任务：' + parentT.title + ' (' + t.parentId + ')' : t.parentId }, '↳ ' + (parentT && parentT.title ? parentT.title : shortId(t.parentId))) : null, t.escalation ? React.createElement('div', { style: { fontSize: 10, color: C.err, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 3 } }, ic('alert-triangle', 10), '待裁决 — 点击查看疑问') : null, t.stuckSince ? React.createElement('div', { style: { fontSize: 10, color: C.warn, fontWeight: 600, marginBottom: 2, animation: 'tskb-pulse 1.5s ease-in-out infinite' } }, '⏱ 疑似卡死 · ' + ago(t.stuckSince) + ' — 点击处理') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2, display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' } },
             epic ? React.createElement('span', { title: '史诗父卡：' + csDone + '/' + cs.total + ' 个子任务已了结（完成/取消/归档）', style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.brand + ' 14%, transparent)', color: C.brand, fontWeight: 600 } }, '📦 史诗 · ' + csDone + '/' + cs.total) : null,
+            // hook 相位徽章：与 📦 徽章**并存**（相位是 epic 的附加过程态，不是替代进度）
+            epic ? hookPhaseBadge(t) : null,
             t.frozen ? React.createElement('span', { title: '已冻结：不参与自动派发（详情页可「解除冻结」）', style: { color: C.brand, fontWeight: 600 } }, '❄ 冻结') : null,
             (Array.isArray(t.waitingForTouches) && t.waitingForTouches.length) ? React.createElement('span', { title: '等文件锁释放：' + t.waitingForTouches.join('、') + '（touches 冲突，详情页可 force 越权派发）', style: { color: C.warn, fontWeight: 600 } }, '🔒 等文件释放') : null,
             React.createElement('span', { title: pm.label, style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: C.nested, border: '1px solid ' + C.border } }, pm.short),

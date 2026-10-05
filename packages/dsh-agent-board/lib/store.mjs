@@ -13,6 +13,7 @@ export function createStore(ctx, state, deps) {
     // 共享状态别名（本体由 index.mjs apply 统一构建并逐模块注入）
     var teamModeCache = state.teamModeCache
     var feedbackCache = state.feedbackCache
+    var epicSplitCache = state.epicSplitCache
     var fileLocks = state.fileLocks
     var cyclePending = state.cyclePending
 
@@ -137,7 +138,7 @@ export function createStore(ctx, state, deps) {
       try {
         var d = JSON.parse(r)
         if (vt(d) && d.ownerSession === sid) {
-          teamModeCache[sid] = !!d.teamMode; var nd = normalizeBoard(d); feedbackCache[sid] = nd.feedbackEnabled !== false
+          teamModeCache[sid] = !!d.teamMode; var nd = normalizeBoard(d); feedbackCache[sid] = nd.feedbackEnabled !== false; epicSplitCache[sid] = nd.epicSplit !== false
           // ownerCwd 回填（只改内存，随下一次写盘落盘）：老看板文件没有该字段，而继承判定靠它——
           // 不写盘就永远不能匿名继承。这里不额外做 IO，避免把只读路径变成写路径。
           if (!nd.ownerCwd) { var cw = sessionCwd(sid); if (cw) nd.ownerCwd = cw }

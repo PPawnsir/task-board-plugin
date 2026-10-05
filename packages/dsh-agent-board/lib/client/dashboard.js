@@ -495,7 +495,25 @@
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '学习反馈'),
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
             React.createElement('input', { type: 'checkbox', checked: !!props.feedbackEnabled, onChange: function (e) { rpc('set-board-config', { key: 'feedbackEnabled', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
-            React.createElement('span', null, '候选教训（Verifier 驳回/仲裁结论自动生成候选，Worker prompt 提示先检索历史教训）'))) : null)
+            React.createElement('span', null, '候选教训（Verifier 驳回/仲裁结论自动生成候选，Worker prompt 提示先检索历史教训）')),
+          // 回执开关（用户要求「回执可以做一个开关，放到设置里」）：派发/完成两类回执各自可关，缺省都开。
+          // 只影响回执播报，不影响派发与状态机；歧义裁决通知不在此闸门内（见下行说明文案）。
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '通知'),
+          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
+            React.createElement('input', { type: 'checkbox', checked: props.notifyDispatch !== false, onChange: function (e) { rpc('set-board-config', { key: 'notifyDispatch', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('span', null, '⚡ 派发回执（任务被 Worker/Verifier 领走时播报）')),
+          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260, marginTop: 3 } },
+            React.createElement('input', { type: 'checkbox', checked: props.notifyDone !== false, onChange: function (e) { rpc('set-board-config', { key: 'notifyDone', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('span', null, '✅ 完成回执（任务完成或阻塞时聚合播报）')),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '歧义裁决通知不受这两个开关影响（任务等人裁决必须提醒）'),
+          // 史诗拆分总开关（板级 epicSplit，缺省 true）：**只关引导，不禁机制**——关掉后 Team 提示词不再
+          // 注入「大任务必须拆分」第 6 条、create-task 响应不再附 suggestSplit 软提示；显式传 parentId 建
+          // 子卡、史诗自动收口/hooks 状态机照常（用户/主窗口明确要拆时不受阻）。勾选态缺字段=开，与 host 同口径。
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '功能'),
+          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
+            React.createElement('input', { type: 'checkbox', checked: props.epicSplit !== false, onChange: function (e) { rpc('set-board-config', { key: 'epicSplit', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('span', null, '🧩 史诗拆分：大任务引导拆为 epic + 子任务')),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '关掉只停引导：显式 parentId 建子卡与史诗自动收口照常工作')) : null)
     }
 
     function TeamView() {

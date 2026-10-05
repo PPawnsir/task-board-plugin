@@ -10,7 +10,7 @@ import zlib from 'node:zlib'
 import * as core from '../lib/core.mjs'
 // 粒度治理（软闸门）住在 lib/policy.mjs（策略层，纯函数）、usage 聚合住在 lib/usage.mjs，
 // 均由 index.mjs 薄壳 re-export（对外契约不变），这里仍从 index.mjs 导入直接断言
-import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE } from '../index.mjs'
+import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE, splitRuleOf } from '../index.mjs'
 import { aggregateUsageSummary, readRunUsage, findRunLog, effectiveTokens, taskEffectiveTokens } from '../index.mjs'
 import { createRpc } from '../lib/rpc.mjs'
 // no-root 刷屏根治（task-muuf0o7a）专项：会话层幻影板防线 + 派发层 root 闸门直调断言
@@ -777,8 +777,9 @@ test('粒度治理接线：工具描述/Team 提示词/双出口返回体均已�
   assert.match(TEAM_SPLIT_RULE, /parentId=父卡 id/)
   assert.match(TEAM_SPLIT_RULE, /checkParentAuto/)
   assert.ok(src.includes("' + TASK_SIZE_CONTRACT")) // task_create 工具描述已拼接契约
-  assert.ok(src.includes("' + TEAM_SPLIT_RULE"))    // teamSection 已拼接第 6 条
-  assert.equal((src.match(/withSplitHint\(\{ ok: true, task: t \}, t\)/g) || []).length, 2) // task_create 工具 + create-task RPC
+  // Team 提示词第 6 条改经 epicSplit 门禁出口注入（task-muuxcj6y）：缺省 true 时逐字回到开关前形态
+  assert.ok(src.includes('splitRuleOf(epicSplitOn(String(agent.id)))'))
+  assert.equal((src.match(/withSplitHint\(\{ ok: true, task: t \}, t, cfg\(d\)\.epicSplit\)/g) || []).length, 2) // task_create 工具 + create-task RPC
   assert.match(src, /全量\|整体\|系统级\|全面\|重构\|所有模块\|整个/) // 史诗特征词表在位
   assert.match(src, /SPLIT_DESC_LIMIT = 500/)                        // 500 字符阈值在位
 })
@@ -790,7 +791,7 @@ test('粒度治理接线：工具描述/Team 提示词/双出口返回体均已�
 // 必须是完整形态（session-xxxx-xxxx-...），否则全量 create-task 用例会被防线拦住。
 const FULL_SID = 'session-test-0000-0000-000000000000'
 function mkRpcHandlers(board, extra) {
-  const state = { handlers: {}, teamModeCache: {}, feedbackCache: {} }
+  const state = { handlers: {}, teamModeCache: {}, feedbackCache: {}, epicSplitCache: {} }
   const tools = {} // 工具通道捕获：双通道接线测试经 __tools['task_create'].execute(...) 直调
   const ctx = { tools: { register(t) { tools[t.name] = t } }, effect() {}, webServer: { register() { return () => {} } } }
   const deps = Object.assign({
@@ -1639,15 +1640,418 @@ test('FamilySection: 子任务清单含归档（灰化 + 「已归档」徽章 +
   assert.match(built, /csDone/)
 })
 
+// ===== 史诗 hooks=agent run（task-muuw4ov7）：host 生命周期接线（pre 闸门 / post 收口 / 薄框架 prompt / 主窗口限定写入）=====
+// 设计定稿：hook 点 = 一次**真实 agent 运行**（不是声明式命令）；点位可选（epic 未声明 hooks 则全链路零变化）；
+// 薄框架 + agent 自行决策 + 歧义上报兜底；commit/push 不入任何默认形态；hooks 只许主窗口设置。
+const HOOK_TASK = (over) => mkTask(Object.assign({ id: 'epic', title: '史诗甲', status: 'in-progress', hooks: { pre: { enabled: true, prompt: '准备环境', state: 'idle', runId: null } } }, over || {}))
+
+test('normalizeHooks: 浅校验形状（enabled 缺省 true / prompt 必填 / state 枚举 / 未知键忽略 / null 清除）', () => {
+  const ok = core.normalizeHooks({ pre: { prompt: '准备' } })
+  assert.deepEqual(ok.hooks.pre, { enabled: true, prompt: '准备', state: 'idle', runId: null }) // enabled 缺省 true
+  assert.equal(core.normalizeHooks({ pre: { prompt: 'p', enabled: false } }).hooks.pre.enabled, false)
+  assert.equal(core.normalizeHooks(null).hooks, null)                       // null = 清除
+  assert.equal(core.normalizeHooks({}).hooks.pre, undefined)                 // 空对象 = 什么都不声明
+  assert.deepEqual(core.normalizeHooks({ pre: null }).hooks, { pre: null })  // 显式 null 原样穿出（撤点位的意图不能在归一化阶段被吃掉）
+  // prompt 必填（薄框架契约本体由主窗口写，空 prompt 等于没契约 → 宁早报错）
+  assert.match(core.normalizeHooks({ pre: { prompt: '   ' } }).error, /prompt 不能为空/)
+  assert.match(core.normalizeHooks({ pre: { prompt: 123 } }).error, /prompt 必须是字符串/)
+  // 形状与枚举
+  assert.match(core.normalizeHooks('x').error, /必须是对象/)
+  assert.match(core.normalizeHooks({ pre: 'x' }).error, /hooks\.pre 必须是对象/)
+  assert.equal(core.normalizeHooks({ pre: { prompt: 'p', state: 'running' } }).hooks.pre.state, 'running') // 合法枚举放行
+  assert.ok(core.normalizeHooks({ pre: { prompt: 'p', state: 'bogus' } }).error, 'state 必须是 ') // 非法枚举拒绝
+  assert.match(String(core.normalizeHooks({ pre: { prompt: 'p', state: 'bogus' } }).error), /state 必须是/)
+  assert.equal(core.normalizeHooks({ pre: { prompt: 'p', state: 'done', runId: 'r1' } }).hooks.pre.state, 'done') // 重启后人工恢复现场
+  // 未知键忽略（前向兼容：老 host 存下的字段不炸）
+  assert.deepEqual(Object.keys(core.normalizeHooks({ pre: { prompt: 'p', 未知: 1 } }).hooks.pre).sort(), ['enabled', 'prompt', 'runId', 'state'])
+  // 超长 prompt 截断到 4000
+  assert.equal(core.normalizeHooks({ pre: { prompt: 'x'.repeat(5000) } }).hooks.pre.prompt.length, 4000)
+})
+
+test('mergeHooks: 浅合并（未提交点位保留 / { pre: null } 只撤 pre / null 全清）', () => {
+  const prev = { pre: { enabled: true, prompt: 'A', state: 'done', runId: null }, post: { enabled: true, prompt: 'B', state: 'idle', runId: null } }
+  const onlyPre = core.mergeHooks(prev, core.normalizeHooks({ pre: { prompt: 'A2' } }).hooks)
+  assert.equal(onlyPre.post.prompt, 'B')   // 未提交的点位保留原值（task_update 只想改 prompt 时不必重复整条）
+  assert.equal(onlyPre.pre.prompt, 'A2')
+  assert.equal(onlyPre.pre.state, 'idle')  // 重新提交 pre = 重置该点位状态机（人改了契约就当重跑）
+  const dropPre = core.mergeHooks(prev, { pre: null }) // { pre: null } 撤点位
+  assert.equal(dropPre.pre, undefined); assert.equal(dropPre.post.prompt, 'B')
+  assert.deepEqual(core.mergeHooks(prev, null), prev)  // 语义同「不提交」
+})
+
+test('preHookGate: 未声明/未启用/done 放行；idle/running/failed 拦下（串行闸门）', () => {
+  assert.deepEqual(core.preHookGate(null), { pass: true, reason: 'none' })                       // 老 epic 无 hooks → 放行
+  assert.deepEqual(core.preHookGate(mkTask({})), { pass: true, reason: 'none' })
+  assert.equal(core.preHookGate(mkTask({ hooks: { pre: { enabled: false, state: 'idle' } } })).pass, true) // 未启用 → 放行
+  assert.deepEqual(core.preHookGate(HOOK_TASK({ hooks: { pre: { enabled: true, state: 'done' } } })), { pass: true, reason: 'done' })
+  assert.deepEqual(core.preHookGate(HOOK_TASK()), { pass: false, reason: 'idle' })                // 待跑 → 本轮不派子任务
+  assert.deepEqual(core.preHookGate(HOOK_TASK({ hooks: { pre: { enabled: true, state: 'running' } } })), { pass: false, reason: 'running' })
+  assert.deepEqual(core.preHookGate(HOOK_TASK({ hooks: { pre: { enabled: true, state: 'failed' } } })), { pass: false, reason: 'failed' })
+  assert.equal(core.hookOn(HOOK_TASK(), 'pre'), true)
+  assert.equal(core.hookOn(HOOK_TASK(), 'post'), false)  // 只声明了 pre
+})
+
+test('pickDispatch: pre 闸门未 done → 该 epic 的子任务一张都不派；done 后放行（核心回归）', () => {
+  const epi = HOOK_TASK() // pre=idle
+  const c1 = mkTask({ id: 'c1', parentId: 'epic', status: 'pending' })
+  const c2 = mkTask({ id: 'c2', parentId: 'epic', status: 'pending' })
+  const other = mkTask({ id: 'solo', status: 'pending' }) // 无关卡片不受影响
+  const d = mkBoard([epi, c1, c2, other])
+  assert.deepEqual(core.pickDispatch(d, 5, 0, null).pendings.map(t => t.id), ['solo'])
+  // idle → running（hook run 在跑）：仍然一张都不派
+  epi.hooks.pre.state = 'running'
+  assert.deepEqual(core.pickDispatch(d, 5, 0, null).pendings.map(t => t.id), ['solo'])
+  // failed（已 blocked 待人裁决）：绝不自动放行
+  epi.hooks.pre.state = 'failed'
+  assert.deepEqual(core.pickDispatch(d, 5, 0, null).pendings.map(t => t.id), ['solo'])
+  // done（前置准备完成）：下轮起子任务正常派发
+  epi.hooks.pre.state = 'done'
+  assert.deepEqual(core.pickDispatch(d, 5, 0, null).pendings.map(t => t.id).sort(), ['c1', 'c2', 'solo'])
+})
+
+test('pickDispatch: 老 epic（无 hooks）+ 只在 post 声明 → 与既有行为零变化', () => {
+  const epi = mkTask({ id: 'epic', status: 'in-progress' })   // 无 hooks
+  const c = mkTask({ id: 'c1', parentId: 'epic', status: 'pending' })
+  assert.deepEqual(core.pickDispatch(mkBoard([epi, c]), 5, 0, null).pendings.map(t => t.id), ['c1'])
+  const epi2 = mkTask({ id: 'e2', status: 'in-progress', hooks: { post: { enabled: true, prompt: '收口', state: 'idle' } } })
+  const c2 = mkTask({ id: 'c2', parentId: 'e2', status: 'pending' })
+  assert.deepEqual(core.pickDispatch(mkBoard([epi2, c2]), 5, 0, null).pendings.map(t => t.id), ['c2']) // post 不拦前置派发
+})
+
+test('maybeAutoCloseParent 接线③：post 未收口 → 不转 verifying，只置 running + 待跑标记', () => {
+  const epi = mkTask({ id: 'epic', status: 'in-progress', hooks: { post: { enabled: true, prompt: '收口', state: 'idle' } } })
+  const c = mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' })
+  const d = mkBoard([epi, c])
+  const p = core.maybeAutoCloseParent(d, c)
+  assert.equal(p, epi)
+  assert.equal(epi.status, 'in-progress')          // 关键：延迟 verifying（不再直接收口）
+  assert.equal(epi.hooks.post.pending, true)       // 等 poolCycle 见标记 spawn hook-post
+  assert.equal(epi.hooks.post.state, 'running')
+  assert.equal(epi.resolution, undefined)          // 未收口就绝不算已收口（旧实现此处会被写成 'all subtasks resolved'）
+  assert.match(epi.history[epi.history.length - 1].note, /post hook 收口未完成，延迟 verifying/)
+  // 幂等：已在 post 收口途中重复调用仍不转 verifying
+  assert.equal(core.maybeAutoCloseParent(d, c), epi)
+  assert.equal(epi.status, 'in-progress')
+})
+
+test('maybeAutoCloseParent 接线③：post 已 done → 正常转 verifying；failed → 回归安静态', () => {
+  const mk = (state, pending) => {
+    const e = mkTask({ id: 'epic', status: 'in-progress', hooks: { post: { enabled: true, prompt: '收口', state: state, pending: pending } } })
+    const c = mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' })
+    return { e, d: mkBoard([e, c]), c }
+  }
+  const a = mk('done', undefined)
+  assert.equal(core.maybeAutoCloseParent(a.d, a.c), a.e)
+  assert.equal(a.e.status, 'verifying')            // 收口完成 → 交人验收
+  assert.equal(a.e.resolution, 'all subtasks resolved')
+  const b = mk('failed', undefined)
+  assert.equal(core.maybeAutoCloseParent(b.d, b.c), null)  // 收口失败已 blocked 待人裁决，绝不自动收口
+  assert.equal(b.e.status, 'in-progress')
+})
+
+test('maybeAutoCloseParent: 老 epic（无 hooks）全链路零变化（防回归）', () => {
+  const e = mkTask({ id: 'epic', status: 'in-progress' })
+  const c = mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' })
+  const d = mkBoard([e, c])
+  assert.equal(core.maybeAutoCloseParent(d, c), e)
+  assert.equal(e.status, 'verifying')              // 未声明 post → 维持现状直接收口
+  assert.equal(e.hooks, undefined)
+})
+
+test('applyHookSettle 接线②：pre 完成 → done（串行闸门打开）', () => {
+  const epi = HOOK_TASK({ hooks: { pre: { enabled: true, prompt: '准备', state: 'running', runId: 'run-p', pending: false } } })
+  const d = mkBoard([epi])
+  const r = core.applyHookSettle(d, 'epic', 'pre', true, '准备完成', 'run-p', '')
+  assert.equal(r.preDone, true)
+  assert.equal(epi.hooks.pre.state, 'done')
+  assert.equal(epi.hooks.pre.runId, null)          // run 归零（结束即失效）
+  assert.equal(epi.status, 'in-progress')          // pre 不影响 epic 自身状态
+  assert.match(epi.history[epi.history.length - 1].note, /hooks\.pre: running → done/)
+  assert.equal(core.applyHookSettle(d, 'epic', 'pre', true, 'x', 'run-p', '').already, true) // 幂等
+})
+
+test('applyHookSettle 接线②：pre 失败 → state=failed + epic blocked + 歧义上报（不自动重试）', () => {
+  const epi = HOOK_TASK({ hooks: { pre: { enabled: true, prompt: '准备', state: 'running', runId: 'run-p' } } })
+  const d = mkBoard([epi])
+  const r = core.applyHookSettle(d, 'epic', 'pre', false, '', 'run-p', '模型不可用')
+  assert.equal(r.blocked, true)
+  assert.equal(epi.hooks.pre.state, 'failed')
+  assert.equal(epi.status, 'blocked')
+  assert.match(epi.escalation.question, /hooks\.pre（前置准备）失败：模型不可用/)
+  assert.match(epi.escalation.question, /重试.*跳过.*放弃/s)
+  assert.match(epi.lastError, /hooks\.pre run 失败/)
+  assert.equal(epi.messages[epi.messages.length - 1].kind, 'escalation')
+  // 已 blocked 后子任务仍被闸门拦住（failed 不放行）
+  const c = mkTask({ id: 'c1', parentId: 'epic', status: 'pending' })
+  d.tasks.push(c)
+  assert.equal(core.pickDispatch(d, 5, 0, null).pendings.length, 0)
+  // 幂等：已被裁决前重复结算不覆盖 escalation
+  const esc0 = epi.escalation
+  assert.equal(core.applyHookSettle(d, 'epic', 'pre', false, '', 'run-p', 'again').already, true)
+  assert.equal(epi.escalation, esc0)
+})
+
+test('applyHookSettle 接线②：post 完成 → post=done + epic 转 verifying（收口完成）', () => {
+  const epi = HOOK_TASK({ status: 'in-progress', hooks: { post: { enabled: true, prompt: '收口', state: 'running', runId: 'run-q', pending: false } } })
+  const d = mkBoard([epi])
+  const r = core.applyHookSettle(d, 'epic', 'post', true, '已总结', 'run-q', '')
+  assert.equal(r.closed, true)
+  assert.equal(epi.hooks.post.state, 'done')
+  assert.equal(epi.status, 'verifying')            // 收口完成才交人验收
+  assert.equal(epi.resolution, 'hooks.post settled')
+  assert.match(epi.history[epi.history.length - 1].note, /post hook 收口完成/)
+})
+
+test('applyHookSettle 接线②：post 失败 → failed + blocked + 歧义；点位被删则只收口', () => {
+  const epi = HOOK_TASK({ hooks: { post: { enabled: true, prompt: '收口', state: 'running', runId: 'run-q' } } })
+  const d = mkBoard([epi])
+  assert.equal(core.applyHookSettle(d, 'epic', 'post', false, '', 'run-q', '超时').blocked, true)
+  assert.equal(epi.hooks.post.state, 'failed'); assert.equal(epi.status, 'blocked')
+  assert.match(epi.escalation.question, /hooks\.post（收口）失败：超时/)
+  // hooks 被人删除 → 只收口（already），不凭空造状态
+  const epi2 = mkTask({ id: 'e2', status: 'in-progress' })
+  assert.equal(core.applyHookSettle(mkBoard([epi2]), 'e2', 'post', true, '', 'r', '').already, true)
+  assert.equal(epi2.status, 'in-progress')
+  // epic 不存在 → null（调用方静默跳过）
+  assert.equal(core.applyHookSettle(mkBoard([]), 'ghost', 'pre', true, '', 'r', ''), null)
+})
+
+test('buildHookPrompt: 薄框架模板（契约 + epic 上下文 + 子任务清单 + 歧义兜底）', () => {
+  const epi = mkTask({
+    id: 'epic', title: '史诗甲', description: '把 X 做完',
+    hooks: { pre: { enabled: true, prompt: '先把依赖装好', state: 'idle' } },
+  })
+  epi.context = { instructions: '别碰 client' }
+  const kids = [mkTask({ id: 'c1', title: '子一', status: 'pending', pipeline: 'full' }), mkTask({ id: 'c2', title: '子二', status: 'resolved' })]
+  const p = core.buildHookPrompt(epi, 'pre', kids)
+  assert.match(p, /hooks=pre run/)                       // 角色标识
+  assert.match(p, /pre（前置准备闸门）/)
+  assert.match(p, /epic · 史诗甲/)
+  assert.match(p, /把 X 做完/)                            // epic 描述注入
+  assert.match(p, /别碰 client/)                          // epic 指引注入
+  assert.match(p, /先把依赖装好/)                          // 主窗口写的运行契约
+  assert.match(p, /- \[pending\] c1 · 子一（管线 full）/)  // 子任务标题/状态清单
+  assert.match(p, /- \[resolved\] c2 · 子二/)
+  assert.match(p, /让这批子任务具备开跑条件/)               // 薄框架：只定边界，不排具体动作
+  assert.match(p, /由你根据上下文判断/)
+  assert.match(p, /board_report（kind=escalate, taskId=epic/) // 歧义兜底通道
+  assert.match(p, /不要猜测、不要硬闯/)
+  assert.match(p, /不要默认提交（git commit）或推送（git push）/) // 红线③：commit/push 不入默认形态
+  assert.match(p, /完成即代表 pre 闸门放行/)
+  // post 契约：收口语义 + 明确「自行决策并自负其责」，且不含 pre 的放行文案
+  const q = core.buildHookPrompt(epi, 'post', kids)
+  assert.match(q, /hooks=post run/)
+  assert.match(q, /post（收口闸门）/)
+  assert.match(q, /把这批已完成的工作收口/)
+  assert.match(q, /自行决策并自负其责/)
+  assert.match(q, /史诗将自动转入 verifying/)
+  assert.doesNotMatch(q, /完成即代表 pre 闸门放行/)
+  // 无子任务时也有可读清单占位（不产生半截列表）
+  assert.match(core.buildHookPrompt(epi, 'pre', []), /（暂无子任务）/)
+})
+
+test('hooks 只许主窗口设置：create-task/update-task RPC 与 task_create/task_update 双通道角色门禁', async () => {
+  // ① RPC 通道：子代理（resolveRoot(actor) !== actor）带 hooks 一律拒绝
+  const child = { resolveRoot: () => 'root-other' }
+  const b1 = mkBoard([])
+  const r1 = await mkRpcHandlers(b1, child)['create-task']({ title: 'T', description: 'd', hooks: { pre: { prompt: 'p' } } })
+  assert.equal(r1.ok, false); assert.match(r1.error, /hooks 仅主窗口可设/); assert.equal(b1.tasks.length, 0)
+  // 不带 hooks 时子代理路径行为不变（老契约：RPC 通道本就主窗口驱动）
+  const r1b = await mkRpcHandlers(mkBoard([]), child)['create-task']({ title: 'T', description: 'd' })
+  assert.equal(r1b.ok, true)
+  // ② RPC 通道：主窗口（resolveRoot(actor) === actor）可设 + 形状校验错误原样返回
+  const b2 = mkBoard([])
+  const r2 = await mkRpcHandlers(b2)['create-task']({ title: 'T', description: 'd', hooks: { pre: { prompt: '准备' } } })
+  assert.equal(r2.ok, true)
+  assert.equal(b2.tasks[0].hooks.pre.prompt, '准备')
+  assert.equal(b2.tasks[0].hooks.pre.enabled, true)
+  const r2b = await mkRpcHandlers(mkBoard([]))['create-task']({ title: 'T', description: 'd', hooks: { pre: {} } })
+  assert.equal(r2b.ok, false); assert.match(r2b.error, /prompt 不能为空/)
+  // ③ RPC 通道：update-task 浅合并（只改 prompt 不动 post；{ pre: null } 撤点位）
+  const b3 = mkBoard([mkTask({ id: 'e1', hooks: { pre: { enabled: true, prompt: 'A', state: 'idle' }, post: { enabled: true, prompt: 'B', state: 'idle' } } })])
+  const r3 = await mkRpcHandlers(b3)['update-task']({ taskId: 'e1', hooks: { pre: { prompt: 'A2' } } })
+  assert.equal(r3.ok, true)
+  assert.equal(b3.tasks[0].hooks.pre.prompt, 'A2'); assert.equal(b3.tasks[0].hooks.post.prompt, 'B')
+  const r3b = await mkRpcHandlers(b3)['update-task']({ taskId: 'e1', hooks: { pre: null } })
+  assert.equal(r3b.ok, true); assert.equal(b3.tasks[0].hooks.pre, undefined); assert.equal(b3.tasks[0].hooks.post.prompt, 'B')
+  // ④ 工具通道：schema 有 hooks 参数 + hooks 专属门禁（子代理报「hooks 仅主窗口可设」，非通用无权限文案）
+  const h = mkRpcHandlers(mkBoard([]))
+  const hChild = mkRpcHandlers(mkBoard([]), child) // 子代理身份（resolveRoot 指向别处）
+  for (const name of ['task_create', 'task_update']) {
+    const tool = h.__tools[name]
+    assert.ok(tool, name + ' 工具已注册')
+    assert.ok(tool.parameters.properties.hooks, name + ' schema 含 hooks 参数')
+    // hooks 与 draft/publish 同级（顶层属性）——曾误插进 draft/publish 属性内部（`.properties.hooks` 为空即漏检）
+    assert.equal(tool.parameters.properties.draft && tool.parameters.properties.draft.properties && tool.parameters.properties.draft.properties.hooks, undefined, name + ' hooks 未误插进 draft 属性内')
+    // 子代理调用带 hooks → 专属文案拒绝（先于/独立于通用「仅主窗口可用」门禁，便于定位权限边界）
+    const resChild = await hChild.__tools[name].execute({ taskId: 'x', title: 'T', hooks: { pre: { prompt: 'p' } } })
+    assert.equal(resChild.ok, false)
+    assert.match(resChild.error, /hooks 仅主窗口可设/)
+  }
+  // ⑤ 子代理（resolveRoot 指向别处）经 update-task 带 hooks → 同一文案拒绝，且不改卡
+  const b4 = mkBoard([mkTask({ id: 'e2', hooks: { pre: { enabled: true, prompt: 'A', state: 'idle' } } })])
+  const r4 = await mkRpcHandlers(b4, child)['update-task']({ taskId: 'e2', hooks: { pre: { prompt: 'X' } } })
+  assert.equal(r4.ok, false); assert.match(r4.error, /hooks 仅主窗口可设/)
+  assert.equal(b4.tasks[0].hooks.pre.prompt, 'A')
+  assert.equal(b4.tasks[0].hooks.pre.state, 'idle') // 状态机不被越权写入扰动
+})
+
+// ===== hooks 接线（host 侧）：pre 闸门 spawn / post 补 spawn / hook run 结算分派（直调 + 源码级）=====
+// poolCycle 直调 harness（带 subagents）：spawnOneShot 走真实路径，捕获 provider/label/prompt；
+// run.result 用永不落定的 Promise（本用例只验证「谁被 spawn 了、prompt 对不对」，不触发结算）。
+function mkHookDispatch(board, over) {
+  const spawned = []
+  const runs = {}
+  const boardRef = { b: board }
+  const ctx = {
+    fs: {}, effect: function () {}, get: function () { return null },
+    timer: null,
+    subagents: {
+      list: () => ['mock'],
+      getProvider: () => ({ inheritsParentContext: false }),
+      start: async (name, req) => {
+        spawned.push({ name, label: req.label, text: req.prompt[0].text, parent: req.parent })
+        return { id: 'run-' + spawned.length, result: new Promise(function () {}), dispose: async function () {} }
+      },
+    },
+  }
+  const state = { knownSessions: {}, dispatchedEver: {}, badModels: {}, packByChild: {}, pendingPacks: [], teamModeCache: {}, activeRuns: {} }
+  const dispatch = createDispatch(ctx, state, Object.assign({
+    rt: async () => boardRef.b,
+    wt: async () => {},
+    mutateLocked: async (sid, fn) => fn(boardRef.b),
+    kickCycle: () => {},
+    rootForSession: () => ({ id: FULL_SID }),
+    sessionCwd: () => '', withTimeout: (p) => p, runsFor: () => runs, feedbackOn: () => true,
+    pushSysNote: () => {}, maybeNotify: () => {}, notifyTaskDone: () => {},
+  }, over || {}))
+  return { dispatch, spawned, runs, board: boardRef }
+}
+
+test('poolCycle 接线①：pre=idle → 不派子任务，改 spawn hook-pre run（prompt=薄框架+契约）', async () => {
+  const epi = HOOK_TASK({ hooks: { pre: { enabled: true, prompt: '先把依赖装好', state: 'idle', runId: null } } })
+  const child = mkTask({ id: 'c1', parentId: 'epic', status: 'pending' })
+  // 第二个子任务挂在一张无 hooks 的 epic 上：它是「无关卡片」参照物，也顺带保证 epi 不被 claim
+  // → epi 停在 in-progress（poolCycle 的空闲快进不会把整轮短路掉，hook 闸门分支真的被执行到）
+  const epi2 = mkTask({ id: 'epic2', status: 'in-progress' })
+  const child2 = mkTask({ id: 'z1', parentId: 'epic2', status: 'pending' })
+  const board = mkBoard([epi, child, epi2, child2])
+  const h = mkHookDispatch(board)
+  await h.dispatch.poolCycle(FULL_SID)
+  const labels = h.spawned.map(s => s.label).sort()
+  assert.deepEqual(labels, ['hook-pre:epic', 'worker:z1'])   // 只 spawn hook + 无关卡片照常派，无 c1 的 Worker
+  assert.equal(child.status, 'pending')                    // 串行闸门：子任务原地待命
+  assert.equal(child2.status, 'in-progress')               // 无关卡片不受闸门影响
+  assert.equal(epi.hooks.pre.state, 'running')             // 状态机推进（写在卡上，重启可恢复）
+  assert.equal(epi.hooks.pre.pending, undefined)           // pre 不用内存占用标记：幂等靠 state='running' 本身
+  const hp = h.spawned.find(s => s.label === 'hook-pre:epic')
+  assert.match(hp.text, /hooks=pre run/)
+  assert.match(hp.text, /先把依赖装好/)                     // 主窗口契约注入
+  // 第二轮（hook 仍在跑）不重复 spawn
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(h.spawned.filter(s => s.label === 'hook-pre:epic').length, 1)
+})
+
+test('poolCycle 接线①：pre=done → 子任务正常派发（闸门放行，不再 spawn hook）', async () => {
+  const epi = HOOK_TASK({ hooks: { pre: { enabled: true, prompt: '准备', state: 'done', runId: null } } })
+  const child = mkTask({ id: 'c1', parentId: 'epic', status: 'pending' })
+  const h = mkHookDispatch(mkBoard([epi, child]))
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(h.spawned.length, 1)
+  assert.equal(h.spawned[0].label, 'worker:c1')            // 派的是 Worker
+  assert.equal(child.status, 'in-progress')
+})
+
+test('poolCycle 接线③：post 待跑标记 → 不转 verifying，spawn hook-post run 收口', async () => {
+  const epi = mkTask({ id: 'epic', title: '史诗甲', status: 'in-progress', hooks: { post: { enabled: true, prompt: '做收口', state: 'idle', runId: null } } })
+  const child = mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' })
+  const board = mkBoard([epi, child])
+  // 先让 core 纯函数挂上待跑标记（真实触发路径：子任务了结时 maybeAutoCloseParent 被调用）
+  core.maybeAutoCloseParent(board, child)
+  assert.equal(epi.status, 'in-progress')                  // 延迟 verifying
+  const h = mkHookDispatch(board)
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(h.spawned.length, 1)
+  assert.equal(h.spawned[0].label, 'hook-post:epic')
+  assert.equal(epi.status, 'in-progress')                  // spawn 后仍等 hook 结算才转 verifying
+  assert.equal(epi.hooks.post.pending, false)
+  assert.equal(epi.verifierRun, 'run-1')                   // 幂等占用位换成真实 run id
+  await h.dispatch.poolCycle(FULL_SID)                     // 不重复 spawn
+  assert.equal(h.spawned.length, 1)
+})
+
+test('poolCycle 接线③：老 epic（无 hooks）→ 子任务了结仍直接 verifying，零 hook spawn（防回归）', async () => {
+  const epi = mkTask({ id: 'epic', status: 'in-progress' })
+  const child = mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' })
+  // 再来一对有 hooks 的 epic（idle pre）：本轮真的会 spawn hook-pre，
+  // 这样「hooked 场景 spawn ≥1、老场景 spawn 0」是对照组而非空跑（快进短路不会掩盖结论）
+  const hooked = HOOK_TASK({ id: 'hooked', hooks: { pre: { enabled: true, prompt: '准备', state: 'idle' } } })
+  const hchild = mkTask({ id: 'h1', parentId: 'hooked', status: 'pending' })
+  const board = mkBoard([epi, child, hooked, hchild])
+  core.maybeAutoCloseParent(board, child)
+  const h = mkHookDispatch(board)
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(epi.status, 'verifying')                    // 老 epic 维持现状直接收口
+  assert.equal(hooked.hooks.pre.state, 'running')          // 对照组确实跑了 hook
+  // 老 epic 收口后进 verifying 会照常派 Verifier（既有行为未变）；对照组只有 hook-pre 一条 run
+  assert.deepEqual(h.spawned.map(s => s.label).sort(), ['hook-pre:hooked', 'verifier:epic'])
+  assert.equal(epi.hooks, undefined)
+})
+
+test('hooks 接线（源码级）：spawnOneShot 三态 prompt + settleRun 分派 + pre/post 占用与 spawn 失败回收', () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  // spawnOneShot：hook 角色走 buildHookPrompt（phase 由 role 决定）
+  assert.match(dsp, /if \(role === 'hook-pre' \|\| role === 'hook-post'\) \{/)
+  assert.match(dsp, /buildHookPrompt\(t, role === 'hook-pre' \? 'pre' : 'post', kids\)/)
+  // settleRun：hook 分支进 settleHook（照 worker/verifier 结算模式）
+  assert.match(dsp, /else if \(rec\.role === 'hook-pre' \|\| rec\.role === 'hook-post'\) await settleHook\(sid, rec, output, failed, errText\)/)
+  assert.match(dsp, /applyHookSettle\(d, rec\.taskId, phase, !\(failed \|\| esc\), output, runId, errText\)/)
+  // pre 闸门占用（state=running 即幂等占用）与 post 补 spawn（pending 标记驱动，复用 verifierRun 幂等位）
+  assert.match(dsp, /if \(hookOn\(t, 'pre'\) && t\.hooks\.pre\.state === 'idle' && !runs\[t\.id\]\) \{/)
+  assert.match(dsp, /hookSetState\(t, 'pre', 'running', 'system', '派发前置 hook run'\)/)
+  assert.match(dsp, /t\.hooks\.post\.pending && !t\.verifierRun && !runs\[t\.id\]/)
+  // spawn 失败回收：pre 退回 idle 重试 / post 保留待跑标记
+  assert.match(dsp, /sp\.role === 'hook-pre'/)
+  assert.match(dsp, /t\.hooks\.pre\.state === 'running'\) \{ t\.hooks\.pre\.state = 'idle'/)
+  assert.match(dsp, /sp\.role === 'hook-post'/)
+  // 角色口径注释：hook run 计入 activeV（不挤占 Worker 并发位但参与空闲快进判定）
+  assert.match(dsp, /hook run 不是 Worker，不该挤占 maxWorkers 并发位/)
+  // core：post 延迟 verifying 注释与串行闸门说明在位（设计意图可追溯）
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  assert.match(coreSrc, /post 延迟 verifying（hooks=agent run 接线③）/)
+  assert.match(coreSrc, /串行闸门语义 = 「一个 epic 的子任务在 pre hook 完成之前一张都不派」/)
+  assert.match(coreSrc, /commit\/push 不进任何默认形态/)
+})
+
+test('hooks 主窗口限定（源码级）：RPC 与工具双通道门禁 + 浅校验口径唯一在 core.normalizeHooks', () => {
+  const rpc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  assert.match(rpc, /var HOOKS_MAIN_ONLY = 'hooks 仅主窗口可设（子代理无 hooks 权限）'/)
+  assert.match(rpc, /function hooksDenied\(actor\) \{ return resolveRoot\(actor\) !== actor \}/)
+  // create-task RPC：锁外角色门禁 + 锁内形状校验（与建卡同处一次持锁段）
+  assert.match(rpc, /if \(args\.hooks !== undefined && hooksDenied\(actor\)\) return \{ ok: false, error: HOOKS_MAIN_ONLY \}/)
+  assert.match(rpc, /var nHooks = null; if \(args\.hooks !== undefined\) \{ var hn = normalizeHooks\(args\.hooks\)/)
+  // update-task RPC：同一门禁 + 浅合并
+  assert.match(rpc, /if \(args\.hooks !== undefined && hooksDenied\(actor\)\) return \{ ok: false, error: HOOKS_MAIN_ONLY \}; var existsFn = existsInSession\(sid\)/)
+  assert.match(rpc, /if \(args\.hooks !== undefined\) \{ var __he = applyHooks\(t, args\.hooks\)/)
+  // 工具通道：两个工具的 hooks 专属门禁（在通用门禁之后，子代理拿到更准确的错误文案）
+  assert.equal((rpc.match(/if \(args\.hooks !== undefined && resolveRoot\(__ra\) !== __ra\) return \{ ok: false, error: 'hooks 仅主窗口可设（子代理无 hooks 权限）' \}/g) || []).length, 2)
+  // 形状校验口径唯一（normalizeHooks/mergeHooks 只在 core 定义，rpc 只解构引用）
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  assert.match(coreSrc, /export function normalizeHooks\(input\)/)
+  assert.match(coreSrc, /export function mergeHooks\(prev, next\)/)
+})
+
 test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tasks 返回 childStats（源码级断言）', () => {
   const host = hostSrc()
   // poolCycle 占位 claim 的 dispatch 分支：claimApply 后紧跟 parentKickOnDispatch
   assert.match(host, /claimApply\(d, t, 'spawn-pending', 'dispatch'\); if \(parentKickOnDispatch\(d, t\)\)/)
   // get-tasks 现算 childStats（零存储）
   assert.match(host, /d\.childStats = aggregateChildStats\(d\.tasks\)/)
-  // 两模块都从 core 解构引入（接线不断）；rpc.mjs 解构表尾部随调研门禁（task-mute6zpw）、调研遵循三件套（task-mutnj3a4）、tasksHash（task-mutrtwin）扩展
-  assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT \} = core/)
-  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash \} = core/)
+  // 两模块都从 core 解构引入（接线不断）；rpc.mjs 解构表尾部随调研门禁（task-mute6zpw）、调研遵循三件套（task-mutnj3a4）、
+  // tasksHash（task-mutrtwin）、hooks 浅校验（normalizeHooks/mergeHooks，本批 hooks=agent run）扩展；
+  // dispatch.mjs 解构表尾部追加 hook 族（buildHookPrompt/hookOn/hookSetState/gsb）
+  assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb \} = core/)
+  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks \} = core/)
   // 既有「全子任务 resolved → 父 verifying」逻辑不动（checkParentAuto 仍在 verifyApply 链路；
   // 但其内部已委托共享 helper maybeAutoCloseParent——单一判定口径，core.mjs 不在 hostSrc 清单，单独读）
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
@@ -1750,13 +2154,139 @@ test('派发回执③：完成回执与派发回执同窗口 → 合并成一条
 
 test('派发回执④：deps 未注入 notifyDispatched（老 host）→ 静默跳过，不抛错', () => {
   const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
-  assert.match(dsp, /if \(typeof notifyDispatched === 'function'\) notifyDispatched\(sid, sp\.t, sp\.role\)/)
+  // 回执开关（task-muuwgcro）加在 deps 注入判断之前：关掉开关与老 host 未注入两种静默路径共用同一行
+  assert.match(dsp, /if \(c\.notifyDispatch !== false && typeof notifyDispatched === 'function'\) notifyDispatched\(sid, sp\.t, sp\.role\)/)
   const idx = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
   assert.match(idx, /notifyDispatched: notify\.notifyDispatched/) // index.mjs 接线在位
   // 行为面：deps 未提供 isDispatched 时 notifyDispatched 照常入队（老 host 兼容，零依赖完成回执判定）
   const h = mkNotify({ board: { tasks: [DTASK()] } })
   assert.doesNotThrow(() => h.notify.notifyDispatched('s1', DTASK(), 'worker'))
   assert.equal(h.state.receiptBuf.s1.items.length, 1)
+})
+
+// ===== 回执开关进设置（task-muuwgcro）：板级 notifyDispatch/notifyDone 双布尔（缺省 true）+ 两处闸门 =====
+// 用户指令：「回执可以做一个开关，放到设置里」。语义：设置区「通知」小节可分别关掉「派发回执」与
+// 「完成回执」；歧义裁决通知（notifyMainWindow）是裁决通道不是回执，不接入开关。
+test('回执开关①：cfg/normalizeBoard/seed 三处缺省均为 true（老板文件与新建板行为不变）', () => {
+  // ① 空对象（最老形态）：cfg 归一为 true，不是 undefined/假值——闸门读的是 !== false
+  const c = core.cfg({})
+  assert.equal(c.notifyDispatch, true)
+  assert.equal(c.notifyDone, true)
+  // ② 老看板文件（无该字段）→ normalizeBoard 补 true（读路径兜底，UI 勾选态确定）
+  const old = core.normalizeBoard({ version: 11, tasks: [] })
+  assert.equal(old.notifyDispatch, true)
+  assert.equal(old.notifyDone, true)
+  // ③ 显式 false 原样保留；非布尔脏值收敛回 true（与 feedbackEnabled 同一归一化口径）
+  const off = core.normalizeBoard({ notifyDispatch: false, notifyDone: false })
+  assert.equal(off.notifyDispatch, false)
+  assert.equal(off.notifyDone, false)
+  assert.equal(core.cfg({ notifyDispatch: false, notifyDone: false }).notifyDispatch, false)
+  assert.equal(core.cfg({ notifyDispatch: false, notifyDone: false }).notifyDone, false)
+  const dirty = core.normalizeBoard({ notifyDispatch: 'no', notifyDone: 0 })
+  assert.equal(dirty.notifyDispatch, true)
+  assert.equal(dirty.notifyDone, true)
+  // ④ 新建板种子显式带两个 true（seed 与 cfg 口径一致）
+  const seeded = core.seed('s1')
+  assert.equal(seeded.notifyDispatch, true)
+  assert.equal(seeded.notifyDone, true)
+})
+
+test('回执开关②：notifyDispatch=false → spawn 成功也不入派发回执（真跑 poolCycle + 真 spawnOneShot）', async () => {
+  const calls = []
+  // 真 spawnOneShot 需要一个可用 provider：start 返回永不结算的 run（派发回执只看 spawn 成功，不看结局）
+  const ctxOver = { subagents: { list: () => ['p1'], getProvider: () => ({ inheritsParentContext: false }), start: async () => ({ id: 'run-1', dispose() {}, result: new Promise(function () {}) }) } }
+  function run(flag) {
+    const board = Object.assign(mkBoard([mkTask({ id: 'dt1', title: '被派的卡' })]), { maxWorkers: 3, notifyDispatch: flag })
+    return mkDispatch(board, {
+      rootForSession: () => ({ id: FULL_SID }),
+      notifyDispatched: (sid, t, role) => calls.push({ sid: sid, id: t.id, role: role }),
+    }, ctxOver)
+  }
+  // 关：spawn 照常成功（占位 claim + 历史留档 + run id 回写，多次写盘），但派发回执一次都不入队
+  const off = run(false)
+  await off.dispatch.poolCycle(FULL_SID)
+  assert.equal(calls.length, 0, 'notifyDispatch=false 时不得入派发回执')
+  assert.ok(off.counters.writes > 1, '派发确实发生（不是因未派发才没回执）')
+  // 开（缺字段 → cfg 默认 true）：同一路径照常回执，证明闸门没误伤正常路径
+  calls.length = 0
+  const on = run(true)
+  await on.dispatch.poolCycle(FULL_SID)
+  assert.deepEqual(calls, [{ sid: FULL_SID, id: 'dt1', role: 'worker' }])
+})
+
+test('回执开关③b：notifyDone=false → worker 三连败转 blocked 也不入完成回执（真跑结算路径）', async () => {
+  const done = []
+  // run 立即失败（Promise.reject）→ settleRun 走失败分支 → retryCount 2→3 → blocked（状态机不受开关影响）
+  const ctxOver = { subagents: { list: () => ['p1'], getProvider: () => ({ inheritsParentContext: false }), start: async () => ({ id: 'run-1', dispose() {}, result: Promise.reject(new Error('boom')) }) } }
+  async function run(flag) {
+    done.length = 0
+    const runs = {} // 稳定 runs 表：settleRun 靠 runsFor(sid)[taskId] === rec 认领本次 run
+    const board = Object.assign(mkBoard([mkTask({ id: 'dt2', title: '会失败的卡', retryCount: 2 })]), { maxWorkers: 3, notifyDone: flag })
+    const h = mkDispatch(board, {
+      rootForSession: () => ({ id: FULL_SID }),
+      runsFor: () => runs,
+      notifyTaskDone: (sid, t, kind) => done.push({ id: t.id, kind: kind, status: t.status }),
+    }, ctxOver)
+    await h.dispatch.poolCycle(FULL_SID)
+    for (let i = 0; i < 3; i++) await new Promise(r => setImmediate(r)) // 结算链（含 closeRunHistory/usage）全在微任务里
+    return { h, board }
+  }
+  // 关：照常 blocked（卡该阻塞就阻塞），只是一条完成回执都不发
+  const off = await run(false)
+  assert.equal(off.board.tasks[0].status, 'blocked')
+  assert.deepEqual(done, [])
+  // 开：同一路径照常回执（证明闸门没误伤完成回执主通道）
+  const on = await run(true)
+  assert.equal(on.board.tasks[0].status, 'blocked')
+  assert.deepEqual(done, [{ id: 'dt2', kind: 'blocked', status: 'blocked' }])
+})
+
+test('回执开关③/④：完成/阻塞回执闸门在结算调用方；歧义裁决通道零开关（源码级断言）', () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const noti = readFileSync(new URL('../lib/notify.mjs', import.meta.url), 'utf8')
+  // 完成回执：三个结算函数（worker/verifier/hook）都在同一次持锁回调里取 notifyDone（零额外读盘）
+  assert.equal((dsp.match(/doneOn = cfg\(d\)\.notifyDone !== false/g) || []).length, 3)
+  assert.equal((dsp.match(/if \(doneOn && /g) || []).length, 5) // worker 2 + verifier 2 + hook-closed 1
+  assert.match(dsp, /if \(doneOn && result\.task && result\.task\.status === 'resolved'\) notifyTaskDone\(sid, result\.task, 'resolved'\)/)
+  assert.match(dsp, /if \(doneOn && result\.task && result\.task\.status === 'blocked'\) notifyTaskDone\(sid, result\.task, 'blocked'\)/)
+  assert.match(dsp, /if \(result\.blocked\) \{ maybeNotify\(sid, result\.task\); if \(doneOn\) notifyTaskDone\(sid, result\.task, 'blocked'\) \}/)
+  // 闸门默认 true：回调未跑到也不漏报（宁可多报）
+  assert.equal((dsp.match(/var doneOn = true/g) || []).length, 3)
+  // ④ 歧义通道零开关：通知层根本读不到板级配置（cfg 未引入），去注释后的上报代码段不含两个开关名
+  assert.doesNotMatch(noti, /cfg\(/)
+  const escBlock = noti.slice(noti.indexOf('// 歧义上报通知'), noti.indexOf('// ===== 任务回执通知'))
+  assert.ok(escBlock.length > 200, '上报段切片成功（锚点注释在位）')
+  const escCode = escBlock.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n')
+  assert.doesNotMatch(escCode, /notifyDispatch|notifyDone/)
+  // 三个结算点的歧义通知调用（maybeNotify）都不带任何开关闸门
+  assert.equal((dsp.match(/maybeNotify\(sid, result\.task\)/g) || []).length, 3)
+})
+
+test('回执开关⑤：设置弹层「通知」小节两行开关 + set-board-config 读写通道（源码 + RPC 行为）', async () => {
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // UI：小节标题 + 两行开关文案 + 各自 RPC 键（勾选态缺字段=开，与 host 缺省一致）
+  assert.match(cli, /'通知'/)
+  assert.match(cli, /'⚡ 派发回执（任务被 Worker\/Verifier 领走时播报）'/)
+  assert.match(cli, /'✅ 完成回执（任务完成或阻塞时聚合播报）'/)
+  assert.match(cli, /checked: props\.notifyDispatch !== false, onChange: function \(e\) \{ rpc\('set-board-config', \{ key: 'notifyDispatch', value: e\.target\.checked \}\)/)
+  assert.match(cli, /checked: props\.notifyDone !== false, onChange: function \(e\) \{ rpc\('set-board-config', \{ key: 'notifyDone', value: e\.target\.checked \}\)/)
+  assert.match(cli, /歧义裁决通知不受这两个开关影响/)
+  // 透传链路：state 读取（老 host 缺字段=开）→ TopPanel useState → PoolCfgPopover props
+  assert.match(cli, /state\.notifyDispatch = !\(d && d\.notifyDispatch === false\)/)
+  assert.match(cli, /state\.notifyDone = !\(d && d\.notifyDone === false\)/)
+  assert.match(cli, /useState\(state\.notifyDispatch\)/)
+  assert.match(cli, /feedbackEnabled: fbEnabled, notifyDispatch: ndOn, notifyDone: nnOn/)
+  // host 通道：set-board-config 白名单两键布尔原样存 + get-tasks 显式透出确定布尔值
+  const board = mkBoard([])
+  const h = mkRpcHandlers(board)
+  await h['set-board-config']({ key: 'notifyDispatch', value: false })
+  await h['set-board-config']({ key: 'notifyDone', value: false })
+  assert.equal(board.notifyDispatch, false)
+  assert.equal(board.notifyDone, false)
+  await h['set-board-config']({ key: 'notifyDispatch', value: true })
+  const got = await h['get-tasks']({})
+  assert.equal(got.notifyDispatch, true)
+  assert.equal(got.notifyDone, false)
 })
 
 // ===== 调研门禁·UI：无调研徽章 + 详情注入清单 + 创建表单 warning 展示（源码级断言）=====
@@ -1939,11 +2469,12 @@ test('touchSession：不完整短 id 不注册进已知会话集合（幻影板�
 })
 
 // poolCycle 直调 harness：ctx 不给 timer（15s 心跳 IIFE 跳过），deps 全 mock，计数读/写/日志
-function mkDispatch(board, over) {
+// ctxOver（第三参，可选）：覆盖 ctx 面（如注入 subagents 让真 spawnOneShot 跑起来——回执开关行为测试用）
+function mkDispatch(board, over, ctxOver) {
   const counters = { reads: 0, writes: 0, errs: [] }
   const dispatch = createDispatch(
     // 创建期无条件触达：effect（卸载清理注册）/ get('systemPrompt' 引导段)；不给 timer/agents/subagents
-    { fs: {}, effect: function () {}, get: function () { return null } },
+    Object.assign({ fs: {}, effect: function () {}, get: function () { return null } }, ctxOver || {}),
     { knownSessions: {}, dispatchedEver: {}, badModels: {}, packByChild: {}, pendingPacks: [], teamModeCache: {}, activeRuns: {} },
     Object.assign({
       rt: async () => { counters.reads++; return board },
@@ -2014,7 +2545,9 @@ test('no-root 刷屏根治接线断言（源码级）：闸门/防线/兜底注�
   assert.match(ses, /sid !== 'unknown' && isFullSessionId\(sid\)\) knownSessions\[sid\]/)
   assert.match(rpc, /import \{ isFullSessionId \} from '\.\/session\.mjs'/)
   // create-task handler 校验在 mutateLocked 之前（拒绝时不建板）
-  assert.match(rpc, /handle\('create-task', async function \(args\) \{ var sid = rpcSessionId\(args\);[\s\S]{0,400}if \(!isFullSessionId\(sid\)\) return \{ ok: false, error: 'sessionId 不完整[\s\S]{0,120}return mutateLocked/)
+  // 窗口放宽到 700：幻影板防线与 return mutateLocked 之间新增了 hooks 角色门禁（本批 hooks=agent run；
+  // hooks 是高权限入口，只许主窗口设置），防线本身仍紧随 handler 开头
+  assert.match(rpc, /handle\('create-task', async function \(args\) \{ var sid = rpcSessionId\(args\);[\s\S]{0,700}if \(!isFullSessionId\(sid\)\) return \{ ok: false, error: 'sessionId 不完整[\s\S]{0,300}return mutateLocked/)
 })
 
 // ===== isRoot 蝶变防抖（task-muupr8ld，反馈 n-muuerxv9ijxs）=====
@@ -2062,4 +2595,242 @@ test('isRoot 蝶变防抖：host 侧注释指回客户端防抖，且 host 行�
   assert.match(rpcSrc, /曾确认 true 的会话需连续 3 次/)
   // 行为未改：isRoot 仍按 agents.roots() 现算（不缓存、不防抖、不落盘）
   assert.match(rpcSrc, /var __roots = __ag\.roots\(\)[\s\S]{0,200}d\.isRoot = __rids\.indexOf\(sid\) >= 0/)
+})
+
+// ===== 史诗 hooks UI（task-muuw56yf）：卡片相位徽章 + 详情页 hooks 编辑区 =====
+// 依赖卡 task-muuw4ov7 落地的真实字段契约（本文件上方 hooks 测试段即其口径）：
+//   epic.hooks = { pre: { enabled, prompt, state, runId, pending? }, post: 同构 }；state ∈ idle|running|done|failed；
+//   hook run 记在 epic.runs[]（role 'hook-pre'/'hook-post'，{ role, id, at, endedAt, outcome, model }）；
+//   update-task RPC 的 hooks 字段浅合并，normalizeHooks 对缺省 state 归零成 idle（故 UI 必须透传 state/runId）；
+//   hooks 只许主窗口设置（UI 不做权限预判，失败原因原样回显）。
+test('hooks 卡片相位徽章（源码级）：三态文案 + err 色 + 无 hooks 零渲染', () => {
+  const card = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+  // 相位判定唯一出处：hookBadgeOf（读 t.hooks，未声明直接 null = 老卡零渲染）
+  assert.match(card, /function hookBadgeOf\(t\) \{/)
+  assert.match(card, /var h = t && t\.hooks\n      if \(!h\) return null/)
+  // 三个相位文案 + 徽章优先级：failed（pre|post）> pre running > post running > 不渲染
+  assert.match(card, /'⚠️ hook 失败待裁决'/)
+  assert.match(card, /'⏳ 前置准备中'/)
+  assert.match(card, /'🧪 收尾中'/)
+  assert.match(card, /if \(\(pre && pre\.state === 'failed'\) \|\| \(post && post\.state === 'failed'\)\) \{/)
+  assert.match(card, /if \(pre && pre\.state === 'running'\) return \{ txt: '⏳ 前置准备中'/)
+  assert.match(card, /if \(post && post\.state === 'running'\) return \{ txt: '🧪 收尾中'/)
+  assert.match(card, /return null\n    \}/) // 末尾兜底：idle / done 不占位
+  // 只有「已声明且 enabled」的点位参与相位判定（停用的点位不该报 running/failed）
+  assert.match(card, /var pre = \(h\.pre && h\.pre\.enabled\) \? h\.pre : null/)
+  assert.match(card, /var post = \(h\.post && h\.post\.enabled\) \? h\.post : null/)
+  // 失败徽章走 err 色（与既有 escalation 视觉同源）
+  assert.match(card, /return \{ txt: '⚠️ hook 失败待裁决', color: C\.err,/)
+  // 挂载点：与「📦 史诗 · x/y」并存（史诗卡限定，相位是附加过程态而非替代进度）
+  assert.match(card, /epic \? hookPhaseBadge\(t\) : null,/)
+  assert.match(card, /'📦 史诗 · ' \+ csDone \+ '\/' \+ cs\.total/)
+  // 组装产物里也要有（require build-client 先跑；npm pretest 已保证）
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  for (const s of ['⏳ 前置准备中', '🧪 收尾中', '⚠️ hook 失败待裁决']) assert.ok(built.includes(s), '产物应含相位文案：' + s)
+})
+
+test('hooks 详情页编辑区（源码级）：开关 + prompt + state/耗时 + 失败跳裁决 + run 跳会话 + 保存通道', () => {
+  const src = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  // ① 挂载与门禁：史诗（有子任务）或已声明 hooks 才渲染，普通老卡整块不出现
+  assert.match(src, /function HooksSection\(props\) \{/)
+  assert.match(src, /var kids = state\.tasks\.filter\(function \(x\) \{ return x\.parentId === task\.id \}\)/)
+  assert.match(src, /var declared = !!\(kHooks && \(kHooks\.pre \|\| kHooks\.post\)\)/)
+  assert.match(src, /if \(kids\.length === 0 && !declared\) return null/)
+  // key=task.id 挂载：切换任务重挂组件，编辑缓冲不串卡
+  assert.match(src, /React\.createElement\(HooksSection, \{ key: task\.id, task: task \}\)/)
+  // ② 两行同构：enabled 开关（原生 checkbox）+ prompt 文本框（薄框架语义写进 placeholder）
+  assert.match(src, /phaseRow\('pre', '⏳ 前置（pre）'/)
+  assert.match(src, /phaseRow\('post', '🧪 收尾（post）'/)
+  assert.match(src, /type: 'checkbox', checked: !!b\.enabled, onChange: function \(e\) \{ setPhase\(ph, \{ enabled: e\.target\.checked \}\) \}/)
+  assert.match(src, /placeholder: '补充指令（可选）——前置=让子任务具备开跑条件；后置=把这批活收口。具体动作由 hook agent 自行决策'/)
+  // ③ state 展示四态 + 未启用 + 耗时（运行中=已跑、落定=净耗时）
+  assert.match(src, /\{ idle: \{ label: off \? '未启用' : '待运行', color: C\.text2 \}, running: \{ label: '运行中', color: C\.brand \}, done: \{ label: '已完成', color: C\.ok \}, failed: \{ label: '失败', color: C\.err \} \}/)
+  assert.match(src, /if \(st === 'running'\) dur = '已跑 ' \+ elapsedSince\(run\.at\)/)
+  assert.match(src, /else if \(run\.endedAt\) dur = '耗时 ' \+ fmtDur\(/)
+  // ④ 失败 → 「前往裁决」：同页锚点跳转（裁决区 id 固定，DetailView 已挂 id）
+  assert.match(src, /m\.state === 'failed' \? React\.createElement\('button', \{ onClick: goArbitration/)
+  assert.match(src, /'前往裁决'/)
+  assert.match(src, /function goArbitration\(\) \{ var el = document\.getElementById\('tskb-escalation'\); if \(el && el\.scrollIntoView\) el\.scrollIntoView\(\{ block: 'center' \}\) \}/)
+  assert.match(src, /React\.createElement\('div', \{ id: 'tskb-escalation'/)
+  // ⑤ run 跳会话（照 verifierRun 跳转既有模式）+ post 的 run id 落在 verifierRun 位
+  assert.match(src, /onClick: function \(\) \{ if \(uiWorkspaceSvc\) uiWorkspaceSvc\.openSession\(m\.run\.id\) \}/)
+  assert.match(src, /var rid = runId \|\| \(phase === 'post' \? task\.verifierRun : null\)/)
+  assert.match(src, /var role = 'hook-' \+ phase/)
+  // ⑥ 保存通道：update-task RPC 的 hooks 字段（UI 不做权限判断，失败原因原样 ⚠️ 回显）
+  assert.match(src, /rpc\('update-task', \{ taskId: task\.id, hooks: \{ pre: pre\.item, post: post\.item \} \}\)/)
+  assert.match(src, /if \(r && r\.ok === false\) \{ setMsg\('⚠️ ' \+ \(r\.error \|\| '保存失败'\)\); return \}/)
+  // ⑦ 提交体三条口径：空 prompt=撤点位（null）；state/runId/pending 原样透传（否则在跑的 hook 会被打回 idle）；
+  //    运行中的点位不清空（run 还在飞，撤声明会让结算落到空点位）——删除意图保留 + 回一行提示
+  assert.match(src, /if \(!String\(b\.prompt \|\| ''\)\.trim\(\)\) \{/)
+  assert.match(src, /if \(cur && cur\.state === 'running'\) return \{ item: keep\(cur\), warn: ph \+ ' 运行中：本次不清空该点位（run 还在跑），等它跑完再撤' \}/)
+  assert.match(src, /return \{ item: null \}/)
+  assert.match(src, /if \(cur\.state\) item\.state = cur\.state/)
+  assert.match(src, /if \(cur\.runId\) item\.runId = cur\.runId/)
+  assert.match(src, /if \(cur\.pending\) item\.pending = true/)
+  assert.match(src, /setMsg\(warns\.length \? '⚠️ ' \+ warns\.join\('；'\) : '✅ 已保存 hooks 配置'\)/)
+  // 组装产物里也要有
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  for (const s of ['Hooks（可选点位）', '前往裁决', '保存 hooks']) assert.ok(built.includes(s), '产物应含：' + s)
+})
+
+test('README 双份同步记录 hooks UI 口径（相位徽章 / 详情编辑区 / 自行决策 + 歧义兜底）', () => {
+  const pkg = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  const root = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')
+  assert.equal(pkg, root) // 两份 README 必须字节一致（npm run sync-readme 的约束）
+  for (const s of ['可选 hooks', '串行闸门', '自行决策', '歧义上报', '⏳ 前置准备中', '🧪 收尾中', '⚠️ hook 失败待裁决', 'hooks 仅主窗口可设']) {
+    assert.ok(pkg.includes(s), 'README 应记录 hooks UI 口径：' + s)
+  }
+})
+
+// ===== 史诗拆分总开关（epicSplit，板级；口径：只关「引导」不禁「机制」）=====
+// false 时两个生效点：① Team 提示词第 6 条 TEAM_SPLIT_RULE 整条不注入（policy.splitRuleOf）
+// ② create-task RPC / task_create 工具返回体不再附 suggestSplit（policy.withSplitHint 第三参）。
+// 机制面（显式 parentId 建子卡 / 史诗自动收口 / hooks 状态机）一律不看这个开关。
+test('cfg/seed/normalizeBoard: epicSplit 缺省开（缺字段/脏值都算开），只有显式 false 才关', () => {
+  assert.equal(core.cfg({}).epicSplit, true)
+  assert.equal(core.cfg({ epicSplit: true }).epicSplit, true)
+  assert.equal(core.cfg({ epicSplit: false }).epicSplit, false)
+  assert.equal(core.cfg({ epicSplit: 'no' }).epicSplit, true) // 脏值不关（默认开）
+  assert.equal(core.cfg({ epicSplit: 0 }).epicSplit, true)
+  assert.equal(core.seed('s1').epicSplit, true)
+  assert.equal(core.normalizeBoard({ tasks: [] }).epicSplit, true)                        // 老看板无字段 → 默认开（行为零变化）
+  assert.equal(core.normalizeBoard({ tasks: [], epicSplit: false }).epicSplit, false)      // 显式 false 原样保留
+  assert.equal(core.normalizeBoard({ tasks: [], epicSplit: 'x' }).epicSplit, true)         // 脏值收敛成默认开
+})
+
+test('splitRuleOf: 第 6 条注入出口——缺省/true 与开关落地前逐字相同，显式 false 整条不出现', () => {
+  assert.equal(splitRuleOf(undefined), '\n' + TEAM_SPLIT_RULE) // 老调用方/缺省 → 零变化
+  assert.equal(splitRuleOf(true), '\n' + TEAM_SPLIT_RULE)
+  assert.equal(splitRuleOf(false), '')
+  assert.doesNotMatch(splitRuleOf(false), /大任务必须拆分|parentId|checkParentAuto/)
+  // 拼接形态：第 5 条末尾直接接出口——关掉时编号 1~5 连续、不留空行尾巴
+  assert.ok(('5. 尾部。' + splitRuleOf(true)).endsWith('\n' + TEAM_SPLIT_RULE))
+  assert.equal('5. 尾部。' + splitRuleOf(false), '5. 尾部。')
+})
+
+test('epicSplit 行为①：Team 提示词第 6 条随门禁注入/消失（真跑一次 section 组装，不是源码断言）', () => {
+  const SID = FULL_SID
+  const sections = []
+  const ctx = {
+    fs: {},
+    effect: function () { return function () {} },
+    get: function (name) {
+      if (name !== 'systemPrompt') return null
+      return { section: function (cfg) { sections.push(cfg); return function () {} }, context: function () { return function () {} } }
+    },
+  }
+  // 只给 createDispatch 创建期真正用到的 deps 面；epicSplitOn 就是要验的门禁读取器
+  const mkDeps = (on) => ({
+    rt: async () => mkBoard([]), wt: async () => {}, mutateLocked: async (sid, fn) => fn(mkBoard([])), kickCycle: () => {},
+    rootForSession: () => undefined, sessionCwd: () => '', withTimeout: (p) => p, runsFor: () => ({}),
+    feedbackOn: () => false, epicSplitOn: () => on,
+    pushSysNote: () => {}, maybeNotify: () => {}, notifyTaskDone: () => {},
+  })
+  const mkState = () => { const s = { knownSessions: {}, dispatchedEver: {}, badModels: {}, packByChild: {}, pendingPacks: [], teamModeCache: {}, activeRuns: {} }; s.teamModeCache[SID] = true; return s }
+  const textOf = (on) => {
+    sections.length = 0
+    createDispatch(ctx, mkState(), mkDeps(on))
+    const sec = sections.find((s) => s.name === 'task-board:team-mode')
+    assert.ok(sec, 'team-mode 引导段已注册')
+    return sec.text({ agent: { id: SID } })
+  }
+  const on = textOf(true)
+  assert.ok(on.includes(TEAM_SPLIT_RULE)); assert.match(on, /大任务必须拆分/); assert.match(on, /checkParentAuto/)
+  const off = textOf(false)
+  // 条款整条消失（连 parentId/checkParentAuto 都不再出现），基础 1~5 条引导一字不少
+  assert.doesNotMatch(off, /大任务必须拆分|parentId=父卡 id|checkParentAuto|epic 父卡/)
+  assert.match(off, /Team 模式已开启/); assert.match(off, /5\. Team 模式下 task_create 默认建为草稿/)
+  assert.equal(on.replace(splitRuleOf(true), ''), off.replace(splitRuleOf(false), '')) // 除第 6 条外逐字相同
+})
+
+test('withSplitHint: epicSplit=false 不附 suggestSplit（与未命中同形），缺省/true 零变化', () => {
+  const big = mkTask({ title: '全量重写派发引擎' })
+  const off = withSplitHint({ ok: true, task: {} }, big, false)
+  assert.equal(off.suggestSplit, undefined)
+  assert.deepEqual(Object.keys(off), ['ok', 'task']) // 返回体形态与「未命中」逐字同形
+  assert.equal(withSplitHint({ ok: true, task: {} }, big, true).suggestSplit, SUGGEST_SPLIT_TEXT)
+  assert.equal(withSplitHint({ ok: true, task: {} }, big).suggestSplit, SUGGEST_SPLIT_TEXT)          // 两参老调用零变化
+  assert.equal(withSplitHint({ ok: true, task: {} }, big, undefined).suggestSplit, SUGGEST_SPLIT_TEXT) // 缺省=开
+})
+
+test('buildWorkerPrompt: Worker prompt 不含拆分条款（引导只在主窗口侧两处动态面，审计锁定）', () => {
+  const t = mkTask({ title: '把整个引擎系统级重写', description: 'x'.repeat(600) })
+  const p = core.buildWorkerPrompt(t, '', true)
+  for (const s of ['建议粒度', '拆分', 'parentId', 'epic 卡', 'TASK_SIZE_CONTRACT', 'TEAM_SPLIT_RULE']) {
+    assert.ok(!p.includes(s), 'Worker prompt 不该出现拆分引导：' + s)
+  }
+  // 源码级：buildWorkerPrompt 体内不引用拆分文案、也不引用门禁出口——Worker 侧没有可跳过的条款，
+  // 所以 epicSplit 对 Worker prompt 是零影响（将来若往这里加拆分条款，必须同步接 epicSplit 门禁）
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  const body = coreSrc.slice(coreSrc.indexOf('export function buildWorkerPrompt'), coreSrc.indexOf('export function buildVerifierPrompt'))
+  assert.ok(body.length > 500, 'buildWorkerPrompt 切片成功')
+  assert.doesNotMatch(body, /TASK_SIZE_CONTRACT|TEAM_SPLIT_RULE|splitRuleOf|建议粒度/)
+})
+
+test('epicSplit 透出：get-tasks 返回确定布尔值（缺省 true / 显式 false），set-board-config 白名单落盘', async () => {
+  const board = mkBoard([])
+  const h = mkRpcHandlers(board)
+  assert.equal((await h['get-tasks']({})).epicSplit, true) // 老看板缺字段 → true（零变化）
+  await h['set-board-config']({ key: 'epicSplit', value: false })
+  assert.equal(board.epicSplit, false)
+  assert.equal((await h['get-tasks']({})).epicSplit, false)
+  await h['set-board-config']({ key: 'epicSplit', value: true })
+  assert.equal((await h['get-tasks']({})).epicSplit, true)
+})
+
+test('epicSplit 行为：关掉后 create-task 不附 suggestSplit，但显式 parentId 建子卡 + 史诗自动收口照常（机制不禁）', async () => {
+  const board = mkBoard([])
+  const h = mkRpcHandlers(board)
+  const big = { title: '全量重构整个派发引擎', description: '把整个看板的派发与结算链路系统级重写一遍，覆盖全部管线与状态机' }
+  const on = await h['create-task'](Object.assign({ id: 'epic-on' }, big))
+  assert.equal(on.ok, true); assert.equal(on.suggestSplit, SUGGEST_SPLIT_TEXT) // 缺省开：引导照旧
+  assert.equal((await h['set-board-config']({ key: 'epicSplit', value: false })).ok, true)
+  const r1 = await h['create-task'](Object.assign({ id: 'epic-off' }, big))
+  assert.equal(r1.ok, true); assert.equal('suggestSplit' in r1, false) // 引导关掉：不再劝拆
+  // 机制不禁①：显式 parentId 建子卡照常
+  const child = await h['create-task']({ id: 'kid-1', title: '拆出来的一小块', description: '明确描述', parentId: 'epic-off' })
+  assert.equal(child.ok, true); assert.equal(child.task.parentId, 'epic-off')
+  // 机制不禁②：子任务全部了结 → 父卡照常自动转 verifying（checkParentAuto 不看开关）
+  const ep = board.tasks.find((x) => x.id === 'epic-off'); ep.status = 'in-progress'
+  const kid = board.tasks.find((x) => x.id === 'kid-1'); kid.status = 'resolved'
+  assert.equal(core.checkParentAuto(board, kid), ep)
+  assert.equal(ep.status, 'verifying')
+})
+
+test('epicSplit 接线（源码级）：缓存同步 / Team 引导段门禁 / 双出口第三参 / get-tasks 透出 / UI「功能」小节', () => {
+  const src = hostSrc()
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8') // hostSrc 不含 core（纯逻辑核）
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // 配置层（core.mjs：cfg 兜底 / seed 初值 / normalizeBoard 老看板补齐）
+  assert.match(coreSrc, /epicSplit: d\.epicSplit !== false/)
+  assert.match(coreSrc, /if \(typeof d\.epicSplit !== 'boolean'\) d\.epicSplit = true/)
+  assert.match(coreSrc, /notifyDone: true, epicSplit: true, minWorkers: 1/) // seed 缺省开
+  // 缓存链路：rt() 读盘同步 + set-board-config 当场回填（Team 提示词是同步组装，只能读缓存）
+  assert.match(src, /epicSplitCache\[sid\] = nd\.epicSplit !== false/)
+  assert.match(src, /function epicSplitOn\(sid\) \{ return epicSplitCache\[sid\] !== false \}/)
+  assert.match(src, /epicSplitOn: session\.epicSplitOn/)
+  assert.match(src, /var epicSplitOn = deps\.epicSplitOn/)
+  assert.match(src, /else if \(args\.key === 'epicSplit'\) \{ d\.epicSplit = !!args\.value; epicSplitCache\[sid\] = d\.epicSplit \}/)
+  // ① Team 提示词第 6 条经门禁出口注入
+  assert.match(src, /splitRuleOf\(epicSplitOn\(String\(agent\.id\)\)\)/)
+  // ② 双出口（RPC + 工具）都传第三参
+  assert.equal((src.match(/withSplitHint\(\{ ok: true, task: t \}, t, cfg\(d\)\.epicSplit\)/g) || []).length, 2)
+  assert.match(src, /d\.epicSplit = cfg\(d\)\.epicSplit/) // get-tasks 透出确定布尔值
+  // ③ UI：入池配置弹层「功能」小节一行开关（勾选态缺字段=开）+ 状态透传链
+  assert.match(cli, /'功能'/)
+  assert.match(cli, /'🧩 史诗拆分：大任务引导拆为 epic \+ 子任务'/)
+  assert.match(cli, /checked: props\.epicSplit !== false, onChange: function \(e\) \{ rpc\('set-board-config', \{ key: 'epicSplit', value: e\.target\.checked \}\)/)
+  assert.match(cli, /关掉只停引导：显式 parentId 建子卡与史诗自动收口照常工作/)
+  assert.match(cli, /state\.epicSplit = !\(d && d\.epicSplit === false\)/)
+  assert.match(cli, /useState\(state\.epicSplit\)/)
+  assert.match(cli, /epicSplit: esOn/)
+})
+
+test('README 双份同步记录 epicSplit 开关口径（关引导不禁机制）', () => {
+  const pkg = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  const root = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')
+  assert.equal(pkg, root) // 两份 README 必须字节一致
+  for (const s of ['`epicSplit`', '「**功能**」小节', '只停**引导**', '**机制不禁**', 'parentId']) {
+    assert.ok(pkg.includes(s), 'README 应记录 epicSplit 口径：' + s)
+  }
 })

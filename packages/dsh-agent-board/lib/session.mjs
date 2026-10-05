@@ -1,6 +1,6 @@
 // dsh-agent-board — 会话层（lib/session.mjs）
 // createSession(ctx, state)：agent 归属解析（resolveRoot 10s 缓存）/ 工具与 RPC 的会话 id 归一 /
-// 已知会话心跳集合 / 工作模式三档派生 / feedback 开关读取 / 按会话找 root agent / 会话工作区 /
+// 已知会话心跳集合 / 工作模式三档派生 / feedback 与 epicSplit 开关读取 / 按会话找 root agent / 会话工作区 /
 // 通用超时包装 / 活跃 run 表与派发履历访问。共享状态全部经 state 显式注入（别名为本地 var）。
 // 另出口纯函数 isFullSessionId（幻影板防线口径，rpc.mjs 直接 import 复用，与 policy.mjs 纯函数同例）。
 
@@ -21,6 +21,7 @@ export function createSession(ctx, state) {
     // 共享状态别名（本体由 index.mjs apply 统一构建并逐模块注入）
     var knownSessions = state.knownSessions
     var feedbackCache = state.feedbackCache
+    var epicSplitCache = state.epicSplitCache
     var activeRuns = state.activeRuns
     var dispatchedEver = state.dispatchedEver
 
@@ -53,6 +54,10 @@ export function createSession(ctx, state) {
     // feedbackEnabled 缓存（学习飞轮 v1）：同样由 rt() 同步——systemPrompt 的组装是同步函数，
     // 不能在里面读文件。与 teamModeCache 同源同生命周期（引导段本来就要 teamMode 命中才渲染）。
     function feedbackOn(sid) { return feedbackCache[sid] !== false }
+    // 史诗拆分总开关缓存（epicSplit，缺省 true）：与 feedbackCache 同源同生命周期——Team 提示词组装是同步
+    // 函数，只能读缓存；由 rt() 每次读盘同步、set-board-config 写入时当场更新。缺键=开（老看板字段由
+    // normalizeBoard 补 true，未落盘前也不会误判为关）。
+    function epicSplitOn(sid) { return epicSplitCache[sid] !== false }
     // 工作模式三档收敛（UI 一维化）：内部仍存 boardMode+teamMode 两个 flag（老数据/老 RPC 无损），
     // workMode 是纯派生字段——由两 flag 算出，不落盘（normalizeBoard 无需改动）。
     //   'team' → boardMode=auto + teamMode=true（主窗口当调度员：默认草稿 + 裁决歧义）
@@ -72,5 +77,5 @@ export function createSession(ctx, state) {
     function runsFor(sid) { if (!activeRuns[sid]) activeRuns[sid] = {}; return activeRuns[sid] }
     function isDispatched(sid, id) { return !!(id && dispatchedEver[sid] && dispatchedEver[sid][id]) }
 
-    return { getActorId: getActorId, resolveRoot: resolveRoot, toolSessionId: toolSessionId, rpcSessionId: rpcSessionId, touchSession: touchSession, rootForSession: rootForSession, sessionCwd: sessionCwd, deriveWorkMode: deriveWorkMode, feedbackOn: feedbackOn, withTimeout: withTimeout, runsFor: runsFor, isDispatched: isDispatched, isFullSessionId: isFullSessionId }
+    return { getActorId: getActorId, resolveRoot: resolveRoot, toolSessionId: toolSessionId, rpcSessionId: rpcSessionId, touchSession: touchSession, rootForSession: rootForSession, sessionCwd: sessionCwd, deriveWorkMode: deriveWorkMode, feedbackOn: feedbackOn, epicSplitOn: epicSplitOn, withTimeout: withTimeout, runsFor: runsFor, isDispatched: isDispatched, isFullSessionId: isFullSessionId }
 }

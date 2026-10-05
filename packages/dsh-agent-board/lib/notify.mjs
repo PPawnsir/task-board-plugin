@@ -3,6 +3,8 @@
 // createNotify(ctx, state, deps)：歧义上报 25s 去抖通知 / 回执批量聚合（45s 或满 5 条）+ 主窗口空闲门控 /
 // 系统异常通知队列 / 投递前按看板现状过滤过期项（含 dispatched 派发回执的离场过滤）。共享状态全部经 state 显式注入。
 // 回执两类入口共用同一聚合队列：notifyTaskDone（完成/阻塞）+ notifyDispatched（派发即回执）。
+// 回执开关（板级 notifyDispatch/notifyDone，设置区「通知」小节）不在本模块判定——闸门在调用方
+// （dispatch.mjs 派发/结算处读 cfg 快照），这样歧义裁决通知（notifyMainWindow）天然不受开关影响。
 
     // makeMsg 支持插件来源标记（参考 dsh-notes 派发模式）：
     // form 'recall' = 背景回执（召回上下文，非指令）；'notice' = 需注意的通知（带一行 summary）
@@ -23,6 +25,9 @@ export function createNotify(ctx, state, deps) {
     var sysNotesBuf = state.sysNotesBuf
 
     // 歧义上报通知：任何模式都通知主窗口（escalation 需要人工裁决，不能静默吞掉）
+    // ⚠️ 本通道是「裁决通道」不是回执——设置区的回执开关（notifyDispatch/notifyDone）只闸下面两条
+    // 回执入队入口（notifyTaskDone/notifyDispatched 的调用方），这里绝不读开关：关掉回执提醒是嫌吵，
+    // 关掉歧义提醒会让任务永久卡在等人裁决（闸门放在调用方而非本函数，就是为了让这条通道零开关）。
     // 25s 去抖投递：主窗口 turn 进行中时 followup 只在宿主侧排队，送达时任务常已被裁决/归档（过期回声）；
     // 排队无法撤回，插件侧唯一可行的方案就是延迟 + 投递前重查看板。
     // escNotifyTimers 存每个任务最新一次调度：同一任务再次上报即顶替旧调度（旧回调身份不匹配 → 静默丢弃）；

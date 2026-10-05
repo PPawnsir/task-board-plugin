@@ -4,13 +4,16 @@
 // Team 模式 systemPrompt 引导段 / 预研文件上下文注入通道（packByChild + pendingPacks 首轮竞速认领）。
 import * as core from './core.mjs'
 import { readRunUsage } from './usage.mjs'
-import { TEAM_SPLIT_RULE, pushRejectLesson } from './policy.mjs'
-const { ah, cfg, claimApply, resolveApply, verifyApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseAnchorPath, sliceLines, buildFileOutline, parentKickOnDispatch, LESSON_RECALL_HINT } = core
+import { splitRuleOf, pushRejectLesson } from './policy.mjs'
+const { ah, cfg, claimApply, resolveApply, verifyApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseAnchorPath, sliceLines, buildFileOutline, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb } = core
 
 export function createDispatch(ctx, state, deps) {
     const fs = ctx.fs
     var rt = deps.rt, wt = deps.wt, mutateLocked = deps.mutateLocked, kickCycle = deps.kickCycle
     var rootForSession = deps.rootForSession, sessionCwd = deps.sessionCwd, withTimeout = deps.withTimeout, runsFor = deps.runsFor, feedbackOn = deps.feedbackOn
+    // 史诗拆分总开关读取器（epicSplit，缺省 true）：与 feedbackOn 同源（session 缓存，rt() 同步）——
+    // Team 提示词组装是同步函数，只能读缓存，不能读盘。
+    var epicSplitOn = deps.epicSplitOn
     var pushSysNote = deps.pushSysNote, maybeNotify = deps.maybeNotify, notifyTaskDone = deps.notifyTaskDone
     // 派发即回执：spawn 成功后入 45s 聚合队列的「🚀 已派发」区（老 host 未注入 → 静默跳过）
     var notifyDispatched = deps.notifyDispatched
@@ -160,7 +163,16 @@ export function createDispatch(ctx, state, deps) {
       }
       // user prompt 只留一行指引，内容走上下文注入区块
       var packNote = pack ? '本任务附带主窗口预研文件，已通过「上下文注入」区提供（含文件完整内容），直接基于其内容工作，不要重复读取这些文件。' : ''
-      var req = { label: role + ':' + t.id, prompt: [{ type: 'text', text: role === 'worker' ? buildWorkerPrompt(t, packNote, cfg(dsnap).feedbackEnabled) : buildVerifierPrompt(t, packNote) }], parent: parent, signal: makeSignal() }
+      // prompt 三态：worker / verifier / hook（hooks=agent run：pre 与 post 共用 buildHookPrompt，
+      // 由 phase 决定契约文案——二者都是挂在 epic 上的一次性真实 agent 运行）。
+      // hook 分支现读一次看板只为拿子任务清单；读失败退化为空清单（prompt 仍成立，绝不因此不 spawn）。
+      var promptText
+      if (role === 'hook-pre' || role === 'hook-post') {
+        var kids = []
+        try { var hsnap = await rt(sid); kids = gsb(t.id, (hsnap && hsnap.tasks) || []) } catch (_) {}
+        promptText = buildHookPrompt(t, role === 'hook-pre' ? 'pre' : 'post', kids)
+      } else promptText = role === 'worker' ? buildWorkerPrompt(t, packNote, cfg(dsnap).feedbackEnabled) : buildVerifierPrompt(t, packNote)
+      var req = { label: role + ':' + t.id, prompt: [{ type: 'text', text: promptText }], parent: parent, signal: makeSignal() }
       if (modelOverride) {
         // list-models 返回的 id 是 "provider/model" 复合格式（如 "cmss/zhanlu/glm-5.2"），
         // 但 AgentOptions 的 provider 和 model 是分开的——整串塞进 model 会报 UNKNOWN_MODEL
@@ -218,6 +230,7 @@ export function createDispatch(ctx, state, deps) {
       var errText = err ? String(err) : (res && (res.diagnostic || res.stopReason) || '')
       try {
         if (rec.role === 'worker') await settleWorker(sid, rec, output, failed, errText)
+        else if (rec.role === 'hook-pre' || rec.role === 'hook-post') await settleHook(sid, rec, output, failed, errText)
         else await settleVerifier(sid, rec, output, failed, errText)
       } catch (e) { console.error('[task-board] settle ' + rec.role + ' failed (task ' + rec.taskId + '):', String(e)) }
       // 历史会话留档：记录该次 run 的结局（完成/失败/硬超时），详情页可据此标注阶段状态
@@ -301,7 +314,11 @@ export function createDispatch(ctx, state, deps) {
     }
 
     async function settleWorker(sid, rec, output, failed, errText) {
+      // 完成回执开关（设置区「通知」notifyDone）：在同一次持锁回调里读看板文档（零额外读盘），
+      // 缺字段/回调未跑到时保持 true——宁可多报一条，也不因读配置失败漏报完成。
+      var doneOn = true
       var result = await mutateLocked(sid, function (d) {
+        doneOn = cfg(d).notifyDone !== false
         var t = d.tasks.find(function (x) { return x.id === rec.taskId })
         if (!t) return null
         // 工具通道已处理（board_report 已推进到 verifying/resolved 或挂了 escalation）→ 只收尾
@@ -332,13 +349,17 @@ export function createDispatch(ctx, state, deps) {
       // already=true：工具通道（board_report）已推进状态并已发回执/歧义通知，settle 只负责 dispose，不再重复通知
       if (result.already) return
       if (result.escalated) maybeNotify(sid, result.task)
-      if (result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved')
-      if (result.blocked) notifyTaskDone(sid, result.task, 'blocked')
+      // 歧义通知（maybeNotify → notifyMainWindow）是裁决通道，不受回执开关影响：只闸下面两条完成/阻塞回执
+      if (doneOn && result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved')
+      if (doneOn && result.blocked) notifyTaskDone(sid, result.task, 'blocked')
       kickCycle(sid) // 结算后立刻补派
     }
 
     async function settleVerifier(sid, rec, output, failed, errText) {
+      // 完成回执开关同上：持锁回调内取 notifyDone
+      var doneOn = true
       var result = await mutateLocked(sid, function (d) {
+        doneOn = cfg(d).notifyDone !== false
         var t = d.tasks.find(function (x) { return x.id === rec.taskId })
         if (!t) return null
         if (t.status !== 'verifying' || t.escalation) return { task: t, already: true } // 工具通道已处理
@@ -372,9 +393,36 @@ export function createDispatch(ctx, state, deps) {
       // already=true：工具通道（board_verdict）已推进状态并已发回执，settle 只负责 dispose，不再重复通知
       if (result.already) return
       if (result.escalated) maybeNotify(sid, result.task)
-      if (result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved')
-      if (result.task && result.task.status === 'blocked') notifyTaskDone(sid, result.task, 'blocked')
+      if (doneOn && result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved')
+      if (doneOn && result.task && result.task.status === 'blocked') notifyTaskDone(sid, result.task, 'blocked')
       kickCycle(sid)
+    }
+
+    // ===== hook run 结算（hooks=agent run 接线②）=====
+    // 照 worker/verifier 的结算模式：mutateLocked 持锁改状态机（状态机纯函数在 core.applyHookSettle，
+    // 单测直接打它），锁外发通知 + kickCycle 补派。
+    //   hook-pre  完成 → hooks.pre.state='done'（下轮起子任务正常放行，串行闸门打开）
+    //   hook-post 完成 → hooks.post.state='done' + epic 转 verifying（收口完成，交人验收）
+    //   失败（异常/stopReason 异常）或文本 [ESCALATE] → 该点位 state='failed' + epic 转 blocked +
+    //   escalation 挂卡（歧义上报「前置准备失败，重试/跳过/放弃」），不自动重试。
+    // 幂等：epic 已有未裁决 escalation 时只收口不覆盖（主窗口裁决前不刷屏）。
+    async function settleHook(sid, rec, output, failed, errText) {
+      var phase = rec.role === 'hook-pre' ? 'pre' : 'post'
+      var esc = /\[ESCALATE\]/i.test(output || '')
+      var runId = String(rec.run.id)
+      // 完成回执开关（notifyDone）：hook 收口把 epic 推进到 blocked/verifying 同样算完成回执，一视同仁
+      var doneOn = true
+      var result = await mutateLocked(sid, function (d) {
+        doneOn = cfg(d).notifyDone !== false
+        var p = d.tasks.find(function (x) { return x.id === rec.taskId })
+        if (!p) return null
+        return applyHookSettle(d, rec.taskId, phase, !(failed || esc), output, runId, errText)
+      })
+      if (!result) return
+      if (result.already) return
+      if (result.blocked) { maybeNotify(sid, result.task); if (doneOn) notifyTaskDone(sid, result.task, 'blocked') }
+      if (doneOn && result.closed) notifyTaskDone(sid, result.task, 'resolved')
+      kickCycle(sid) // 结算后立刻补派（pre 完成 → 子任务开跑；post 完成 → epic 进验收）
     }
 
     // ===== 派发周期（15s 心跳 + 写入后 kickCycle 触发）=====
@@ -391,6 +439,9 @@ export function createDispatch(ctx, state, deps) {
       var runs = runsFor(sid)
       var snap = await rt(sid)
       var activeW = 0, activeV = 0
+      // 角色口径：worker 计入 activeW（占 Worker 并发位）；verifier 与 hook run（hook-pre/hook-post）
+      // 统一计入 activeV——hook run 不是 Worker，不该挤占 maxWorkers 并发位，但它确实是一条在跑的 run，
+      // 必须参与「空闲快进」判定，否则 hook 跑着时重复派发的闸门会失守。
       Object.keys(runs).forEach(function (k) { if (runs[k].role === 'worker') activeW++; else activeV++ })
       // 空闲快进：无活跃任务且无活跃 run → 不写盘直接返回（心跳每 15s 跑一次，不能每次都写文件）
       var hasActive = snap.tasks.some(function (t) { return t.status === 'pending' || t.status === 'verifying' || t.status === 'in-progress' })
@@ -423,6 +474,27 @@ export function createDispatch(ctx, state, deps) {
         var picked = pickDispatch(d, capW, Math.max(0, c.maxVerifiers - activeV), runs)
         picked.pendings.forEach(function (t) { claimApply(d, t, 'spawn-pending', 'dispatch'); if (parentKickOnDispatch(d, t)) info.push('epic-kick ' + t.parentId); toSpawn.push({ role: 'worker', t: t }); info.push('dispatch ' + t.id) })
         picked.verifs.forEach(function (t) { t.verifierRun = 'spawn-pending'; t.verifierRunAt = new Date().toISOString(); toSpawn.push({ role: 'verifier', t: t }); info.push('verify ' + t.id) })
+        // ===== hooks=agent run：pre 闸门占用 + post 收口补 spawn（接线①③）=====
+        // pre：候选被 pickDispatch 的 preHookGate 拦下时，本轮不派子任务——这里改 spawn hook-pre run。
+        // 触发条件用状态机本身（state='idle' 即「已声明且从未跑过」，重启后从卡上原样恢复，不靠内存标记）；
+        // state='running' 说明已有 hook run 在跑（幂等，同一 epic 同时最多一条），'done'/'failed' 都轮不到这里。
+        // post：子任务全部了结时 core.maybeAutoCloseParent 不直接转 verifying，只置 hooks.post.pending
+        // 标记；本轮在这里看到标记就 spawn hook-post run（无活跃子任务时也能被下一次心跳收走）。
+        d.tasks.forEach(function (t) {
+          if (hookOn(t, 'pre') && t.hooks.pre.state === 'idle' && !runs[t.id]) {
+            hookSetState(t, 'pre', 'running', 'system', '派发前置 hook run')
+            toSpawn.push({ role: 'hook-pre', t: t })
+            info.push('hook-pre ' + t.id)
+          }
+          if (t.status === 'in-progress' && hookOn(t, 'post') && t.hooks.post.pending && !t.verifierRun && !runs[t.id]) {
+            t.hooks.post.pending = false
+            t.hooks.post.state = 'running'
+            t.verifierRun = 'spawn-pending' // 复用 Verifier 幂等占用位：只在 spawn 成功后换成真实 run id
+            t.verifierRunAt = new Date().toISOString()
+            toSpawn.push({ role: 'hook-post', t: t })
+            info.push('hook-post ' + t.id)
+          }
+        })
         // touches 文件级排他展示态：被拦候选写 t.waitingForTouches = [持有者任务id...]，
         // 未被拦/已派发/已落定的任务清除该字段（每心跳刷新的 UI 展示态，不参与任何派发逻辑，
         // 但必须显式清——只在写入时报字段会留下"锁已释放仍显示 🔒 等待"的永久误导）。
@@ -432,7 +504,8 @@ export function createDispatch(ctx, state, deps) {
           if (waitMap[t.id]) { t.waitingForTouches = waitMap[t.id]; info.push('wait-touches ' + t.id + '<-' + waitMap[t.id].join(',')) }
           else if (t.waitingForTouches) delete t.waitingForTouches
         })
-        // UI 池状态：来自活跃 run（一次性模型：没有成员名册，只有在跑的任务）
+        // UI 池状态：来自活跃 run（一次性模型：没有成员名册，只有在跑的任务）。
+        // hook run 也归「verifiers」区展示（同一格里都是非 Worker 的一次性 run）。
         d.poolStatus = { workers: [], verifiers: [] }
         Object.keys(runs).forEach(function (k) { var rc = runs[k]; d.poolStatus[rc.role === 'worker' ? 'workers' : 'verifiers'].push({ id: k, num: '-', busy: true, taskId: rc.taskId, runId: String(rc.run.id), done: 0, queueLen: 0, suspect: false, model: rc.model || '' }) })
         if (info.length > 0) { d.dispatchInfo = info.join('; '); d.dispatchInfoAt = new Date().toISOString() }
@@ -445,10 +518,12 @@ export function createDispatch(ctx, state, deps) {
         var sp = toSpawn[k]
         var rec = await spawnOneShot(sid, sp.t, sp.role)
         if (rec) {
-          // claim 占位换成真实 run id；verifier run 单独记（claimedBy 保留 worker 的，供详情页跳转会话）
-          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t) { if (sp.role === 'worker' && t.claimedBy === 'spawn-pending') t.claimedBy = String(rec.run.id); if (sp.role === 'verifier' && t.verifierRun === 'spawn-pending') { t.verifierRun = String(rec.run.id); t.verifierRunAt = new Date().toISOString() } }; return t }, true)
+          // claim 占位换成真实 run id；verifier/hook-post run 单独记（claimedBy 保留 worker 的，供详情页跳转会话）
+          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t) { if (sp.role === 'worker' && t.claimedBy === 'spawn-pending') t.claimedBy = String(rec.run.id); if ((sp.role === 'verifier' || sp.role === 'hook-post') && t.verifierRun === 'spawn-pending') { t.verifierRun = String(rec.run.id); t.verifierRunAt = new Date().toISOString() }; if (sp.role === 'hook-pre' && t.hooks && t.hooks.pre) t.hooks.pre.runId = String(rec.run.id) }; return t }, true)
           // 派发即回执：spawn 真成功后才入队（占位阶段失败不通知）；经 deps 注入，未注入静默跳过（老 host 兼容）
-          if (typeof notifyDispatched === 'function') notifyDispatched(sid, sp.t, sp.role)
+          // 回执开关（设置区「通知」）：notifyDispatch=false → 派发回执整条跳过（spawn 照常，只闭嘴）；
+          // 闸门读本轮 poolCycle 已取的 cfg 快照 c（无额外读盘），老看板缺字段 → cfg 归一为 true。
+          if (c.notifyDispatch !== false && typeof notifyDispatched === 'function') notifyDispatched(sid, sp.t, sp.role)
         } else if (sp.role === 'worker') {
           // spawn 失败 → 回 pending
           await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t && t.status === 'in-progress' && t.claimedBy === 'spawn-pending') { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', 'spawn 失败，回收重新排队') }; return t }, true)
@@ -457,6 +532,14 @@ export function createDispatch(ctx, state, deps) {
           // verifier spawn 失败 → 清占位，下轮 cycle 重试（占位不清会永远卡住派发）
           await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t && t.verifierRun === 'spawn-pending') { t.verifierRun = null; delete t.verifierRunAt }; return t }, true)
           pushSysNote(sid, '任务「' + sp.t.title + '」Verifier 启动失败，下轮自动重试')
+        } else if (sp.role === 'hook-pre') {
+          // hook-pre spawn 失败 → 退回 idle + 重新置待跑标记，下轮自动重试（串行闸门保持关闭）
+          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t && t.hooks && t.hooks.pre && t.hooks.pre.state === 'running') { t.hooks.pre.state = 'idle'; t.hooks.pre.runId = null; t.hooks.pre.pending = true }; return t }, true)
+          pushSysNote(sid, '史诗「' + sp.t.title + '」前置 hook 启动失败，下轮自动重试')
+        } else if (sp.role === 'hook-post') {
+          // hook-post spawn 失败 → 清幂等占用 + 保留待跑标记，下轮自动重试
+          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t) { if (t.verifierRun === 'spawn-pending') { t.verifierRun = null; delete t.verifierRunAt } if (t.hooks && t.hooks.post && t.hooks.post.state !== 'done') t.hooks.post.pending = true }; return t }, true)
+          pushSysNote(sid, '史诗「' + sp.t.title + '」收口 hook 启动失败，下轮自动重试')
         }
       }
       return result
@@ -483,7 +566,9 @@ export function createDispatch(ctx, state, deps) {
           // 不能走 resolveRoot：该函数在每个 agent 每次 prompt 组装时同步执行，
           // resolveRoot 全表扫 agent 注册表会把宿主事件循环卡死（曾导致全局界面卡顿、用户消息延迟渲染）。
           if (!teamModeCache[String(agent.id)]) return ''
-          return '【任务看板 Team 模式已开启】\n本会话的任务看板处于 Team 模式。请遵循以下工作方式：\n1. 涉及代码改动、文件创建、命令执行等实质性工作时，优先用 task_create 提交为看板任务（由一次性 Worker/Verifier 子代理执行与验收），不要自己直接动手实现。\n2. 你仍保有全部工具能力——调研、读代码、讨论方案、回答问题时直接进行，无需提交任务。\n3. 创建任务时，务必在 description 里写清任务目标和约束；调研结论/原始需求/思路用 contextNotes 带上，调研时读过的关键文件用 contextFiles 把路径带上——两者都会通过「上下文注入」通道传给子代理（独立注入区块，不占对话流）。子代理是全新会话、无你的会话记忆，上下文不够它需要从零自行调研，效率大打折扣甚至跑偏方向——开发类任务（代码改动/修复/特性）务必带文件调研，实测可省 Worker 10~15 分钟自行 grep 定位；未带调研上下文的开发类任务返回会附 warning。\n4. Worker 上报歧义时会通过 task_arbitrate 等待你裁决，请及时响应。驳回重派时同样：新 Worker 没有上一轮的记忆，驳回原因会在 prompt 里，但额外上下文需你在 description 里补上。\n5. Team 模式下 task_create 默认建为草稿（草稿不会被派发领取）。把所有任务的 dependsOn 依赖关系、contextNotes/contextFiles 都补完后，再逐个 task_update publish=true 统一发布。确实需要立即派发的单个任务才显式传 draft:false。\n' + TEAM_SPLIT_RULE + (feedbackOn(String(agent.id)) ? '\n' + LESSON_RECALL_HINT + '把检索到的相关历史教训写进任务的 contextNotes，让子代理少踩重复的坑。' : '')
+          // 第 6 条（拆分条款）走 epicSplit 门禁（缺省 true = 逐字不变）：关掉只是不再主动劝拆，
+          // 显式 parentId 建子卡 / 史诗自动收口 / hooks 状态机全部照常（机制不禁）。
+          return '【任务看板 Team 模式已开启】\n本会话的任务看板处于 Team 模式。请遵循以下工作方式：\n1. 涉及代码改动、文件创建、命令执行等实质性工作时，优先用 task_create 提交为看板任务（由一次性 Worker/Verifier 子代理执行与验收），不要自己直接动手实现。\n2. 你仍保有全部工具能力——调研、读代码、讨论方案、回答问题时直接进行，无需提交任务。\n3. 创建任务时，务必在 description 里写清任务目标和约束；调研结论/原始需求/思路用 contextNotes 带上，调研时读过的关键文件用 contextFiles 把路径带上——两者都会通过「上下文注入」通道传给子代理（独立注入区块，不占对话流）。子代理是全新会话、无你的会话记忆，上下文不够它需要从零自行调研，效率大打折扣甚至跑偏方向——开发类任务（代码改动/修复/特性）务必带文件调研，实测可省 Worker 10~15 分钟自行 grep 定位；未带调研上下文的开发类任务返回会附 warning。\n4. Worker 上报歧义时会通过 task_arbitrate 等待你裁决，请及时响应。驳回重派时同样：新 Worker 没有上一轮的记忆，驳回原因会在 prompt 里，但额外上下文需你在 description 里补上。\n5. Team 模式下 task_create 默认建为草稿（草稿不会被派发领取）。把所有任务的 dependsOn 依赖关系、contextNotes/contextFiles 都补完后，再逐个 task_update publish=true 统一发布。确实需要立即派发的单个任务才显式传 draft:false。' + splitRuleOf(epicSplitOn(String(agent.id))) + (feedbackOn(String(agent.id)) ? '\n' + LESSON_RECALL_HINT + '把检索到的相关历史教训写进任务的 contextNotes，让子代理少踩重复的坑。' : '')
         },
       })
       ctx.effect(function () { return disposeSection })

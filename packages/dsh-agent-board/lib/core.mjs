@@ -113,10 +113,22 @@ export function classifyPipeline(t) {
 // dispose 释放并发位——人在线时由人决策，人不在时系统兜底。
 // feedbackEnabled（学习飞轮 v1 总开关，默认开）：关掉后不生成候选教训、prompt 不提软召回、
 // 详情页沉淀按钮不渲染。老看板文件没有该字段 → 默认 true（normalizeBoard 补齐）。
+// 回执开关（设置区「通知」小节，双布尔，缺省 true = 现状不变）：
+//   notifyDispatch=false → 派发回执（任务被 Worker/Verifier 领走时播报）不入聚合队列；
+//   notifyDone=false     → 完成回执（任务完成/阻塞时聚合播报）不入聚合队列。
+// 只闸「回执」两条入口；歧义裁决通知（notifyMainWindow）是裁决通道不是回执，不接入开关。
+// 史诗拆分总开关 epicSplit（入池配置弹层「功能」小节，缺省 true = 现状不变）：**只关引导，不禁机制**——
+//   false → ① Team 提示词第 6 条 TEAM_SPLIT_RULE 整条不注入（policy.splitRuleOf）；② create-task RPC 与
+//           task_create 工具的返回体不再附 suggestSplit 软提示（policy.withSplitHint 第三参门禁）。
+//   机制照常：显式传 parentId 建子卡、史诗自动收口（checkParentAuto）、hooks 状态机都不看这个开关——
+//   用户/主窗口明确要拆的时候不受阻（关的是"主动劝你拆"，不是"不许你拆"）。
+// 边界：task_create 工具描述里的 TASK_SIZE_CONTRACT 是**静态工具契约**（工具定义会快照进 request header，
+//   dsh-session 校验 description 必须是 string），没有按板动态能力，因此不随本开关走——这也是「关引导」
+//   只覆盖两处**动态引导**（Team 提示词条款 + suggestSplit 软提示）的原因。
 export function cfg(d) {
   var soft = Math.max(1, Math.min(480, d.softTimeoutMin || 30))
   var hard = Math.max(soft, Math.min(1440, d.hardTimeoutMin || 120))
-  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, feedbackEnabled: d.feedbackEnabled !== false }
+  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false }
 }
 
 // ===== 看板数据目录（跨重启继承用）=====
@@ -133,7 +145,7 @@ export function boardHome() { return path.join(boardDirName(), '.dsh') }
 // ownerCwd（跨重启继承）：创建该看板的会话工作区路径，继承判定全靠它——取不到就省略字段
 // （绝不落空串，否则「路径读不到的多个会话」会被误判成同一工作区）。
 export function seed(sid, ownerCwd) {
-  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, poolStatus: { workers: [], verifiers: [] }, tasks: [] }
+  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, poolStatus: { workers: [], verifiers: [] }, tasks: [] }
   if (typeof ownerCwd === 'string' && ownerCwd) d.ownerCwd = ownerCwd
   return d
 }
@@ -141,10 +153,15 @@ export function seed(sid, ownerCwd) {
 // touches 兼容：老任务没有该字段照常（这里只把「存在但非数组」的脏值收敛成数组，
 // 避免 holdsFiles/touchesConflict 里 Array.isArray 判定之外还有第三种形态）
 // feedbackEnabled 兼容：老看板没有该字段（或落了脏值）一律补 true——默认开，行为与 v1 之前一致。
+// notifyDispatch/notifyDone（回执开关）同法：老看板文件没有该字段 → 补 true，缺省开 = 现状不变。
+// epicSplit（史诗拆分总开关）同法：老看板没有该字段（或脏值）→ 补 true，缺省开 = 引导照旧。
 export function normalizeBoard(d) {
   if (d && typeof d === 'object') {
     if (!d.poolStatus || typeof d.poolStatus !== 'object' || !Array.isArray(d.poolStatus.workers) || !Array.isArray(d.poolStatus.verifiers)) d.poolStatus = { workers: [], verifiers: [] }
     if (typeof d.feedbackEnabled !== 'boolean') d.feedbackEnabled = true
+    if (typeof d.notifyDispatch !== 'boolean') d.notifyDispatch = true
+    if (typeof d.notifyDone !== 'boolean') d.notifyDone = true
+    if (typeof d.epicSplit !== 'boolean') d.epicSplit = true
     if (Array.isArray(d.tasks)) {
       for (var i = 0; i < d.tasks.length; i++) {
         var t = d.tasks[i]
@@ -171,6 +188,25 @@ export function maybeAutoCloseParent(d, childTask) {
   if (!p || p.status !== 'in-progress') return null
   var s = gsb(p.id, d.tasks)
   if (!s.length || !s.every(function (x) { return isChildSettled(x) })) return null
+  // ===== post 延迟 verifying（hooks=agent run 接线③）=====
+  // epic 声明了 post hook 且尚未收口（state !== 'done'）→ 不直接转 verifying，先挂 post 闸门：
+  //   state='idle'    → 本轮不转 verifying，只置 running 等 poolCycle 补 spawn hook-post run
+  //                     （core 保持纯函数：只落状态 + 返回父卡，spawn 由 dispatch 侧做）
+  //   state='running' → 已在收口途中，poolCycle 会补 spawn（idle 与 running 同分支，二者共用
+  //                     hook-post 幂等占用标记 hooks.post.pending）
+  //   state='failed'  → 收口失败已 blocked 等人裁决，绝不自动收口（回归安静态，避免每轮重复触发）
+  // 未声明/未启用 post → 直接转 verifying（既有行为逐字不变），并清掉可能残留的待跑标记。
+  if (hookOn(p, 'post')) {
+    var pst = hookState(p, 'post')
+    if (pst === 'failed') return null
+    if (pst !== 'done') {
+      p.hooks.post.pending = true // hook-post 幂等占用标记：poolCycle 见它才 spawn（spawn 后清除，失败再置回）
+      p.hooks.post.state = 'running'
+      ah(p, p.status, p.status, 'system', 'auto: all subtasks settled，post hook 收口未完成，延迟 verifying')
+      return p
+    }
+  }
+  if (p.hooks && p.hooks.post && p.hooks.post.pending) delete p.hooks.post.pending
   p.status = 'verifying'
   p.resolvedAt = new Date().toISOString()
   p.resolution = 'all subtasks resolved'
@@ -181,6 +217,140 @@ export function maybeAutoCloseParent(d, childTask) {
 export function checkParentAuto(d, t) { return maybeAutoCloseParent(d, t) }
 export function resolveApply(d, t, sid, status, resolution, note) { var ps = t.status; if (status === 'verifying' && t.pipeline && t.pipeline !== 'full') { status = 'resolved' } t.status = status; t.resolution = resolution || null; t.resolvedAt = new Date().toISOString(); ah(t, ps, status, sid, note); var r = { ok: true, task: t }; var p = maybeAutoCloseParent(d, t); if (p) { r.parentUpdated = true }; return r }
 export function verifyApply(d, t, sid, verdict, comment) { var ps = t.status; if (verdict === 'approved') { t.status = 'resolved'; t.verifiedAt = new Date().toISOString(); t.verifiedBy = sid; delete t.frozen; delete t.frozenAt; delete t.frozenBy; ah(t, ps, 'resolved', sid, 'approved' + (comment ? ': ' + comment : '')) } else { t.status = 'in-progress'; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'in-progress', sid, 'rejected' + (comment ? ': ' + comment : '')) }; var r = { ok: true, task: t }; if (verdict === 'approved' && isb(t)) { var p = checkParentAuto(d, t); if (p) { r.parentUpdated = true } }; return r }
+
+// ===== 史诗 hooks=agent run（宿主生命周期接线）=====
+// 定位：hook 点 = 一次**真实 agent 运行**（不是声明式命令、不走 shell），挂在 epic 卡上、
+// 由派发周期 spawn 成一次性子代理 run（role 'hook-pre' / 'hook-post'），run 结算把 state 推进。
+// 数据形态（写在卡上，重启可恢复——state 机不靠内存）：
+//   epic.hooks = { pre: { enabled, prompt, state: 'idle'|'running'|'done'|'failed', runId }, post: 同构 }
+// 三条红线：
+//   ① 点位可选——epic 未声明 hooks 时全链路零变化（pickDispatch / maybeAutoCloseParent / poolCycle
+//      都只在 hooks 存在且 enabled 时才进入分支，老 epic 行为逐字不变）；
+//   ② 薄框架——prompt 只给契约与上下文，做什么由 hook agent 自行决策，吃不准就歧义上报；
+//   ③ commit/push 不进任何默认形态——默认文案明确写「不要默认提交/推送」，收口动作全由 agent 自己判断。
+export var HOOK_PHASES = ['pre', 'post']
+export var HOOK_STATES = ['idle', 'running', 'done', 'failed']
+// 建卡/更新卡的 hooks 浅校验（工具 task_create/task_update 与 RPC create-task/update-task 共用同一口径）。
+// 口径：只认 { pre?, post? } 两键；每项 { enabled?:bool, prompt?:string, state?:enum, runId?:string }；
+// prompt 非空字符串（≤4000，超长截断）；state/runId 允许传（重启后人工恢复现场）；未知键忽略、不报错。
+// 返回 { hooks } 或 { error }——调用方把 error 原样回给主窗口（宁早报错，别静默存下一坨跑不起来的配置）。
+export function normalizeHooks(input) {
+  if (input === null) return { hooks: null }
+  if (typeof input !== 'object' || Array.isArray(input)) return { error: 'hooks 必须是对象（{ pre?, post? }）' }
+  var out = {}
+  var dels = []
+  for (var i = 0; i < HOOK_PHASES.length; i++) {
+    var ph = HOOK_PHASES[i]
+    var raw = input[ph]
+    if (raw === undefined) continue
+    // 显式 null = 撤掉该点位（un-declare）。它必须原样穿到 mergeHooks——否则「只撤 pre」的意图会在
+    // 归一化阶段被吃掉，task_update hooks:{pre:null} 变成空操作（实测踩过）。
+    if (raw === null) { dels.push(ph); out[ph] = null; continue }
+    if (typeof raw !== 'object' || Array.isArray(raw)) return { error: 'hooks.' + ph + ' 必须是对象' }
+    var h = { enabled: raw.enabled === undefined ? true : !!raw.enabled, prompt: '', state: 'idle', runId: null }
+    if (raw.prompt !== undefined) {
+      if (typeof raw.prompt !== 'string') return { error: 'hooks.' + ph + '.prompt 必须是字符串' }
+      h.prompt = raw.prompt.slice(0, 4000)
+    }
+    if (!String(h.prompt).trim()) return { error: 'hooks.' + ph + '.prompt 不能为空（薄框架只给契约，契约本体由主窗口写）' }
+    if (raw.state !== undefined) {
+      if (HOOK_STATES.indexOf(raw.state) < 0) return { error: 'hooks.' + ph + '.state 必须是 ' + HOOK_STATES.join('/') }
+      h.state = raw.state
+    }
+    if (raw.runId !== undefined && raw.runId !== null) h.runId = String(raw.runId)
+    // 内部机器标记（pending）原样穿过去：主窗口若为恢复现场整条重传 pre，不该把待跑标记洗掉
+    if (raw.pending) h.pending = true
+    out[ph] = h
+  }
+  // 只有「纯删除」时才返回仅含 null 的对象；有真实点位时把 null 一并带上（mergeHooks 逐点位处理）
+  if (!dels.length) { var clean = {}; for (var j = 0; j < HOOK_PHASES.length; j++) { if (out[HOOK_PHASES[j]] && out[HOOK_PHASES[j]] !== null) clean[HOOK_PHASES[j]] = out[HOOK_PHASES[j]] } return { hooks: clean } }
+  return { hooks: out }
+}
+// 已有 hooks 与本次提交的钩子做**浅合并**（task_update 只想改 prompt 时不必重复整条 pre/post）：
+// 未提交的键保留原值；提交 null 表示删除该点位（un-declare）。
+export function mergeHooks(prev, next) {
+  var out = {}
+  var base = (prev && typeof prev === 'object') ? prev : {}
+  for (var i = 0; i < HOOK_PHASES.length; i++) {
+    var ph = HOOK_PHASES[i]
+    if (base[ph]) out[ph] = base[ph]
+  }
+  if (!next) return out
+  for (var j = 0; j < HOOK_PHASES.length; j++) {
+    var p2 = HOOK_PHASES[j]
+    if (next[p2] === undefined) continue
+    if (next[p2] === null) { delete out[p2]; continue }
+    out[p2] = next[p2]
+  }
+  return out
+}
+// 该点位是否「已声明且启用」——pickDispatch 闸门与 poolCycle 触发共用的唯一判定口径
+export function hookOn(owner, phase) { var h = owner && owner.hooks && owner.hooks[phase]; return !!(h && h.enabled) }
+export function hookState(owner, phase) { var h = owner && owner.hooks && owner.hooks[phase]; return (h && h.state) || 'idle' }
+// 状态机写入（唯一入口，保证 ah 留痕）：state 写在 epic 卡上（重启可恢复）。
+export function hookSetState(p, phase, state, actor, note) {
+  var h = p.hooks && p.hooks[phase]
+  var from = (h && h.state) || 'idle'
+  h.state = state
+  ah(p, p.status, p.status, actor || 'system', 'hooks.' + phase + ': ' + from + ' → ' + state + (note ? '（' + note + '）' : ''))
+  return h
+}
+// hook run 结算（纯函数，dispatch.settleHook 持锁段调用；抽出来是为了能单测状态机）：
+//   ok=true   pre  → hooks.pre='done'（串行闸门打开，下轮起子任务正常派发）
+//   ok=true   post → hooks.post='done' + epic 转 verifying（收口完成，交人验收）
+//   ok=false  pre/post → 该点位 state='failed' + epic 转 blocked + escalation 挂卡（歧义上报：
+//              重试/跳过/放弃，由主窗口裁决），绝不自动重试——故障 hook 反复重跑只会烧钱。
+// 幂等：点位已 done、或 epic 已有未裁决 escalation 时返回 { already: true }，不覆盖不改状态。
+export function applyHookSettle(d, epicId, phase, ok, output, runId, errText) {
+  var p = d.tasks.find(function (x) { return x.id === epicId })
+  if (!p) return null
+  var h = (p.hooks && p.hooks[phase]) || null
+  if (!h) return { task: p, already: true }
+  if (h.state === 'done') return { task: p, already: true }
+  if (p.escalation) { h.runId = null; delete h.pending; return { task: p, already: true } }
+  h.runId = null
+  delete h.pending
+  if (!ok) {
+    var why = String(errText || '').slice(0, 150) || '未给出有效结论'
+    hookSetState(p, phase, 'failed', String(runId), 'hook run 失败')
+    p.lastError = ('hooks.' + phase + ' run 失败: ' + why).slice(0, 300)
+    p.escalation = {
+      question: 'hooks.' + phase + '（' + (phase === 'pre' ? '前置准备' : '收口') + '）失败：' + why + '\n' +
+        (output ? 'hook agent 输出（截断）：\n' + String(output).slice(0, 1200) + '\n' : '') +
+        '请裁决：重试（把 hooks.' + phase + '.state 置回 idle 即可重跑）/ 跳过（置为 done 放行）/ 放弃（终止该史诗）。',
+      at: new Date().toISOString(), by: String(runId),
+    }
+    if (!Array.isArray(p.messages)) p.messages = []
+    p.messages.push({ kind: 'escalation', text: p.escalation.question, at: p.escalation.at, by: String(runId) })
+    ah(p, p.status, 'blocked', String(runId), 'hooks.' + phase + ' 失败，待主窗口裁决（重试/跳过/放弃）')
+    p.status = 'blocked'
+    return { task: p, blocked: true }
+  }
+  hookSetState(p, phase, 'done', String(runId), 'hook run 完成')
+  if (phase === 'post') {
+    var from = p.status
+    p.status = 'verifying'
+    p.resolvedAt = new Date().toISOString()
+    p.resolution = 'hooks.post settled'
+    ah(p, from, 'verifying', 'system', 'auto: post hook 收口完成')
+    return { task: p, closed: true }
+  }
+  return { task: p, preDone: true }
+}
+// ===== pre 串行闸门（纯函数，pickDispatch 过滤用）=====
+// 语义：子任务候选命中派发前，先看它所在 epic 的前置 hook 是否已完成——
+//   hooks.pre 未声明/未启用 → 放行（老 epic 零变化）
+//   state='done'          → 放行（前置准备完成，下轮起子任务正常派发）
+//   state='idle'          → **拦下**：本轮不派子任务，由 poolCycle 改 spawn hook-pre run（串行闸门）
+//   state='running'       → 拦下：hook run 还在跑，跳过本轮（不重复 spawn）
+//   state='failed'        → 拦下：已 blocked 等人裁决（重试/跳过/放弃），绝不自动放行
+// 串行闸门语义 = 「一个 epic 的子任务在 pre hook 完成之前一张都不派」，天然并发安全。
+export function preHookGate(epic) {
+  if (!epic || !hookOn(epic, 'pre')) return { pass: true, reason: 'none' }
+  var st = hookState(epic, 'pre')
+  if (st === 'done') return { pass: true, reason: 'done' }
+  return { pass: false, reason: st }
+}
 
 // ===== 史诗父卡语义层 =====
 // 父卡自动流转：子任务被派发时（poolCycle 占位 claim 的 dispatch 分支调用），
@@ -385,6 +555,11 @@ export function buildFileOutline(content) {
   }
   return out
 }
+// 口径说明（epicSplit 总开关审计）：Worker prompt **不含任何拆分引导条款**——拆分引导只出现在主窗口侧
+// 两处动态面（Team 提示词第 6 条 + create-task/task_create 的 suggestSplit 软提示），Worker 拿到的是
+// 已经建好的单张卡（要拆也轮不到它拆，真觉得大应走歧义上报）。故 epicSplit=false 时 Worker prompt 字面
+// 与 true 时逐字相同（单测锁定 parity，防止将来有人往这里塞拆分条款而漏接门禁）；buildWorkerPrompt
+// 因此不引入 epicSplit 形参——没有条款可跳过，加个无用参数只会是死代码。
 export function buildWorkerPrompt(t, pack, feedbackEnabled) {
   var notes = histNotes(t)
   var msgs = buildMessages(t)
@@ -415,6 +590,45 @@ export function buildVerifierPrompt(t, pack) {
   // 供主窗口分诊「立单缺料 vs Worker 执行问题」，缺料占高了就该把建卡调研门禁拧紧。
   p += '\n驳回归因：若 Worker 的产出明显因缺少调研上下文而跑偏/绕路，驳回时请在驳回理由里注明「立单缺调研」（归因会计入驳回热点统计）。'
   p += '\n\n结论契约（双模，工具优先）：\n1. 优先调用 board_verdict 工具（taskId=' + t.id + ', verdict=approved/rejected, summary=测试概要, checks=逐条核对证据含行号）。\n2. 工具不可用则首行 APPROVED: <结论> 或 REJECTED: <结论>，然后 ## 测试概要 / ## 核对项 分段。'
+  return p
+}
+
+// ===== hook run prompt（薄框架模板，hooks=agent run）=====
+// hook 点 = 一次真实 agent 运行：prompt 只给「契约一句话 + epic 上下文 + 子任务清单」，
+// 具体做什么由 hook agent 按现场自行决策；吃不准/信息不足一律歧义上报，禁止硬闯。
+// commit/push 不进任何默认形态——前置不许默认提交，后置明确写「不要默认提交/推送」（红线③）。
+// pre 契约：让这批子任务具备开跑条件（做什么准备由 agent 判断，可只读调研后什么都不改）。
+// post 契约：把这批已完成的工作收口（验证/总结/（自行决定并自负其责的）提交都算）。
+export function buildHookPrompt(epic, phase, childTasks) {
+  var kids = Array.isArray(childTasks) ? childTasks : []
+  var pre = phase !== 'post'
+  var p = '你是一个一次性史诗 hook 执行 Agent（hooks=' + (pre ? 'pre' : 'post') + ' run）。本次运行由任务看板的派发周期发起，完成（或上报歧义）后本会话即销毁。\n\n'
+  p += 'hook 点位：' + (pre ? 'pre（前置准备闸门）' : 'post（收口闸门）') + '\n'
+  p += '所属史诗：' + epic.id + ' · ' + String(epic.title || '') + '\n'
+  p += '史诗状态：' + String(epic.status || '') + '\n'
+  p += '史诗描述：' + String(epic.description || '(无)').slice(0, 2000) + '\n'
+  if (epic.context && epic.context.instructions) p += '史诗指引：' + String(epic.context.instructions).slice(0, 1000) + '\n'
+  p += '\n主窗口给本次 hook 的运行契约（薄框架：只定边界，不做具体动作安排）：\n' + String((epic.hooks && epic.hooks[phase] && epic.hooks[phase].prompt) || '(未填写)').slice(0, 4000) + '\n'
+  p += '\n该史诗的子任务清单（' + kids.length + ' 个）：\n'
+  if (!kids.length) p += '- （暂无子任务）\n'
+  for (var i = 0; i < kids.length; i++) {
+    var c = kids[i]
+    p += '- [' + (c.status || '') + '] ' + c.id + ' · ' + String(c.title || '').slice(0, 120)
+    if (c.pipeline) p += '（管线 ' + c.pipeline + '）'
+    p += '\n'
+  }
+  p += '\n你的任务：' + (pre
+    ? '让这批子任务具备开跑条件。做什么准备由你根据上下文判断（可只读调研、制定方案、补齐约定，也可以判断为「无需准备」）。'
+    : '把这批已完成的工作收口。收口动作由你判断（通常可能涉及验证、总结，也可能涉及提交——自行决策并自负其责）。')
+  p += '信息不足、吃不准、或需要用户/主窗口决策时：优先调用 board_report（kind=escalate, taskId=' + epic.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测、不要硬闯。\n'
+  p += '红灯纪律：不要默认提交（git commit）或推送（git push）——除非上面的运行契约明确要求，或你判断确实是本次收口不可省略的一步；那也要在完成说明里写清做了什么、为什么。\n'
+  if (!pre) p += '本次收口完成后，史诗将自动转入 verifying（交人验收）。\n'
+  p += '\n完成契约（双模，工具优先）：\n'
+  if (pre) p += '1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + epic.id + '，summary=做了什么准备/changes=改动清单（无改动就写「无」）/selfTest=自测情况/diffStat=变更概要）。工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况 / ## diff 概要）。完成即代表 pre 闸门放行，之后 epic 的子任务会开始派发。\n'
+  else p += '1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + epic.id + '，summary=收口做了什么/changes=改动清单（无改动就写「无」）/selfTest=自测情况/diffStat=变更概要）。工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况 / ## diff 概要）。\n'
+  p += '   **board_report 调用成功即本次运行终点：立即结束输出，不要再修改/验证任何文件**。\n'
+  p += '2. 歧义/信息不足：board_report（kind=escalate, taskId=' + epic.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。上报后直接结束本轮。\n'
+  p += '3. 进展汇报：只在有实际产物/结论时报（board_report kind="progress"），禁止表演式汇报。\n'
   return p
 }
 
@@ -449,6 +663,9 @@ export function touchesConflict(t, holds) {
 // 不进 pendings，改记 [{id, conflicts:[持有任务id...]}]，由 index.mjs 的 poolCycle 写展示态字段
 // t.waitingForTouches（每心跳刷新的 UI 展示，不参与其他逻辑）。verifs 不受 touches 影响（Verifier 只读）。
 // 注意：frozen/dependsOn/escalation/上限 的优先级不变——先过滤再算 touches 冲突。
+// pre hook 串行闸门（hooks=agent run 接线①）：候选所属 epic 的 hooks.pre 未 done 时整批不派
+// （见 preHookGate），由 poolCycle 改 spawn hook-pre run——同一 epic 的子任务在准备完成前
+// 一张都不派，这是「pre 闸门」的串行语义；未声明 hooks 的 epic 逐字不受影响。
 export function pickDispatch(d, capW, capV, busyTaskIds) {
   var blockedTouches = []
   var pendings = []
@@ -456,7 +673,7 @@ export function pickDispatch(d, capW, capV, busyTaskIds) {
   // 防止同一轮 cycle 派出的两个任务声明重叠 touches。
   var holds = holdsFiles(d)
   if (capW > 0) {
-    var cands = d.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && !t.frozen && t.assignMode !== 'manual' && t.pipeline !== 'direct' && depsSatisfied(d, t) && !t.escalation })
+    var cands = d.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && !t.frozen && t.assignMode !== 'manual' && t.pipeline !== 'direct' && depsSatisfied(d, t) && !t.escalation && preHookGate(gpt(t, d.tasks)).pass })
       .sort(function (a, b) { var p = (PRIO_RANK[b.priority] || 2) - (PRIO_RANK[a.priority] || 2); return p !== 0 ? p : (a.createdAt || '').localeCompare(b.createdAt || '') })
     for (var i = 0; i < cands.length && pendings.length < capW; i++) {
       var conflicts = touchesConflict(cands[i], holds)
@@ -468,7 +685,7 @@ export function pickDispatch(d, capW, capV, busyTaskIds) {
   var verifs = capV > 0 ? d.tasks.filter(function (t) { return t.status === 'verifying' && !t.frozen && (!t.pipeline || t.pipeline === 'full') && !t.escalation && t.verifierRun !== 'spawn-pending' && !(busyTaskIds && busyTaskIds[t.id]) }).slice(0, capV) : []
   return { pendings: pendings, verifs: verifs, blockedTouches: blockedTouches }
 }
-// 孤儿回收判定：in-progress 且 claimedBy 非主会话、无活跃 run、无 escalation、超 2 分钟
+// 孤儿回收判定：in-progress 且 claimedBy 非主会话、无活跃 run、无 escalation、超 2 分钟：in-progress 且 claimedBy 非主会话、无活跃 run、无 escalation、超 2 分钟
 export function isOrphan(d, t, runs, now) {
   return t.status === 'in-progress' && t.claimedBy && t.claimedBy !== d.ownerSession && !(runs && runs[t.id]) && !t.escalation && (now - new Date(t.claimedAt || 0).getTime()) > 120000
 }
