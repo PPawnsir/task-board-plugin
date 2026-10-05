@@ -240,7 +240,7 @@
           if (r && r.ok === false && r.error === 'touches-conflict') {
             var ids = Array.isArray(r.conflicts) ? r.conflicts : []
             var names = ids.map(function (id) { var t2 = getTask(id); return (t2 ? t2.title : id) + ' (' + id + ')' }).join('、')
-            if (window.confirm('⚠️ 文件锁冲突：以下进行中任务正在改同一批文件（touches 重叠）：\n\n' + (names || ids.join('、')) + '\n\n强行并行可能互相覆盖改动/diff 冲突。仍要越权派发吗？')) return send(true)
+            if (window.confirm('⚠️ 文件锁冲突：以下任务正持有同一批文件（touches 重叠；锁持到归档——verifying/resolved 卡也在持锁，等其归档即自动放行）：\n\n' + (names || ids.join('、')) + '\n\n强行并行可能互相覆盖改动/diff 冲突。仍要越权派发吗？')) return send(true)
             setActionMsg('⛔ 已取消派发（等文件锁释放，或调整 touches 声明）')
             return { ok: false, cancelled: true }
           }

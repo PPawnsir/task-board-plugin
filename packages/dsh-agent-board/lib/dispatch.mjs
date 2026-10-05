@@ -498,6 +498,11 @@ export function createDispatch(ctx, state, deps) {
         // touches 文件级排他展示态：被拦候选写 t.waitingForTouches = [持有者任务id...]，
         // 未被拦/已派发/已落定的任务清除该字段（每心跳刷新的 UI 展示态，不参与任何派发逻辑，
         // 但必须显式清——只在写入时报字段会留下"锁已释放仍显示 🔒 等待"的永久误导）。
+        // 持锁口径的唯一出处是 core.holdsFiles（in-progress + claimedBy / verifying / resolved 都持锁，
+        // 归档才真释放——反馈 n-muupqg81u575）。这里不做任何放锁动作：verifying/resolved 卡不放锁，
+        // 故 conflicts 里出现 resolved 卡 id 是预期行为（滞留原因对用户可见，就是主窗口还没归档）；
+        // 归档动作（archive-task / task_archive）把卡改成 archived 后，下轮 tickInProgress 15s 轮
+        // 自然把等待卡放行，无需在此额外触发补派。
         var waitMap = {}
         picked.blockedTouches.forEach(function (b) { waitMap[b.id] = b.conflicts })
         d.tasks.forEach(function (t) {

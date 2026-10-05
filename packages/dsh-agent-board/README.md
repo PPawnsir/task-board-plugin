@@ -133,7 +133,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **依赖调度**：`dependsOn` 声明依赖（DFS 环检测），依赖全部完成后才会被派发，串行链路自动编排
 - **管线分档**：`full`（执行+验证）/ `work`（只做不验）/ `direct`（不进池，主窗口直接处理），创建时按规则自动分类、可手动覆盖
 - **硬性验收**：`acceptance` 字段写验收脚本命令，Worker 必须实际运行、Verifier 必须独立复跑
-- **文件级排他**：`touches` 声明本任务要改的文件/glob（如 `["src/**", "README.md"]`）；进行中的任务持有文件锁，派发器发现候选与活动任务 touches 重叠就跳过本轮（卡片显示 `🔒 等文件释放`，详情页列出在等谁），锁在提交验收/完成后自动释放——避免并行 Worker 改同一批文件互踩。手动「派发」遇到冲突会列出冲突任务，确认后才以 `force` 越权派发
+- **文件级排他**：`touches` 声明本任务要改的文件/glob（如 `["src/**", "README.md"]`）；持有文件锁的任务（`in-progress`/`verifying`/`resolved`）与候选 touches 重叠就跳过本轮（卡片显示 `🔒 等文件释放`，详情页列出在等谁），**锁持到归档**：验收通过后继续持锁（护住「验收后-提交前」的提交窗口期），归档（含批量归档）才真释放，`cancelled` 立即放锁（放弃语义=不再产出）——避免并行 Worker 改同一批文件互踩。手动「派发」遇到冲突会列出冲突任务，确认后才以 `force` 越权派发
 - **里程碑进展通道**：Worker 每完成一个可验证的里程碑，可调用 `board_report`（`kind: "progress"`，`question` 写一行进展摘要 ≤200 字符）上报——进行中的卡片显示「📈 最近进展 · 相对时间」（覆盖式只留最新一条），详情页消息流保留全部 progress 条目
 - **防表演式汇报**：进展契约只写在 Worker prompt 里、且要求「有实际产物/结论才报」（禁止定时汇报）；progress **静默不通知主窗口**（不进回执聚合），也不写 `history` 流转记录，避免刷屏
 - **子任务**：父子层级 + 上下文继承 + 父任务自动流转 + 级联归档（僵尸态出清：`archive-task` 对「无活跃 run 的 in-progress」——典型如被 parentKick 推进后子任务已全部归档的史诗——直接放行，有活跃 run 的仍拒）；**归档子任务仍计入史诗进度并在详情留档可见**——进度分子口径 `settled = resolved | cancelled | archived`、分母也含归档，归档一张子卡不会再让史诗进度从 `0/10` 退化成 `0/9`（进度只增不减），全归档的父卡也照常显示徽章；详情子任务清单不排归档行（灰化 + 行尾「已归档」徽章 + 沉底排序，点击仍可进子卡看留档）
@@ -175,7 +175,7 @@ draft → pending → in-progress → verifying → resolved → archived
 
 - **歧义裁决**：Worker 遇歧义不猜测，一律上报；裁决后新 Worker 携带答案接手（Team 托管档附带 system prompt 派发引导 + 默认草稿护栏）
 - **Verifier 验收**：`acceptance` 硬性验收脚本命令，Worker 必须实际运行、Verifier 必须独立复跑；跨档一致
-- **touches 排他**：`touches` 文件级排他锁在活动任务间生效，冲突任务跳过本轮派发，提交验收/完成后释放；跨档一致
+- **touches 排他**：`touches` 文件级排他锁在活动任务间生效，冲突任务跳过本轮派发，**锁持到归档**（`in-progress`/`verifying`/`resolved` 持有，归档释放，`cancelled` 立即释放）；跨档一致
 - 孤儿回收、看门狗、级联归档、会话隔离同样三档一致
 
 Team 托管档独有（调度员体验）：

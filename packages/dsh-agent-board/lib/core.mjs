@@ -20,8 +20,9 @@ export function vt(d) { return d && typeof d === 'object' && Array.isArray(d.tas
 
 // ===== touches 文件级排他（glob 最小匹配器，零依赖）=====
 // 背景：并行 Worker 改同一批文件会互踩（diff 冲突/一方覆盖另一方）。任务可声明
-// touches: string[]（glob），派发器发现与「活动（in-progress）任务的 touches」冲突
+// touches: string[]（glob），派发器发现与「持锁任务的 touches」冲突
 // 则本轮跳过该候选（记入 pickDispatch 返回的 blockedTouches），等锁释放再派。
+// 持锁口径见 holdsFiles（in-progress/verifying/resolved 都持锁，归档才真释放）。
 // 语义（宁可偏严不可漏拦）：
 //   1. 先归一化：\ → /、去 './' 前缀、去尾部 '/'；空串或非字符串忽略。
 //   2. a === b 视为冲突。
@@ -633,17 +634,27 @@ export function buildHookPrompt(epic, phase, childTasks) {
 }
 
 // ===== 文件锁持有集合（touches 排他）=====
-// 仅 in-progress + claimedBy + 声明了 touches 的任务持有文件锁：
-//   - verifying 不持有（Worker 已按契约停笔，锁随 in-progress→verifying 自动释放；
-//     驳回回 in-progress 时重新持有）；
-//   - pending/blocked/draft 没有 Worker 在改文件，不持有。
+// 锁随卡的生命周期走，归档（archived）= 真释放（反馈 n-muupqg81u575：验收后-提交前窗口期
+// 锁已放，下一卡 Worker 污染同树 commit——连续批次三次复发）。
+// 持锁三态（声明了 touches 为前提）：
+//   - in-progress + claimedBy：Worker 正在改文件（claimedBy 为空=占位未落座/僵尸，不算持锁）；
+//   - verifying：Worker 已停笔但**尚未落定**——驳回会回 in-progress 让同一批文件继续被改，
+//     且验收通过后的提交窗口期仍属于本卡（不再随 in-progress→verifying 放锁）；
+//   - resolved：验收/完成已通过，但主窗口还没提交——锁一直持到 archived。
+// 不持有：pending/blocked/draft（没有 Worker 在改文件）、cancelled（放弃语义：不再产出，
+// 立刻放锁，避免被废弃的卡长期堵住同批文件）、archived（已归档=真释放）。
+// 边界（有意为之的背压）：resolved 卡若长期不归档，后续冲突卡会一直 pending 滞留——
+// 这是逼主窗口验收后尽快归档的信号；UI 上 waitingForTouches 行会显示持锁卡 id（含 resolved 卡），
+// 滞留原因对用户可见，不需要额外的超时放锁逻辑。
 // 返回 [{id, touches}]，id 用于 blockedTouches.conflicts 展示"在等谁"。
 export function holdsFiles(d) {
   var out = []
   if (!d || !Array.isArray(d.tasks)) return out
   for (var i = 0; i < d.tasks.length; i++) {
     var t = d.tasks[i]
-    if (t.status === 'in-progress' && t.claimedBy && Array.isArray(t.touches) && t.touches.length) out.push({ id: t.id, touches: t.touches })
+    if (!t || !Array.isArray(t.touches) || !t.touches.length) continue
+    var holds = t.status === 'verifying' || t.status === 'resolved' || (t.status === 'in-progress' && !!t.claimedBy)
+    if (holds) out.push({ id: t.id, touches: t.touches })
   }
   return out
 }

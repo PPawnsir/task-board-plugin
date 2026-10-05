@@ -578,19 +578,86 @@ test('touchesConflict: 与锁持有者逐条比对，返回冲突持有者 id', 
   assert.deepEqual(core.touchesConflict({ id: 'h1', touches: ['src/a.js'] }, holds), []) // 不和自己冲突
 })
 
-test('holdsFiles: 仅 in-progress + claimedBy + 有 touches 持有文件锁', () => {
+test('holdsFiles: in-progress(claimedBy) / verifying / resolved 三态持有文件锁，其余不持有', () => {
   const tasks = [
     mkTask({ id: 'live', status: 'in-progress', claimedBy: 'run-1', touches: ['src/**'] }),
     mkTask({ id: 'notouch', status: 'in-progress', claimedBy: 'run-2' }),
     mkTask({ id: 'noclaim', status: 'in-progress' }),
     mkTask({ id: 'pending', status: 'pending', touches: ['src/a.js'] }),
+    // task-muv7c8ja：verifying/resolved 都持锁（锁随卡的生命周期走，归档才真释放）
     mkTask({ id: 'verifying', status: 'verifying', touches: ['src/b.js'] }),
+    // resolved 卡不查 claimedBy（resolveApply 转 resolved 前 worker 已停笔，claimedBy 可能已清/保留）
+    mkTask({ id: 'resolved', status: 'resolved', touches: ['src/c.js'] }),
     mkTask({ id: 'empty', status: 'in-progress', claimedBy: 'run-3', touches: [] }),
   ]
   const holds = core.holdsFiles(mkBoard(tasks))
-  assert.deepEqual(holds.map(h => h.id), ['live'])
+  assert.deepEqual(holds.map(h => h.id), ['live', 'verifying', 'resolved'])
   assert.deepEqual(holds[0].touches, ['src/**'])
   assert.deepEqual(core.holdsFiles(null), [])
+})
+
+// ===== touches 锁延长至归档（task-muv7c8ja / 反馈 n-muupqg81u575）四类断言 =====
+test('touches 持锁①：resolved 未归档 + 同 touches 候选 → 候选不派发（验收后-提交前窗口期不放锁）', () => {
+  const holder = mkTask({ id: 'holder', status: 'resolved', touches: ['src/**'] })
+  const cand = mkTask({ id: 'cand', touches: ['src/a.js'], createdAt: '2026-01-02' })
+  const r = core.pickDispatch(mkBoard([holder, cand]), 5, 0, null)
+  assert.deepEqual(r.pendings, [])                                        // 锁未放：候选一张都不派
+  assert.deepEqual(r.blockedTouches, [{ id: 'cand', conflicts: ['holder'] }]) // 滞留原因对 UI 可见（等的是 resolved 卡）
+  // 不依赖候选自身状态：resolved 持锁只与 touches 声明有关
+  assert.deepEqual(core.holdsFiles(mkBoard([holder])).map(h => h.id), ['holder'])
+})
+
+test('touches 持锁②：holder 归档后 → 候选下一轮自动放行（归档是唯一真释放点）', () => {
+  const holder = mkTask({ id: 'holder', status: 'resolved', touches: ['src/**'] })
+  const cand = mkTask({ id: 'cand', touches: ['src/a.js'], createdAt: '2026-01-02' })
+  assert.deepEqual(core.pickDispatch(mkBoard([holder, cand]), 5, 0, null).pendings, []) // 归档前：拦住
+  holder.status = 'archived'                                                             // 主窗口提交后的归档动作
+  const r = core.pickDispatch(mkBoard([holder, cand]), 5, 0, null)
+  assert.deepEqual(r.pendings.map(t => t.id), ['cand'])
+  assert.deepEqual(r.blockedTouches, [])
+})
+
+test('touches 持锁③：cancelled 立即放锁（放弃语义=不再产出，不堵同批文件）', () => {
+  const holder = mkTask({ id: 'holder', status: 'in-progress', claimedBy: 'run-1', touches: ['src/**'] })
+  const cand = mkTask({ id: 'cand', touches: ['src/a.js'], createdAt: '2026-01-02' })
+  assert.deepEqual(core.pickDispatch(mkBoard([holder, cand]), 5, 0, null).blockedTouches, [{ id: 'cand', conflicts: ['holder'] }])
+  holder.status = 'cancelled'
+  assert.deepEqual(core.holdsFiles(mkBoard([holder])), [])                 // 取消即放锁（不等归档）
+  const r = core.pickDispatch(mkBoard([holder, cand]), 5, 0, null)
+  assert.deepEqual(r.pendings.map(t => t.id), ['cand'])
+  assert.deepEqual(r.blockedTouches, [])
+})
+
+test('touches 持锁④：verifying 持锁拦候选，但 Verifier 派发（verifs）照常不受影响', () => {
+  const vt = mkTask({ id: 'vt', status: 'verifying', pipeline: 'full', touches: ['src/**'] })
+  const cand = mkTask({ id: 'cand', touches: ['src/a.js'], createdAt: '2026-01-02' })
+  const r = core.pickDispatch(mkBoard([vt, cand]), 5, 5, null)
+  assert.deepEqual(r.blockedTouches, [{ id: 'cand', conflicts: ['vt'] }])  // verifying 仍持锁
+  assert.deepEqual(r.verifs.map(t => t.id), ['vt'])                       // 只读的 Verifier 不被 touches 拦
+  // 驳回会回 in-progress 继续改同一批文件 → 锁在 verifying 期间不能断
+  assert.deepEqual(core.holdsFiles(mkBoard([vt])).map(h => h.id), ['vt'])
+})
+
+test('touches 锁生命周期接线（源码级）：holdsFiles 三态口径 + 不再有 resolved 放锁调用点', () => {
+  const src = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  // ① 三态持锁口径写在 holdsFiles 里（verifying 与 resolved 都持，in-progress 仍需 claimedBy）
+  assert.match(src, /var holds = t\.status === 'verifying' \|\| t\.status === 'resolved' \|\| \(t\.status === 'in-progress' && !!t\.claimedBy\)/)
+  // ② 锁不再随 in-progress→verifying 释放（旧注释口径已退役）
+  assert.doesNotMatch(src, /verifying 不持有/)
+  // ③ cancelled/archived 明确不在持锁集合里
+  assert.doesNotMatch(src, /t\.status === 'cancelled' && !!t\.claimedBy/)
+  // ④ 派发层不再有「resolved 时放锁」的动作调用（旧实现 releaseTouchesOnly 已不存在）
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(dsp, /releaseTouchesOnly/)
+})
+
+test('README 双份同步记录 touches 锁持到归档口径（锁生命周期 = 卡生命周期）', () => {
+  const pkg = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  const root = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')
+  assert.equal(pkg, root) // 两份 README 必须字节一致（npm run sync-readme 的约束）
+  for (const s of ['锁持到归档', 'verifying', 'resolved', 'cancelled']) {
+    assert.ok(pkg.includes(s), 'README 应记录 touches 锁口径：' + s)
+  }
 })
 
 // ===== 派发决策（touches 拦截）=====
@@ -606,15 +673,15 @@ test('pickDispatch: touches 与活动任务冲突 → 不进 pendings，记入 b
   assert.deepEqual(r.blockedTouches, [{ id: 'clash', conflicts: ['holder'] }])
 })
 
-test('pickDispatch: verifying 不持有文件锁（Worker 已停笔），verifier 派发（verifs）不受 touches 影响', () => {
+test('pickDispatch: verifying 持有文件锁（锁未断），但 verifier 派发（verifs）不受 touches 影响', () => {
   const tasks = [
-    // verifying 的任务即使声明了 touches 也不持有锁
+    // task-muv7c8ja 后：verifying 仍持锁（驳回会回 in-progress 继续改同一批文件，验收后-提交前窗口期也属本卡）
     mkTask({ id: 'vt', status: 'verifying', pipeline: 'full', claimedBy: 'run-1', touches: ['src/**'] }),
     mkTask({ id: 'w1', touches: ['src/a.js'] }),
   ]
   const r = core.pickDispatch(mkBoard(tasks), 5, 5, null)
-  assert.deepEqual(r.pendings.map(t => t.id), ['w1'])          // 未被 verifying 任务拦住
-  assert.deepEqual(r.blockedTouches, [])
+  assert.deepEqual(r.pendings, [])                             // 被 verifying 任务拦住，本轮不派
+  assert.deepEqual(r.blockedTouches, [{ id: 'w1', conflicts: ['vt'] }])
   assert.deepEqual(r.verifs.map(t => t.id), ['vt'])            // Verifier 照常派（只读，不参与排他）
   // 反向：pending 任务声明 touches 也不影响 verifs 派发
   const tasks2 = [mkTask({ id: 'w2', touches: ['src/**'] }), mkTask({ id: 'v2', status: 'verifying', pipeline: 'full' })]
@@ -642,20 +709,25 @@ test('pickDispatch: frozen/dependsOn/escalation 优先级不变（touches 拦截
   const tasks = [
     mkTask({ id: 'holder', status: 'in-progress', claimedBy: 'run-1', touches: ['src/**'] }),
     mkTask({ id: 'fz', frozen: true, touches: ['src/a.js'] }),                 // 冻结 → 既有语义直接排除，不记 blockedTouches
-    mkTask({ id: 'dep', dependsOn: ['holder'], touches: ['src/a.js'] }),        // 依赖未满足 → 既有语义排除
+    // dep 的 touches 走 lib/：只验「依赖未满足被既有语义排除」，不与 clash 抢同一把锁
+    // （holder 归档后 dep 的依赖即满足、会被派发并拿下 src/a.js，抢锁会掩盖本条想验的语义）
+    mkTask({ id: 'dep', dependsOn: ['holder'], touches: ['lib/a.js'] }),
     mkTask({ id: 'esc', escalation: { question: 'q' }, touches: ['src/a.js'] }),// 待裁决 → 排除
     mkTask({ id: 'clash', touches: ['src/a.js'] }),                            // 唯一被 touches 拦下的
   ]
   const r = core.pickDispatch(mkBoard(tasks), 5, 0, null)
   assert.deepEqual(r.pendings, [])
   assert.deepEqual(r.blockedTouches, [{ id: 'clash', conflicts: ['holder'] }])
-  // 锁释放（holder 结算/归档）后，被拦任务下一轮自动恢复可派发
-  mkBoard(tasks).tasks[0].status = 'verifying'
-  const r2 = core.pickDispatch(mkBoard(tasks), 5, 0, null)
-  assert.ok(r2.pendings.map(t => t.id).indexOf('clash') >= 0)
-  assert.deepEqual(r2.blockedTouches, [])
+  // 锁真释放（holder 归档；task-muv7c8ja 后 verifying/resolved 都还持锁）后，被拦任务下一轮自动恢复可派发
+  const b2 = mkBoard(tasks)
+  b2.tasks[0].status = 'verifying'
+  const r2 = core.pickDispatch(b2, 5, 0, null)
+  assert.deepEqual(r2.blockedTouches, [{ id: 'clash', conflicts: ['holder'] }])  // verifying 仍持锁
+  b2.tasks[0].status = 'archived'
+  const r3 = core.pickDispatch(b2, 5, 0, null)
+  assert.ok(r3.pendings.map(t => t.id).indexOf('clash') >= 0)
+  assert.deepEqual(r3.blockedTouches, [])
 })
-
 test('normalizeBoard: touches 脏值（非数组）收敛为空数组，缺字段任务照常', () => {
   const legacy = { tasks: [{ id: 'a', touches: 'src/a.js' }, { id: 'b' }, { id: 'c', touches: ['src/c.js'] }] }
   const d = core.normalizeBoard(legacy)
