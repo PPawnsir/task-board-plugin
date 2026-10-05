@@ -1036,6 +1036,7 @@ function apply(ctx) {
       return { state: st, off: off, label: meta.label, color: meta.color, run: run, dur: dur }
     }
     function HooksSection(props) {
+      var _R = React; var useState = _R.useState // 与全库组件同例：bundler 只注入 React 本体，hook 须自行解构（漏了就是运行期 ReferenceError，shell 容错层直接卸载整个 overlay——2026-10-05 详情页崩板事故）
       var task = props.task
       var kHooks = task.hooks || null
       var _a = useState(''), msg = _a[0], setMsg = _a[1]

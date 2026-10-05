@@ -2659,6 +2659,9 @@ test('hooks 详情页编辑区（源码级）：开关 + prompt + state/耗时 +
   // ⑥ 保存通道：update-task RPC 的 hooks 字段（UI 不做权限判断，失败原因原样 ⚠️ 回显）
   assert.match(src, /rpc\('update-task', \{ taskId: task\.id, hooks: \{ pre: pre\.item, post: post\.item \} \}\)/)
   assert.match(src, /if \(r && r\.ok === false\) \{ setMsg\('⚠️ ' \+ \(r\.error \|\| '保存失败'\)\); return \}/)
+  // ⓪ 防再发（2026-10-05 详情页崩板事故）：组件首行必须完成 React hook 解构——bundler 只注入 React 本体，
+  //    裸用 useState = 运行期 ReferenceError → shell 容错层卸载整个 shell.overlay（看板整体消失）
+  assert.match(src, /function HooksSection\(props\) \{\s+var _R = React; var useState = _R\.useState/)
   // ⑦ 提交体三条口径：空 prompt=撤点位（null）；state/runId/pending 原样透传（否则在跑的 hook 会被打回 idle）；
   //    运行中的点位不清空（run 还在飞，撤声明会让结算落到空点位）——删除意图保留 + 回一行提示
   assert.match(src, /if \(!String\(b\.prompt \|\| ''\)\.trim\(\)\) \{/)
