@@ -38,8 +38,6 @@ export function apply(ctx) {
       activeRuns: {},      // sid -> { taskId: { run, role, taskId, startedAt, model } }
       dispatchedEver: {},  // sid -> { runId: true }（回执判定：区分派发执行 vs 主窗口手动）
       badModels: {},       // 模型熔断坏名单（sid|model → true）
-      packByChild: {},     // 预研文件注入缓存（按子代理会话 id）
-      pendingPacks: [],    // 首轮竞速认领队列（start() 返回前的首次 prompt 组装）
       escNotifyTimers: {}, // 歧义通知 25s 去抖（同任务新调度顶替旧调度）
       receiptBuf: {},      // 回执 45s/满 5 条聚合窗口
       receiptedKeys: {},   // 回执幂等去重（完成事件指纹，1h TTL）
@@ -54,7 +52,8 @@ export function apply(ctx) {
     var notify = createNotify(ctx, state, { rt: store.rt, rootForSession: session.rootForSession, withTimeout: session.withTimeout, isDispatched: session.isDispatched })
     var dispatch = createDispatch(ctx, state, {
       rt: store.rt, wt: store.wt, mutateLocked: store.mutateLocked, kickCycle: store.kickCycle,
-      rootForSession: session.rootForSession, sessionCwd: session.sessionCwd,
+      rootForSession: session.rootForSession,
+      // sessionCwd 不再注入 dispatch（预研清单瘦身后派发侧不读盘）；rpc 侧仍需要（epic 预检路径存在性）
       withTimeout: session.withTimeout, runsFor: session.runsFor, feedbackOn: session.feedbackOn, epicSplitOn: session.epicSplitOn,
       pushSysNote: notify.pushSysNote, maybeNotify: notify.maybeNotify, notifyTaskDone: notify.notifyTaskDone,
       notifyDispatched: notify.notifyDispatched,

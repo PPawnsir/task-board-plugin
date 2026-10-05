@@ -492,28 +492,45 @@ export function buildMessages(t) {
   if (!Array.isArray(t.messages) || t.messages.length === 0) return ''
   return t.messages.map(function (m) { return '### [' + (m.kind || 'note') + '] (' + (m.at || '') + ' by ' + (m.by || '') + ')\n' + String(m.text || '').slice(0, 2000) }).join('\n\n')
 }
-// 主窗口预研上下文段：笔记（调研结论/原始需求/思路）+ 文件，由 host 组装后传入（core 保持纯函数不碰 IO）
-// 注意：systemPrompt context 通道做严格 {{var}} 插值，内容里的 {{...}} 会直接抛异常
-// 毁掉子代理的整个 prompt 组装——必须把 { 连写整 run 拆开（肉眼可读，插值器不再触发）。
+// 主窗口预研上下文段（瘦身分离形态，task-muvjs392）：**笔记全文 + 文件清单**，
+// 由 host 组装后传入（core 保持纯函数不碰 IO）。文件内容本体不进 prompt——由 Worker 用 read 工具
+// 按行号范围自取（执行时盘面，更新鲜），既免了大文件正文撑爆 prompt，也免了随 runtime 快照每轮重发
+//（旧形态走 systemPrompt.context，自治 run 中实测 6×48.8K 字符≈白烧 75–100K token）。
+// 注意：{{ }} 净化沿用「systemPrompt context 严格插值」时代的封闭变换（内容里 {{...}} 会直接抛异常
+// 毁掉子代理的整个 prompt 组装）。通道虽已退役，净化是幂等纯变换且单测锁定口径，保留以防历史笔记复发。
 // 教训：replace(/\{\{/g,'{ {') 是开变换——三连括号 {{{lo}}}（Python f-string）会得到
 // "{ {{lo}}}"，替换结果自己又造出 {{。按"连 { 整 run 拆开"才是封闭变换。
 function sanitizeCtx(s) { return String(s).replace(/\{+/g, function (m) { return m.length === 1 ? m : m.split('').join(' ') }) }
+// contextFiles 条目写法：「路径[:L起[-L止]][ — 一句用途]」。
+// 用途可选（缺省只给路径行号，不造新字段）：分隔符用「 — 」（em dash 带两侧空格，路径/锚点里不会出现）。
+// 锚点按 parseAnchorPath 口径归一（a.js:L10-20 → a.js:L10-L20；非法锚点剥掉，不误导 Worker 去读空段）。
+// 返回 { path: 清单展示串（含归一锚点）, file: 纯路径（存在性预检用，剥掉锚点与用途）, usage }。
+export function parseContextFileEntry(entry) {
+  var s = String(entry == null ? '' : entry).trim()
+  var usage = ''
+  var sep = s.indexOf(' — ')
+  if (sep > 0) { usage = s.slice(sep + 3).trim(); s = s.slice(0, sep).trim() }
+  var a = parseAnchorPath(s)
+  var p = a.from != null ? (a.file + ':L' + a.from + (a.to != null ? '-L' + a.to : '')) : a.file
+  return { path: p, file: a.file, usage: usage }
+}
+// 组装瘦身清单：笔记段（全文，调用方已按 8000 字符截断）+ 文件清单段（每行「路径:L行号 — 一句用途」）。
+// files 收 { path, usage }（兼容裸字符串）；两者皆空 → 空串（调用方据此跳过注入，保持无清单 parity）。
 export function buildContextPackSection(files, notes) {
   var parts = []
   if (notes && String(notes).trim()) parts.push('### 主窗口调研笔记（结论/思路/原始需求，直接采信）\n' + sanitizeCtx(String(notes)))
-  if (Array.isArray(files) && files.length) {
-    parts.push('主窗口预研文件（主窗口创建任务前已读过以下内容，直接使用，不要重复读取；标"截断"的内容可按需补读）：')
+  var list = []
+  if (Array.isArray(files)) {
     for (var i = 0; i < files.length; i++) {
       var f = files[i]
-      // meta 携带截断详情/锚点信息（readContextPack 组装）；老数据只有 truncated 时回退「（截断）」
-      var head = '### ' + sanitizeCtx(f.path) + (f.meta ? '（' + sanitizeCtx(f.meta) + '）' : (f.truncated ? '（截断）' : ''))
-      parts.push(head + '\n' + sanitizeCtx(f.content))
-      // 结构索引块：供 Worker 按行号用锚点语法直读目标段，不用全文盘点
-      if (Array.isArray(f.outline) && f.outline.length) {
-        parts.push('结构索引（' + sanitizeCtx(f.path) + ' 的函数/标题及行号，可用 路径:L起-L止 锚点补读）：\n' + f.outline.map(function (x) { return sanitizeCtx(x) }).join('\n'))
-      }
+      var path = (typeof f === 'string') ? f : (f && f.path)
+      if (!path) continue
+      var line = '- ' + sanitizeCtx(path)
+      if (f && typeof f === 'object' && f.usage) line += ' — ' + sanitizeCtx(f.usage)
+      list.push(line)
     }
   }
+  if (list.length) parts.push('### 调研文件清单（附带的调研文件清单请按需用 read 工具自行读取，不要全量盲读；给出行号的按行号范围读）\n' + list.join('\n'))
   return parts.length ? parts.join('\n\n') : ''
 }
 
@@ -521,6 +538,9 @@ export function buildContextPackSection(files, notes) {
 // 背景：contextFiles 注入大文件被 8KB 头部截断，目标代码段在中部/尾部，Worker 仍需全文盘点；
 // 且只标"截断"二字，不知道截掉了什么、该补读哪里。
 // 三个纯函数落在这里可单测；零依赖纯行正则，宁可漏检不可误切（不引 parser）。
+// 【task-muvjs392 后现状】派发侧已改为「清单 + Worker 按需 read 自取」，host 不再读盘、不再切段/附索引：
+// parseAnchorPath 仍在使用（清单条目归一，见 parseContextFileEntry）；sliceLines / buildFileOutline
+// 暂留为纯工具（口径由单测锁定），不删以免丢历史行为证据、也备将来主窗口要行段预切时复用——宿主路径上已无调用点。
 // 锚点行段长度上限（行）：超出截断到该上限并标记 capped
 export var CONTEXT_SLICE_MAX_LINES = 400
 // 结构索引条数上限：超出附一条省略标注
@@ -822,7 +842,8 @@ export function attachContextSuggestions(out, warnings, touches, exists) {
 
 // epic 发布预检：父卡 publish 时对其子任务做轻量调研注入预检。
 // 口径：只看 pipeline≠direct 的非归档子任务；「无调研注入」= context.files/context.notes 皆空，
-//   或 files 列了路径但全部不存在（exists 回调判定，锚点 :L 段先剥掉再查——存在性是对文件而言的）。
+//   或 files 列了路径但全部不存在（exists 回调判定，锚点 :L 段与可选「 — 一句用途」后缀先剥掉再查——
+//   存在性是对文件而言的，见 parseContextFileEntry）。
 // exists(path) 由调用方注入（fs.existsSync + 会话工作区相对解析包装）；缺省时退化为只查字段有无。
 // 返回 { total, missing: [{id, title, reason}] }；total=参与预检的子任务数（供汇总文案 N/M）。
 export function epicPrecheck(tasks, parentId, exists) {
@@ -836,8 +857,8 @@ export function epicPrecheck(tasks, parentId, exists) {
     var reason = ''
     if (!files.length && !hasNotes) reason = '无 contextFiles/contextNotes'
     else if (files.length && typeof exists === 'function') {
-      var anyExist = files.some(function (p) { try { return !!exists(parseAnchorPath(p).file) } catch (_) { return false } })
-      if (!anyExist) reason = '预研文件路径全部不存在（注入将全是读取失败）'
+      var anyExist = files.some(function (p) { try { return !!exists(parseContextFileEntry(p).file) } catch (_) { return false } })
+      if (!anyExist) reason = '预研文件路径全部不存在（子代理按需 read 时也会全部读不到）'
     }
     if (reason) missing.push({ id: String(k.id || ''), title: String(k.title || '').slice(0, 40), reason: reason })
   }

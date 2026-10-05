@@ -270,78 +270,163 @@ test('buildVerifierPrompt: 注入交付物 + 验收脚本 + messages', () => {
   assert.match(p, /做完了/); assert.match(p, /npm test/); assert.match(p, /board_verdict/); assert.match(p, /方案B/)
 })
 
-// ===== 预研文件段（主窗口选择性注入，host 读盘后传入）=====
+// ===== 预研上下文段（瘦身分离形态，task-muvjs392）：笔记全文 + 文件清单，不含文件内容本体 =====
+// 形态：### 主窗口调研笔记（全文 ≤8000 字符）\n…\n\n### 调研文件清单（- 路径:L起-L止 — 一句用途）
 test('buildContextPackSection: 空清单返回空串', () => {
   assert.equal(core.buildContextPackSection([]), '')
   assert.equal(core.buildContextPackSection(null), '')
   assert.equal(core.buildContextPackSection(undefined), '')
 })
 
-test('buildContextPackSection: 文件内容 + 截断标记', () => {
+test('parseContextFileEntry: 路径/锚点归一 + 可选「 — 一句用途」', () => {
+  assert.deepEqual(core.parseContextFileEntry('src/a.js'), { path: 'src/a.js', file: 'src/a.js', usage: '' })
+  assert.deepEqual(core.parseContextFileEntry('src/a.js:L2350-L2420'), { path: 'src/a.js:L2350-L2420', file: 'src/a.js', usage: '' })
+  // 第二段 L 可省略 → 归一成 :L10-L20（清单里给 Worker 的行号形态统一）
+  assert.deepEqual(core.parseContextFileEntry('src/a.js:L10-20'), { path: 'src/a.js:L10-L20', file: 'src/a.js', usage: '' })
+  // 「 — 一句用途」（em dash 两侧空格）：用途与路径/锚点一起剥出来
+  assert.deepEqual(core.parseContextFileEntry('lib/x.mjs:L112-L116 — 派发引擎锚点行段'), { path: 'lib/x.mjs:L112-L116', file: 'lib/x.mjs', usage: '派发引擎锚点行段' })
+  assert.deepEqual(core.parseContextFileEntry('docs/a.md — 设计文档'), { path: 'docs/a.md', file: 'docs/a.md', usage: '设计文档' })
+  // Windows 盘符 + 锚点 + 用途共存
+  assert.deepEqual(core.parseContextFileEntry('C:\\w\\a.js:L100-L200 — 入口'), { path: 'C:\\w\\a.js:L100-L200', file: 'C:\\w\\a.js', usage: '入口' })
+  // 非法锚点剥掉（不误导子代理去读空段）；空串安全
+  assert.deepEqual(core.parseContextFileEntry('a.js:L0'), { path: 'a.js', file: 'a.js', usage: '' })
+  assert.deepEqual(core.parseContextFileEntry(''), { path: '', file: '', usage: '' })
+})
+
+test('buildContextPackSection: 文件清单行（路径+行号+用途），不含内容本体', () => {
   const s = core.buildContextPackSection([
-    { path: 'src/a.ts', content: 'const x = 1', truncated: false },
-    { path: 'docs/b.md', content: '说明', truncated: true },
+    { path: 'src/a.ts:L1-L40', usage: '状态机主循环' },
+    { path: 'docs/b.md' },
   ])
-  assert.match(s, /主窗口预研文件/); assert.match(s, /不要重复读取/)
-  assert.match(s, /### src\/a\.ts/); assert.match(s, /const x = 1/)
-  assert.match(s, /### docs\/b\.md（截断）/); assert.match(s, /说明/)
+  assert.match(s, /调研文件清单/); assert.match(s, /不要全量盲读/)
+  assert.match(s, /- src\/a\.ts:L1-L40 — 状态机主循环/)
+  assert.match(s, /- docs\/b\.md/)              // 无用途 → 只给路径行号
+  // 条目上的老字段（content/truncated/meta/outline）一律不再被消费：正文绝不进清单
+  const s2 = core.buildContextPackSection([
+    { path: 'src/big.js:L2350-L2420', usage: '目标段', content: 'const LEGACY_BODY = 1', truncated: true, meta: '锚点行段：共 3800 行，已注入 L2350–L2420', outline: ['L12: export function foo()'] },
+  ])
+  assert.match(s2, /- src\/big\.js:L2350-L2420 — 目标段/)
+  assert.doesNotMatch(s2, /LEGACY_BODY/)        // 文件内容本体不进 prompt
+  assert.doesNotMatch(s2, /结构索引/)           // 不再附结构索引块
+  assert.doesNotMatch(s2, /锚点行段：共 3800 行/) // 不再有读盘产出的 meta
 })
 
-test('buildWorkerPrompt/buildVerifierPrompt: 注入预研文件段', () => {
-  const pack = core.buildContextPackSection([{ path: 'src/x.js', content: 'hello', truncated: false }])
+test('buildContextPackSection: 裸字符串条目兼容（老调用方零改）+ 清单与笔记同现', () => {
+  const s = core.buildContextPackSection(['src/x.js'], '结论：先改 A 再改 B')
+  assert.match(s, /- src\/x\.js/)
+  assert.match(s, /主窗口调研笔记/); assert.match(s, /结论：先改 A 再改 B/)
+})
+
+test('buildWorkerPrompt/buildVerifierPrompt: 预研清单进 prompt（笔记全文 + 清单行，不含文件内容本体）', () => {
+  const pack = core.buildContextPackSection(
+    [{ path: 'lib/core.mjs:L100-L140', usage: '清单组装与锚点归一', content: 'export function buildContextPackSection(files, notes) {' }],
+    '根因：调研包随快照每轮重发 6×48.8K 字符'
+  )
   const t = mkTask({ id: 'pk' })
-  assert.match(core.buildWorkerPrompt(t, pack), /### src\/x\.js/)
-  assert.match(core.buildWorkerPrompt(t, pack), /hello/)
-  assert.match(core.buildVerifierPrompt(t, pack), /### src\/x\.js/)
-  // 不传 pack 时不出现该段
-  assert.doesNotMatch(core.buildWorkerPrompt(t), /主窗口预研文件/)
+  const pw = core.buildWorkerPrompt(t, pack)
+  assert.match(pw, /### 主窗口调研笔记/); assert.match(pw, /根因：调研包随快照每轮重发 6×48\.8K 字符/)  // 笔记全文
+  assert.match(pw, /- lib\/core\.mjs:L100-L140 — 清单组装与锚点归一/)                                 // 清单行（含行号+用途）
+  assert.match(pw, /按需用 read 工具自行读取/)                                                       // 自取指引
+  assert.doesNotMatch(pw, /export function buildContextPackSection/)                                 // 文件内容本体不在 prompt
+  const pv = core.buildVerifierPrompt(t, pack)
+  assert.match(pv, /- lib\/core\.mjs:L100-L140 — 清单组装与锚点归一/)
+  assert.doesNotMatch(pv, /export function buildContextPackSection/)
+  // 不传 pack 时不出现该段（无清单 parity：与注入迁移前逐字同形）
+  assert.doesNotMatch(core.buildWorkerPrompt(t), /调研文件清单/)
+  assert.doesNotMatch(core.buildVerifierPrompt(t), /调研文件清单/)
+  assert.doesNotMatch(core.buildWorkerPrompt(t), /主窗口调研笔记/)
 })
 
-test('buildContextPackSection: {{ }} 插值净化（context 通道严格插值会抛异常）', () => {
-  const s = core.buildContextPackSection([{ path: 'src/tpl.vue', content: '<div>{{ msg }}</div>', truncated: false }])
+test('buildContextPackSection: {{ }} 插值净化（严格插值时代遗留口径，封闭变换）', () => {
+  const s = core.buildContextPackSection([{ path: 'src/tpl.vue' }], '<div>{{ msg }}</div>')
   assert.doesNotMatch(s, /\{\{/)          // 不允许残留插值触发器
   assert.match(s, /\{ \{ msg \}\}/)        // 内容可读性保留
 })
 
 test('buildContextPackSection: 三连花括号（Python f-string）封闭净化', () => {
   // 真实事故：f"{{{lo}}}" 经 replace(/\{\{/g,'{ {') 变成 "{ {{lo}}}"——替换结果自己又造出 {{
-  const s = core.buildContextPackSection([{ path: 'gen.py', content: 'quant = f"{{{lo}}}" + f"{{{lo},{hi}}}"', truncated: false }])
+  const s = core.buildContextPackSection([], 'quant = f"{{{lo}}}" + f"{{{lo},{hi}}}"')
   assert.doesNotMatch(s, /\{\{/)           // 净化必须是封闭变换
   assert.match(s, /\{ \{ \{lo\}\}\}/)      // 可读性保留
   // 五连括号 + 单括号混合
-  const s2 = core.buildContextPackSection([{ path: 'x', content: 'a{{{{{b}}}}}{c}{{d}}', truncated: false }])
+  const s2 = core.buildContextPackSection([], 'a{{{{{b}}}}}{c}{{d}}')
   assert.doesNotMatch(s2, /\{\{/)
 })
 
-test('buildContextPackSection: 笔记（思路/原始需求）注入 + 净化', () => {
-  const s = core.buildContextPackSection([{ path: 'a.js', content: 'x', truncated: false }], '用户原话：要做成{{可配置}}的')
+test('buildContextPackSection: 笔记（思路/原始需求）注入 + 净化 + 清单同现', () => {
+  const s = core.buildContextPackSection([{ path: 'a.js:L1-L9', usage: '入口' }], '用户原话：要做成{{可配置}}的')
   assert.match(s, /主窗口调研笔记/)
   assert.match(s, /用户原话：要做成\{ \{可配置\}\}的/)  // 笔记里的 {{}} 也被净化
-  assert.match(s, /### a\.js/)                          // 文件段同时存在
+  assert.match(s, /- a\.js:L1-L9 — 入口/)              // 清单行同时存在
 })
 
-test('buildContextPackSection: 仅笔记无文件也可注入', () => {
+test('buildContextPackSection: 仅笔记无文件也可注入（不出现清单段）', () => {
   const s = core.buildContextPackSection([], '思路：先改 A 再改 B')
   assert.match(s, /主窗口调研笔记/); assert.match(s, /先改 A 再改 B/)
-  assert.doesNotMatch(s, /预研文件/)
+  assert.doesNotMatch(s, /调研文件清单/)
   assert.equal(core.buildContextPackSection([], ''), '')
   assert.equal(core.buildContextPackSection(null, '  '), '')
 })
 
-test('buildContextPackSection: meta 截断详情 + 结构索引块渲染（①②④）', () => {
-  const s = core.buildContextPackSection([
-    { path: 'src/big.js', content: 'function a() {}', truncated: true, meta: '截断：共 3800 行，已注入 1–96 行', outline: ['L12: export function foo(a, b)', 'L88: class Bar'] },
-  ])
-  assert.match(s, /### src\/big\.js（截断：共 3800 行，已注入 1–96 行）/)
-  assert.match(s, /结构索引/); assert.match(s, /L12: export function foo\(a, b\)/); assert.match(s, /L88: class Bar/)
+test('注入迁移（task-muvjs392）：清单进首条 prompt，注入区块通道与认领机制全清零（源码级断言）', () => {
+  const src = hostSrc()
+  // ① 通道退役：不再注册 systemPrompt.context 动态注入段（Team 引导段 section 照旧在位）
+  assert.doesNotMatch(src, /task-board:context-pack/)
+  assert.doesNotMatch(src, /packByChild|pendingPacks/)
+  assert.doesNotMatch(src, /sysPrompt\.context\(/)
+  assert.match(src, /name: 'task-board:team-mode'/)
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const idx = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(idx, /packByChild|pendingPacks/)   // state 容器本体清零
+  // ② 派发侧零读盘：不再读文件、不再切段/附索引、不再按会话工作区解析
+  assert.doesNotMatch(dsp, /packByChild|pendingPacks|packNote/)
+  assert.doesNotMatch(dsp, /ctx\.fs|fs\.readText|sliceLines|buildFileOutline/)
+  // ③ 瘦身清单本体直接拼进 worker/verifier 两态 prompt（三态其余不变：hook 仍走 buildHookPrompt）
+  assert.match(dsp, /buildWorkerPrompt\(t, pack, cfg\(dsnap\)\.feedbackEnabled\)/)
+  assert.match(dsp, /buildVerifierPrompt\(t, pack\)/)
+  assert.match(dsp, /buildHookPrompt\(t, role === 'hook-pre' \? 'pre' : 'post', kids\)/)
+  // ④ readContextPack = 组装清单（不再 await 读盘）——派发点与 rpc 预览点都直接调用
+  assert.match(dsp, /function readContextPack\(t\) \{/)
+  assert.match(dsp, /return buildContextPackSection\(files, notes\.slice\(0, 8000\)\)/)
 })
 
-test('buildContextPackSection: 锚点行段 meta 渲染', () => {
-  const s = core.buildContextPackSection([
-    { path: 'src/big.js:L2350-L2420', content: 'x', truncated: false, meta: '锚点行段：共 3800 行，已注入 L2350–L2420' },
-  ])
-  assert.match(s, /### src\/big\.js:L2350-L2420（锚点行段：共 3800 行，已注入 L2350–L2420）/)
-  assert.doesNotMatch(s, /结构索引/)
+test('task_preview_context / preview-context：返回瘦身清单形态（笔记全文 + 清单行；无文件正文）', async () => {
+  // 真实 readContextPack 出自 dispatch（组装清单，零 IO）：用最小 ctx/deps 造一份
+  const dispatch = createDispatch(
+    { effect: function () {}, get: function () { return null } },
+    { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: {} },
+    {
+      rt: async () => mkBoard([]), wt: async () => {}, mutateLocked: async (sid, fn) => fn(mkBoard([])), kickCycle: () => {},
+      rootForSession: () => null, withTimeout: (p) => p, runsFor: () => ({}), feedbackOn: () => true,
+      pushSysNote: () => {}, maybeNotify: () => {}, notifyTaskDone: () => {},
+    })
+  const h = mkRpcHandlers(mkBoard([]), { readContextPack: dispatch.readContextPack })
+  const files = ['lib/core.mjs:L1-L60 — 清单组装与锚点归一', 'lib/dispatch.mjs']
+  const r1 = await h.__tools['task_preview_context'].execute({ contextFiles: files, contextNotes: '结论：先改 A' })
+  assert.equal(r1.ok, true); assert.equal(r1.empty, false)
+  assert.match(r1.pack, /### 主窗口调研笔记/); assert.match(r1.pack, /结论：先改 A/)
+  assert.match(r1.pack, /- lib\/core\.mjs:L1-L60 — 清单组装与锚点归一/)
+  assert.match(r1.pack, /- lib\/dispatch\.mjs/)
+  assert.doesNotMatch(r1.pack, /export function buildContextPackSection/)  // 正文不进预览（0.1.7 起不再读盘）
+  const r2 = await h['preview-context']({ contextFiles: files })
+  assert.equal(r2.ok, true); assert.equal(r2.filesCount, 2)
+  assert.match(r2.pack, /- lib\/core\.mjs:L1-L60 — 清单组装与锚点归一/)
+  assert.equal((await h['preview-context']({})).ok, false)  // 两样都不给 → 明确报错（既有口径）
+})
+
+test('派发接线：Worker 首条 prompt 带瘦身清单（笔记全文 + 清单行），不含文件内容本体', async () => {
+  // 真跑一次 spawn（poolCycle → spawnOneShot → buildWorkerPrompt），捕获子代理实收 prompt。
+  // ctx.fs 只给空对象：清单组装若还试图读盘会立刻炸——顺带锁定「IO 清零」。
+  const t = mkTask({ id: 'c1', status: 'pending', context: { files: ['lib/core.mjs:L100-L140 — 清单组装与锚点归一'], notes: '调研结论：走瘦身分离，文件正文由我自己 read' } })
+  const h = mkHookDispatch(mkBoard([t]))
+  await h.dispatch.poolCycle(FULL_SID)
+  const w = h.spawned.find((s) => s.label === 'worker:c1')
+  assert.ok(w, 'Worker 已按真实派发路径 spawn')
+  assert.match(w.text, /### 主窗口调研笔记/); assert.match(w.text, /调研结论：走瘦身分离，文件正文由我自己 read/)  // 笔记全文
+  assert.match(w.text, /### 调研文件清单/); assert.match(w.text, /- lib\/core\.mjs:L100-L140 — 清单组装与锚点归一/)        // 清单行
+  assert.match(w.text, /按需用 read 工具自行读取，不要全量盲读/)                                                            // 自取指引
+  assert.doesNotMatch(w.text, /export function buildContextPackSection/)                                                    // 文件内容本体不在 prompt
+  assert.doesNotMatch(w.text, /通过「上下文注入」区提供/)                                                                    // 旧指引句已退役
 })
 
 // ===== 锚点行段解析（②，零依赖纯正则，Windows 盘符冒号不得误判）=====
@@ -968,10 +1053,13 @@ test('epicPrecheck: 字段有无 + 路径存在性（exists 注入），direct/�
   assert.deepEqual(pre.missing.map((m) => m.id), ['k1', 'k3'])
   assert.match(pre.missing[0].reason, /无 contextFiles/)
   assert.match(pre.missing[1].reason, /全部不存在/)
-  // 锚点 :L 段先剥掉再查存在性（'b.mjs:L3-L9' 以 'b.mjs' 查 exists）
+  // 锚点 :L 段先剥掉再查存在性（'b.mjs:L3-L9' 以 'b.mjs' 查 exists）；
+  // 可选「 — 一句用途」后缀同样剥掉（瘦身清单条目写法，task-muvjs392）——存在性是对文件而言的。
+  // some 短路：第一条 false 才会继续查第二条，正好把两种剥法都走一遍。
   const seen = []
-  core.epicPrecheck([mkTask({ id: 'x', parentId: 'ep', context: { files: ['b.mjs:L3-L9'], notes: '' } })], 'ep', (p) => { seen.push(p); return true })
-  assert.deepEqual(seen, ['b.mjs'])
+  const pre2 = core.epicPrecheck([mkTask({ id: 'x', parentId: 'ep', context: { files: ['b.mjs:L3-L9', 'd.mjs:L1-L5 — 状态机主循环'], notes: '' } })], 'ep', (p) => { seen.push(p); return p === 'd.mjs' })
+  assert.deepEqual(seen, ['b.mjs', 'd.mjs'])   // 锚点与用途都剥掉，落到纯路径
+  assert.deepEqual(pre2.missing, [])           // d.mjs 存在 → 不判缺材料
 })
 
 test('epicPrecheckNote: 全部有材料 → 空串（不打扰）；有缺失 → N/M 汇总文案（超 5 条折叠）', () => {
@@ -1132,7 +1220,7 @@ function mkVerifierSettleDispatch(board) {
       start: async function () { return { id: 'run-v1', result: new Promise(function (res) { resolveRun = res }), dispose: async function () {} } },
     },
   }
-  var state = { knownSessions: {}, dispatchedEver: {}, badModels: {}, packByChild: {}, pendingPacks: [], teamModeCache: {}, activeRuns: {} }
+  var state = { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: {} }
   var dispatch = createDispatch(ctx, state, {
     rt: async function () { return boardRef.b }, wt: async function () {}, mutateLocked: async function (sid, fn) { return fn(boardRef.b) },
     kickCycle: function () {}, rootForSession: function () { return { id: FULL_SID } }, sessionCwd: function () { return '' },
@@ -1656,8 +1744,8 @@ test('学习飞轮接线：两处触发点 + push-lesson 开关拦截 + prompt/�
   assert.match(host, /args\.key === 'feedbackEnabled'/)
   assert.match(host, /feedbackCache\[sid\] = d\.feedbackEnabled/)
   assert.match(host, /feedbackCache\[sid\] = nd\.feedbackEnabled !== false/)
-  // 软召回：Worker prompt 与 Team 提示词都以开关为条件拼接
-  assert.match(host, /buildWorkerPrompt\(t, packNote, cfg\(dsnap\)\.feedbackEnabled\)/)
+  // 软召回：Worker prompt 与 Team 提示词都以开关为条件拼接（pack=瘦身清单本体，随首条 prompt 注入）
+  assert.match(host, /buildWorkerPrompt\(t, pack, cfg\(dsnap\)\.feedbackEnabled\)/)
   assert.match(host, /feedbackOn\(String\(agent\.id\)\) \? '\\n' \+ LESSON_RECALL_HINT/)
   assert.match(coreSrc, /if \(feedbackEnabled !== false\) p \+= '\\n\\n' \+ LESSON_RECALL_HINT/)
   // 客户端：开关读取 + 设置区 checkbox + 候选卡片「沉淀」按钮 + 关闭即整块不渲染
@@ -2123,7 +2211,7 @@ function mkHookDispatch(board, over) {
       },
     },
   }
-  const state = { knownSessions: {}, dispatchedEver: {}, badModels: {}, packByChild: {}, pendingPacks: [], teamModeCache: {}, activeRuns: {} }
+  const state = { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: {} }
   const dispatch = createDispatch(ctx, state, Object.assign({
     rt: async () => boardRef.b,
     wt: async () => {},
@@ -2683,7 +2771,7 @@ function mkDispatch(board, over, ctxOver) {
   const dispatch = createDispatch(
     // 创建期无条件触达：effect（卸载清理注册）/ get('systemPrompt' 引导段)；不给 timer/agents/subagents
     Object.assign({ fs: {}, effect: function () {}, get: function () { return null } }, ctxOver || {}),
-    { knownSessions: {}, dispatchedEver: {}, badModels: {}, packByChild: {}, pendingPacks: [], teamModeCache: {}, activeRuns: {} },
+    { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: {} },
     Object.assign({
       rt: async () => { counters.reads++; return board },
       wt: async () => { counters.writes++ },
@@ -2937,7 +3025,7 @@ test('epicSplit 行为①：Team 提示词第 6 条随门禁注入/消失（真�
     feedbackOn: () => false, epicSplitOn: () => on,
     pushSysNote: () => {}, maybeNotify: () => {}, notifyTaskDone: () => {},
   })
-  const mkState = () => { const s = { knownSessions: {}, dispatchedEver: {}, badModels: {}, packByChild: {}, pendingPacks: [], teamModeCache: {}, activeRuns: {} }; s.teamModeCache[SID] = true; return s }
+  const mkState = () => { const s = { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: {} }; s.teamModeCache[SID] = true; return s }
   const textOf = (on) => {
     sections.length = 0
     createDispatch(ctx, mkState(), mkDeps(on))

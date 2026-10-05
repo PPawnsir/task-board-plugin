@@ -1,16 +1,17 @@
 // dsh-agent-board — 派发引擎（lib/dispatch.mjs）
 // createDispatch(ctx, state, deps)：一次性子代理 spawn/结算（软+硬两级超时）/ run 历史留档 /
 // token 消耗累加 / poolCycle 派发周期（孤儿回收+占位 claim+池快照）/ 15s 心跳 / 插件卸载清理 /
-// Team 模式 systemPrompt 引导段 / 预研文件上下文注入通道（packByChild + pendingPacks 首轮竞速认领）。
+// Team 模式 systemPrompt 引导段 / 预研上下文瘦身清单（调研笔记全文 + 文件清单，随首条 prompt 一次性注入）。
 import * as core from './core.mjs'
 import { readRunUsage } from './usage.mjs'
 import { splitRuleOf, pushRejectLesson } from './policy.mjs'
-const { ah, cfg, claimApply, resolveApply, verifyApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseAnchorPath, sliceLines, buildFileOutline, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection } = core
+const { ah, cfg, claimApply, resolveApply, verifyApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection } = core
 
 export function createDispatch(ctx, state, deps) {
-    const fs = ctx.fs
+    // 宿主 fs 句柄与「会话工作区解析根」随预研注入瘦身退役（task-muvjs392）：派发侧不再读盘——
+    // 清单只给「路径:L行号 — 一句用途」，文件内容由 Worker 自己用 read 工具按行号范围自取。
     var rt = deps.rt, wt = deps.wt, mutateLocked = deps.mutateLocked, kickCycle = deps.kickCycle
-    var rootForSession = deps.rootForSession, sessionCwd = deps.sessionCwd, withTimeout = deps.withTimeout, runsFor = deps.runsFor, feedbackOn = deps.feedbackOn
+    var rootForSession = deps.rootForSession, withTimeout = deps.withTimeout, runsFor = deps.runsFor, feedbackOn = deps.feedbackOn
     // 史诗拆分总开关读取器（epicSplit，缺省 true）：与 feedbackOn 同源（session 缓存，rt() 同步）——
     // Team 提示词组装是同步函数，只能读缓存，不能读盘。
     var epicSplitOn = deps.epicSplitOn
@@ -20,8 +21,8 @@ export function createDispatch(ctx, state, deps) {
     // 共享状态别名（本体由 index.mjs apply 统一构建并逐模块注入）
     var dispatchedEver = state.dispatchedEver
     var badModels = state.badModels
-    var packByChild = state.packByChild
-    var pendingPacks = state.pendingPacks
+    // 「上下文注入」区块通道的按子代理会话缓存表 + 首轮竞速认领队列随该通道一起退役（task-muvjs392）：
+    // 瘦身清单直接进首条 prompt，不再需要注入段命中与父子归属认领（并行 spawn 认领错包的潜伏 bug 一并消灭）。
     var knownSessions = state.knownSessions
     var teamModeCache = state.teamModeCache
 
@@ -46,74 +47,24 @@ export function createDispatch(ctx, state, deps) {
       _cachedProvider = names[0]; return _cachedProvider
     }
 
-    // 主窗口预研文件：t.context.files 里的路径由主 agent 选择性指定（它调研时读过哪些文件），
-    // host 在派发时从磁盘读最新内容注入 prompt——Worker/Verifier 不用从零重复调研。
-    // 上限：单文件 8KB、总计 40KB，超出截断并标注。
-    // 相对路径的解析根必须是「该会话的工作区」（root agent 的 session.header.cwd），
-    // 不能靠进程 cwd——dsh web 从家目录启动时相对路径会解析到 ~/.dsh 之外的家目录下，
-    // 全部读成「读取失败」（v0.1.7 实测：dsh-notes-plugin/... → C:\Users\<user>\dsh-notes-plugin）。
-
-    async function readContextPack(sid, t) {
-      var paths = (t.context && Array.isArray(t.context.files)) ? t.context.files : []
-      var notes = (t.context && typeof t.context.notes === 'string') ? t.context.notes : ''
+    // 主窗口预研上下文（瘦身分离形态，task-muvjs392）：只组装**瘦身清单**——调研笔记全文（≤8000 字符）
+    // + 文件清单（每行「路径:L行号 — 一句用途」，用途取自 contextFiles 条目的可选注释位）。
+    // 文件内容本体不进 prompt、host 也不再读盘（IO 清零）：由 Worker 用 read 工具按行号范围自取——执行时
+    // 盘面更新鲜，且免了大文件正文（旧形态单文件 8KB/总包 40KB 截断注入）既撑 prompt 又随快照每轮重发
+    // （实证 6×48.8K 字符≈白烧 75–100K token；整包塞 prompt 同样有害，故取「分离 + 按需自取」）。
+    function readContextPack(t) {
+      var paths = (t && t.context && Array.isArray(t.context.files)) ? t.context.files : []
+      var notes = (t && t.context && typeof t.context.notes === 'string') ? t.context.notes : ''
       if (!paths.length && !notes.trim()) return ''
-      var cwd = sessionCwd(sid)
-      var out = [], total = 0
-      for (var i = 0; i < paths.length && total < 40960; i++) {
-        var p = String(paths[i] || '')
-        if (!p) continue
-        // 锚点行段语法：'path:L2350-L2420' / 'path:L2350'（看板反馈 n-musaoirgsigo ②）
-        // 盘符冒号不会被误判（parseAnchorPath 只认尾部 :L<num>）；展示路径保留原始写法。
-        var anchor = parseAnchorPath(p)
-        try {
-          var full = await fs.readText(await fs.resolve(anchor.file, cwd ? { cwd: cwd } : undefined))
-          var content = full, truncated = false, meta = '', outline = null
-          var anchorFrom = null // 锚点段起点（预算二次截断时换算注入末行用）
-          if (anchor.from != null) {
-            var seg = sliceLines(full, anchor.from, anchor.to)
-            if (seg.invalid) {
-              // 段超范围 → 回退头部注入并标注（调用方写明锚点意图，Worker 可据此换锚点重读）
-              meta = '锚点 L' + anchor.from + (anchor.to != null ? '-L' + anchor.to : '') + ' 无效（共 ' + seg.totalLines + ' 行），已回退头部'
-            } else {
-              content = seg.text
-              anchorFrom = seg.injectedFrom
-              meta = '锚点行段：共 ' + seg.totalLines + ' 行，已注入 L' + seg.injectedFrom + '–L' + seg.injectedTo + (seg.capped ? '（超 400 行段长上限）' : '')
-            }
-          } else if (anchor.invalidAnchor) {
-            meta = '锚点写法无效，已回退头部'
-          }
-          // 预算口径不变：单文件 8KB、总计 40KB（锚点段同样计入）
-          if (content.length > 8192) { content = content.slice(0, 8192); truncated = true }
-          if (total + content.length > 40960) { content = content.slice(0, 40960 - total); truncated = true }
-          if (truncated) {
-            // 截断标注升级（①）：从「（截断）」升级为「共 N 行，已注入 X–M 行」
-            var gotLines = content ? content.split('\n').length : 0
-            if (anchorFrom != null) {
-              meta += '；预算截断到 L' + (anchorFrom + gotLines - 1)
-            } else {
-              var totalLines = full.split('\n').length
-              meta += (meta ? '；' : '') + '截断：共 ' + totalLines + ' 行，已注入 1–' + gotLines + ' 行'
-              // 结构索引（①④）：头部注入被截断时附上，Worker 可照索引用锚点语法直读目标段
-              outline = buildFileOutline(full)
-            }
-          }
-          var entry = { path: p, content: content, truncated: truncated }
-          if (meta) entry.meta = meta
-          if (outline && outline.length) entry.outline = outline
-          out.push(entry)
-          total += content.length
-        } catch (e) {
-          out.push({ path: p, content: '[读取失败: ' + String(e).slice(0, 120) + ']', truncated: false })
-        }
+      var files = []
+      for (var i = 0; i < paths.length; i++) {
+        // 锚点行段语法 'path:L2350-L2420' / 'path:L2350' 与可选「 — 一句用途」由 core 纯函数归一，
+        // 清单里原样带上行号供 Worker 直接 read(file, offset, limit) 自取。
+        var e = parseContextFileEntry(paths[i])
+        if (e.path) files.push(e)
       }
-      return buildContextPackSection(out, notes.slice(0, 8000))
+      return buildContextPackSection(files, notes.slice(0, 8000))
     }
-
-    // 预研文件注入通道：内容不混进 user prompt，而是通过 systemPrompt.context 以「上下文注入」
-    // 区块呈现（与 skill-catalog 等系统注入同形态）。
-    // 首轮竞速：子代理的首次 prompt 组装发生在 subagents.start() 返回之前，packByChild 还没写入
-    // → spawn 前把 pack 放进 pendingPacks，provider 按父子归属（isOwnedBy 父 agent）即时认领。
-    // packByChild / pendingPacks 容器本体在 state（见上方别名）
 
     // 历史会话留档：t.runs = [{ role, id, at, model, outcome, endedAt }]，上限 20 条
     // 目的：任务流转到 resolved/archived 后，详情页仍能选择跳转到任一历史阶段的会话
@@ -154,24 +105,24 @@ export function createDispatch(ctx, state, deps) {
       if (role === 'verifier') { modelOverride = (typeof dsnap.verifierModel === 'string' && dsnap.verifierModel.trim()) ? dsnap.verifierModel.trim() : ''; if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited, using parent model'); modelOverride = '' } }
       else if (role === 'worker') { modelOverride = (typeof dsnap.workerModel === 'string' && dsnap.workerModel.trim()) ? dsnap.workerModel.trim() : ''; if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited, using parent model'); modelOverride = '' } }
       var pack = ''
-      try { pack = await readContextPack(sid, t) } catch (e) {
+      try { pack = readContextPack(t) } catch (e) {
         console.error('[task-board] context pack read failed:', String(e))
-        // 调研门禁④：读包失败落卡（t.lastError，复用详情页「最近失败」行展示机制），不再只沉在
+        // 调研门禁④：组装清单失败落卡（t.lastError，复用详情页「最近失败」行展示机制），不再只沉在
         // host 控制台——主窗口排查「Worker 为什么没拿到预研材料」不用翻日志。
         // mutateLocked 契约：回调返回 null/undefined 跳过写盘——找到任务才返回非空值；skipKick 免一次无谓 poolCycle。
         try { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === t.id }); if (!t2) return null; t2.lastError = ('contextPack 读取失败: ' + String(e)).slice(0, 300); return t2 }, true) } catch (_) {}
       }
-      // user prompt 只留一行指引，内容走上下文注入区块
-      var packNote = pack ? '本任务附带主窗口预研文件，已通过「上下文注入」区提供（含文件完整内容），直接基于其内容工作，不要重复读取这些文件。' : ''
       // prompt 三态：worker / verifier / hook（hooks=agent run：pre 与 post 共用 buildHookPrompt，
       // 由 phase 决定契约文案——二者都是挂在 epic 上的一次性真实 agent 运行）。
+      // pack = 瘦身清单本体（调研笔记全文 + 文件清单），由 buildWorkerPrompt/buildVerifierPrompt 直接拼进
+      // 首条 prompt 一次性注入——不再是「一行指引 + 随快照每轮重发的上下文注入区块」。
       // hook 分支现读一次看板只为拿子任务清单；读失败退化为空清单（prompt 仍成立，绝不因此不 spawn）。
       var promptText
       if (role === 'hook-pre' || role === 'hook-post') {
         var kids = []
         try { var hsnap = await rt(sid); kids = gsb(t.id, (hsnap && hsnap.tasks) || []) } catch (_) {}
         promptText = buildHookPrompt(t, role === 'hook-pre' ? 'pre' : 'post', kids)
-      } else promptText = role === 'worker' ? buildWorkerPrompt(t, packNote, cfg(dsnap).feedbackEnabled) : buildVerifierPrompt(t, packNote)
+      } else promptText = role === 'worker' ? buildWorkerPrompt(t, pack, cfg(dsnap).feedbackEnabled) : buildVerifierPrompt(t, pack)
       var req = { label: role + ':' + t.id, prompt: [{ type: 'text', text: promptText }], parent: parent, signal: makeSignal() }
       if (modelOverride) {
         // list-models 返回的 id 是 "provider/model" 复合格式（如 "cmss/zhanlu/glm-5.2"），
@@ -181,18 +132,13 @@ export function createDispatch(ctx, state, deps) {
         else req.agentOptions = { model: modelOverride }
       }
       var run
-      var ppEntry = pack ? { pack: pack, parent: parent, at: Date.now() } : null
-      if (ppEntry) pendingPacks.push(ppEntry)
       try { run = await subagents.start(providerName, req) } catch (e) {
         if (modelOverride) { console.error('[task-board] model override failed, fallback to parent model:', String(e)); delete req.agentOptions; try { run = await subagents.start(providerName, req) } catch (e2) { console.error('[task-board] spawn ' + role + ' failed:', String(e2)); return null } }
         else { console.error('[task-board] spawn ' + role + ' failed:', String(e)); return null }
-      } finally {
-        if (ppEntry) { var ppi = pendingPacks.indexOf(ppEntry); if (ppi >= 0) pendingPacks.splice(ppi, 1) }
       }
       var c = cfg(dsnap)
       var rec = { run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, settled: false }
       runsFor(sid)[t.id] = rec
-      if (pack) packByChild[String(run.id)] = pack
       if (!dispatchedEver[sid]) dispatchedEver[sid] = {}
       dispatchedEver[sid][String(run.id)] = true
       // 历史会话留档：每次派发都追加一条 {role,id,at,model}，任务完成后仍可回看
@@ -223,7 +169,6 @@ export function createDispatch(ctx, state, deps) {
     async function settleRun(sid, rec, res, err) {
       if (runsFor(sid)[rec.taskId] !== rec) return // 已被 terminate 等路径处理
       delete runsFor(sid)[rec.taskId]
-      delete packByChild[String(rec.run.id)] // 上下文注入缓存随 run 销毁
       try { await rec.run.dispose() } catch (_) {}
       var output = outputText(res)
       var failed = !!err || (res && res.stopReason && res.stopReason !== 'completed')
@@ -576,37 +521,14 @@ export function createDispatch(ctx, state, deps) {
           if (!teamModeCache[String(agent.id)]) return ''
           // 第 6 条（拆分条款）走 epicSplit 门禁（缺省 true = 逐字不变）：关掉只是不再主动劝拆，
           // 显式 parentId 建子卡 / 史诗自动收口 / hooks 状态机全部照常（机制不禁）。
-          return '【任务看板 Team 模式已开启】\n本会话的任务看板处于 Team 模式。请遵循以下工作方式：\n1. 涉及代码改动、文件创建、命令执行等实质性工作时，优先用 task_create 提交为看板任务（由一次性 Worker/Verifier 子代理执行与验收），不要自己直接动手实现。\n2. 你仍保有全部工具能力——调研、读代码、讨论方案、回答问题时直接进行，无需提交任务。\n3. 创建任务时，务必在 description 里写清任务目标和约束；调研结论/原始需求/思路用 contextNotes 带上，调研时读过的关键文件用 contextFiles 把路径带上——两者都会通过「上下文注入」通道传给子代理（独立注入区块，不占对话流）。子代理是全新会话、无你的会话记忆，上下文不够它需要从零自行调研，效率大打折扣甚至跑偏方向——开发类任务（代码改动/修复/特性）务必带文件调研，实测可省 Worker 10~15 分钟自行 grep 定位；未带调研上下文的开发类任务返回会附 warning。\n4. Worker 上报歧义时会通过 task_arbitrate 等待你裁决，请及时响应。驳回重派时同样：新 Worker 没有上一轮的记忆，驳回原因会在 prompt 里，但额外上下文需你在 description 里补上。\n5. Team 模式下 task_create 默认建为草稿（草稿不会被派发领取）。把所有任务的 dependsOn 依赖关系、contextNotes/contextFiles 都补完后，再逐个 task_update publish=true 统一发布。确实需要立即派发的单个任务才显式传 draft:false。' + splitRuleOf(epicSplitOn(String(agent.id))) + (feedbackOn(String(agent.id)) ? '\n' + LESSON_RECALL_HINT + '把检索到的相关历史教训写进任务的 contextNotes，让子代理少踩重复的坑。' : '')
+          return '【任务看板 Team 模式已开启】\n本会话的任务看板处于 Team 模式。请遵循以下工作方式：\n1. 涉及代码改动、文件创建、命令执行等实质性工作时，优先用 task_create 提交为看板任务（由一次性 Worker/Verifier 子代理执行与验收），不要自己直接动手实现。\n2. 你仍保有全部工具能力——调研、读代码、讨论方案、回答问题时直接进行，无需提交任务。\n3. 创建任务时，务必在 description 里写清任务目标和约束；调研结论/原始需求/思路用 contextNotes 带上，调研时读过的关键文件用 contextFiles 把路径带上（可写「路径:L1-L2 — 一句用途」，只给行号不给正文）——两者都会随子代理的首条 prompt 一次性注入（调研笔记全文 + 文件清单），文件内容由子代理按需用 read 工具按行号范围自取。子代理是全新会话、无你的会话记忆，上下文不够它需要从零自行调研，效率大打折扣甚至跑偏方向——开发类任务（代码改动/修复/特性）务必带文件调研，实测可省 Worker 10~15 分钟自行 grep 定位；未带调研上下文的开发类任务返回会附 warning。\n4. Worker 上报歧义时会通过 task_arbitrate 等待你裁决，请及时响应。驳回重派时同样：新 Worker 没有上一轮的记忆，驳回原因会在 prompt 里，但额外上下文需你在 description 里补上。\n5. Team 模式下 task_create 默认建为草稿（草稿不会被派发领取）。把所有任务的 dependsOn 依赖关系、contextNotes/contextFiles 都补完后，再逐个 task_update publish=true 统一发布。确实需要立即派发的单个任务才显式传 draft:false。' + splitRuleOf(epicSplitOn(String(agent.id))) + (feedbackOn(String(agent.id)) ? '\n' + LESSON_RECALL_HINT + '把检索到的相关历史教训写进任务的 contextNotes，让子代理少踩重复的坑。' : '')
         },
       })
       ctx.effect(function () { return disposeSection })
-      // 预研文件上下文注入：Worker/Verifier 的预研文件内容以「上下文注入」区块呈现
-      // （与 skill-catalog 同形态），不混进 user prompt。按子代理会话 id 命中，O(1)，
-      // 其他 agent 组装时零成本返回空串。
-      var disposeCtxPack = sysPrompt.context({
-        name: 'task-board:context-pack',
-        order: 50,
-        text: function (assembleCtx) {
-          var agent = assembleCtx && assembleCtx.agent
-          if (!agent) return ''
-          var aid = String(agent.id)
-          var hit = packByChild[aid]
-          if (hit) return hit
-          // 首轮竞速自愈：start() 返回前的首次组装按父子归属从 pendingPacks 认领
-          var agentsSvc = ctx.agents
-          if (!agentsSvc) return ''
-          var now = Date.now()
-          for (var i = pendingPacks.length - 1; i >= 0; i--) {
-            var pp = pendingPacks[i]
-            if (now - pp.at > 60000) { pendingPacks.splice(i, 1); continue }
-            try {
-              if (agentsSvc.isOwnedBy(aid, pp.parent)) { packByChild[aid] = pp.pack; return pp.pack }
-            } catch (e) { console.error('[task-board] ctxpack isOwnedBy threw: ' + String(e)) }
-          }
-          return ''
-        },
-      })
-      ctx.effect(function () { return disposeCtxPack })
+      // 预研「上下文注入」区块通道已整体退役（task-muvjs392）：瘦身清单直接拼进首条 prompt，
+      // 这里不再注册任何 systemPrompt.context 动态注入段——旧形态随 runtime 快照每轮刷新重发
+      // （实证 6×48.8K 字符≈白烧 75–100K token），且「按父子归属认领预研包」的首轮竞速机制
+      // 在并行 spawn 下存在认领错包的潜伏 bug，一并消灭。
     }
 
     return { poolCycle: poolCycle, spawnOneShot: spawnOneShot, accumulateRunUsage: accumulateRunUsage, readContextPack: readContextPack }

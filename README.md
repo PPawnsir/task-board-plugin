@@ -151,10 +151,10 @@ draft → pending → in-progress → verifying → resolved → archived
 ### 一次性派发（v74 去池化）
 
 - 每个任务 spawn 一个**一次性子代理**（Worker/Verifier），上下文全量注入 prompt，做完即销毁——无常驻池、无池化状态残留
-- **预研上下文注入（contextFiles/contextNotes）**：主窗口调研时读过的文件与笔记，由 host 在派发时读盘取最新内容，经「上下文注入」区块提供给 Worker/Verifier（不混进 user prompt）；预算口径单文件 8KB、总包 40KB；UI 侧调研门禁——full/work 且声明了 touches 却未附调研的卡片亮「⚠️ 无调研」徽章，详情页「调研注入」区列 files 清单 + notes 字数（无则明示）
-  - **锚点行段**：`contextFiles` 支持 `path:L2350-L2420` / `path:L2350` 行段语法（只认尾部 `:L<行号>`，兼容 Windows 盘符），只注入该段（段长上限 400 行，超出截断并标注）；锚点无效（越界/写法错）自动回退头部注入并标注「锚点无效，已回退头部」
-  - **截断结构索引**：头部注入被预算截断时，标注升级为「截断：共 N 行，已注入 1–M 行」，并附结构索引块（JS/TS 顶层函数/类/箭头赋值、Markdown 标题及行号，上限 40 条）——Worker 照索引用锚点语法补读目标段即可，不用全文盘点
-- **派发调研门禁（warning 族，软提示不阻断）**：`task_create`/`create-task` 响应附 `warning` 字段——①描述为空「Worker 只能凭标题猜需求」②full/work + touches 非空而未附调研上下文 ③touches 含整树 glob 建议精确到文件级（可多条合并）；GUI 表单内黄色展示不关窗。epic 发布（publish）时自动轻量预检全部子任务注入情况，缺材料则 pushSysNote 汇总提醒主窗口（全有不打扰）；派发时读包失败落任务「最近失败」行，不再静默
+- **预研上下文注入（contextFiles/contextNotes，瘦身分离形态）**：主窗口调研时读过的文件与笔记随子代理的**首条 prompt 一次性注入**——调研笔记全文（notes，≤8000 字符）+ **文件清单**（每行「`路径:L起-L止` — 一句用途」）；**文件内容本体不进 prompt**，由子代理用 `read` 工具按行号范围按需自取（执行时盘面更新鲜；旧形态「host 读盘取正文注入」既受单文件 8KB/总包 40KB 截断，又随 runtime 快照每轮刷新重发——自治 run 实测 6×48.8K 字符≈白烧 75–100K token）；UI 侧调研门禁——full/work 且声明了 touches 却未附调研的卡片亮「⚠️ 无调研」徽章，详情页「调研注入」区列 files 清单 + notes 字数（无则明示）
+  - **锚点行段与用途**：`contextFiles` 条目写法「`path:L2350-L2420` / `path:L2350`」+ 可选「` — 一句用途`」（em dash 两侧空格分隔；缺省只给路径行号）——锚点只认尾部 `:L<行号>`（兼容 Windows 盘符），清单里原样带上行号供子代理直接按行段 read；锚点写错（`:L0` / `:L5-L2`）自动剥掉，不误导子代理去读空段
+  - **按需自取代替 host 预切段**：派发侧零读盘（不再切行段、不再附结构索引块）——子代理自己 `read(path, offset, limit)` 取需要的那段，清单里给出的行号就是起点；`task_preview_context` / `preview-context` 返回的也是这份瘦身清单（不是文件正文）
+- **派发调研门禁（warning 族，软提示不阻断）**：`task_create`/`create-task` 响应附 `warning` 字段——①描述为空「Worker 只能凭标题猜需求」②full/work + touches 非空而未附调研上下文 ③touches 含整树 glob 建议精确到文件级（可多条合并）；GUI 表单内黄色展示不关窗。epic 发布（publish）时自动轻量预检全部子任务注入情况，缺材料则 pushSysNote 汇总提醒主窗口（全有不打扰）；派发时清单组装失败落任务「最近失败」行，不再静默
 - **Worker/Verifier 均可配置异构模型**（⚙️ 弹出层下拉选择，空 = 继承父级），避免同源盲点；模型故障自动熔断回退父级模型
 - 孤儿回收：子代理 run 结束/丢失超 2 分钟 → 任务自动回待办重派
 - 看门狗：运行超时且事件流停滞 → 标记"疑似卡死"（不自动杀，裁决权交主窗口/用户）

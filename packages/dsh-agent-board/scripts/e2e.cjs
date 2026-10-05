@@ -88,8 +88,8 @@ scenarios['auto-full'] = async () => {
   const r = await rpcRaw('create-task', {
     title: 'E2E auto-full ' + new Date().toISOString().slice(11, 19),
     description: '只读验证任务：新建文件 ' + marker + '，内容写一行 ok，读取确认。除此之外不要改动任何文件。',
-    contextNotes: 'E2E 自动模式验证：本笔记应出现在你的上下文注入区。看到即证明 contextNotes 通道生效。',
-    contextFiles: ['packages/dsh-agent-board/lib/core.mjs'],
+    contextNotes: 'E2E 自动模式验证：本笔记应出现在你首条 prompt 的「主窗口调研笔记」段。看到即证明 contextNotes 通道生效。',
+    contextFiles: ['packages/dsh-agent-board/lib/core.mjs:L1-L40 — core 纯逻辑模块（清单组装/状态机）'],
     acceptance: acc,
     pipeline: 'full',
   });
