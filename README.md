@@ -158,6 +158,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - 孤儿回收：子代理 run 结束/丢失超 2 分钟 → 任务自动回待办重派
 - 看门狗：运行超时且事件流停滞 → 标记"疑似卡死"（不自动杀，裁决权交主窗口/用户）
 - 歧义上报：Worker 遇到歧义不猜测，上报等主窗口裁决（任何模式下都通知）；裁决后新 Worker 携带裁决答案接手
+- 驳回详情全量带回：三条驳回路径（`board_verdict` 工具 / Verifier 文本结算 / 手动 `task_verify`·`verify-task`）统一往 `t.messages` 落一条 `kind: "rejection"` 完整驳回包（summary + checks 逐条核对证据；手动路径补写 `t.verification`），经 `buildMessages` 全量注入重派 Worker prompt——新 Worker 据此返工，不再只看到 300 字截断的 history 记录
 - 手动派发：详情页「派发 / 派发验收」按钮可随时手动触发单任务派发（auto 模式补派、manual 模式主通道）
 - 会话隔离：看板按会话分桶，多会话互不干扰
 

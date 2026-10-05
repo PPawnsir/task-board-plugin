@@ -5,7 +5,7 @@
 import * as core from './core.mjs'
 import { readRunUsage } from './usage.mjs'
 import { splitRuleOf, pushRejectLesson } from './policy.mjs'
-const { ah, cfg, claimApply, resolveApply, verifyApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseAnchorPath, sliceLines, buildFileOutline, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb } = core
+const { ah, cfg, claimApply, resolveApply, verifyApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseAnchorPath, sliceLines, buildFileOutline, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection } = core
 
 export function createDispatch(ctx, state, deps) {
     const fs = ctx.fs
@@ -382,6 +382,9 @@ export function createDispatch(ctx, state, deps) {
         verifyApply(d, t, String(rec.run.id), approved ? 'approved' : 'rejected', trimmed.slice(0, 200))
         if (!approved) {
           t.rejectCount = (t.rejectCount || 0) + 1
+          // 驳回包全量带回（task-muvg15p5）：summary + checks（逐条核对证据）落 messages，
+          // 随 buildMessages 注入重派 Worker prompt——history 里只有 200 字截断，Worker 据此无法返工
+          pushRejection(t, vsecs.verifySummary, vsecs.checks, t.verification.at, String(rec.run.id))
           // 学习飞轮 v1：Verifier 驳回 → 候选教训（场景/错误做法/来源），随 t.verification.at 判重
           pushRejectLesson(d, t, vsecs.verifySummary || trimmed, t.verification.at)
           if (t.rejectCount >= 3) { t.status = 'blocked'; ah(t, 'in-progress', 'blocked', 'system', 'verifier 驳回 x' + t.rejectCount + '，待人工裁决') }

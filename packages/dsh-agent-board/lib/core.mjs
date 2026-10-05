@@ -449,6 +449,39 @@ export function pushLesson(t, text, at, by) {
   return true
 }
 
+// ===== 驳回包全量带回（task-muvg15p5）=====
+// 问题实证：驳回信息此前只走 history（histNotes 每条截 300 字），board_verdict 工具通道更把
+// checks（逐条核对证据 = 真正可执行的驳回细节）整段丢弃；手动驳回 comment 可为空、且不写
+// t.verification → 重派 Worker 只拿到一句被截断的「rejected」，无从据此返工。
+// 修法（零新通道）：三条驳回路径统一往 t.messages 追一条 kind='rejection' 的完整驳回包，
+// buildMessages 会把 t.messages 全量拼进 Worker prompt（每条 2000 字，远超 history 的 300 字）。
+// history 保持现状不动——它是审计轨，不是执行载荷。
+// 文本口径：有 summary/checks 时「验收驳回 · <summary>」+「核对项：<checks>」；两者皆空（手动驳回
+// 未填原因）时给一句可执行的兜底，而不是留一条空消息。
+export function rejectionText(summary, checks) {
+  var s = String(summary == null ? '' : summary).trim()
+  var c = String(checks == null ? '' : checks).trim()
+  if (!s && !c) return '（驳回方未填写原因，请先自查交付物与验收脚本差距）'
+  return '验收驳回 · ' + s + (c ? '\n\n核对项：\n' + c : '')
+}
+// 往任务 messages 追一条完整驳回包（kind='rejection'）。轻量判重（与 pushLesson 同口径）：
+// 同一 at 或正文前 80 字相同视为同一事件——文本结算路径在工具通道已处理时 already=true 会整段
+// 跳过，判重是第二道保险，杜绝同一驳回双推。返回 true = 本次新落一条。
+export function pushRejection(t, summary, checks, at, by) {
+  if (!t) return false
+  if (!Array.isArray(t.messages)) t.messages = []
+  var stamp = at || new Date().toISOString()
+  var text = rejectionText(summary, checks)
+  var head = text.slice(0, 80)
+  for (var i = 0; i < t.messages.length; i++) {
+    var m = t.messages[i]
+    if (!m || m.kind !== 'rejection') continue
+    if (m.at === stamp || String(m.text || '').slice(0, 80) === head) return false
+  }
+  t.messages.push({ kind: 'rejection', text: text, at: stamp, by: by || 'system' })
+  return true
+}
+
 // ===== 一次性子代理 prompt 构建（上下文由主窗口 agent 写入 description/instructions，系统只追加生命周期记录）=====
 // 学习飞轮 v1 软召回引导（feedbackEnabled 开时才拼进 prompt）：环境里若有笔记/记忆类工具，先查历史教训再动手。
 // 只是"提示先搜"——看板不代查、不调用任何记忆工具、也无从知道有没有这类工具（零耦合）。

@@ -1113,6 +1113,142 @@ test('verify 驳回 hint：verify-task RPC + task_verify 工具 rejected 附重�
   assert.equal(r4.ok, true); assert.equal('hint' in r4, false)
 })
 
+// ===== 驳回信息全量带回（task-muvg15p5）：三条驳回路径统一落 kind='rejection' 完整包 =====
+// 事故链：驳回信息此前只走 history（histNotes 每条截 300 字）——board_verdict 工具通道的 checks
+// （逐条核对证据）整段丢弃、手动驳回 comment 常空且不写 t.verification → 重派 Worker 只看到一句
+// 被截断的「rejected」，拿不到可执行的返工细节。修法：驳回包落 t.messages，经 buildMessages 全量
+// 注入 Worker prompt（每条 2000 字），history 保持不动（审计轨）。
+const REJ_CHECKS = '## 核对项\n- 断言①未落地（lib/core.mjs:100 无 pushRejection 调用）\n- 断言②端到端未锁（test/core.test.mjs 缺 prompt 含 checks 断言）'
+// 文本通道端到端 harness：真跑 poolCycle 派 Verifier run，run.result 由用例手工 resolve → 真走 settleVerifier
+function mkVerifierSettleDispatch(board) {
+  var runs = {}
+  var resolveRun = null
+  var boardRef = { b: board }
+  var ctx = {
+    fs: {}, effect: function () {}, get: function () { return null }, timer: null,
+    subagents: {
+      list: function () { return ['mock'] },
+      getProvider: function () { return { inheritsParentContext: false } },
+      start: async function () { return { id: 'run-v1', result: new Promise(function (res) { resolveRun = res }), dispose: async function () {} } },
+    },
+  }
+  var state = { knownSessions: {}, dispatchedEver: {}, badModels: {}, packByChild: {}, pendingPacks: [], teamModeCache: {}, activeRuns: {} }
+  var dispatch = createDispatch(ctx, state, {
+    rt: async function () { return boardRef.b }, wt: async function () {}, mutateLocked: async function (sid, fn) { return fn(boardRef.b) },
+    kickCycle: function () {}, rootForSession: function () { return { id: FULL_SID } }, sessionCwd: function () { return '' },
+    withTimeout: function (p) { return p }, runsFor: function () { return runs }, feedbackOn: function () { return true }, epicSplitOn: function () { return true },
+    pushSysNote: function () {}, maybeNotify: function () {}, notifyTaskDone: function () {},
+  })
+  return { dispatch: dispatch, settle: function (text) { resolveRun({ output: [{ type: 'text', text: text }], stopReason: 'completed' }) } }
+}
+async function waitRej(t, ms) {
+  var t0 = Date.now()
+  while (Date.now() - t0 < (ms || 2000)) {
+    if (t.messages.some(function (m) { return m && m.kind === 'rejection' })) return true
+    await new Promise(function (r) { setTimeout(r, 5) })
+  }
+  return t.messages.some(function (m) { return m && m.kind === 'rejection' })
+}
+
+test('驳回信息全量带回①：board_verdict 工具通道 → messages 落完整驳回包（checks 全文不再丢）', async () => {
+  const board = mkBoard([mkTask({ id: 'r1', status: 'verifying' })])
+  const r = await mkRpcHandlers(board).__tools['board_verdict'].execute({ taskId: 'r1', verdict: 'rejected', summary: '单测未过', checks: REJ_CHECKS }, {})
+  assert.equal(r.ok, true)
+  const t = board.tasks[0]
+  const rej = t.messages.filter(m => m.kind === 'rejection')
+  assert.equal(rej.length, 1)
+  assert.match(rej[0].text, /单测未过/)
+  assert.ok(rej[0].text.includes('断言①未落地（lib/core.mjs:100 无 pushRejection 调用）')) // checks 全文在位（工具通道此前整段丢弃）
+  assert.equal(rej[0].by, 'tester')
+  assert.equal(rej[0].at, t.verification.at) // 与验收结论同一时间戳（判重口径）
+  // 端到端：重派 Worker prompt 真的带上了 checks（「带回」的最终判据）
+  const p = core.buildWorkerPrompt(t, '', false)
+  assert.match(p, /\[rejection\]/)
+  assert.ok(p.includes('断言②端到端未锁（test/core.test.mjs 缺 prompt 含 checks 断言）'))
+})
+
+test('驳回信息全量带回②：Verifier 文本结算路径 → 同构驳回包，prompt 含 checks（端到端真 settle）', async () => {
+  const t = mkTask({ id: 'v1', status: 'verifying' })
+  const h = mkVerifierSettleDispatch(mkBoard([t]))
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(t.status, 'verifying'); assert.ok(t.verifierRun) // 已派 Verifier（占位已换真实 run id）
+  h.settle('REJECTED: 交付物与验收脚本不符\n\n## 测试概要\nnpm test 未跑通\n\n' + REJ_CHECKS)
+  assert.equal(await waitRej(t), true)
+  const rej = t.messages.filter(m => m.kind === 'rejection')
+  assert.equal(rej.length, 1)
+  assert.match(rej[0].text, /npm test 未跑通/)
+  assert.ok(rej[0].text.includes('断言①未落地'))
+  assert.equal(rej[0].by, 'run-v1')
+  assert.equal(t.verification.verdict, 'rejected')
+  assert.equal(t.status, 'pending') // 驳回重派（rejectCount=1 < 3）
+  const p = core.buildWorkerPrompt(t, '', false)
+  assert.ok(p.includes('断言②端到端未锁（test/core.test.mjs 缺 prompt 含 checks 断言）'))
+})
+
+test('驳回信息全量带回③：手动驳回双通道 → messages 落包 + t.verification 补写（空 comment 有兜底）', async () => {
+  // RPC 通道 + comment 缺省（人工/GUI 常留空）：兜底文案也要是「可执行的下一步」，不能是空消息
+  const board = mkBoard([mkTask({ id: 'm1', status: 'verifying' })])
+  await mkRpcHandlers(board)['verify-task']({ taskId: 'm1', verdict: 'rejected' })
+  const t = board.tasks[0]
+  assert.equal(t.verification.verdict, 'rejected'); assert.equal(t.verification.checks, '')
+  assert.equal(t.verification.by, 'tester'); assert.ok(t.verification.at)
+  const rej = t.messages.filter(m => m.kind === 'rejection')
+  assert.equal(rej.length, 1)
+  assert.match(rej[0].text, /驳回方未填写原因，请先自查交付物与验收脚本差距/)
+  assert.match(core.buildWorkerPrompt(t, '', false), /驳回方未填写原因/) // 端到端：空原因也带回一句可执行兜底
+  // 工具通道带 comment → 同构落包 + 结论字段口径与自动路径一致
+  const board2 = mkBoard([mkTask({ id: 'm2', status: 'verifying' })])
+  await mkRpcHandlers(board2).__tools['task_verify'].execute({ taskId: 'm2', verdict: 'rejected', comment: '缺边界断言' }, {})
+  const t2 = board2.tasks[0]
+  assert.equal(t2.verification.summary, '缺边界断言'); assert.equal(t2.verification.checks, '')
+  const rej2 = t2.messages.filter(m => m.kind === 'rejection')
+  assert.equal(rej2.length, 1)
+  assert.match(rej2[0].text, /验收驳回 · 缺边界断言/)
+})
+
+test('驳回信息全量带回④：approved 路径零 rejection 消息（双通道 + 文本结算，防误落）', async () => {
+  const board = mkBoard([mkTask({ id: 'a1', status: 'verifying' })])
+  await mkRpcHandlers(board).__tools['board_verdict'].execute({ taskId: 'a1', verdict: 'approved', summary: 'OK', checks: '## 核对项\n- 全过' }, {})
+  assert.equal(board.tasks[0].status, 'resolved')
+  assert.equal(board.tasks[0].messages.filter(m => m.kind === 'rejection').length, 0)
+  const board2 = mkBoard([mkTask({ id: 'a2', status: 'verifying' })])
+  await mkRpcHandlers(board2)['verify-task']({ taskId: 'a2', verdict: 'approved', comment: 'OK' })
+  assert.equal(board2.tasks[0].messages.filter(m => m.kind === 'rejection').length, 0)
+  const t = mkTask({ id: 'a3', status: 'verifying' })
+  const h = mkVerifierSettleDispatch(mkBoard([t]))
+  await h.dispatch.poolCycle(FULL_SID)
+  h.settle('APPROVED: 全部通过\n\n## 测试概要\n真跑通过')
+  await new Promise(function (r) { setTimeout(r, 20) })
+  assert.equal(t.status, 'resolved')
+  assert.equal(t.messages.filter(m => m.kind === 'rejection').length, 0)
+})
+
+test('pushRejection: 同事件判重（同时间戳/同前缀不双推）+ 空原因兜底文案', () => {
+  const t = { messages: [] }
+  assert.equal(core.pushRejection(t, '概要', '核对项全文', 'T1', 'v'), true)
+  assert.equal(core.pushRejection(t, '概要', '核对项全文', 'T1', 'v'), false) // 同时间戳
+  assert.equal(core.pushRejection(t, '概要', '核对项全文', 'T2', 'v'), false) // 异时间戳但正文前缀相同（同一驳回）
+  assert.equal(core.pushRejection(t, '另一件事', '', 'T3', 'v'), true)        // 不同事件照常落
+  assert.equal(t.messages.length, 2)
+  assert.equal(t.messages[0].kind, 'rejection'); assert.equal(t.messages[0].by, 'v')
+  assert.equal(core.rejectionText('', ''), '（驳回方未填写原因，请先自查交付物与验收脚本差距）')
+  assert.equal(core.rejectionText('概要', '核对'), '验收驳回 · 概要\n\n核对项：\n核对')
+})
+
+test('驳回全量带回接线（源码级）：三条驳回路径都调 pushRejection + messages 通道在位', () => {
+  const rpc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  assert.equal((rpc.match(/pushRejection\(t, /g) || []).length, 3) // board_verdict 工具 + verify-task RPC + task_verify 工具
+  assert.match(dsp, /pushRejection\(t, vsecs\.verifySummary, vsecs\.checks, t\.verification\.at, String\(rec\.run\.id\)\)/)
+  assert.equal((hostSrc().match(/pushRejection\(t, /g) || []).length, 4) // 三条路径 + Verifier 文本结算
+  assert.match(coreSrc, /export function pushRejection/)
+  assert.match(coreSrc, /kind: 'rejection'/)
+  // buildMessages 现成通道在位（驳回包靠它进 prompt，不新开通道）
+  assert.match(coreSrc, /export function buildMessages/)
+  assert.match(coreSrc, /if \(msgs\) p \+= '\\n\\n该任务的详细消息/)
+})
+
 test('buildVerifierPrompt: 含「立单缺调研」驳回归因条款', () => {
   const p = core.buildVerifierPrompt(mkTask({ id: 'tx', status: 'verifying' }), '')
   assert.match(p, /立单缺调研/)
@@ -1506,7 +1642,7 @@ test('学习飞轮接线：两处触发点 + push-lesson 开关拦截 + prompt/�
   // 候选教训两处触发：Verifier 驳回（文本通道 + 工具通道 + GUI RPC）与主窗口仲裁结论
   assert.match(host, /pushRejectLesson\(d, t, vsecs\.verifySummary \|\| trimmed, t\.verification\.at\)/)
   assert.match(host, /if \(!approved\) pushRejectLesson\(d, t, \(args\.summary \|\| ''\)/)
-  assert.match(host, /if \(args\.verdict === 'rejected'\) \{ pushRejectLesson\(d, t, args\.comment\); r\.hint = REJECT_REDISPATCH_HINT \}/) // verify-task RPC：候选教训 + 驳回重派 hint（task-mutnj3a4）同分支挂载
+  assert.match(host, /if \(args\.verdict === 'rejected'\) \{ t\.verification = \{ verdict: 'rejected'[^}]*\}; pushRejection\(t, args\.comment, '', t\.verification\.at, actor\); pushRejectLesson\(d, t, args\.comment\); r\.hint = REJECT_REDISPATCH_HINT \}/) // verify-task RPC：驳回包落 messages + 候选教训 + 驳回重派 hint 同分支挂载（task-mutnj3a4 / task-muvg15p5）
   assert.match(host, /pushArbitrationLesson\(d, t, escQ, answer \|\| '', arbAt\)/)
   // 生成前一律过 feedbackEnabled 总开关（关掉 = 不生成、不推）
   assert.equal((host.match(/if \(!cfg\(d\)\.feedbackEnabled\) return false/g) || []).length, 2)
@@ -2121,9 +2257,9 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
   assert.match(host, /d\.childStats = aggregateChildStats\(d\.tasks\)/)
   // 两模块都从 core 解构引入（接线不断）；rpc.mjs 解构表尾部随调研门禁（task-mute6zpw）、调研遵循三件套（task-mutnj3a4）、
   // tasksHash（task-mutrtwin）、hooks 浅校验（normalizeHooks/mergeHooks，本批 hooks=agent run）扩展；
-  // dispatch.mjs 解构表尾部追加 hook 族（buildHookPrompt/hookOn/hookSetState/gsb）
-  assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb \} = core/)
-  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks \} = core/)
+  // dispatch.mjs 解构表尾部追加 hook 族（buildHookPrompt/hookOn/hookSetState/gsb）与驳回包 helper（pushRejection，task-muvg15p5）
+  assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection \} = core/)
+  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection \} = core/)
   // 既有「全子任务 resolved → 父 verifying」逻辑不动（checkParentAuto 仍在 verifyApply 链路；
   // 但其内部已委托共享 helper maybeAutoCloseParent——单一判定口径，core.mjs 不在 hostSrc 清单，单独读）
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
