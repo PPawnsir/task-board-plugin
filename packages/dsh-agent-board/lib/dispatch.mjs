@@ -237,14 +237,26 @@ export function createDispatch(ctx, state, deps) {
       return x.getFullYear() + '-' + p2(x.getMonth() + 1) + '-' + p2(x.getDate())
     }
 
+    // 有效消耗 = 输入 + 输出 + 缓存写（不含缓存读）。
+    // 为什么单列：本板实测累计 total 里缓存读占 94%（9.7M/10.3M），大数字被缓存读撑高约 17 倍，
+    // 与「真实花掉多少」严重脱节——有效消耗才是可比的成本口径，缓存读单列展示。
+    function effectiveOf(u) {
+      if (!u) return 0
+      return (u.input || 0) + (u.output || 0) + (u.cacheWrite || 0)
+    }
+
     // 把一次 run 的 token 消耗累加到任务（t.usage）：总量/输入/输出/缓存读写 + 按模型小计 + runs 计数 + 日账。
     // 模型小计的 key：优先本次派发显式覆盖的模型（rec.model），否则用日志里记录的会话模型。
-    // 日账（byDay）：本次 run 的 total 整笔记到「结算时刻的本地日」——一次 run 不跨日拆分
+    // 日账（byDay）：本次 run 整笔记到「结算时刻的本地日」——一次 run 不跨日拆分
     // （跨零点的长 run 全算在结算日），换取实现极简与仪表盘「今日 / 近 7 天」可算。
+    // 双指标形态：byDay[day] = { t: total, e: effective }（e 是有效消耗，不含缓存读）。
+    // 老数据（number 形态，本轮之前落的日账）只在聚合端兼容：读侧按 { t: n, e: null } 处理，
+    // e 不可知就置 null（宁可展示上标 ~ 近似，也不伪造一个「有效值」）。
     async function accumulateRunUsage(sid, rec) {
       var u = null
       try { u = readRunUsage(String(rec.run.id)) } catch (_) { u = null }
       if (!u || !u.total) return
+      var eff = effectiveOf(u)
       try {
         await mutateLocked(sid, function (d) {
           var t = d.tasks.find(function (x) { return x.id === rec.taskId })
@@ -262,8 +274,26 @@ export function createDispatch(ctx, state, deps) {
           t.usage.models[mk] = (t.usage.models[mk] || 0) + u.total
           // 日账：老任务没有 byDay 就地补（不改写老字段形态）；键是本地日 YYYY-MM-DD。
           if (!t.usage.byDay) t.usage.byDay = {}
+          // 脏值兜底：历史/半写数据里 byDay[dk] 可能是 number（老形态）或字符串，一律收敛成对象记账
           var dk = localDayKey()
-          t.usage.byDay[dk] = (t.usage.byDay[dk] || 0) + u.total
+          var cell = t.usage.byDay[dk]
+          if (!cell || typeof cell !== 'object') cell = { t: Number(cell) || 0, e: 0 }
+          cell.t = (Number(cell.t) || 0) + u.total
+          cell.e = (Number(cell.e) || 0) + eff
+          t.usage.byDay[dk] = cell
+          // ===== run 级留账：把本次 run 的用量原样写回它在 t.runs 里的条目 =====
+          // 作用：总量口径万一再要调整（换分母/排除某类 run/按天或按模型重建），不必回头猜——
+          // 每个 run 自带五分量，任意维度都能精确重算（byDay 只是它的一个投影）。
+          // 找不到条目就跳过：t.runs 条目由 recordRunHistory 先行写入、closeRunHistory 更新结局，
+          // 正常结算路径必存在；只有手写/裁剪过的历史任务会缺，缺了也不该阻断聚合累加。
+          if (Array.isArray(t.runs)) {
+            for (var ri = t.runs.length - 1; ri >= 0; ri--) {
+              if (String(t.runs[ri] && t.runs[ri].id) === String(rec.run.id)) {
+                t.runs[ri].usage = { input: u.input || 0, output: u.output || 0, cacheRead: u.cacheRead || 0, cacheWrite: u.cacheWrite || 0, total: u.total || 0 }
+                break
+              }
+            }
+          }
           t.usage.updatedAt = new Date().toISOString()
           return { ok: true }
         })

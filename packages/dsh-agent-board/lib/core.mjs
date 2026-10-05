@@ -192,20 +192,27 @@ export function verifyApply(d, t, sid, verdict, comment) { var ps = t.status; if
 export function parentKickOnDispatch(d, t) { if (!isb(t)) return null; var p = gpt(t, d.tasks); if (!p || p.status !== 'pending') return null; p.status = 'in-progress'; ah(p, 'pending', 'in-progress', 'system', '首个子任务派发，史诗进入推进态'); return p }
 
 // childStats 聚合（get-tasks 返回体字段，按 tasks 现算零存储）：
-// { <parentId>: { total, resolved, active, activeTitle } }
-// 口径：total=该 parentId 的非归档子任务数；resolved=其中 resolved/archived（归档子任务
-// 已在 total 口径被排除，archived 分支保留仅为防御性写明口径）；active=in-progress 数；
-// activeTitle=第一个 in-progress 子任务标题（按看板顺序，无则空串）。
-// 无非归档子任务的父卡不出键（史诗归档时子任务级联归档，键自然消失）。
+// { <parentId>: { total, settled, resolved, active, activeTitle } }
+// 口径：total=该 parentId 的**全部**子任务数（**含已归档**）；settled=其中已了结数，分子口径
+// settled = resolved | cancelled | archived；resolved=settled 的兼容别名（既有对外字段名，同值，
+// 老前端/老断言按 resolved 读仍成立）；active=in-progress 数；activeTitle=第一个 in-progress
+// 子任务标题（按看板顺序，无则空串）。active/activeTitle 口径不变：archived 永不算 active。
+// 为什么归档必须计入（task-muupgfot）：归档=人已显式了结该卡；若把 archived 从 total/settled 里
+// 一起排除，归档一张子卡会让史诗进度从 0/10「退化」成 0/9——分母无故缩水、分子永不前进，
+// 正是用户报的「有子任务完成后史诗进度从 0/10 变 0/9」。进度只增不减是这条口径的红线。
+// 近似说明：v1.7.1 起 archive-task 放行「无活跃 run 的 in-progress 僵尸卡」，故 archived 不再严格
+// 等于「曾经完成」；但归档动作本身仍是人的显式了结，进度语义上计入是对的（僵尸出清场景里父卡
+// 通常随之归档，不影响在板卡片的展示）。注意与 isChildSettled（父卡自动收口口径，archived 不算）
+// 的区别：那条管「是否推动父卡流转」，本条只管「进度分母/分子的展示口径」，两者刻意不合并。
 export function aggregateChildStats(tasks) {
   var out = {}
   var list = Array.isArray(tasks) ? tasks : []
   for (var i = 0; i < list.length; i++) {
     var t = list[i]
-    if (!t || !isb(t) || t.status === 'archived') continue
-    var s = out[t.parentId] || (out[t.parentId] = { total: 0, resolved: 0, active: 0, activeTitle: '' })
+    if (!t || !isb(t)) continue
+    var s = out[t.parentId] || (out[t.parentId] = { total: 0, settled: 0, resolved: 0, active: 0, activeTitle: '' })
     s.total++
-    if (t.status === 'resolved' || t.status === 'archived') s.resolved++
+    if (t.status === 'resolved' || t.status === 'cancelled' || t.status === 'archived') { s.settled++; s.resolved++ }
     if (t.status === 'in-progress') { s.active++; if (!s.activeTitle) s.activeTitle = String(t.title || '') }
   }
   return out

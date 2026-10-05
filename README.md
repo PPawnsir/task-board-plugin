@@ -102,8 +102,12 @@ dsh plugin --profile web remove dsh-agent-board
 
 ### 仪表盘（Token 消耗）
 
-- 仪表盘视图新增「Token 消耗」区：本看板累计总量 + 输入 / 输出 / 缓存读（缓存写非零时一并展示）拆分、按模型分布条形图、任务消耗 **Top 8**（标题可点击直达该任务详情）；大数字为**今日消耗**（本地日口径，无日账则显示 0）、旁附「累计（本看板）」小字，下方「近 7 天」迷你条形按日展示近 7 天消耗（今天高亮，7 天全为 0 时不渲染）；进行中的卡片右上角显示本任务已累计消耗（`⛁ 数字`）
-- 数据来源：每次 Worker/Verifier run 结算时读该 run 的 v4 会话日志（`~/.dsh/sessions/*/<runId>/session.v4.jsonl.zstd`），把 `assistant/message` 事件的 `usage`（`inputTokens` / `outputTokens` / `cacheReadTokens` / `cacheWriteTokens` / `totalTokens`，字段形状以真实日志为准）按 zstd 帧逐帧累加到任务 `usage`（含按模型小计、`runs` 计数与 `byDay` 日账——本地日 `YYYY-MM-DD`，一次 run 整笔记在结算日；多轮重跑/驳回重做自动累加），`get-tasks` 再现算 board 级 `usageSummary`（总量 / 按模型 / Top8 / 日账 `byDay`，不落盘额外表；老任务无 `byDay` 时整笔近似归到 `updatedAt` 的本地日，无 `updatedAt` 则不计入任何日）——**只做展示、不做计费断言**，日志读不到或没有 usage 时一律显示「暂无数据」
+- 仪表盘视图新增「Token 消耗」区：本看板累计**有效 / 缓存读 / 合计**三分量 + 输入 / 输出（缓存写非零时一并展示）拆分、按模型分布条形图、任务消耗 **Top 8**（标题可点击直达该任务详情，title 附「有效 N / 缓存读 M」拆分）；大数字为**今日有效消耗**（本地日口径，无日账则显示 0，旁附「含缓存读共 X」小字对照，有效值不可知时以总量近似并标 `~`）、旁附「累计（本看板）」三分量小字，下方「近 7 天」迷你条形按日展示近 7 天**有效消耗**（今天高亮，title 补总量对照，7 天全为 0 时不渲染）；进行中的卡片右上角显示本任务已累计消耗（`⛁ 数字`）；区底固定一行口径 caption：**仅看板派发的 Worker/Verifier run 消耗，不含主窗口对话**
+- 口径要点：**有效消耗 = 输入 + 输出 + 缓存写（不含缓存读）**。实证本板累计 10.3M 里缓存读占 9.7M（94%）、有效消耗仅 605K——总量被缓存读撑高约 17 倍，因此大数字与「近 7 天」一律用有效值，缓存读单列可查（差额一眼可见），避免「仪表盘与真实消耗差太多」
+- 数据来源：每次 Worker/Verifier run 结算时读该 run 的 v4 会话日志（`~/.dsh/sessions/*/<runId>/session.v4.jsonl.zstd`），把 `assistant/message` 事件的 `usage`（`inputTokens` / `outputTokens` / `cacheReadTokens` / `cacheWriteTokens` / `totalTokens`，字段形状以真实日志为准）按 zstd 帧逐帧累加到任务 `usage`（含按模型小计、`runs` 计数与 `byDay` 日账——本地日 `YYYY-MM-DD`，一次 run 整笔记在结算日；多轮重跑/驳回重做自动累加）；**run 级留账**：本次用量同时原样写回 `t.runs` 对应条目的 `usage`（五分量俱全），因此按天 / 按模型 / 按阶段任何维度都能从 runs 精确重建，口径若要再调整不必回头猜
+- `byDay` 为**双指标**形态 `{ t, e }`（`t` = 总量含缓存读，`e` = 有效消耗不含缓存读；一次 run 不跨日拆分）。聚合端兼容老数据：值是裸 number 的历史日账按 `{ t: n, e: null }` 处理——总量照常保留（「近 7 天」不会整段消失），有效值不可知就置 `null` 并由 UI 标 `~` 近似，**绝不把总量冒充有效值**
+- `get-tasks` 再现算 board 级 `usageSummary`（总量 / 有效合计 / 按模型 / Top8（带有效与缓存读拆分）/ 日账 `byDay`，不落盘额外表；老任务无 `byDay` 时整笔近似归到 `updatedAt` 的本地日，无 `updatedAt` 则不计入任何日）——**只做展示、不做计费断言**，日志读不到或没有 usage 时一律显示「暂无数据」
+- 统计口径边界：本区只统计**看板派发的 Worker/Verifier run**，**不含主窗口对话本身**（不越界统计，UI caption 已明示）
 - 「架构健康」区（架构自省 L1）：`get-tasks` 顺带对**近 50 张卡**现算四信号（纯函数零存储：touches 声明热度 ≥8 次且占比 ≥40% / 带 touches 任务滞留中位数 >2 倍 / 任务**执行**时长 p90 >45min（claimedAt→resolvedAt 纯干活口径，不含排队）/ 同路径驳回 ≥2 次），命中才在仪表盘渲染提示条（⚠️/ℹ️ 两级，最多 3 条）——让运行数据主动提示"该优化架构了"（如某文件反复成为锁热点=该拆），信号只建议不裁判
 - 统计区耗时同口径拆分：「平均排队 / 平均执行」双行展示（平均验收单列不变）
 - 统计区新增「调研 ROI」对比行：resolved/archived 卡按有无调研注入分组现算卡数 / 平均执行时长 / 平均 token（双组总样本 ≥4 才渲染，无调研组明显更慢时数字 warn 色提示）
@@ -132,11 +136,11 @@ draft → pending → in-progress → verifying → resolved → archived
 - **文件级排他**：`touches` 声明本任务要改的文件/glob（如 `["src/**", "README.md"]`）；进行中的任务持有文件锁，派发器发现候选与活动任务 touches 重叠就跳过本轮（卡片显示 `🔒 等文件释放`，详情页列出在等谁），锁在提交验收/完成后自动释放——避免并行 Worker 改同一批文件互踩。手动「派发」遇到冲突会列出冲突任务，确认后才以 `force` 越权派发
 - **里程碑进展通道**：Worker 每完成一个可验证的里程碑，可调用 `board_report`（`kind: "progress"`，`question` 写一行进展摘要 ≤200 字符）上报——进行中的卡片显示「📈 最近进展 · 相对时间」（覆盖式只留最新一条），详情页消息流保留全部 progress 条目
 - **防表演式汇报**：进展契约只写在 Worker prompt 里、且要求「有实际产物/结论才报」（禁止定时汇报）；progress **静默不通知主窗口**（不进回执聚合），也不写 `history` 流转记录，避免刷屏
-- **子任务**：父子层级 + 上下文继承 + 父任务自动流转 + 级联归档（僵尸态出清：`archive-task` 对「无活跃 run 的 in-progress」——典型如被 parentKick 推进后子任务已全部归档的史诗——直接放行，有活跃 run 的仍拒）
+- **子任务**：父子层级 + 上下文继承 + 父任务自动流转 + 级联归档（僵尸态出清：`archive-task` 对「无活跃 run 的 in-progress」——典型如被 parentKick 推进后子任务已全部归档的史诗——直接放行，有活跃 run 的仍拒）；**归档子任务仍计入史诗进度并在详情留档可见**——进度分子口径 `settled = resolved | cancelled | archived`、分母也含归档，归档一张子卡不会再让史诗进度从 `0/10` 退化成 `0/9`（进度只增不减），全归档的父卡也照常显示徽章；详情子任务清单不排归档行（灰化 + 行尾「已归档」徽章 + 沉底排序，点击仍可进子卡看留档）
 - **死会话零打扰**：15s 派发心跳对无活 root 的会话板直接跳过（不读盘/不写盘/零日志，会话重开后自动恢复派发）；`create-task` 拒绝不完整 sessionId（防裸短 id 建出幻影板）
 - **面板轮询渲染短路**：`get-tasks` 响应附 `tasksHash`，任务列表无变化时前端跳过重渲染（usage/池状态等轻量字段照常刷新）
-  - 卡片识别层：父卡显示「📦 史诗 · resolved/total」徽章 + 3px 迷你进度条（有在跑子任务时附「▸ 在跑：标题」行）；子卡标题下显示「↳ 父任务标题」；依赖未满足的待办卡底部灰字「⛓ 等待「依赖标题」」（childStats 由 host 现算，缺字段一律不渲染）
-  - 详情父子区块：父卡详情列子任务清单（状态色点 + 标题，点击直达子卡详情，标题行汇总 resolved/total）；子卡详情顶行「↳ 史诗：父标题」点击回跳父卡
+  - 卡片识别层：父卡显示「📦 史诗 · settled/total」徽章 + 3px 迷你进度条（`settled = resolved | cancelled | archived`，total 同口径含归档；有在跑子任务时附「▸ 在跑：标题」行）；子卡标题下显示「↳ 父任务标题」；依赖未满足的待办卡底部灰字「⛓ 等待「依赖标题」」（childStats 由 host 现算，缺字段一律不渲染）
+  - 详情父子区块：父卡详情列子任务清单（状态色点 + 标题，**含已归档留档**——归档行灰化 + 行尾「已归档」徽章并沉底，点击直达子卡详情，标题行汇总 settled/total）；子卡详情顶行「↳ 史诗：父标题」点击回跳父卡
 - **删除通道（真删，无 undo）**：`delete-task` RPC（卡片 hover 垃圾桶按钮 / 详情页「删除」按钮，均先 `confirm('删除不可恢复，确认删除「标题」？')`）+ `batch-op op='delete'`（多选模式底部「批量删除」，同样 confirm）。状态门禁：**草稿/待办/阻塞可删**；进行中/验证中拒绝并提示先用 `terminate-agent` 终止（避免在跑的 run 变孤儿）；已完成/取消引导改用归档（`archive-task`，留档可检索）；有**未归档子任务**时拒删（防 `parentId` 悬空破坏父任务自动流转）；已归档任务幂等返回 ok。是真删（从 `tasks` 数组移除），因此**不产生 `batch-undo` 撤销快照**（批量条对 delete 不显示「↩️ 撤销」），删除操作在 host 端 `console.error` 留一行日志便于溯源
 - **任务粒度建议**：单任务 **10~30 分钟**可独立完成为甜区；预计超过 30 分钟的大任务先建一张 **epic 父卡**（`pipeline: direct`，不进池派发），再挂若干 10~30 分钟的子任务（`task_create` 传 `parentId=父卡 id`，有先后顺序用 `dependsOn` 串联），子任务全部完成后父卡自动流转（`checkParentAuto`）——`task_create` 工具描述与 Team 模式提示词都写了这条契约
 - **suggestSplit 软提示**：`task_create` / `create-task` 发现描述超 500 字符、或标题/描述命中「全量 / 整体 / 系统级 / 全面 / 重构 / 所有模块 / 整个」等史诗特征词时，返回体附带一行 `suggestSplit` 建议文案（**只提示，不阻断创建与派发**；未命中则不出现该字段，老调用方无感）
@@ -220,7 +224,7 @@ v1.6.0 起 host 端从单体 index.mjs（1487 行）拆为薄壳 + 7 个领域�
 | 模块 | 域 | 内容 |
 |---|---|---|
 | `policy.mjs` | 策略层 | 粒度治理软闸门 + 学习飞轮候选教训（纯函数零状态） |
-| `usage.mjs` | 统计 | v4 会话日志定位 / zstd 分帧 / token usage 聚合（纯函数） |
+| `usage.mjs` | 统计 | v4 会话日志定位 / zstd 分帧 / token usage 聚合（纯函数；有效消耗 `effectiveTokens` + `byDay` 双指标 `{t,e}` 聚合，兼容老 number 日账） |
 | `session.mjs` | 会话 | root 解析缓存 / 会话 id 归一 / workMode 派生 / runsFor |
 | `store.mjs` | 持久化 | boardPath / rt / wt 原子落盘 / 跨重启继承 / fileLocks 串行化 / mutateLocked |
 | `notify.mjs` | 通知 | makeMsg / 歧义 25s 去抖 / 回执聚合 + 空闲门控 / 投递前过滤 |

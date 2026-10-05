@@ -11,7 +11,7 @@ import * as core from '../lib/core.mjs'
 // 粒度治理（软闸门）住在 lib/policy.mjs（策略层，纯函数）、usage 聚合住在 lib/usage.mjs，
 // 均由 index.mjs 薄壳 re-export（对外契约不变），这里仍从 index.mjs 导入直接断言
 import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE } from '../index.mjs'
-import { aggregateUsageSummary, readRunUsage, findRunLog } from '../index.mjs'
+import { aggregateUsageSummary, readRunUsage, findRunLog, effectiveTokens } from '../index.mjs'
 import { createRpc } from '../lib/rpc.mjs'
 // no-root 刷屏根治（task-muuf0o7a）专项：会话层幻影板防线 + 派发层 root 闸门直调断言
 import { createSession, isFullSessionId } from '../lib/session.mjs'
@@ -1071,7 +1071,7 @@ test('aggregateUsageSummary: 空任务/无 usage 任务 → 全零 + 空 Top', (
   assert.equal(s.total, 0); assert.equal(s.input, 0); assert.equal(s.output, 0); assert.equal(s.cacheRead, 0)
   assert.deepEqual(s.byModel, {}); assert.deepEqual(s.topTasks, [])
   assert.deepEqual(s.byDay, {}) // 日账缺省空对象（老看板/无 usage 不炸）
-  assert.deepEqual(aggregateUsageSummary(undefined), { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, byModel: {}, byDay: {}, topTasks: [] })
+  assert.deepEqual(aggregateUsageSummary(undefined), { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, effective: 0, byModel: {}, byDay: {}, topTasks: [] })
 })
 
 test('aggregateUsageSummary: 总量/输入输出缓存拆分累加 + 按模型小计合并', () => {
@@ -1090,19 +1090,19 @@ const lk = (iso) => { const d = new Date(iso); const p2 = (n) => (n < 10 ? '0' :
 const localIso = (y, mo, d, h, mi) => new Date(y, mo - 1, d, h, mi).toISOString()
 
 test('aggregateUsageSummary: byDay 日账逐日合并（同日累加 / 跨日分桶）', () => {
-  const a = mkTask({ id: 'a', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 100, runs: 2, models: {}, updatedAt: localIso(2026, 10, 2, 10, 0), byDay: { '2026-10-01': 60, '2026-10-02': 40 } } })
-  const b = mkTask({ id: 'b', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 30, runs: 1, models: {}, updatedAt: localIso(2026, 10, 2, 11, 0), byDay: { '2026-10-02': 30 } } })
+  const a = mkTask({ id: 'a', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 100, runs: 2, models: {}, updatedAt: localIso(2026, 10, 2, 10, 0), byDay: { '2026-10-01': { t: 60, e: 60 }, '2026-10-02': { t: 40, e: 40 } } } })
+  const b = mkTask({ id: 'b', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 30, runs: 1, models: {}, updatedAt: localIso(2026, 10, 2, 11, 0), byDay: { '2026-10-02': { t: 30, e: 30 } } } })
   const s = aggregateUsageSummary([a, b])
-  assert.deepEqual(s.byDay, { '2026-10-01': 60, '2026-10-02': 70 }) // 同日 40+30 合并、跨日分桶
+  assert.deepEqual(s.byDay, { '2026-10-01': { t: 60, e: 60 }, '2026-10-02': { t: 70, e: 70 } }) // 同日 t/e 分别累加、跨日分桶
   assert.equal(s.total, 130) // 总量口径不变
-  assert.deepEqual(a.usage.byDay, { '2026-10-01': 60, '2026-10-02': 40 }) // 入参对象未被就地改写（纯函数）
+  assert.deepEqual(a.usage.byDay, { '2026-10-01': { t: 60, e: 60 }, '2026-10-02': { t: 40, e: 40 } }) // 入参对象未被就地改写（纯函数）
 })
 
 test('aggregateUsageSummary: 存量任务无 byDay → 整笔归 updatedAt 的本地日（近似口径）', () => {
   const legacy = mkTask({ id: 'old', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 500, runs: 1, models: {}, updatedAt: localIso(2026, 10, 2, 10, 30) } })
-  const fresh = mkTask({ id: 'new', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 20, runs: 1, models: {}, updatedAt: localIso(2026, 10, 3, 9, 0), byDay: { '2026-10-03': 20 } } })
+  const fresh = mkTask({ id: 'new', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 20, runs: 1, models: {}, updatedAt: localIso(2026, 10, 3, 9, 0), byDay: { '2026-10-03': { t: 20, e: 20 } } } })
   const s = aggregateUsageSummary([legacy, fresh])
-  assert.deepEqual(s.byDay, { '2026-10-02': 500, '2026-10-03': 20 }) // 老任务兜底 + 新任务日账混合
+  assert.deepEqual(s.byDay, { '2026-10-02': { t: 500, e: null }, '2026-10-03': { t: 20, e: 20 } }) // 老任务兜底只有总量（e 不可知=null）+ 新任务日账双指标
   assert.equal(lk(localIso(2026, 10, 2, 10, 30)), '2026-10-02') // 本地日口径自检（防 toISOString 的 UTC 错位）
 })
 
@@ -1112,7 +1112,7 @@ test('aggregateUsageSummary: 本地 00:30 的 updatedAt 落在本地日（用 UT
   const iso = localIso(2026, 10, 2, 0, 30)
   const s = aggregateUsageSummary([mkTask({ id: 'midnight', usage: { total: 42, models: {}, updatedAt: iso } })])
   assert.deepEqual(Object.keys(s.byDay), ['2026-10-02'])
-  assert.equal(s.byDay['2026-10-02'], 42)
+  assert.deepEqual(s.byDay['2026-10-02'], { t: 42, e: null }) // 兜底路径只有总量：e 不可知置 null，不冒充有效值
 })
 
 test('aggregateUsageSummary: 无 updatedAt / 坏 updatedAt → 不归任何日，byDay 空对象不炸', () => {
@@ -1133,6 +1133,86 @@ test('aggregateUsageSummary: Top 任务按总量降序、最多 8 条、带 runs
   assert.equal(s.topTasks.length, 8)
   assert.deepEqual(s.topTasks.map(x => x.total), [110, 100, 90, 80, 70, 60, 50, 40]) // 降序取前 8
   assert.equal(s.topTasks[0].id, 't11'); assert.equal(s.topTasks[0].title, 'T11'); assert.equal(s.topTasks[0].runs, 11)
+})
+
+// ===== Token 口径对齐真实消耗：有效/缓存读分离 + run 级留账 =====
+test('aggregateUsageSummary: 有效消耗合计 = 输入+输出+缓存写（缓存读不计入）', () => {
+  // 实证场景：本板累计 10.3M 里缓存读 9.7M（94%），有效消耗仅 605K——大数字虚高 17 倍。
+  const u1 = { input: 100, output: 20, cacheRead: 1000, cacheWrite: 5, total: 1125, runs: 2, models: {} }
+  const u2 = { input: 5, output: 5, cacheRead: 0, cacheWrite: 3, total: 13, runs: 1, models: {} }
+  const s = aggregateUsageSummary([mkTask({ id: 'a', usage: u1 }), mkTask({ id: 'b', usage: u2 })])
+  assert.equal(s.effective, 138) // (100+20+5) + (5+5+3)
+  assert.equal(s.cacheRead, 1000)
+  assert.equal(s.total, 1138)
+  assert.equal(s.effective + s.cacheRead, s.total) // 三分量自洽：有效 + 缓存读 = 合计
+  // 脏字段/缺字段不把 NaN 带进看板（NaN 会让工具输出的 lossless-JSON 校验拒整条结果）
+  const s2 = aggregateUsageSummary([mkTask({ id: 'z', usage: { total: 9, models: {} } })])
+  assert.equal(s2.effective, 0)
+  // Top8 条目带 有效 / 缓存读 拆分（仪表盘 title 直接用）
+  const t0 = aggregateUsageSummary([mkTask({ id: 'a', usage: u1 })]).topTasks[0]
+  assert.equal(t0.effective, 125); assert.equal(t0.cacheRead, 1000)
+})
+
+test('aggregateUsageSummary: byDay 双指标记账（{t,e} 逐日合并）+ 有效合计', () => {
+  const a = mkTask({ id: 'a', usage: { input: 10, output: 5, cacheRead: 900, cacheWrite: 5, total: 920, runs: 2, models: {}, updatedAt: localIso(2026, 10, 2, 10, 0), byDay: { '2026-10-01': { t: 600, e: 60 }, '2026-10-02': { t: 320, e: 20 } } } })
+  const b = mkTask({ id: 'b', usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 1, total: 30, runs: 1, models: {}, updatedAt: localIso(2026, 10, 2, 11, 0), byDay: { '2026-10-02': { t: 30, e: 3 } } } })
+  const s = aggregateUsageSummary([a, b])
+  assert.deepEqual(s.byDay, { '2026-10-01': { t: 600, e: 60 }, '2026-10-02': { t: 350, e: 23 } }) // 同日 t/e 各自累加、跨日分桶
+  assert.equal(s.effective, 23) // (10+5+5) + (1+1+1)
+  assert.equal(s.total, 950)
+  assert.deepEqual(a.usage.byDay, { '2026-10-01': { t: 600, e: 60 }, '2026-10-02': { t: 320, e: 20 } }) // 纯函数：入参不被就地改写
+})
+
+test('aggregateUsageSummary: 老 number 形态 byDay 兼容（总量保留、有效值置 null 不猜）', () => {
+  // 本轮之前的日账是裸 number（只有总量、没有逐 run 拆分）→ e 不可知必须 null，
+  // 既不能让「近 7 天」整段消失（t 保留），也不能伪造一个有效值冒充。
+  const legacy = mkTask({ id: 'old', usage: { input: 10, output: 5, cacheRead: 900, cacheWrite: 5, total: 920, runs: 1, models: {}, byDay: { '2026-10-01': 600 } } })
+  const fresh = mkTask({ id: 'new', usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 1, total: 30, runs: 1, models: {}, byDay: { '2026-10-02': { t: 30, e: 3 } } } })
+  const s = aggregateUsageSummary([legacy, fresh])
+  assert.deepEqual(s.byDay, { '2026-10-01': { t: 600, e: null }, '2026-10-02': { t: 30, e: 3 } })
+  assert.equal(s.byDay['2026-10-01'].e, null) // 不可知就是 null（不是 0、也不是 t）
+  // 同一天既有老形态又有新形态 → 合并后 e 仍不可知（总量照常累加，不假装算得出）
+  const mixOld = mkTask({ id: 'm1', usage: { total: 100, models: {}, byDay: { '2026-10-03': 40 } } })
+  const mixNew = mkTask({ id: 'm2', usage: { input: 3, output: 2, cacheRead: 50, cacheWrite: 0, total: 55, models: {}, byDay: { '2026-10-03': { t: 55, e: 5 } } } })
+  assert.deepEqual(aggregateUsageSummary([mixOld, mixNew]).byDay['2026-10-03'], { t: 95, e: null })
+  // 逐项合计仍按各任务 usage 精确算（不受日账形态影响）
+  assert.equal(aggregateUsageSummary([legacy, fresh]).effective, 23) // (10+5+5)+(1+1+1)
+})
+
+test('aggregateUsageSummary: effective 字段与 effectiveTokens 导出一致（口径单点定义）', () => {
+  assert.equal(effectiveTokens({ input: 3, output: 4, cacheRead: 99, cacheWrite: 5 }), 12)
+  assert.equal(effectiveTokens({ cacheRead: 99 }), 0)   // 只有缓存读 → 有效 0（缓存读不算真实消耗）
+  assert.equal(effectiveTokens(null), 0)                 // 空值不炸
+  assert.equal(effectiveTokens({ input: '3', output: 4 }), 7) // 字符串数字按数字算
+  const s = aggregateUsageSummary([mkTask({ id: 'a', usage: { input: 3, output: 4, cacheRead: 99, cacheWrite: 5, total: 111, models: {} } })])
+  assert.equal(s.effective, effectiveTokens({ input: 3, output: 4, cacheRead: 99, cacheWrite: 5 }))
+})
+
+test('README 双份同步记录 Token 口径（有效消耗 / 近 7 天 / 缓存读单列 / 派发口径边界）', () => {
+  const pkg = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  const root = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')
+  assert.equal(pkg, root) // 两份 README 必须字节一致（npm run sync-readme 的约束）
+  for (const s of ['今日有效消耗', '近 7 天', '有效消耗 = 输入 + 输出 + 缓存写（不含缓存读）', '不含主窗口对话', 'run 级留账']) {
+    assert.ok(pkg.includes(s), 'README 应记录口径：' + s)
+  }
+})
+
+test('Token run 级留账：accumulateRunUsage 把本次用量写回对应 t.runs 条目（源码级断言）', () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  // 五分量原样写回 runs 条目：任何维度（按天/按模型/按阶段）都能从 runs 精确重建，不必回头猜
+  assert.match(dsp, /if \(Array\.isArray\(t\.runs\)\)/)
+  assert.match(dsp, /if \(String\(t\.runs\[ri\] && t\.runs\[ri\]\.id\) === String\(rec\.run\.id\)\)/)
+  assert.match(dsp, /t\.runs\[ri\]\.usage = \{ input: u\.input \|\| 0, output: u\.output \|\| 0, cacheRead: u\.cacheRead \|\| 0, cacheWrite: u\.cacheWrite \|\| 0, total: u\.total \|\| 0 \}/)
+  assert.match(dsp, /break/) // 命中即停（同一 runId 只记一次）
+  // 倒序查找 + 找不到就跳过：runs 条目由 recordRunHistory 先行写入、closeRunHistory 更新结局，正常必存在
+  assert.match(dsp, /for \(var ri = t\.runs\.length - 1; ri >= 0; ri--\)/)
+  // 有效消耗口径单点定义（host 侧），byDay 双指标记账与它同源
+  assert.match(dsp, /function effectiveOf\(u\) \{/)
+  assert.match(dsp, /return \(u\.input \|\| 0\) \+ \(u\.output \|\| 0\) \+ \(u\.cacheWrite \|\| 0\)/)
+  assert.match(dsp, /var eff = effectiveOf\(u\)/)
+  // byDay 双指标：总 t / 有效 e 各自累加；老 number 形态脏值就地收敛成对象（不把老字段形态写坏）
+  assert.match(dsp, /if \(!cell \|\| typeof cell !== 'object'\) cell = \{ t: Number\(cell\) \|\| 0, e: 0 \}/)
+  assert.match(dsp, /t\.usage\.byDay\[dk\] = cell/)
 })
 
 test('readRunUsage: run 不存在 / 日志目录不可读 → null（优雅降级，不抛错）', () => {
@@ -1180,11 +1260,12 @@ test('Token 消耗接线：settleRun 结算累加 + 按模型小计 + get-tasks 
   assert.match(cli, /'⛁ ' \+ fmtTokens\(t\.usage\.total\)/)                     // 进行中/已完成卡片显示本任务累计
 })
 
-test('Token 日账接线：dispatch 记 byDay 本地日 + 仪表盘「今日 / 近 7 天」（源码级断言）', () => {
+test('Token 日账接线：dispatch 记 byDay 双指标（本地日）+ 仪表盘有效消耗口径（源码级断言）', () => {
   const host = hostSrc()
   const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.match(host, /t\.usage\.byDay\[dk\] = \(t\.usage\.byDay\[dk\] \|\| 0\) \+ u\.total/) // 结算时记一笔日账
-  assert.match(host, /var dk = localDayKey\(\)/)                                  // 键取结算时刻本地日
+  assert.match(host, /cell\.t = \(Number\(cell\.t\) \|\| 0\) \+ u\.total/) // 结算时记一笔日账总量
+  assert.match(host, /cell\.e = \(Number\(cell\.e\) \|\| 0\) \+ eff/)       // 同一笔记一笔有效消耗
+  assert.match(host, /var dk = localDayKey\(\)/)                           // 键取结算时刻本地日
   // 本地日口径：localDayKey 必须用本地 getters 拼（含 getFullYear/getMonth/getDate），不得用 toISOString
   const dispatchSrc = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
   const dkBody = dispatchSrc.match(/function localDayKey\(d\) \{[\s\S]{0,300}?\n    \}/)
@@ -1194,16 +1275,23 @@ test('Token 日账接线：dispatch 记 byDay 本地日 + 仪表盘「今日 / �
   assert.match(dkBody[0], /getDate\(\)/)
   assert.equal(/toISOString/.test(dkBody[0]), false) // UTC 会让晚间消耗落到次日
   assert.match(host, /if \(!t\.usage\.byDay\) t\.usage\.byDay = \{\}/)            // 老任务就地补日账（不改老字段形态）
-  assert.match(host, /s\.byDay\[lk\] = \(s\.byDay\[lk\] \|\| 0\) \+ u\.total/)     // 存量兜底归 updatedAt 本地日
-  // 仪表盘：大数字=今日（本地日 key 取 byDay，缺省 0）+ 累计小字 + 近 7 天迷你条形
+  assert.match(host, /lc\.t \+= u\.total; lc\.e = null; s\.byDay\[lk\] = lc/)     // 存量兜底归 updatedAt 本地日（只有总量，e 不可知）
+  // 仪表盘：大数字=今日有效消耗 + 「含缓存读共 X」小字 + 累计三分量 + 近 7 天有效值 + 口径 caption
   assert.match(cli, /function lastNDays\(n\)/)
-  assert.match(cli, /var todayTok = byDay\[todayKey\] \|\| 0/)                    // 今日缺省 0（无日账不误报）
-  assert.match(cli, /'tokens（今日）'/)
-  assert.match(cli, /'（本看板）'/)                                               // 累计总量小字保留
-  assert.match(cli, /'近 7 天'/)
-  assert.match(cli, /k\.slice\(5\) \+ '：' \+ String\(v\) \+ ' tok'/)              // 条形 title：MM-DD：N tok
+  assert.match(cli, /var todayCell = dayOf\(byDay\[todayKey\]\)/)                 // 今日缺省退化（无日账不误报）
+  assert.match(cli, /'tokens（今日有效'/)                                          // 大数字口径 = 有效消耗
+  assert.match(cli, /'含缓存读共 '/)                                              // 有效 vs 总量的差额单列
+  assert.match(cli, /'累计（本看板） 有效 '/)                                      // 累计三分量：有效
+  assert.match(cli, /' · 缓存读 '/)                                              // 累计三分量：缓存读
+  assert.match(cli, /' · 合计 '/)                                                // 累计三分量：合计
+  assert.match(cli, /'近 7 天（有效消耗）'/)
+  assert.match(cli, /k\.slice\(5\) \+ '：有效 ' \+ String\(v\)/)                  // 条形 title：MM-DD：有效 N tok
+  assert.match(cli, /含缓存读共 ' \+ String\(c\.t\) \+ ' tok'/)                    // 条形 title 补总量对照
+  assert.match(cli, /口径：仅看板派发的 Worker\/Verifier run 消耗，不含主窗口对话/)    // 口径边界明示（不含主窗口）
+  assert.match(cli, /\/ 缓存读 ' \+ String\(x\.cacheRead \|\| 0\)/)                // Top8 title 补 有效 / 缓存读 拆分
   assert.match(cli, /background: isToday \? C\.brand : C\.nested/)                // 今天高亮 brand、其余浅底
   assert.match(cli, /hasDayData \? React\.createElement/)                         // 7 天全空不渲染该区
+  assert.match(cli, /'（近似：老日账只有总量）'/)                                    // e 不可知 → 标 ~ 近似，不冒充有效值
 })
 
 // ===== 学习飞轮 v1：候选教训信号 + feedbackEnabled 开关 + 软召回 =====
@@ -1363,7 +1451,7 @@ test('aggregateChildStats: 空板 / 无父子关系 → 空对象（不出键）
   assert.deepEqual(core.aggregateChildStats(d), {})
 })
 
-test('aggregateChildStats: 聚合口径 total/resolved/active/activeTitle', () => {
+test('aggregateChildStats: 聚合口径 total/settled/active/activeTitle', () => {
   const kids = [
     mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' }),
     mkTask({ id: 'c2', parentId: 'epic', status: 'in-progress', title: '进行中甲' }),
@@ -1373,29 +1461,104 @@ test('aggregateChildStats: 聚合口径 total/resolved/active/activeTitle', () =
     mkTask({ id: 'c6', parentId: 'epic', status: 'blocked' }),
   ]
   const s = core.aggregateChildStats(kids).epic
-  assert.equal(s.total, 6)      // 非归档子任务全计
-  assert.equal(s.resolved, 1)   // 仅 resolved（verifying 不算完成）
+  assert.equal(s.total, 6)      // 子任务全计（含归档，本例无归档）
+  assert.equal(s.settled, 1)    // 仅 resolved（verifying 不算了结）
+  assert.equal(s.resolved, 1)   // 兼容别名同值
   assert.equal(s.active, 2)     // in-progress 数
   assert.equal(s.activeTitle, '进行中甲') // 第一个 in-progress 子任务标题（看板顺序）
 })
 
-test('aggregateChildStats: 归档子任务不计入；全归档 → 不出键；多父卡各自成键', () => {
+// 反馈 task-muupgfot（史诗进度归档消失）：归档子任务必须计入 total + settled，否则归档一张子卡
+// 会让进度分母缩水（0/10 → 0/9）、分子永不前进，且全归档父卡整个从卡片上消失。
+test('aggregateChildStats: 归档子任务计入 total+settled（10 卡归 2 → 2/10，不再退化 0/8）', () => {
+  const ten = []
+  for (let i = 1; i <= 10; i++) ten.push(mkTask({ id: 'k' + i, parentId: 'epic', status: i <= 2 ? 'archived' : 'pending' }))
+  const s10 = core.aggregateChildStats(ten).epic
+  assert.equal(s10.total, 10)   // 归档不减分母（旧口径被 continue 跳过 → 8）
+  assert.equal(s10.settled, 2)  // 归档计入分子（旧口径 → 0）
+  assert.equal(s10.resolved, 2) // 兼容别名与 settled 同值（老前端/老断言按 resolved 读仍成立）
+  assert.equal(s10.active, 0)
+
+  // 全归档父卡仍出键（史诗收尾后卡片徽章不凭空消失，留档可查）
+  const allArch = [mkTask({ id: 'z1', parentId: 'e2', status: 'archived' }), mkTask({ id: 'z2', parentId: 'e2', status: 'archived' })]
+  assert.deepEqual(core.aggregateChildStats(allArch).e2, { total: 2, settled: 2, resolved: 2, active: 0, activeTitle: '' })
+
+  // 多父卡各自成键 + 混合状态（cancelled 也属了结集：人已显式放弃该子任务范围）
   const tasks = [
-    // 父卡 p1：1 resolved + 1 archived（归档不计）+ 1 in-progress
     mkTask({ id: 'a1', parentId: 'p1', status: 'resolved' }),
     mkTask({ id: 'a2', parentId: 'p1', status: 'archived' }),
     mkTask({ id: 'a3', parentId: 'p1', status: 'in-progress', title: 'p1活跃' }),
-    // 父卡 p2：全部 archived → 不出键
     mkTask({ id: 'b1', parentId: 'p2', status: 'archived' }),
-    mkTask({ id: 'b2', parentId: 'p2', status: 'archived' }),
-    // 父卡 p3：无活跃子任务 → activeTitle 空串
+    mkTask({ id: 'b2', parentId: 'p2', status: 'cancelled' }),
     mkTask({ id: 'd1', parentId: 'p3', status: 'pending' }),
     mkTask({ id: 'd2', parentId: 'p3', status: 'resolved' }),
   ]
   const stats = core.aggregateChildStats(tasks)
-  assert.deepEqual(Object.keys(stats).sort(), ['p1', 'p3']) // p2 全归档不出键；父卡自身不在 tasks 也照算（按键聚合）
-  assert.deepEqual(stats.p1, { total: 2, resolved: 1, active: 1, activeTitle: 'p1活跃' }) // archived 的 a2 不进 total
-  assert.deepEqual(stats.p3, { total: 2, resolved: 1, active: 0, activeTitle: '' })
+  assert.deepEqual(Object.keys(stats).sort(), ['p1', 'p2', 'p3']) // 全归档的父卡也出键（不再「键自然消失」）
+  assert.deepEqual(stats.p1, { total: 3, settled: 2, resolved: 2, active: 1, activeTitle: 'p1活跃' })
+  assert.deepEqual(stats.p2, { total: 2, settled: 2, resolved: 2, active: 0, activeTitle: '' })
+  assert.deepEqual(stats.p3, { total: 2, settled: 1, resolved: 1, active: 0, activeTitle: '' })
+})
+
+test('aggregateChildStats: in-progress/verifying/pending 未了结不计 settled；archived 永不算 active', () => {
+  const kids = [
+    mkTask({ id: 'c1', parentId: 'epic', status: 'in-progress', title: '甲' }),
+    mkTask({ id: 'c2', parentId: 'epic', status: 'verifying' }),
+    mkTask({ id: 'c3', parentId: 'epic', status: 'blocked' }),
+    mkTask({ id: 'c4', parentId: 'epic', status: 'pending' }),
+    mkTask({ id: 'c5', parentId: 'epic', status: 'draft' }),
+    mkTask({ id: 'c6', parentId: 'epic', status: 'archived' }),
+  ]
+  const s = core.aggregateChildStats(kids).epic
+  assert.equal(s.total, 6)
+  assert.equal(s.settled, 1)   // 只有归档那张算了结；进行中/验证中/阻塞/待办/草稿都不算
+  assert.equal(s.active, 1)    // 归档不冒充在跑
+  assert.equal(s.activeTitle, '甲')
+})
+
+test('aggregateChildStats: 归档口径注释写明僵尸卡近似 + 旧「归档跳过」已消灭（源码级断言）', () => {
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  // 近似口径必须写在注释里：v1.7.1 起 archive-task 放行「无活跃 run 的 in-progress 僵尸卡」，
+  // 故 archived 不再严格等于「曾经完成」——但归档仍是人的显式了结，进度上计入是对的
+  assert.match(coreSrc, /archive-task 放行「无活跃 run 的 in-progress 僵尸卡」/)
+  assert.match(coreSrc, /进度只增不减/)
+  // 分子口径单一出处（resolved | cancelled | archived）
+  assert.match(coreSrc, /if \(t\.status === 'resolved' \|\| t\.status === 'cancelled' \|\| t\.status === 'archived'\) \{ s\.settled\+\+; s\.resolved\+\+ \}/)
+  // 防回归：聚合循环里不得再按 archived 跳过
+  assert.doesNotMatch(coreSrc, /aggregateChildStats[\s\S]{0,600}?status === 'archived'\) continue/)
+  assert.match(coreSrc, /if \(!t \|\| !isb\(t\)\) continue/)
+  // 与父卡自动收口口径（isChildSettled，archived 不算）刻意分离，注释里写明区别
+  assert.match(coreSrc, /与 isChildSettled（父卡自动收口口径，archived 不算）/)
+  // 僵尸放行本身的门禁注释仍在 rpc.mjs（口径来源不悬空）
+  const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  assert.match(rpcSrc, /in-progress 且无活跃 run\s+→ 放行（parentKick 僵尸态出清/)
+})
+
+test('FamilySection: 子任务清单含归档（灰化 + 「已归档」徽章 + 沉底，不排 archived）（源码级断言）', () => {
+  const src = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  // 清单按 parentId 现算，**不再**附加 status !== 'archived' 过滤（反馈 task-muupgfot：归档后详情里子任务消失）
+  assert.match(src, /var kids = state\.tasks\.filter\(function \(x\) \{ return x\.parentId === task\.id \}\)/)
+  assert.doesNotMatch(src, /x\.parentId === task\.id && x\.status !== 'archived'/)
+  // 沉底排序：已归档排后（稳定排序，未归档保持既有顺序）
+  assert.match(src, /\.sort\(function \(a, b\) \{ return \(a\.status === 'archived' \? 1 : 0\) - \(b\.status === 'archived' \? 1 : 0\) \}\)/)
+  // 行尾「已归档」徽章 + 灰化（降透明度 + 次要文字色），点击行为不变（仍可进详情看留档）
+  assert.match(src, /'已归档'/)
+  assert.match(src, /opacity: arch \? 0\.55 : 1/)
+  assert.match(src, /color: arch \? C\.text2 : C\.brand/)
+  assert.match(src, /onClick: function \(\) \{ jump\(x\.id\) \}/)
+  // 标题行分子口径与卡片 📦 徽章同源（settled，含归档），不再用只数 resolved 的旧分子
+  assert.match(src, /var settledN = kids\.filter\(function \(x\) \{ return x\.status === 'resolved' \|\| x\.status === 'cancelled' \|\| x\.status === 'archived' \}\)\.length/)
+  assert.match(src, /'📦 子任务 · ' \+ settledN \+ '\/' \+ kids\.length \+ ' 已了结'/)
+  // 卡片徽章/进度条读 settled（老宿主无该字段时回退 resolved，缺省兼容）
+  const card = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+  assert.match(card, /var csDone = cs \? \(typeof cs\.settled === 'number' \? cs\.settled : cs\.resolved\) : 0/)
+  assert.match(card, /'📦 史诗 · ' \+ csDone \+ '\/' \+ cs\.total/)
+  assert.match(card, /Math\.round\(\(csDone \/ cs\.total\) \* 100\)/)
+  assert.doesNotMatch(card, /cs\.resolved \+ '\/' \+ cs\.total/) // 旧读法已全部换成 csDone
+  // 组装产物里也要有（require build-client 先跑；npm pretest 已保证）
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /'已归档'/)
+  assert.match(built, /csDone/)
 })
 
 test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tasks 返回 childStats（源码级断言）', () => {

@@ -106,8 +106,9 @@ export function createRpc(ctx, state, deps) {
       d.usageSummary = aggregateUsageSummary(d.tasks)
       // 架构自省 L1：healthHints 现算（纯函数零存储零 IO，近 50 卡窗口），客户端「架构健康」区超阈值才显示
       d.healthHints = computeHealthHints(d.tasks)
-      // 史诗父卡语义层：childStats 现算（零存储）——{ <parentId>: { total, resolved, active, activeTitle } }，
-      // 父卡列位置/进度展示的数据源；无非归档子任务的父卡不出键
+      // 史诗父卡语义层：childStats 现算（零存储）——{ <parentId>: { total, settled, resolved, active, activeTitle } }，
+      // 父卡列位置/进度展示的数据源；total 含已归档子任务，settled=resolved|cancelled|archived（resolved 为
+      // 兼容别名同值），因此归档子卡不会让进度分母缩水（task-muupgfot）；只有无任何子任务的父卡才不出键
       d.childStats = aggregateChildStats(d.tasks)
       // 渲染变更检测（反馈 n-mut9rzs2mkhg）：tasks 关键字段的稳定 hash（纯函数，口径见 core.tasksHash），
       // 客户端 3s 轮询 hash 相同则跳过 state.tasks 赋值 + notify——传输仍全量，省的是渲染

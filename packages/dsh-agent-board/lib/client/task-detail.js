@@ -69,27 +69,38 @@
 
     // 父子区块（与 DepsSection 并列）：
     //   子卡 = 父链面包屑「↳ 史诗：<父标题>」，点击回跳父卡详情；
-    //   父卡 = 非归档子任务清单（状态色点 + 标题 + 状态标签，点击直达子卡详情；标题行汇总 resolved/total）。
+    //   父卡 = 子任务清单（状态色点 + 标题 + 状态标签，点击直达子卡详情；标题行汇总 settled/total）。
+    //   归档留档（反馈 task-muupgfot）：清单**含已归档子任务**——归档后子任务不该从详情消失，
+    //     否则史诗拆分过程整段丢失、只剩一个分母缩水的数字。归档行灰化（降透明度 + 次要文字色）
+    //     + 行尾「已归档」徽章，并沉底排在未归档之后（稳定排序：未归档保持 state.tasks 既有顺序）；
+    //     仅降视觉权重不改交互——点击照旧进子卡详情看留档。
+    //   口径与卡片 📦 徽章同源：settled = resolved | cancelled | archived（宿主 aggregateChildStats 的
+    //     settled/resolved 字段），total 含归档，所以详情与卡片永远显示同一个 N/M。
     //   数据源是 state.tasks 按 parentId 现算（parentId 为老字段），不依赖 host 的 childStats，天然缺省兼容；
     //   既无父也无子的普通卡整块不渲染。嵌套史诗（本身也是子卡的父卡）两段同区块上下排列。
     function FamilySection(props) {
       var task = props.task
       var parentT = task.parentId ? getTask(task.parentId) : null
-      var kids = state.tasks.filter(function (x) { return x.parentId === task.id && x.status !== 'archived' })
+      // 不按状态过滤（归档也要留在清单里）；仅按「是否归档」稳定排序把归档沉底（V8 sort 稳定，未归档保序）
+      var kids = state.tasks.filter(function (x) { return x.parentId === task.id })
+        .sort(function (a, b) { return (a.status === 'archived' ? 1 : 0) - (b.status === 'archived' ? 1 : 0) })
       if (!task.parentId && kids.length === 0) return null
-      var resolvedN = kids.filter(function (x) { return x.status === 'resolved' }).length
+      var settledN = kids.filter(function (x) { return x.status === 'resolved' || x.status === 'cancelled' || x.status === 'archived' }).length
       function jump(id) { state.detailId = id; notify() }
       return React.createElement('div', { style: { marginBottom: 8, padding: '6px 8px', border: '1px solid ' + C.border, borderRadius: 6, background: C.card } },
         task.parentId ? React.createElement('div', { style: { fontSize: 11, marginBottom: kids.length ? 6 : 0 } },
           React.createElement('span', { style: { color: C.text2, fontWeight: 600 } }, '↳ 史诗：'),
           React.createElement('span', { onClick: function () { if (parentT) jump(task.parentId) }, title: parentT ? parentT.title + ' (' + task.parentId + ')' : task.parentId, style: { color: parentT ? C.brand : C.text2, cursor: parentT ? 'pointer' : 'default', fontWeight: 600 } }, parentT && parentT.title ? parentT.title : shortId(task.parentId))) : null,
         kids.length > 0 ? React.createElement('div', null,
-          React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '📦 子任务 · ' + resolvedN + '/' + kids.length + ' 已完成'),
+          React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '📦 子任务 · ' + settledN + '/' + kids.length + ' 已了结'),
           kids.map(function (x) {
-            return React.createElement('div', { key: x.id, onClick: function () { jump(x.id) }, title: (statusLabels[x.status] || x.status) + ' · ' + x.id, style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, fontSize: 10, cursor: 'pointer' } },
+            var arch = x.status === 'archived'
+            return React.createElement('div', { key: x.id, onClick: function () { jump(x.id) }, title: (statusLabels[x.status] || x.status) + ' · ' + x.id + (arch ? ' · 已归档留档（点击查看）' : ''), style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, fontSize: 10, cursor: 'pointer', opacity: arch ? 0.55 : 1 } },
               React.createElement('span', { style: { width: 7, height: 7, borderRadius: '50%', background: statusColors[x.status] || C.text2, flexShrink: 0 } }),
-              React.createElement('span', { style: { color: C.brand, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 } }, x.title || x.id),
-              React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0 } }, statusLabels[x.status] || x.status))
+              React.createElement('span', { style: { color: arch ? C.text2 : C.brand, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 } }, x.title || x.id),
+              arch
+                ? React.createElement('span', { style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: C.nested, color: C.text2, border: '1px solid ' + C.border, flexShrink: 0 } }, '已归档')
+                : React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0 } }, statusLabels[x.status] || x.status))
           })) : null)
     }
 

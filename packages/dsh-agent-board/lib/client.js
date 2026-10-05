@@ -648,7 +648,9 @@ function apply(ctx) {
     }
 
     // 史诗/依赖/父子识别层（childStats 缺省兼容：host 未返回该字段时一律不渲染相关元素）：
-    //   父卡 = 元信息行首位「📦 史诗 · resolved/total」徽章 + 3px 迷你进度条 + activeTitle 非空时「▸ 在跑」行；
+    //   父卡 = 元信息行首位「📦 史诗 · settled/total」徽章 + 3px 迷你进度条 + activeTitle 非空时「▸ 在跑」行；
+    //     settled = resolved | cancelled | archived（含已归档子任务、total 也含），口径同宿主 aggregateChildStats；
+    //     老宿主只下发 resolved 时回退读它（缺省兼容）——所以归档子卡不再让徽章从 0/10 退化成 0/9；
     //   子卡 = 标题下一行小字「↳ 父任务标题」（从 state.tasks 找父卡，找不到回退 shortId）；
     //   依赖未满足的待办卡 = 卡片底部灰字「⛓ 等待「第一个未满足依赖标题」」（多个时附「 等 N 个」）。
     // ===== 调研门禁·UI：「⚠️ 无调研」徽章判定（纯 client 侧现算，host 不下发该字段）=====
@@ -664,13 +666,13 @@ function apply(ctx) {
       var notes = typeof cx.notes === 'string' ? cx.notes.trim() : ''
       return files.length === 0 && notes.length === 0
     }
-    function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); var delOk = !state.selectMode && canDelete(t); var cs = (state.childStats && state.childStats[t.id]) || null; var epic = !!(cs && cs.total > 0); var parentT = t.parentId ? getTask(t.parentId) : null; var depWaitTitle = ''; var depWaitN = 0; if (depBlock) { t.dependsOn.forEach(function (id) { var d = getTask(id); if (!d || (d.status !== 'resolved' && d.status !== 'archived')) { depWaitN++; if (!depWaitTitle) depWaitTitle = d && d.title ? d.title : id } }) } var durB = cardDur(t);
+    function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); var delOk = !state.selectMode && canDelete(t); var cs = (state.childStats && state.childStats[t.id]) || null; var csDone = cs ? (typeof cs.settled === 'number' ? cs.settled : cs.resolved) : 0; var epic = !!(cs && cs.total > 0); var parentT = t.parentId ? getTask(t.parentId) : null; var depWaitTitle = ''; var depWaitN = 0; if (depBlock) { t.dependsOn.forEach(function (id) { var d = getTask(id); if (!d || (d.status !== 'resolved' && d.status !== 'archived')) { depWaitN++; if (!depWaitTitle) depWaitTitle = d && d.title ? d.title : id } }) } var durB = cardDur(t);
       // 无障碍（反馈 n-mut9rzpyc7p1）：卡片根以 button 角色进 Tab 序（aria-label=标题+状态），
       // Enter/Space 触发与点击相同的激活行为（多选=切换选中，否则开详情）；
       // focus 态用主题色 C.brand 2px outline（不用浏览器默认蓝框，保持主题一致）
       function activate() { if (state.selectMode) { if (state.selected[t.id]) delete state.selected[t.id]; else state.selected[t.id] = true; notify() } else { state.detailId = t.id; notify() } }
       return React.createElement('div', { role: 'button', tabIndex: 0, 'aria-label': t.title + '（' + (statusLabels[t.status] || t.status) + '）', draggable: !state.selectMode, onDragStart: function (e) { onDragStart(e, t) }, onDragEnd: onDragEnd, onMouseEnter: function () { if (delOk) setHover(t.id, 'del') }, onMouseLeave: function () { if (delOk) setHover('', '') }, onFocus: function () { setCardFocus(t.id) }, onBlur: function () { setCardFocus('') }, onKeyDown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate() } }, onClick: activate, style: { outline: isCardFocus(t.id) ? '2px solid ' + C.brand : 'none', outlineOffset: 2, border: '1px solid ' + (sel ? C.brand : (t.escalation ? C.err : (critGlow ? C.err : C.border))), borderRadius: 6, padding: '6px 8px', marginBottom: 6, background: sel ? C.nested : C.card, borderLeft: '3px solid ' + (t.escalation ? C.err : pc), cursor: state.selectMode ? 'pointer' : 'grab', fontSize: 12, opacity: dragging ? 0.4 : (depBlock ? 0.65 : 1), transition: 'opacity .15s', animation: critGlow ? 'tskb-crit 2s ease-in-out infinite' : 'none' } }, React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 4 } }, state.selectMode ? React.createElement('span', { style: { color: sel ? C.brand : C.text2, flexShrink: 0, marginTop: 1, display: 'inline-flex' } }, ic(sel ? 'square-check-big' : 'square', 12)) : null, React.createElement('div', { style: { fontWeight: 600, color: C.text, marginBottom: 2, wordBreak: 'break-word', flex: 1 } }, t.title), React.createElement('span', { style: { flexShrink: 0, marginTop: 1, display: 'inline-flex', color: C.text2 }, title: pm.label }, ic(pm.icon, 10)), React.createElement('span', { style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + pc + ' 20%, transparent)', color: pc, flexShrink: 0, marginTop: 1 } }, prioLabel[t.priority] || '中'), noResearch(t) ? React.createElement('span', { title: '本任务未附调研上下文，Worker 需自行定位——建议补 contextFiles/contextNotes', style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + C.warn + ' 18%, transparent)', color: C.warn, fontWeight: 600, flexShrink: 0, marginTop: 1, whiteSpace: 'nowrap' } }, '⚠️ 无调研') : null, (t.usage && t.usage.total) ?React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0, marginTop: 1 }, title: '本任务累计 token：' + String(t.usage.total) + '（' + (t.usage.runs || 0) + ' 次 run）' }, '⛁ ' + fmtTokens(t.usage.total)) : null), t.parentId ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: parentT ? '父任务：' + parentT.title + ' (' + t.parentId + ')' : t.parentId }, '↳ ' + (parentT && parentT.title ? parentT.title : shortId(t.parentId))) : null, t.escalation ? React.createElement('div', { style: { fontSize: 10, color: C.err, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 3 } }, ic('alert-triangle', 10), '待裁决 — 点击查看疑问') : null, t.stuckSince ? React.createElement('div', { style: { fontSize: 10, color: C.warn, fontWeight: 600, marginBottom: 2, animation: 'tskb-pulse 1.5s ease-in-out infinite' } }, '⏱ 疑似卡死 · ' + ago(t.stuckSince) + ' — 点击处理') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2, display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' } },
-            epic ? React.createElement('span', { title: '史诗父卡：' + cs.resolved + '/' + cs.total + ' 个子任务已完成', style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.brand + ' 14%, transparent)', color: C.brand, fontWeight: 600 } }, '📦 史诗 · ' + cs.resolved + '/' + cs.total) : null,
+            epic ? React.createElement('span', { title: '史诗父卡：' + csDone + '/' + cs.total + ' 个子任务已了结（完成/取消/归档）', style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.brand + ' 14%, transparent)', color: C.brand, fontWeight: 600 } }, '📦 史诗 · ' + csDone + '/' + cs.total) : null,
             t.frozen ? React.createElement('span', { title: '已冻结：不参与自动派发（详情页可「解除冻结」）', style: { color: C.brand, fontWeight: 600 } }, '❄ 冻结') : null,
             (Array.isArray(t.waitingForTouches) && t.waitingForTouches.length) ? React.createElement('span', { title: '等文件锁释放：' + t.waitingForTouches.join('、') + '（touches 冲突，详情页可 force 越权派发）', style: { color: C.warn, fontWeight: 600 } }, '🔒 等文件释放') : null,
             React.createElement('span', { title: pm.label, style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: C.nested, border: '1px solid ' + C.border } }, pm.short),
@@ -685,8 +687,8 @@ function apply(ctx) {
               title: '删除任务（不可恢复；执行中请先终止，已落定请用归档）',
               style: { flexShrink: 0, marginTop: 1, display: 'inline-flex', cursor: 'pointer', color: C.err, opacity: isCardHover(t.id, 'del') ? 1 : 0, transition: 'opacity .15s' }
             }, ic('trash-2', 11)) : null),
-          // 史诗迷你进度条（3px 高，resolved/total 比例，ok 色填充）+ 在跑子任务行（activeTitle 非空才渲染）
-          epic ? React.createElement('div', { style: { height: 3, borderRadius: 2, background: C.nested, marginTop: 4, overflow: 'hidden' }, title: '子任务进度 ' + cs.resolved + '/' + cs.total }, React.createElement('div', { style: { height: '100%', width: Math.max(0, Math.min(100, Math.round((cs.resolved / cs.total) * 100))) + '%', background: C.ok, borderRadius: 2, transition: 'width .3s' } })) : null,
+          // 史诗迷你进度条（3px 高，settled/total 比例，ok 色填充）+ 在跑子任务行（activeTitle 非空才渲染）
+          epic ? React.createElement('div', { style: { height: 3, borderRadius: 2, background: C.nested, marginTop: 4, overflow: 'hidden' }, title: '子任务进度 ' + csDone + '/' + cs.total }, React.createElement('div', { style: { height: '100%', width: Math.max(0, Math.min(100, Math.round((csDone / cs.total) * 100))) + '%', background: C.ok, borderRadius: 2, transition: 'width .3s' } })) : null,
           epic && cs.activeTitle ? React.createElement('div', { style: { fontSize: 10, color: C.brand, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: '在跑子任务：' + cs.activeTitle }, '▸ 在跑：' + cs.activeTitle) : null,
           // 当前动作行：展示摘要（工具名+关键参数），悬停 title 仍是 host 原文
           (t.status === 'in-progress' || t.status === 'verifying') && state.activity[t.id] ? React.createElement('div', { style: { fontSize: 10, color: C.brand, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: state.activity[t.id] }, '👁 ' + activitySummary(state.activity[t.id])) : null,
@@ -896,27 +898,38 @@ function apply(ctx) {
 
     // 父子区块（与 DepsSection 并列）：
     //   子卡 = 父链面包屑「↳ 史诗：<父标题>」，点击回跳父卡详情；
-    //   父卡 = 非归档子任务清单（状态色点 + 标题 + 状态标签，点击直达子卡详情；标题行汇总 resolved/total）。
+    //   父卡 = 子任务清单（状态色点 + 标题 + 状态标签，点击直达子卡详情；标题行汇总 settled/total）。
+    //   归档留档（反馈 task-muupgfot）：清单**含已归档子任务**——归档后子任务不该从详情消失，
+    //     否则史诗拆分过程整段丢失、只剩一个分母缩水的数字。归档行灰化（降透明度 + 次要文字色）
+    //     + 行尾「已归档」徽章，并沉底排在未归档之后（稳定排序：未归档保持 state.tasks 既有顺序）；
+    //     仅降视觉权重不改交互——点击照旧进子卡详情看留档。
+    //   口径与卡片 📦 徽章同源：settled = resolved | cancelled | archived（宿主 aggregateChildStats 的
+    //     settled/resolved 字段），total 含归档，所以详情与卡片永远显示同一个 N/M。
     //   数据源是 state.tasks 按 parentId 现算（parentId 为老字段），不依赖 host 的 childStats，天然缺省兼容；
     //   既无父也无子的普通卡整块不渲染。嵌套史诗（本身也是子卡的父卡）两段同区块上下排列。
     function FamilySection(props) {
       var task = props.task
       var parentT = task.parentId ? getTask(task.parentId) : null
-      var kids = state.tasks.filter(function (x) { return x.parentId === task.id && x.status !== 'archived' })
+      // 不按状态过滤（归档也要留在清单里）；仅按「是否归档」稳定排序把归档沉底（V8 sort 稳定，未归档保序）
+      var kids = state.tasks.filter(function (x) { return x.parentId === task.id })
+        .sort(function (a, b) { return (a.status === 'archived' ? 1 : 0) - (b.status === 'archived' ? 1 : 0) })
       if (!task.parentId && kids.length === 0) return null
-      var resolvedN = kids.filter(function (x) { return x.status === 'resolved' }).length
+      var settledN = kids.filter(function (x) { return x.status === 'resolved' || x.status === 'cancelled' || x.status === 'archived' }).length
       function jump(id) { state.detailId = id; notify() }
       return React.createElement('div', { style: { marginBottom: 8, padding: '6px 8px', border: '1px solid ' + C.border, borderRadius: 6, background: C.card } },
         task.parentId ? React.createElement('div', { style: { fontSize: 11, marginBottom: kids.length ? 6 : 0 } },
           React.createElement('span', { style: { color: C.text2, fontWeight: 600 } }, '↳ 史诗：'),
           React.createElement('span', { onClick: function () { if (parentT) jump(task.parentId) }, title: parentT ? parentT.title + ' (' + task.parentId + ')' : task.parentId, style: { color: parentT ? C.brand : C.text2, cursor: parentT ? 'pointer' : 'default', fontWeight: 600 } }, parentT && parentT.title ? parentT.title : shortId(task.parentId))) : null,
         kids.length > 0 ? React.createElement('div', null,
-          React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '📦 子任务 · ' + resolvedN + '/' + kids.length + ' 已完成'),
+          React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '📦 子任务 · ' + settledN + '/' + kids.length + ' 已了结'),
           kids.map(function (x) {
-            return React.createElement('div', { key: x.id, onClick: function () { jump(x.id) }, title: (statusLabels[x.status] || x.status) + ' · ' + x.id, style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, fontSize: 10, cursor: 'pointer' } },
+            var arch = x.status === 'archived'
+            return React.createElement('div', { key: x.id, onClick: function () { jump(x.id) }, title: (statusLabels[x.status] || x.status) + ' · ' + x.id + (arch ? ' · 已归档留档（点击查看）' : ''), style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, fontSize: 10, cursor: 'pointer', opacity: arch ? 0.55 : 1 } },
               React.createElement('span', { style: { width: 7, height: 7, borderRadius: '50%', background: statusColors[x.status] || C.text2, flexShrink: 0 } }),
-              React.createElement('span', { style: { color: C.brand, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 } }, x.title || x.id),
-              React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0 } }, statusLabels[x.status] || x.status))
+              React.createElement('span', { style: { color: arch ? C.text2 : C.brand, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 } }, x.title || x.id),
+              arch
+                ? React.createElement('span', { style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: C.nested, color: C.text2, border: '1px solid ' + C.border, flexShrink: 0 } }, '已归档')
+                : React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0 } }, statusLabels[x.status] || x.status))
           })) : null)
     }
 
@@ -1304,7 +1317,10 @@ function apply(ctx) {
     // usageSummary 由 host 从各任务 t.usage 现算（t.usage 来自 Worker/Verifier 会话 v4 日志的
     // assistant/message.usage 聚合）。这里只做展示、不做计费断言；日志读不到/还没有 run 结算时
     // usageSummary.total 为 0，一律显示「暂无数据」。
-    // 日账（usageSummary.byDay：{'YYYY-MM-DD': tokens}）用于「今日」大数字与「近 7 天」条形；
+    // 日账（usageSummary.byDay：{'YYYY-MM-DD': {t,e}}）用于「今日」大数字与「近 7 天」条形。
+    // 双指标口径：t = 总量（含缓存读）、e = 有效消耗（输入+输出+缓存写，不含缓存读）。
+    // e === null 表示该日只有老形态 number 日账 / 存量兜底（没有逐 run 拆分，有效值不可知）——
+    // 展示时退化为 t 并在文案/title 上标 ~ 近似，绝不把总量冒充有效值。
     // dayKey 口径与 host 记账完全一致——本地 getters 拼，绝不用 toISOString()（UTC 会让
     // 晚上 8 点后的消耗落到次日，今日消耗直接错位）。
     function localDayKey(d) {
@@ -1345,32 +1361,46 @@ function apply(ctx) {
       var maxM = models.length ? (models[0].total || 1) : 1
       var top = u.topTasks || []
       var maxT = top.length ? (top[0].total || 1) : 1
-      // 日账：今日数字取本地日 key，没有日账（byDay 缺字段/老 host）时退化为 0，不炸也不误报
+      // 日账：今日数字取本地日 key，没有日账（byDay 缺字段/老 host）时退化为 0，不炸也不误报。
+      // 读侧兼容两种单元形态：老 number（只有总量，有效值不可知）→ { t: n, e: null }。
       var byDay = (u.byDay && typeof u.byDay === 'object') ? u.byDay : {}
+      function dayOf(v) {
+        if (v && typeof v === 'object') return { t: Number(v.t) || 0, e: (v.e === 0 || v.e) ? Number(v.e) || 0 : null }
+        return { t: Number(v) || 0, e: null }
+      }
       var todayKey = localDayKey()
-      var todayTok = byDay[todayKey] || 0
+      var todayCell = dayOf(byDay[todayKey])
+      // 有效消耗缺失（老日账/存量兜底）→ 大数字退化为总量并打 approx 标 ~，口径不伪造
+      var todayApprox = todayCell.e === null
+      var todayEff = todayApprox ? todayCell.t : todayCell.e
       var days = lastNDays(7)
       var maxDay = 1
       var hasDayData = false
-      for (var di = 0; di < days.length; di++) { var dv = byDay[days[di]] || 0; if (dv > maxDay) maxDay = dv; if (dv > 0) hasDayData = true }
+      for (var di = 0; di < days.length; di++) { var dc = dayOf(byDay[days[di]]); var dv = (dc.e === null ? dc.t : dc.e); if (dv > maxDay) maxDay = dv; if (dc.t > 0 || dc.e > 0) hasDayData = true }
       function mini(label, value) { return React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, label + ' ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(value))) }
+      // 累计三分量：有效（真实成本）+ 缓存读（占了 total 的大头，必须单列才看得出虚高来源）+ 合计
+      var effTotal = (typeof u.effective === 'number') ? u.effective : ((u.input || 0) + (u.output || 0) + (u.cacheWrite || 0))
       return React.createElement('div', { style: box },
         head,
         React.createElement('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginBottom: 8 } },
-          React.createElement('span', { style: { fontSize: 20, fontWeight: 700, color: C.brand }, title: '今日消耗（本地日 ' + todayKey + '；一次 run 的消耗整笔记在结算日）' }, fmtTokens(todayTok)),
-          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, 'tokens（今日）'),
-          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '累计 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(u.total)), '（本看板）'),
-          mini('输入', u.input), mini('输出', u.output), mini('缓存读', u.cacheRead), u.cacheWrite ? mini('缓存写', u.cacheWrite) : null),
+          React.createElement('span', { style: { fontSize: 20, fontWeight: 700, color: C.brand }, title: '今日有效消耗（本地日 ' + todayKey + '）= 输入+输出+缓存写，不含缓存读；一次 run 的消耗整笔记在结算日' + (todayApprox ? '。本条日账来自老形态/存量兜底数据，有效值不可知，此处以总量近似（标 ~）' : '') }, (todayApprox ? '~' : '') + fmtTokens(todayEff)),
+          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, 'tokens（今日有效' + (todayApprox ? ' · 近似' : '') + '）'),
+          todayCell.t > todayEff ? React.createElement('span', { style: { fontSize: 10, color: C.text2 }, title: '今日总量（含缓存读）——与有效消耗的差额就是缓存读' }, '含缓存读共 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(todayCell.t))) : null,
+          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '累计（本看板） 有效 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(effTotal)), ' · 缓存读 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(u.cacheRead)), ' · 合计 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(u.total))),
+          mini('输入', u.input), mini('输出', u.output), u.cacheWrite ? mini('缓存写', u.cacheWrite) : null),
         // 近 7 天迷你条形：高按区间 max 归一（今天高亮 brand，其余浅底 + 边框），
+        // 柱高一律取**有效消耗**；e 不可知的日退化为总量（title 标 ~ 近似）。
         // 7 天全为 0 时整块不渲染（零残留，不占版面）
         hasDayData ? React.createElement('div', { style: { marginBottom: 8 } },
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '近 7 天'),
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '近 7 天（有效消耗）'),
           React.createElement('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 4 } },
             days.map(function (k) {
-              var v = byDay[k] || 0
+              var c = dayOf(byDay[k])
+              var approx = c.e === null
+              var v = approx ? c.t : c.e
               var isToday = k === todayKey
               var h = v > 0 ? Math.max(3, Math.round(v / maxDay * 32)) : 3
-              return React.createElement('div', { key: k, title: k.slice(5) + '：' + String(v) + ' tok', style: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 } },
+              return React.createElement('div', { key: k, title: k.slice(5) + '：有效 ' + String(v) + (approx ? '（近似：老日账只有总量）' : '') + ' tok' + (c.t > v ? ' / 含缓存读共 ' + String(c.t) + ' tok' : ''), style: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 } },
                 React.createElement('div', { style: { width: '100%', height: h, background: isToday ? C.brand : C.nested, border: '1px solid ' + (isToday ? C.brand : C.border), borderRadius: 2 } }),
                 React.createElement('span', { style: { fontSize: 8, color: isToday ? C.brand : C.text2, whiteSpace: 'nowrap' } }, k.slice(5)))
             }))) : null,
@@ -1384,8 +1414,10 @@ function apply(ctx) {
             React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '任务消耗 Top 8'),
             top.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无数据') : top.map(function (x) {
               var t = getTask(x.id)
-              return React.createElement(UsageRow, { key: x.id, label: x.title || x.id, value: x.total, max: maxT, color: C.ok, labelColor: t ? C.brand : C.text2, title: x.title + '（' + String(x.total) + ' tokens / ' + (x.runs || 0) + ' 次 run）' + (t ? '——点击查看详情' : ''), onClick: t ? function () { state.detailId = x.id; notify() } : undefined })
-            }))))
+              return React.createElement(UsageRow, { key: x.id, label: x.title || x.id, value: x.total, max: maxT, color: C.ok, labelColor: t ? C.brand : C.text2, title: x.title + '（合计 ' + String(x.total) + ' tokens · 有效 ' + String((typeof x.effective === 'number') ? x.effective : (x.total - (x.cacheRead || 0))) + ' / 缓存读 ' + String(x.cacheRead || 0) + ' · ' + (x.runs || 0) + ' 次 run）' + (t ? '——点击查看详情' : ''), onClick: t ? function () { state.detailId = x.id; notify() } : undefined })
+            }))),
+        // 口径边界：本区只统计看板派发的 Worker/Verifier run，主窗口对话自身不越界纳入
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：仅看板派发的 Worker/Verifier run 消耗，不含主窗口对话；大数字与「近 7 天」为有效消耗（输入+输出+缓存写，不含缓存读），缓存读单列'))
     }
 
     // ===== 架构健康提示区（架构自省 L1 · 数据源：state.healthHints）=====
