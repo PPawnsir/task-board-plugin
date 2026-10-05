@@ -1,6 +1,6 @@
 // touches 文件排他 + 裁决 hold/freeze 专项 E2E（v1.4.0 新功能）
-// 场景 T：重叠 touches 的任务 B 在 A in-progress 期间被拦截（waitingForTouches 标注），
-//         A 进 verifying（停笔不持锁）后 B 自动放行；最终双双 resolved。
+// 场景 T：重叠 touches 的任务 B 在 A in-progress 期间被拦截（waitingForTouches 标注）；
+//         v1.7.2 锁延长语义：A resolved 未归档仍持锁（B 继续被拦），归档 A 才真放行；最终双双 resolved。
 // 场景 F：手动派发遇 touches 冲突返回 touches-conflict；force:true 越权强派。
 // 场景 H：Worker 上报歧义 → resolve-escalation action=hold 冻结（不自动重派）→
 //         观察 ≥40s 不被派发 → unfreeze-task 解冻 → 自动派发至 resolved。
@@ -78,11 +78,16 @@ const stamp = Date.now().toString(36);
   ok(aHeld, 'A 已派发（持锁）');
   ok(bBlockedSeen, 'B 被 touches 拦截（A 持锁期间 waitingForTouches 含 A）');
   ok(aHeld && bBlockedSeen && bBlockedSeen.status === 'pending' && aHeld.status === 'in-progress', '拦截瞬间语义正确（A in-progress / B pending）');
-  // A 进 verifying/resolved 后 B 放行
-  const bFreed = await waitFor(B, (t) => t.status === 'in-progress' || t.status === 'resolved' || t.status === 'verifying', 300000, 'B 放行');
-  const aState = await getTask(A);
-  ok(bFreed, 'A 停笔（' + (aState && aState.status) + '）后 B 放行（' + (bFreed && bFreed.status) + '）');
+  // v1.7.2 锁延长语义：A resolved 未归档仍持锁——B 继续被拦；归档 A 才真放行
   const aDone = await waitFor(A, (t) => t.status === 'resolved', 300000);
+  ok(aDone, 'A 完成（resolved，未归档仍持锁）');
+  await sleep(40000); // ≥2 次派发心跳：resolved 卡继续持锁，B 不得放行
+  const bStill = await getTask(B);
+  ok(bStill && bStill.status === 'pending' && Array.isArray(bStill.waitingForTouches) && bStill.waitingForTouches.includes(A), 'A resolved 未归档：B 仍被拦（锁持到归档）');
+  const arch = await rpc('archive-task', { taskId: A });
+  ok(arch && arch.ok === true, '归档 A（唯一真释放点）');
+  const bFreed = await waitFor(B, (t) => t.status === 'in-progress' || t.status === 'resolved' || t.status === 'verifying', 300000, 'B 放行');
+  ok(bFreed, 'A 归档后 B 放行（' + (bFreed && bFreed.status) + '）');
   const bDone = await waitFor(B, (t) => t.status === 'resolved', 300000);
   ok(aDone && bDone, 'A/B 最终双双 resolved');
 
