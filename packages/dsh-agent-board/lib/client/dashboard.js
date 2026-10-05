@@ -26,20 +26,38 @@
         if (!(execMs >= 0)) return // 时间戳异常（NaN/负值）跳过
         var cx = t.context || {}
         var hasRes = (Array.isArray(cx.files) && cx.files.length > 0) || (typeof cx.notes === 'string' && cx.notes.trim().length > 0)
-        var tok = (t.usage && typeof t.usage.total === 'number' && t.usage.total > 0) ? t.usage.total : null // 无 usage 记录的卡不拉低 token 均值（只计有结算样本）
-        ;(hasRes ? roiYes : roiNo).push({ execMs: execMs, tok: tok })
+        // token 口径与「Token 消耗区」一致化（task-muupnnq5）：取**有效消耗**（输入+输出+缓存写，不含缓存读），
+        //   不再拿含缓存读的 total 冒充——本板实测缓存读占总量 ~94%，用 total 会让 ROI 行的 token 均值虚高十几倍，
+        //   与 Token 区大数字口径互相打架。分量字段缺失的老/存量卡兜底退化为 total 并打 tokFallback 标记（title 标注），
+        //   绝不把总量伪装成有效值；无任何结算记录的卡 tok=null，不参与均值（不拉低样本）。
+        var tk = roiTokenOf(t.usage)
+        ;(hasRes ? roiYes : roiNo).push({ execMs: execMs, tok: tk.tok, tokFallback: tk.fallback })
       })
       var roi = null
       if (roiYes.length > 0 && roiNo.length > 0 && roiYes.length + roiNo.length >= 4) {
         var roiAgg = function (arr) {
           var execMs = Math.round(arr.reduce(function (a, b) { return a + b.execMs }, 0) / arr.length)
-          var toks = []; arr.forEach(function (x) { if (x.tok !== null) toks.push(x.tok) })
-          return { n: arr.length, execMs: execMs, tok: toks.length ? Math.round(toks.reduce(function (a, b) { return a + b }, 0) / toks.length) : null }
+          var toks = [], fb = 0
+          arr.forEach(function (x) { if (x.tok !== null) { toks.push(x.tok); if (x.tokFallback) fb++ } })
+          return { n: arr.length, execMs: execMs, tok: toks.length ? Math.round(toks.reduce(function (a, b) { return a + b }, 0) / toks.length) : null, tokN: toks.length, tokFallbackN: fb }
         }
         roi = { yes: roiAgg(roiYes), no: roiAgg(roiNo) }
       }
       // 耗时口径三分离（task-mutdnitw）：avgQueue=平均排队（创建→被领取）、avgExec=平均执行（被领取→完成），均只统计领取过的卡；avgVerify 口径不动（完成→验收）
       return { total: total, byStatus: byStatus, byPriority: byPriority, byAgent: byAgent, avgQueue: fmtMs(avgMs(queueTimes)), avgExec: fmtMs(avgMs(execTimes)), avgVerify: fmtMs(avgMs(verifyTimes)), todayDone: todayDone, dailyDone: dailyDone, recentActivity: recentActivity, roi: roi }
+    }
+
+    // 单卡 token 口径（task-muupnnq5）：ROI 行与「Token 消耗区」口径同源，避免同一张卡两处两个数。
+    //   有分量（input/output/cacheWrite 任一 >0）→ 有效消耗（不含缓存读）；只有 total 的老/存量卡 → 兜底 total 并标 fallback；
+    //   两者皆无 → tok=null（无结算样本，跳过而不是记 0，避免拉低均值）。
+    //   注：客户端 bundle 只注入 React（无模块系统），故此处内联，host 侧同款判定在 lib/usage.mjs taskEffectiveTokens。
+    function roiTokenOf(u) {
+      if (!u) return { tok: null, fallback: false }
+      function pos(v) { var n = Number(v); return isFinite(n) && n > 0 ? n : 0 }
+      var inp = pos(u.input), outp = pos(u.output), cw = pos(u.cacheWrite), tot = pos(u.total)
+      if (inp > 0 || outp > 0 || cw > 0) return { tok: inp + outp + cw, fallback: false }
+      if (tot > 0) return { tok: tot, fallback: true }
+      return { tok: null, fallback: false }
     }
 
     function TrendChart(props) {
@@ -65,17 +83,23 @@
     // 调研 ROI 对比行（task-mutnjesa）：让数据替道理说话——「有调研 vs 无调研」分组账单直接摆给主窗口看，
     //   比任何引导文案都管用。数据源 computeStats 的 roi（null = 任一组为空或总样本 <4，整块不渲染）；
     //   无调研组明显更慢（平均执行 > 有调研组 1.2 倍，阈值写清避免把随机波动误读成结论）时其数字用 warn 色。
+    //   token 口径（task-muupnnq5）：**有效消耗**（输入+输出+缓存写，不含缓存读），与「Token 消耗区」大数字同源；
+    //   组内只要有一张卡走了 total 兜底（无分量字段的老/存量卡），该数字后加 '~' 并在 title 里写明张数。
     function ResearchRoiRow(props) {
       var roi = props.roi
       if (!roi) return null
       function fmtM(ms) { var m = Math.round(ms / 60000); if (m < 60) return m + 'm'; return (m / 60).toFixed(1) + 'h' }
       var noSlower = roi.no.execMs > roi.yes.execMs * 1.2
       function grp(icon, label, g, warnNums) {
-        return React.createElement('span', null,
+        var approx = (g.tokFallbackN || 0) > 0
+        var tip = g.tok === null ? label + '：无带 usage 结算记录的卡，token 均值不可计'
+          : g.n + ' 卡中 ' + g.tokN + ' 张有 usage 结算记录；均值口径 = 有效消耗（输入+输出+缓存写，不含缓存读）'
+            + (approx ? '；其中 ' + g.tokFallbackN + ' 张无分量字段（老/存量结算），退化为含缓存读的合计值参与均值（故标 ~）' : '')
+        return React.createElement('span', { title: tip },
           icon + ' ' + label + ' ',
-          React.createElement('span', { style: { fontWeight: 600, color: warnNums ? C.warn : C.text } }, g.n + ' 卡 平均 ' + fmtM(g.execMs) + '/约 ' + (g.tok === null ? '-' : fmtTokens(g.tok)) + ' tok'))
+          React.createElement('span', { style: { fontWeight: 600, color: warnNums ? C.warn : C.text } }, g.n + ' 卡 平均 ' + fmtM(g.execMs) + '/约 ' + (g.tok === null ? '-' : (approx ? '~' : '') + fmtTokens(g.tok)) + ' tok'))
       }
-      return React.createElement('div', { style: { padding: '6px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12, fontSize: 10, color: C.text2, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }, title: 'resolved/archived 且领取过的卡按有无调研注入分组现算（执行 = 被领取→完成；token 均值只计有 usage 结算记录的卡）' },
+      return React.createElement('div', { style: { padding: '6px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12, fontSize: 10, color: C.text2, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }, title: 'resolved/archived 且领取过的卡按有无调研注入分组现算（执行 = 被领取→完成；token 均值只计有 usage 结算记录的卡，口径 = 有效消耗：输入+输出+缓存写，不含缓存读；老卡无分量字段时退化为合计并标 ~）' },
         React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('scale', 11), '调研 ROI'),
         grp('📎', '有调研', roi.yes, false),
         React.createElement('span', null, '·'),

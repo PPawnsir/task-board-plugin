@@ -232,7 +232,7 @@ function apply(ctx) {
 
     var COLUMNS = ['draft', 'pending', 'in-progress', 'verifying', 'resolved', 'blocked']
     var reqEpoch = 0 // 会话切换纪元：切会话时自增，旧会话在途响应按纪元丢弃
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, lessonPushed: {}, isRoot: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
 
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
@@ -270,6 +270,32 @@ function apply(ctx) {
     }
     function clearReadErr() { state.tasksErr = '' } // 仅 fetchTasks 成功路径调用（3s 轮询兜底，任何错误条都能随之消失）
     function readErrText(e) { return String((e && e.message) || e || '网络异常') }
+
+    // ===== isRoot 蝶变防抖（反馈 n-muuerxv9ijxs / task-muupr8ld）=====
+    // 为什么防抖：host rpc.mjs L97 的 isRoot 是每次 get-tasks 现算的
+    // （agents.roots() 是否含本会话 id）。生成开始/结束瞬间 agents 树重建，roots() 存在一个
+    // 瞬态窗口返回不含本 sid → 单次 isRoot=false 就触发 L303 强收抽屉（state.open=false），
+    // 用户表现为「看板在生成状态切换时突然消失，每次都要重新打开」；按钮/面板同病闪烁。
+    // 防抖口径：已确认过 true 的会话（everTrue）需连续 IS_ROOT_FALSE_LIMIT 次 false
+    // （host 3s 心跳 ≈ 9s）才把 isRootStable 翻成 false——覆盖瞬态窗口，真正降级仍会收敛。
+    // 为什么子代理会话不防抖：everTrue=false 的会话（新打开的子代理）立即 isRootStable=false，
+    // 保护语义不削弱——子代理会话本就不该出现看板入口/抽屉，即时收起没有代价。
+    // 消费口径：强收（本函数）/按钮（BoardButton）/面板（TopPanel）/活动心跳省流（fetchActivity）
+    // 四处一律读 isRootStable，不读单次轮询的 state.isRoot 原始值。
+    var IS_ROOT_FALSE_LIMIT = 3
+    function applyIsRoot(rawIsRoot) {
+      state.isRoot = rawIsRoot
+      if (rawIsRoot) {
+        state.isRootEverTrue = true // 曾确认 true：此后 false 需连续累计（会话生命周期内粘滞，切换会话时重置）
+        state.isRootFalseN = 0
+        state.isRootStable = true
+      } else if (!state.isRootEverTrue) {
+        state.isRootStable = false // 从未 true（新打开的子代理会话）：即时收起，不防抖
+      } else {
+        state.isRootFalseN++
+        if (state.isRootFalseN >= IS_ROOT_FALSE_LIMIT) state.isRootStable = false // 连续 3 次 false：真降级（子代理树已重建不含本 sid），收敛
+      }
+    }
 
     function fetchTasks() {
       if (!state.sessionId) return
@@ -312,8 +338,8 @@ function apply(ctx) {
         state.childStats = (d && d.childStats) || {}
         // 学习飞轮 v1 能力检测：老 host 不返回该字段 → 视为开启（默认开）；只有显式 false 才关。
         state.feedbackEnabled = !(d && d.feedbackEnabled === false)
-        state.isRoot = !d || d.isRoot !== false
-        if (state.isRoot === false && state.open) { state.open = false; state.detailId = null } // 子代理会话：强制收起看板
+        applyIsRoot(!d || d.isRoot !== false) // 原始值只喂给防抖器，消费点一律读 isRootStable
+        if (!state.isRootStable && state.open) { state.open = false; state.detailId = null } // 子代理会话（含连续 3 次 false 的真降级）：强制收起看板
         if (d && d.dispatchInfo && d.dispatchInfoAt && Date.now() - new Date(d.dispatchInfoAt).getTime() < 120000) { state.dispatchInfo = d.dispatchInfo } else { state.dispatchInfo = '' } // 瞬时通知 2min 内有效，过期强制清空（服务端写后不清曾致残留数天）
         // escalation 一等公民：出现新的待裁决任务 → 面板自动弹开直达该任务详情
         // （escalation.question 在 tasksHash 序列化口径内：新歧义必然改变 hash → 必然走变化分支，不会漏弹）
@@ -331,7 +357,7 @@ function apply(ctx) {
 
     // 活动心跳：对进行中/验收中的任务轮询子代理最近动作（卡片与详情展示"现在跑到哪了"）
     function fetchActivity() {
-      if (!state.sessionId || !state.isRoot || !state.open) return // 面板关闭时不轮询活动（省同步 I/O）
+      if (!state.sessionId || !state.isRootStable || !state.open) return // 面板关闭时不轮询活动（省同步 I/O）；isRootStable 口径见 isRoot 蝶变防抖
       var running = state.tasks.filter(function (t) { return t.status === 'in-progress' || t.status === 'verifying' })
       if (!running.length) { if (Object.keys(state.activity).length) { state.activity = {}; notify() } return }
       var pending = running.length
@@ -482,9 +508,9 @@ function apply(ctx) {
     function BoardButton(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
       var _a = useState(0), pendingCount = _a[0], setPendingCount = _a[1]; var _b = useState(false), isOpen = _b[0], setIsOpen = _b[1]; var _c = useState(0), escCount = _c[0], setEscCount = _c[1]; var _d2 = useState(true), isRoot = _d2[0], setIsRoot = _d2[1]
-      useEffect(function () { if (props && props.sessionId) { var sid = String(props.sessionId); if (state.sessionId !== sid) { state.sessionId = sid; reqEpoch++; state.tasks = []; state.tasksHash = ''; state.children = []; state.activity = {}; state.archived = []; state.detailId = null; state.childStats = {}; state.tasksErr = ''; notify(); fetchTasks(); fetchChildren() } } }, [props && props.sessionId])
-      useEffect(function () { function update() { var n = 0, e = 0; for (var i = 0; i < state.tasks.length; i++) { if (state.tasks[i].status === 'pending') n++; if (state.tasks[i].escalation) e++ }; setPendingCount(n); setEscCount(e); setIsOpen(state.open); setIsRoot(state.isRoot) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
-      if (!isRoot) return null // 子代理会话不显示看板入口
+      useEffect(function () { if (props && props.sessionId) { var sid = String(props.sessionId); if (state.sessionId !== sid) { state.sessionId = sid; reqEpoch++; state.tasks = []; state.tasksHash = ''; state.children = []; state.activity = {}; state.archived = []; state.detailId = null; state.childStats = {}; state.tasksErr = ''; state.isRootEverTrue = false; state.isRootFalseN = 0; state.isRootStable = false; notify(); fetchTasks(); fetchChildren() } } }, [props && props.sessionId]) // 会话切换重置 isRoot 防抖态（everTrue/计数/stable 都按会话生命周期——旧会话的"曾确认 true"不得漂到新会话）；reset 后首轮 get-tasks 判定前按"未确认 root"保守隐藏，避免切进子代理会话时入口闪现
+      useEffect(function () { function update() { var n = 0, e = 0; for (var i = 0; i < state.tasks.length; i++) { if (state.tasks[i].status === 'pending') n++; if (state.tasks[i].escalation) e++ }; setPendingCount(n); setEscCount(e); setIsOpen(state.open); setIsRoot(state.isRootStable) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
+      if (!isRoot) return null // 子代理会话不显示看板入口（读 isRootStable：瞬态 false 不收，见 isRoot 蝶变防抖）
       return React.createElement('button', { onClick: function () { state.open = !state.open; notify() }, title: '智能看板' + (pendingCount > 0 ? '（' + pendingCount + ' 待办）' : '') + (escCount > 0 ? '（' + escCount + ' 待裁决）' : ''), style: { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', border: '1px solid ' + (escCount > 0 ? C.err : C.border), borderRadius: 6, background: isOpen ? C.nested : 'transparent', color: C.text, cursor: 'pointer', fontSize: 12 } }, React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center' } }, ic('clipboard-list', 14)), React.createElement('span', null, '智能看板'), escCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.err, color: C_INV, fontSize: 10, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 1, animation: 'tskb-pulse 1s ease-in-out infinite' }, title: escCount + ' 个任务待裁决' }, ic('alert-triangle', 10), escCount) : null, pendingCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.brand, color: C_INV, fontSize: 10, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' } }, String(pendingCount)) : null)
     }
 
@@ -502,7 +528,7 @@ function apply(ctx) {
       var _fbo = useState(state.feedbackEnabled), fbEnabled = _fbo[0], setFbEnabled = _fbo[1]
       useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!open) return null
-      if (state.isRoot === false) return null // 子代理会话不渲染看板面板
+      if (!state.isRootStable) return null // 子代理会话不渲染看板面板（读 isRootStable：瞬态 false 不闪，见 isRoot 蝶变防抖）
       var active = tasks.filter(function (t) { return t.status !== 'archived' }); var archived = tasks.filter(function (t) { return t.status === 'archived' })
       var hasFilter = state.filterQ.trim() || state.filterPrio.length > 0 || state.filterTag
       if (hasFilter) { active = active.filter(passFilter); archived = archived.filter(passFilter) }
@@ -1137,20 +1163,38 @@ function apply(ctx) {
         if (!(execMs >= 0)) return // 时间戳异常（NaN/负值）跳过
         var cx = t.context || {}
         var hasRes = (Array.isArray(cx.files) && cx.files.length > 0) || (typeof cx.notes === 'string' && cx.notes.trim().length > 0)
-        var tok = (t.usage && typeof t.usage.total === 'number' && t.usage.total > 0) ? t.usage.total : null // 无 usage 记录的卡不拉低 token 均值（只计有结算样本）
-        ;(hasRes ? roiYes : roiNo).push({ execMs: execMs, tok: tok })
+        // token 口径与「Token 消耗区」一致化（task-muupnnq5）：取**有效消耗**（输入+输出+缓存写，不含缓存读），
+        //   不再拿含缓存读的 total 冒充——本板实测缓存读占总量 ~94%，用 total 会让 ROI 行的 token 均值虚高十几倍，
+        //   与 Token 区大数字口径互相打架。分量字段缺失的老/存量卡兜底退化为 total 并打 tokFallback 标记（title 标注），
+        //   绝不把总量伪装成有效值；无任何结算记录的卡 tok=null，不参与均值（不拉低样本）。
+        var tk = roiTokenOf(t.usage)
+        ;(hasRes ? roiYes : roiNo).push({ execMs: execMs, tok: tk.tok, tokFallback: tk.fallback })
       })
       var roi = null
       if (roiYes.length > 0 && roiNo.length > 0 && roiYes.length + roiNo.length >= 4) {
         var roiAgg = function (arr) {
           var execMs = Math.round(arr.reduce(function (a, b) { return a + b.execMs }, 0) / arr.length)
-          var toks = []; arr.forEach(function (x) { if (x.tok !== null) toks.push(x.tok) })
-          return { n: arr.length, execMs: execMs, tok: toks.length ? Math.round(toks.reduce(function (a, b) { return a + b }, 0) / toks.length) : null }
+          var toks = [], fb = 0
+          arr.forEach(function (x) { if (x.tok !== null) { toks.push(x.tok); if (x.tokFallback) fb++ } })
+          return { n: arr.length, execMs: execMs, tok: toks.length ? Math.round(toks.reduce(function (a, b) { return a + b }, 0) / toks.length) : null, tokN: toks.length, tokFallbackN: fb }
         }
         roi = { yes: roiAgg(roiYes), no: roiAgg(roiNo) }
       }
       // 耗时口径三分离（task-mutdnitw）：avgQueue=平均排队（创建→被领取）、avgExec=平均执行（被领取→完成），均只统计领取过的卡；avgVerify 口径不动（完成→验收）
       return { total: total, byStatus: byStatus, byPriority: byPriority, byAgent: byAgent, avgQueue: fmtMs(avgMs(queueTimes)), avgExec: fmtMs(avgMs(execTimes)), avgVerify: fmtMs(avgMs(verifyTimes)), todayDone: todayDone, dailyDone: dailyDone, recentActivity: recentActivity, roi: roi }
+    }
+
+    // 单卡 token 口径（task-muupnnq5）：ROI 行与「Token 消耗区」口径同源，避免同一张卡两处两个数。
+    //   有分量（input/output/cacheWrite 任一 >0）→ 有效消耗（不含缓存读）；只有 total 的老/存量卡 → 兜底 total 并标 fallback；
+    //   两者皆无 → tok=null（无结算样本，跳过而不是记 0，避免拉低均值）。
+    //   注：客户端 bundle 只注入 React（无模块系统），故此处内联，host 侧同款判定在 lib/usage.mjs taskEffectiveTokens。
+    function roiTokenOf(u) {
+      if (!u) return { tok: null, fallback: false }
+      function pos(v) { var n = Number(v); return isFinite(n) && n > 0 ? n : 0 }
+      var inp = pos(u.input), outp = pos(u.output), cw = pos(u.cacheWrite), tot = pos(u.total)
+      if (inp > 0 || outp > 0 || cw > 0) return { tok: inp + outp + cw, fallback: false }
+      if (tot > 0) return { tok: tot, fallback: true }
+      return { tok: null, fallback: false }
     }
 
     function TrendChart(props) {
@@ -1176,17 +1220,23 @@ function apply(ctx) {
     // 调研 ROI 对比行（task-mutnjesa）：让数据替道理说话——「有调研 vs 无调研」分组账单直接摆给主窗口看，
     //   比任何引导文案都管用。数据源 computeStats 的 roi（null = 任一组为空或总样本 <4，整块不渲染）；
     //   无调研组明显更慢（平均执行 > 有调研组 1.2 倍，阈值写清避免把随机波动误读成结论）时其数字用 warn 色。
+    //   token 口径（task-muupnnq5）：**有效消耗**（输入+输出+缓存写，不含缓存读），与「Token 消耗区」大数字同源；
+    //   组内只要有一张卡走了 total 兜底（无分量字段的老/存量卡），该数字后加 '~' 并在 title 里写明张数。
     function ResearchRoiRow(props) {
       var roi = props.roi
       if (!roi) return null
       function fmtM(ms) { var m = Math.round(ms / 60000); if (m < 60) return m + 'm'; return (m / 60).toFixed(1) + 'h' }
       var noSlower = roi.no.execMs > roi.yes.execMs * 1.2
       function grp(icon, label, g, warnNums) {
-        return React.createElement('span', null,
+        var approx = (g.tokFallbackN || 0) > 0
+        var tip = g.tok === null ? label + '：无带 usage 结算记录的卡，token 均值不可计'
+          : g.n + ' 卡中 ' + g.tokN + ' 张有 usage 结算记录；均值口径 = 有效消耗（输入+输出+缓存写，不含缓存读）'
+            + (approx ? '；其中 ' + g.tokFallbackN + ' 张无分量字段（老/存量结算），退化为含缓存读的合计值参与均值（故标 ~）' : '')
+        return React.createElement('span', { title: tip },
           icon + ' ' + label + ' ',
-          React.createElement('span', { style: { fontWeight: 600, color: warnNums ? C.warn : C.text } }, g.n + ' 卡 平均 ' + fmtM(g.execMs) + '/约 ' + (g.tok === null ? '-' : fmtTokens(g.tok)) + ' tok'))
+          React.createElement('span', { style: { fontWeight: 600, color: warnNums ? C.warn : C.text } }, g.n + ' 卡 平均 ' + fmtM(g.execMs) + '/约 ' + (g.tok === null ? '-' : (approx ? '~' : '') + fmtTokens(g.tok)) + ' tok'))
       }
-      return React.createElement('div', { style: { padding: '6px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12, fontSize: 10, color: C.text2, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }, title: 'resolved/archived 且领取过的卡按有无调研注入分组现算（执行 = 被领取→完成；token 均值只计有 usage 结算记录的卡）' },
+      return React.createElement('div', { style: { padding: '6px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12, fontSize: 10, color: C.text2, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }, title: 'resolved/archived 且领取过的卡按有无调研注入分组现算（执行 = 被领取→完成；token 均值只计有 usage 结算记录的卡，口径 = 有效消耗：输入+输出+缓存写，不含缓存读；老卡无分量字段时退化为合计并标 ~）' },
         React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('scale', 11), '调研 ROI'),
         grp('📎', '有调研', roi.yes, false),
         React.createElement('span', null, '·'),

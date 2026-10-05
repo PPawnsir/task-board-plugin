@@ -11,7 +11,7 @@ import * as core from '../lib/core.mjs'
 // 粒度治理（软闸门）住在 lib/policy.mjs（策略层，纯函数）、usage 聚合住在 lib/usage.mjs，
 // 均由 index.mjs 薄壳 re-export（对外契约不变），这里仍从 index.mjs 导入直接断言
 import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE } from '../index.mjs'
-import { aggregateUsageSummary, readRunUsage, findRunLog, effectiveTokens } from '../index.mjs'
+import { aggregateUsageSummary, readRunUsage, findRunLog, effectiveTokens, taskEffectiveTokens } from '../index.mjs'
 import { createRpc } from '../lib/rpc.mjs'
 // no-root 刷屏根治（task-muuf0o7a）专项：会话层幻影板防线 + 派发层 root 闸门直调断言
 import { createSession, isFullSessionId } from '../lib/session.mjs'
@@ -1294,6 +1294,84 @@ test('Token 日账接线：dispatch 记 byDay 双指标（本地日）+ 仪表�
   assert.match(cli, /'（近似：老日账只有总量）'/)                                    // e 不可知 → 标 ~ 近似，不冒充有效值
 })
 
+// ===== 调研 ROI 行 token 有效口径（task-muupnnq5）=====
+// 客户端 bundle 无模块系统（只注入 React），故 ROI 判定在 dashboard.js 内联为 roiTokenOf；
+// 这里把该函数原文切出来执行，直接断言真行为而不是断言注释。
+function dashboardFnOf(name) {
+  const src = readFileSync(new URL('../lib/client/dashboard.js', import.meta.url), 'utf8')
+  const start = src.indexOf('function ' + name + '(')
+  assert.ok(start >= 0, 'lib/client/dashboard.js 应定义 ' + name)
+  const end = src.indexOf('\n    function ', start + 1)
+  return src.slice(start, end > start ? end : undefined)
+}
+function evalDashboardFn(name, deps) {
+  const body = dashboardFnOf(name) + '\n' + (deps || []).map(dashboardFnOf).join('\n')
+  return new Function(body + '\nreturn ' + name)()
+}
+// 造一张「已领取→已完成」的 ROI 候选卡（usage 由调用方给）
+function mkRoiTask(i, hasRes, usage) {
+  const base = Date.parse('2026-01-01T00:00:00Z')
+  return mkTask({
+    id: 'roi' + i,
+    status: 'resolved',
+    createdAt: new Date(base + i * 60000).toISOString(),
+    claimedAt: new Date(base + i * 60000 + 60000).toISOString(),
+    resolvedAt: new Date(base + i * 60000 + 60000 + 3600000).toISOString(), // 执行恒为 1h
+    context: hasRes ? { files: ['docs/a.md'] } : {},
+    usage: usage || null,
+  })
+}
+
+test('ROI token 口径：有分量字段取有效消耗（不含缓存读），与 total 明确不同（源码级实执）', () => {
+  const roiTokenOf = evalDashboardFn('roiTokenOf')
+  // 有效 = 输入 1000 + 输出 500 + 缓存写 200 = 1700；含缓存读的 total 竟是 91700（缓存读撑高 ~54 倍）
+  assert.deepEqual(roiTokenOf({ input: 1000, output: 500, cacheWrite: 200, cacheRead: 90000, total: 91700 }), { tok: 1700, fallback: false })
+  // 分量只有一项也算：缓存写单独存在时有效值就是它（不等于含缓存读的 total）
+  assert.deepEqual(roiTokenOf({ cacheWrite: 300, cacheRead: 90000, total: 90300 }), { tok: 300, fallback: false })
+  // 全 0 分量 + 有 total：退化为含缓存读的合计并标 fallback（老/存量结算卡的近似口径）
+  assert.deepEqual(roiTokenOf({ input: 0, output: 0, cacheWrite: 0, cacheRead: 90000, total: 90000 }), { tok: 90000, fallback: true })
+  assert.deepEqual(roiTokenOf({ total: 5000 }), { tok: 5000, fallback: true })
+  // 无任何结算记录 → null（不参与均值，不拉低样本）；脏值/缺 usage 同样降级
+  assert.deepEqual(roiTokenOf({ input: 0, total: 0 }), { tok: null, fallback: false })
+  assert.deepEqual(roiTokenOf(null), { tok: null, fallback: false })
+  assert.deepEqual(roiTokenOf({ input: 'x', total: -5 }), { tok: null, fallback: false })
+})
+
+test('ROI 分组均值：computeStats 用有效消耗取均值，token 口径与 Token 区一致（源码级实执）', () => {
+  const computeStats = evalDashboardFn('computeStats', ['roiTokenOf'])
+  // 有调研 2 张：(1000+0+200)=1200 与 (300+100+0)=400 → 均值 800（若退回旧口径 total，均值会是 45850）
+  const tasks = [
+    mkRoiTask(0, true, { input: 1000, output: 0, cacheWrite: 200, cacheRead: 90000, total: 91200 }),
+    mkRoiTask(1, true, { input: 300, output: 100, cacheWrite: 0, cacheRead: 0, total: 400 }),
+    // 无调研 2 张：一张只有 total（老卡 → 兜底 + fallback 计数），一张无 usage（不参与均值）
+    mkRoiTask(2, false, { total: 5000 }),
+    mkRoiTask(3, false, null),
+  ]
+  const st = computeStats(tasks)
+  assert.ok(st.roi, '两组各 ≥1 且总样本 ≥4 时应产出 roi')
+  assert.equal(st.roi.yes.n, 2)
+  assert.equal(st.roi.yes.tok, 800)
+  assert.equal(st.roi.yes.tokN, 2)
+  assert.equal(st.roi.yes.tokFallbackN, 0)
+  assert.equal(st.roi.no.n, 2)
+  assert.equal(st.roi.no.tok, 5000)  // 无 usage 的卡被跳过：均值就是那张老卡的 total
+  assert.equal(st.roi.no.tokN, 1)
+  assert.equal(st.roi.no.tokFallbackN, 1) // 老卡兜底要能被 UI 标 ~（ResearchRoiRow 读该字段）
+  assert.equal(st.roi.no.execMs, 3600000)
+})
+
+test('ROI 口径注释/接线：client.js 产物与 host 端判定同源（源码级断言）', () => {
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(cli, /var tk = roiTokenOf\(t\.usage\)/)                       // ROI 行不再直接读 t.usage.total
+  assert.equal(/var tok = \(t\.usage && typeof t\.usage\.total === 'number'/.test(cli), false)
+  assert.match(cli, /tokN: toks\.length, tokFallbackN: fb/)                  // 分组均值带样本数与兜底张数
+  assert.match(cli, /口径 = 有效消耗（输入\+输出\+缓存写，不含缓存读）/)          // title 标注口径来源
+  // host 侧同款判定（单卡口径的规范实现，client 内联以免引入模块系统）
+  assert.deepEqual(taskEffectiveTokens({ input: 10, output: 5, cacheWrite: 2, cacheRead: 900, total: 917 }), { tok: 17, fallback: false, total: 917 })
+  assert.deepEqual(taskEffectiveTokens({ total: 917 }), { tok: 917, fallback: true, total: 917 })
+  assert.deepEqual(taskEffectiveTokens(null), { tok: null, fallback: false, total: null })
+})
+
 // ===== 学习飞轮 v1：候选教训信号 + feedbackEnabled 开关 + 软召回 =====
 test('cfg: feedbackEnabled 默认开（缺字段/脏值都算开），只有显式 false 才关', () => {
   assert.equal(core.cfg({}).feedbackEnabled, true)
@@ -1937,4 +2015,51 @@ test('no-root 刷屏根治接线断言（源码级）：闸门/防线/兜底注�
   assert.match(rpc, /import \{ isFullSessionId \} from '\.\/session\.mjs'/)
   // create-task handler 校验在 mutateLocked 之前（拒绝时不建板）
   assert.match(rpc, /handle\('create-task', async function \(args\) \{ var sid = rpcSessionId\(args\);[\s\S]{0,400}if \(!isFullSessionId\(sid\)\) return \{ ok: false, error: 'sessionId 不完整[\s\S]{0,120}return mutateLocked/)
+})
+
+// ===== isRoot 蝶变防抖（task-muupr8ld，反馈 n-muuerxv9ijxs）=====
+// 根因：host get-tasks 现算 isRoot（agents.roots() 含本 sid），生成开始/结束瞬间 agents 树重建有瞬态窗口
+// 返回假 false；旧口径一次 false 就强收抽屉（state.open=false）→「看板在生成状态切换时突然消失」。
+// 修法：客户端防抖——曾确认 true 的会话需连续 3 次 false 才收；从未 true 的子代理会话即时收起；
+// 三处消费点（强收/按钮/面板）+ 活动心跳省流统一读 isRootStable；会话切换重置防抖态。
+test('isRoot 蝶变防抖（源码级）：计数器 + 连续 3 次阈值 + everTrue 门锁 + 新会话即时收紧', () => {
+  const ksrc = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // ① 防抖态三字段入 state（everTrue/连续 false 计数/稳定值）
+  assert.match(ksrc, /isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true/)
+  // ② 阈值常量 = 3（host 3s 心跳 ≈ 9s），注释写明为什么防抖/为什么子代理不防抖
+  assert.match(ksrc, /var IS_ROOT_FALSE_LIMIT = 3/)
+  assert.match(ksrc, /为什么防抖：host rpc\.mjs L97 的 isRoot 是每次 get-tasks 现算的/)
+  assert.match(ksrc, /为什么子代理会话不防抖：everTrue=false 的会话（新打开的子代理）立即 isRootStable=false/)
+  // ③ 防抖器本体：true → 清零+everTrue+stable；从未 true → 即时 false（门锁）；everTrue 则累计到阈值才翻
+  assert.match(ksrc, /function applyIsRoot\(rawIsRoot\) \{/)
+  assert.match(ksrc, /if \(rawIsRoot\) \{[\s\S]{0,400}state\.isRootEverTrue = true/)
+  assert.match(ksrc, /state\.isRootFalseN = 0[\s\S]{0,80}state\.isRootStable = true/)
+  assert.match(ksrc, /else if \(!state\.isRootEverTrue\) \{[\s\S]{0,120}state\.isRootStable = false/)
+  assert.match(ksrc, /state\.isRootFalseN\+\+[\s\S]{0,200}if \(state\.isRootFalseN >= IS_ROOT_FALSE_LIMIT\) state\.isRootStable = false/)
+  // ④ 轮询只把原始值喂给防抖器（不再直写 state.isRoot）
+  assert.match(ksrc, /applyIsRoot\(!d \|\| d\.isRoot !== false\)/)
+  assert.doesNotMatch(ksrc, /state\.isRoot = !d \|\| d\.isRoot !== false/)
+  // ⑤ 三处消费点 + 活动心跳省流统一读 isRootStable（不得再读单次 isRoot 原始值）
+  assert.match(ksrc, /if \(!state\.isRootStable && state\.open\) \{ state\.open = false; state\.detailId = null \}/) // L303 强收
+  assert.match(ksrc, /if \(!state\.sessionId \|\| !state\.isRootStable \|\| !state\.open\) return/)                        // 省流轮询
+  assert.match(ksrc, /setIsOpen\(state\.open\); setIsRoot\(state\.isRootStable\)/)                                        // 按钮
+  assert.match(ksrc, /if \(!isRoot\) return null \/\/ 子代理会话不显示看板入口（读 isRootStable/)
+  assert.match(ksrc, /if \(!state\.isRootStable\) return null \/\/ 子代理会话不渲染看板面板（读 isRootStable/)
+  assert.doesNotMatch(ksrc, /state\.isRoot === false/) // 旧口径已根除（消费点不再看单次值）
+  // ⑥ 会话切换重置防抖态（旧会话的"曾确认 true"不得漂到新会话）
+  assert.match(ksrc, /state\.isRootEverTrue = false; state\.isRootFalseN = 0; state\.isRootStable = false; notify\(\); fetchTasks\(\); fetchChildren\(\)/)
+  // ⑦ 产物体重组装：断言在源码与 lib/client.js 产物上同口径
+  assert.match(cli, /var IS_ROOT_FALSE_LIMIT = 3/)
+  assert.match(cli, /isRootEverTrue: false, isRootFalseN: 0, isRootStable: true/)
+  assert.equal((cli.match(/applyIsRoot\(/g) || []).length, 2) // 定义 1 + 轮询调用 1
+})
+
+test('isRoot 蝶变防抖：host 侧注释指回客户端防抖，且 host 行为未改（仍现算 isRoot）', () => {
+  const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  // 指针注释：说明瞬态假 false + 防抖落在客户端 kernel.js applyIsRoot
+  assert.match(rpcSrc, /host 不改行为（保持"现算真相"），防抖在客户端：kernel\.js applyIsRoot/)
+  assert.match(rpcSrc, /曾确认 true 的会话需连续 3 次/)
+  // 行为未改：isRoot 仍按 agents.roots() 现算（不缓存、不防抖、不落盘）
+  assert.match(rpcSrc, /var __roots = __ag\.roots\(\)[\s\S]{0,200}d\.isRoot = __rids\.indexOf\(sid\) >= 0/)
 })

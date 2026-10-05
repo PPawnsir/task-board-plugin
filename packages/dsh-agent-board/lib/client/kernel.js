@@ -219,7 +219,7 @@
 
     var COLUMNS = ['draft', 'pending', 'in-progress', 'verifying', 'resolved', 'blocked']
     var reqEpoch = 0 // 会话切换纪元：切会话时自增，旧会话在途响应按纪元丢弃
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, lessonPushed: {}, isRoot: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
 
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
@@ -257,6 +257,32 @@
     }
     function clearReadErr() { state.tasksErr = '' } // 仅 fetchTasks 成功路径调用（3s 轮询兜底，任何错误条都能随之消失）
     function readErrText(e) { return String((e && e.message) || e || '网络异常') }
+
+    // ===== isRoot 蝶变防抖（反馈 n-muuerxv9ijxs / task-muupr8ld）=====
+    // 为什么防抖：host rpc.mjs L97 的 isRoot 是每次 get-tasks 现算的
+    // （agents.roots() 是否含本会话 id）。生成开始/结束瞬间 agents 树重建，roots() 存在一个
+    // 瞬态窗口返回不含本 sid → 单次 isRoot=false 就触发 L303 强收抽屉（state.open=false），
+    // 用户表现为「看板在生成状态切换时突然消失，每次都要重新打开」；按钮/面板同病闪烁。
+    // 防抖口径：已确认过 true 的会话（everTrue）需连续 IS_ROOT_FALSE_LIMIT 次 false
+    // （host 3s 心跳 ≈ 9s）才把 isRootStable 翻成 false——覆盖瞬态窗口，真正降级仍会收敛。
+    // 为什么子代理会话不防抖：everTrue=false 的会话（新打开的子代理）立即 isRootStable=false，
+    // 保护语义不削弱——子代理会话本就不该出现看板入口/抽屉，即时收起没有代价。
+    // 消费口径：强收（本函数）/按钮（BoardButton）/面板（TopPanel）/活动心跳省流（fetchActivity）
+    // 四处一律读 isRootStable，不读单次轮询的 state.isRoot 原始值。
+    var IS_ROOT_FALSE_LIMIT = 3
+    function applyIsRoot(rawIsRoot) {
+      state.isRoot = rawIsRoot
+      if (rawIsRoot) {
+        state.isRootEverTrue = true // 曾确认 true：此后 false 需连续累计（会话生命周期内粘滞，切换会话时重置）
+        state.isRootFalseN = 0
+        state.isRootStable = true
+      } else if (!state.isRootEverTrue) {
+        state.isRootStable = false // 从未 true（新打开的子代理会话）：即时收起，不防抖
+      } else {
+        state.isRootFalseN++
+        if (state.isRootFalseN >= IS_ROOT_FALSE_LIMIT) state.isRootStable = false // 连续 3 次 false：真降级（子代理树已重建不含本 sid），收敛
+      }
+    }
 
     function fetchTasks() {
       if (!state.sessionId) return
@@ -299,8 +325,8 @@
         state.childStats = (d && d.childStats) || {}
         // 学习飞轮 v1 能力检测：老 host 不返回该字段 → 视为开启（默认开）；只有显式 false 才关。
         state.feedbackEnabled = !(d && d.feedbackEnabled === false)
-        state.isRoot = !d || d.isRoot !== false
-        if (state.isRoot === false && state.open) { state.open = false; state.detailId = null } // 子代理会话：强制收起看板
+        applyIsRoot(!d || d.isRoot !== false) // 原始值只喂给防抖器，消费点一律读 isRootStable
+        if (!state.isRootStable && state.open) { state.open = false; state.detailId = null } // 子代理会话（含连续 3 次 false 的真降级）：强制收起看板
         if (d && d.dispatchInfo && d.dispatchInfoAt && Date.now() - new Date(d.dispatchInfoAt).getTime() < 120000) { state.dispatchInfo = d.dispatchInfo } else { state.dispatchInfo = '' } // 瞬时通知 2min 内有效，过期强制清空（服务端写后不清曾致残留数天）
         // escalation 一等公民：出现新的待裁决任务 → 面板自动弹开直达该任务详情
         // （escalation.question 在 tasksHash 序列化口径内：新歧义必然改变 hash → 必然走变化分支，不会漏弹）
@@ -318,7 +344,7 @@
 
     // 活动心跳：对进行中/验收中的任务轮询子代理最近动作（卡片与详情展示"现在跑到哪了"）
     function fetchActivity() {
-      if (!state.sessionId || !state.isRoot || !state.open) return // 面板关闭时不轮询活动（省同步 I/O）
+      if (!state.sessionId || !state.isRootStable || !state.open) return // 面板关闭时不轮询活动（省同步 I/O）；isRootStable 口径见 isRoot 蝶变防抖
       var running = state.tasks.filter(function (t) { return t.status === 'in-progress' || t.status === 'verifying' })
       if (!running.length) { if (Object.keys(state.activity).length) { state.activity = {}; notify() } return }
       var pending = running.length
@@ -469,9 +495,9 @@
     function BoardButton(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
       var _a = useState(0), pendingCount = _a[0], setPendingCount = _a[1]; var _b = useState(false), isOpen = _b[0], setIsOpen = _b[1]; var _c = useState(0), escCount = _c[0], setEscCount = _c[1]; var _d2 = useState(true), isRoot = _d2[0], setIsRoot = _d2[1]
-      useEffect(function () { if (props && props.sessionId) { var sid = String(props.sessionId); if (state.sessionId !== sid) { state.sessionId = sid; reqEpoch++; state.tasks = []; state.tasksHash = ''; state.children = []; state.activity = {}; state.archived = []; state.detailId = null; state.childStats = {}; state.tasksErr = ''; notify(); fetchTasks(); fetchChildren() } } }, [props && props.sessionId])
-      useEffect(function () { function update() { var n = 0, e = 0; for (var i = 0; i < state.tasks.length; i++) { if (state.tasks[i].status === 'pending') n++; if (state.tasks[i].escalation) e++ }; setPendingCount(n); setEscCount(e); setIsOpen(state.open); setIsRoot(state.isRoot) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
-      if (!isRoot) return null // 子代理会话不显示看板入口
+      useEffect(function () { if (props && props.sessionId) { var sid = String(props.sessionId); if (state.sessionId !== sid) { state.sessionId = sid; reqEpoch++; state.tasks = []; state.tasksHash = ''; state.children = []; state.activity = {}; state.archived = []; state.detailId = null; state.childStats = {}; state.tasksErr = ''; state.isRootEverTrue = false; state.isRootFalseN = 0; state.isRootStable = false; notify(); fetchTasks(); fetchChildren() } } }, [props && props.sessionId]) // 会话切换重置 isRoot 防抖态（everTrue/计数/stable 都按会话生命周期——旧会话的"曾确认 true"不得漂到新会话）；reset 后首轮 get-tasks 判定前按"未确认 root"保守隐藏，避免切进子代理会话时入口闪现
+      useEffect(function () { function update() { var n = 0, e = 0; for (var i = 0; i < state.tasks.length; i++) { if (state.tasks[i].status === 'pending') n++; if (state.tasks[i].escalation) e++ }; setPendingCount(n); setEscCount(e); setIsOpen(state.open); setIsRoot(state.isRootStable) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
+      if (!isRoot) return null // 子代理会话不显示看板入口（读 isRootStable：瞬态 false 不收，见 isRoot 蝶变防抖）
       return React.createElement('button', { onClick: function () { state.open = !state.open; notify() }, title: '智能看板' + (pendingCount > 0 ? '（' + pendingCount + ' 待办）' : '') + (escCount > 0 ? '（' + escCount + ' 待裁决）' : ''), style: { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', border: '1px solid ' + (escCount > 0 ? C.err : C.border), borderRadius: 6, background: isOpen ? C.nested : 'transparent', color: C.text, cursor: 'pointer', fontSize: 12 } }, React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center' } }, ic('clipboard-list', 14)), React.createElement('span', null, '智能看板'), escCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.err, color: C_INV, fontSize: 10, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 1, animation: 'tskb-pulse 1s ease-in-out infinite' }, title: escCount + ' 个任务待裁决' }, ic('alert-triangle', 10), escCount) : null, pendingCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.brand, color: C_INV, fontSize: 10, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' } }, String(pendingCount)) : null)
     }
 
@@ -489,7 +515,7 @@
       var _fbo = useState(state.feedbackEnabled), fbEnabled = _fbo[0], setFbEnabled = _fbo[1]
       useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!open) return null
-      if (state.isRoot === false) return null // 子代理会话不渲染看板面板
+      if (!state.isRootStable) return null // 子代理会话不渲染看板面板（读 isRootStable：瞬态 false 不闪，见 isRoot 蝶变防抖）
       var active = tasks.filter(function (t) { return t.status !== 'archived' }); var archived = tasks.filter(function (t) { return t.status === 'archived' })
       var hasFilter = state.filterQ.trim() || state.filterPrio.length > 0 || state.filterTag
       if (hasFilter) { active = active.filter(passFilter); archived = archived.filter(passFilter) }

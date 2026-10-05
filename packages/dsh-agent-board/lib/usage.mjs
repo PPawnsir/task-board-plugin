@@ -137,6 +137,20 @@ export function effectiveTokens(u) {
   return numOr0(u.input) + numOr0(u.output) + numOr0(u.cacheWrite)
 }
 
+// 单卡「有效消耗」展示口径（task-muupnnq5）：ROI 行与 Token 消耗区必须同源，否则同一张卡两处两个数。
+//   - 有结算分量（input/output/cacheWrite 任一为 >0 的数字）→ 有效消耗 = 输入+输出+缓存写（不含缓存读）；
+//   - 无任何分量字段（老形态 / 只有 total 的存量卡）→ 兜底退化为 total，调用方可按 fallback 标注口径；
+//   - 两者皆无 → null（表示「没有可用的结算记录」，调用方跳过该样本而不是记 0，避免拉低均值）。
+// 返回 { tok, fallback, total }：tok 为 null 时整卡不参与均值。
+export function taskEffectiveTokens(u) {
+  if (!u) return { tok: null, fallback: false, total: null }
+  var hasPart = numOr0(u.input) > 0 || numOr0(u.output) > 0 || numOr0(u.cacheWrite) > 0
+  var tot = numOr0(u.total) > 0 ? numOr0(u.total) : null
+  if (hasPart) return { tok: effectiveTokens(u), fallback: false, total: tot }
+  if (tot !== null) return { tok: tot, fallback: true, total: tot }
+  return { tok: null, fallback: false, total: null }
+}
+
 // 日账单元的归一化读取：新形态是 { t, e }（t=总量含缓存读，e=有效消耗不含缓存读），
 // 老形态是裸 number（只有总量）→ e 返回 null 表示「不可知」——调用方按近似口径展示（标 ~），
 // 绝不把总量冒充有效值（伪造一个有效数字比留 null 更坏）。

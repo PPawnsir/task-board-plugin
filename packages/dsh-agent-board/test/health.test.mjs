@@ -58,8 +58,44 @@ test('信号 a 口径：路径归一化（./ 前缀与反斜杠合并计数）',
   assert.ok(hints[0].text.indexOf('src/big.js 在近 8 张卡中被 8 次声明 touches（占比 100%）') >= 0)
 })
 
+// task-muupnnq5 ③：机械随卡路径（组装产物 / 守门员目录 / 根 README）不计入热度，也不占占比分母
+test('信号 a 防灌水：test/ 与 lib/client.js 只出现在机械随卡时不再触发 warn', function () {
+  var ts = []
+  // 10 张卡都挂守门员/产物路径——旧口径下 lib/client.js 会以 10 次 + 100% 占比误报「架构收敛点」
+  for (var i = 0; i < 10; i++) ts.push(mk(i, { touches: ['lib/client.js', 'test/health.test.mjs', 'test'] }))
+  assert.deepEqual(computeHealthHints(ts), [])
+})
+
+test('信号 a 防灌水：噪声路径不进占比分母', function () {
+  var ts = []
+  // 10 张卡只挂守门员/产物路径：过滤后一律不算「有 touches 任务」，不该抬高分母、也不该进热度计数
+  for (var i = 0; i < 10; i++) ts.push(mk(i, { touches: ['README.md', 'test/health.test.mjs', 'lib/client.js'] }))
+  // 7 张真实热点路径卡：真实分母 7（旧口径会被 10 张噪声卡撑成 17）
+  for (var j = 0; j < 7; j++) ts.push(mk(10 + j, { touches: ['src/real.js'] }))
+  // 判定式：次数 7 < 8 → 不命中；若分母含噪声卡则是 7/17=41% ≥ 40%，会误报（本断言锁死该回归）
+  assert.deepEqual(computeHealthHints(ts), [])
+})
+
+test('信号 a 防灌水：真实热点路径照常计入（噪声过滤不误伤相邻路径）', function () {
+  var ts = []
+  for (var i = 0; i < 8; i++) ts.push(mk(i, { touches: ['lib/core.mjs', 'test/core.test.mjs'] })) // 同卡里的真实路径仍计数（只丢 test/ 那条）
+  var hints = computeHealthHints(ts)
+  assert.equal(hints.length, 1)
+  assert.ok(hints[0].text.indexOf('lib/core.mjs 在近 8 张卡中被 8 次声明 touches') >= 0)
+  assert.equal(hints[0].text.indexOf('test/core.test.mjs'), -1)
+})
+
+test('信号 a 防灌水：过滤只在健康度侧，touches 锁语义不受影响（core 判定原样）', async function () {
+  // 黑名单属健康度展示口径：core 的锁冲突判定必须仍认这些路径（否则会静默放行并行 Worker 互踩）
+  var core = await import('../lib/core.mjs')
+  assert.equal(core.normTouch('./lib/client.js'), 'lib/client.js')
+  assert.equal(core.patOverlap('lib/client.js', './lib/client.js'), true)
+  assert.equal(core.patOverlap('test/**', 'test/health.test.mjs'), true)
+  assert.equal(core.patOverlap('README.md', 'README.md'), true)
+})
+
 // ===== 信号 b：串行代价代理 =====
-test('信号 b 命中：有 touches 任务滞留中位数 > 无 touches 的 2 倍且样本 ≥5', function () {
+test('信号 b 命中：有 touches 任务滞留中位数 > 无 touches 的 2 倍且样本 ≥5（绝对阈值也过）', function () {
   var ts = []
   for (var i = 0; i < 6; i++) ts.push(mk(i, { touches: ['src/x' + i + '.js'], claimedAt: iso(BASE + i * MIN + 30 * MIN), resolvedAt: iso(BASE + i * MIN + 31 * MIN) }))
   for (var j = 0; j < 6; j++) ts.push(mk(100 + j, { claimedAt: iso(BASE + (100 + j) * MIN + 3 * MIN), resolvedAt: iso(BASE + (100 + j) * MIN + 4 * MIN) }))
@@ -72,9 +108,55 @@ test('信号 b 命中：有 touches 任务滞留中位数 > 无 touches 的 2 �
 
 test('信号 b 不命中：有 touches 任务样本 <5', function () {
   var ts = []
-  for (var i = 0; i < 4; i++) ts.push(mk(i, { touches: ['src/x' + i + '.js'], claimedAt: iso(BASE + i * MIN + 60 * MIN) }))
-  for (var j = 0; j < 4; j++) ts.push(mk(100 + j, { claimedAt: iso(BASE + (100 + j) * MIN + MIN) }))
+  for (var i = 0; i < 4; i++) ts.push(mk(i, { touches: ['src/x' + i + '.js'], claimedAt: iso(BASE + i * MIN + 60 * MIN), resolvedAt: iso(BASE + i * MIN + 61 * MIN) }))
+  for (var j = 0; j < 4; j++) ts.push(mk(100 + j, { claimedAt: iso(BASE + (100 + j) * MIN + MIN), resolvedAt: iso(BASE + (100 + j) * MIN + 2 * MIN) }))
   assert.deepEqual(computeHealthHints(ts), [])
+})
+
+// task-muupnnq5 ①：亚分钟差异（0.4min vs 0.1min 满足 2 倍）是纯噪声，绝对阈值 5min 拦掉
+test('信号 b 不触发：相对倍数够但不足 5min 绝对阈值（4.9min vs 0.4min）', function () {
+  var ts = []
+  for (var i = 0; i < 6; i++) ts.push(mk(i, { touches: ['src/n' + i + '.js'], claimedAt: iso(BASE + i * MIN + 294000), resolvedAt: iso(BASE + i * MIN + 300000) })) // 等待 4.9min
+  for (var j = 0; j < 6; j++) ts.push(mk(100 + j, { claimedAt: iso(BASE + (100 + j) * MIN + 24000), resolvedAt: iso(BASE + (100 + j) * MIN + 30000) })) // 等待 0.4min
+  assert.deepEqual(computeHealthHints(ts), [])
+})
+
+test('信号 b 触发：刚过 5min 绝对阈值（5.1min vs 0.4min）', function () {
+  var ts = []
+  for (var i = 0; i < 6; i++) ts.push(mk(i, { touches: ['src/y' + i + '.js'], claimedAt: iso(BASE + i * MIN + 306000), resolvedAt: iso(BASE + i * MIN + 312000) })) // 等待 5.1min
+  for (var j = 0; j < 6; j++) ts.push(mk(100 + j, { claimedAt: iso(BASE + (100 + j) * MIN + 24000), resolvedAt: iso(BASE + (100 + j) * MIN + 30000) })) // 等待 0.4min
+  var hints = computeHealthHints(ts)
+  assert.equal(hints.length, 1)
+  assert.ok(hints[0].text.indexOf('中位数 5min vs <1min') >= 0) // 5.1 → 5min；0.4min 不再撞脸成「0min」而是 <1min
+})
+
+// task-muupnnq5 ④：排队中（无 claimedAt/resolvedAt）的 pending 卡按 now-createdAt 计入，治右删失低估
+test('信号 b 口径：仍在排队的 pending 卡滞留计入（now-createdAt）', function () {
+  var now = Date.now()
+  var ts = []
+  // 6 张仍排队的有 touches 卡，创建于 40min 前 → 滞留 40min
+  for (var i = 0; i < 6; i++) ts.push(mk(i, { status: 'pending', touches: ['src/w' + i + '.js'], createdAt: iso(now - 40 * MIN) }))
+  // 6 张立刻完成的无 touches 卡 → 滞留 ~0
+  for (var j = 0; j < 6; j++) ts.push(mk(100 + j, { createdAt: iso(now - 60 * MIN), claimedAt: iso(now - 59 * MIN), resolvedAt: iso(now - 58 * MIN) }))
+  var hints = computeHealthHints(ts)
+  assert.equal(hints.length, 1)
+  assert.ok(hints[0].text.indexOf('并行度受锁限制') >= 0)
+  // 反证：同一批卡若都是「刚刚创建还在排队」（滞留 ~0）则不判定——差别全部来自 now-createdAt 口径
+  var fresh = ts.map(function (t) { return Object.assign({}, t, { createdAt: iso(now - 30000) }) })
+  assert.deepEqual(computeHealthHints(fresh), [])
+})
+
+// task-muupnnq5 ①：亚分钟滞留的展示修正——不再四舍五入成「0min」撞脸（治幽灵告警的观感来源）
+test('文案口径：不足 1 分钟渲染 <1min（无 0min 撞脸）', function () {
+  var now = Date.now()
+  var ts = []
+  // 6 张排队中的有 touches 卡：滞留 40min（过绝对阈值）+ 6 张 0.2min 对照组 → 对照组必须显示 <1min
+  for (var i = 0; i < 6; i++) ts.push(mk(i, { status: 'pending', touches: ['src/z' + i + '.js'], createdAt: iso(now - 40 * MIN) }))
+  for (var j = 0; j < 6; j++) ts.push(mk(100 + j, { createdAt: iso(now - 12000), claimedAt: iso(now), resolvedAt: iso(now) }))
+  var hints = computeHealthHints(ts)
+  assert.equal(hints.length, 1)
+  assert.ok(hints[0].text.indexOf('40min vs <1min') >= 0)
+  assert.equal(hints[0].text.indexOf('vs 0min'), -1) // 亚分钟不再渲染成「0min」
 })
 
 // ===== 信号 c：执行时长 p90（口径 = claimedAt→resolvedAt，task-mutdnitw 修正后不含排队）=====
@@ -144,7 +226,7 @@ test('四信号同时命中时截断为 3 条（warn 优先）', function () {
   for (var i = 0; i < 8; i++) ts.push(mk(i, { touches: ['src/hot.js'], rejectCount: 1, claimedAt: iso(BASE + i * MIN + 30 * MIN), resolvedAt: iso(BASE + i * MIN + 100 * MIN) }))
   // 6 张其他 touches 卡：滞留 30min、执行 70min（凑信号 b 样本与信号 c）
   for (var j = 0; j < 6; j++) ts.push(mk(100 + j, { touches: ['src/other.js'], claimedAt: iso(BASE + (100 + j) * MIN + 30 * MIN), resolvedAt: iso(BASE + (100 + j) * MIN + 100 * MIN) }))
-  // 6 张无 touches 卡：滞留 3min、执行 97min（信号 b 对照组）
+  // 6 张无 touches 卡：滞留 3min、执行 97min（信号 b 对照组；resolvedAt 必须有，否则滞留会退化成 now-createdAt）
   for (var k = 0; k < 6; k++) ts.push(mk(200 + k, { claimedAt: iso(BASE + (200 + k) * MIN + 3 * MIN), resolvedAt: iso(BASE + (200 + k) * MIN + 100 * MIN) }))
   var hints = computeHealthHints(ts)
   assert.equal(hints.length, 3)

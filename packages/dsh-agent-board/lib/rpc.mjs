@@ -94,6 +94,9 @@ export function createRpc(ctx, state, deps) {
     // ===== RPC =====
     // get-tasks 是纯读路径（rt 只读文件）——poolCycle 由 15s 心跳 + 写入后 kickCycle 驱动，
     // 客户端 3s 轮询不再触发池计算/写盘（之前每轮询一次就 poolCycle+写盘一次，切会话时多会话轮询挤在文件锁上）
+    // isRoot 现算不落盘：生成开始/结束瞬间 agents 树重建，roots() 存在瞬态窗口返回不含本 sid（假 false）。
+    // host 不改行为（保持"现算真相"），防抖在客户端：kernel.js applyIsRoot——曾确认 true 的会话需连续 3 次
+    // false（3s 心跳≈9s）才收抽屉；从未 true 的子代理会话仍即时收起（反馈 n-muuerxv9ijxs / task-muupr8ld）。
     handle('get-tasks', async function (args) { var sid = rpcSessionId(args); var d = await rt(sid); d.sessionId = sid; var __ag = ctx.agents; d.isRoot = true; if (__ag) { var __roots = __ag.roots(); var __rids = []; for (var __i = 0; __i < __roots.length; __i++) __rids.push(String(__roots[__i].id)); d.isRoot = __rids.indexOf(sid) >= 0 }
       // poolStatus 防幽灵：只保留指向当前活跃任务的条目（重启后内存 runs 清空，文件快照可能残留）
       if (d.poolStatus) { var __act = {}; (d.tasks || []).forEach(function (t) { if (t.status === 'in-progress' || t.status === 'verifying') __act[t.id] = true }); d.poolStatus.workers = (d.poolStatus.workers || []).filter(function (w) { return __act[w.taskId] }); d.poolStatus.verifiers = (d.poolStatus.verifiers || []).filter(function (v) { return __act[v.taskId] }) }
