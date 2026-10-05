@@ -114,10 +114,25 @@ export function readRunUsage(runId, sessionsRoot) {
 }
 function numOr0(v) { var n = Number(v); return isFinite(n) && n > 0 ? n : 0 }
 
-// board 级聚合（get-tasks 现算，不落盘额外表）：总量 + 输入/输出/缓存读拆分 + 按模型小计 + 任务 Top8。
+// 本地日期 key（YYYY-MM-DD）：与 dispatch.mjs 的日账记账同一口径。
+// 用本地 getters 拼而不用 toISOString()——UTC 会把晚间消耗挪到次日，「今日消耗」直接错位。
+function localDayKey(d) {
+  var x = d
+  function p2(n) { return (n < 10 ? '0' : '') + n }
+  return x.getFullYear() + '-' + p2(x.getMonth() + 1) + '-' + p2(x.getDate())
+}
+// ISO 串 → 本地日 key；缺失/解析失败返回 ''（宁可漏记一天，也不错记到别的日子）
+function dayKeyOf(iso) {
+  if (!iso) return ''
+  var d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  return localDayKey(d)
+}
+
+// board 级聚合（get-tasks 现算，不落盘额外表）：总量 + 输入/输出/缓存读拆分 + 按模型小计 + 任务 Top8 + 日账。
 // 归档任务同样计入（它们确实消耗过 token）；无 usage 的任务跳过。
 export function aggregateUsageSummary(tasks) {
-  var s = { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, byModel: {}, topTasks: [] }
+  var s = { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, byModel: {}, byDay: {}, topTasks: [] }
   var list = Array.isArray(tasks) ? tasks : []
   for (var i = 0; i < list.length; i++) {
     var t = list[i]; var u = t && t.usage
@@ -127,6 +142,19 @@ export function aggregateUsageSummary(tasks) {
     var ms = u.models || {}
     for (var mk in ms) { if (Object.prototype.hasOwnProperty.call(ms, mk)) s.byModel[mk] = (s.byModel[mk] || 0) + (ms[mk] || 0) }
     if (u.total) s.topTasks.push({ id: t.id, title: t.title, total: u.total, runs: u.runs || 0 })
+    // 日账合并：任务自带 byDay（逐日精确）→ 逐 key 累加。
+    // 存量兜底：本功能上线前结算的老任务没有 byDay，把整笔 total 归到 updatedAt 的本地日——
+    // 近似口径（跨天老任务全部落在最后结算日），好过整段历史在「近 7 天」里凭空消失；
+    // 无 updatedAt / 解析失败则不归任何日（宁可漏不错）。
+    var by = (u.byDay && typeof u.byDay === 'object') ? u.byDay : null
+    var hasBy = false
+    for (var bk in by) { if (Object.prototype.hasOwnProperty.call(by, bk)) { hasBy = true; break } }
+    if (hasBy) {
+      for (var dk in by) { if (Object.prototype.hasOwnProperty.call(by, dk)) s.byDay[dk] = (s.byDay[dk] || 0) + (by[dk] || 0) }
+    } else if (u.total) {
+      var lk = dayKeyOf(u.updatedAt)
+      if (lk) s.byDay[lk] = (s.byDay[lk] || 0) + u.total
+    }
   }
   s.topTasks.sort(function (a, b) { return b.total - a.total })
   s.topTasks = s.topTasks.slice(0, 8)

@@ -993,7 +993,8 @@ test('aggregateUsageSummary: 空任务/无 usage 任务 → 全零 + 空 Top', (
   const s = aggregateUsageSummary([mkTask({ id: 'a' }), mkTask({ id: 'b', usage: null })])
   assert.equal(s.total, 0); assert.equal(s.input, 0); assert.equal(s.output, 0); assert.equal(s.cacheRead, 0)
   assert.deepEqual(s.byModel, {}); assert.deepEqual(s.topTasks, [])
-  assert.deepEqual(aggregateUsageSummary(undefined), { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, byModel: {}, topTasks: [] })
+  assert.deepEqual(s.byDay, {}) // 日账缺省空对象（老看板/无 usage 不炸）
+  assert.deepEqual(aggregateUsageSummary(undefined), { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, byModel: {}, byDay: {}, topTasks: [] })
 })
 
 test('aggregateUsageSummary: 总量/输入输出缓存拆分累加 + 按模型小计合并', () => {
@@ -1003,6 +1004,49 @@ test('aggregateUsageSummary: 总量/输入输出缓存拆分累加 + 按模型�
   assert.equal(s.total, 1133); assert.equal(s.input, 105); assert.equal(s.output, 25)
   assert.equal(s.cacheRead, 1000); assert.equal(s.cacheWrite, 3)
   assert.deepEqual(s.byModel, { 'deepseek-flash': 1013, 'glm-5': 120 })
+  assert.deepEqual(s.byDay, {}) // 无 byDay 且无 updatedAt → 不归任何日（宁可漏不错）
+})
+
+// 测试侧独立复刻本地日 key（与实现同口径但各自独立写，防「实现自证」）
+const lk = (iso) => { const d = new Date(iso); const p2 = (n) => (n < 10 ? '0' : '') + n; return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) }
+// 用本地时间构造再转 ISO：任意时区下本地日都是 2026-10-02，断言与宿主时区无关
+const localIso = (y, mo, d, h, mi) => new Date(y, mo - 1, d, h, mi).toISOString()
+
+test('aggregateUsageSummary: byDay 日账逐日合并（同日累加 / 跨日分桶）', () => {
+  const a = mkTask({ id: 'a', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 100, runs: 2, models: {}, updatedAt: localIso(2026, 10, 2, 10, 0), byDay: { '2026-10-01': 60, '2026-10-02': 40 } } })
+  const b = mkTask({ id: 'b', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 30, runs: 1, models: {}, updatedAt: localIso(2026, 10, 2, 11, 0), byDay: { '2026-10-02': 30 } } })
+  const s = aggregateUsageSummary([a, b])
+  assert.deepEqual(s.byDay, { '2026-10-01': 60, '2026-10-02': 70 }) // 同日 40+30 合并、跨日分桶
+  assert.equal(s.total, 130) // 总量口径不变
+  assert.deepEqual(a.usage.byDay, { '2026-10-01': 60, '2026-10-02': 40 }) // 入参对象未被就地改写（纯函数）
+})
+
+test('aggregateUsageSummary: 存量任务无 byDay → 整笔归 updatedAt 的本地日（近似口径）', () => {
+  const legacy = mkTask({ id: 'old', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 500, runs: 1, models: {}, updatedAt: localIso(2026, 10, 2, 10, 30) } })
+  const fresh = mkTask({ id: 'new', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 20, runs: 1, models: {}, updatedAt: localIso(2026, 10, 3, 9, 0), byDay: { '2026-10-03': 20 } } })
+  const s = aggregateUsageSummary([legacy, fresh])
+  assert.deepEqual(s.byDay, { '2026-10-02': 500, '2026-10-03': 20 }) // 老任务兜底 + 新任务日账混合
+  assert.equal(lk(localIso(2026, 10, 2, 10, 30)), '2026-10-02') // 本地日口径自检（防 toISOString 的 UTC 错位）
+})
+
+test('aggregateUsageSummary: 本地 00:30 的 updatedAt 落在本地日（用 UTC 位移可区分的时刻钉死口径）', () => {
+  // 东八区：本地 2026-10-02 00:30 → UTC 2026-10-01T16:30Z；若实现用 toISOString().slice(0,10)
+  // 就会记成 10-01（跨日错位）。本条在 UTC+8 宿主上必然抓得住这种写法。
+  const iso = localIso(2026, 10, 2, 0, 30)
+  const s = aggregateUsageSummary([mkTask({ id: 'midnight', usage: { total: 42, models: {}, updatedAt: iso } })])
+  assert.deepEqual(Object.keys(s.byDay), ['2026-10-02'])
+  assert.equal(s.byDay['2026-10-02'], 42)
+})
+
+test('aggregateUsageSummary: 无 updatedAt / 坏 updatedAt → 不归任何日，byDay 空对象不炸', () => {
+  const s = aggregateUsageSummary([
+    mkTask({ id: 'x', usage: { total: 7, models: {} } }),
+    mkTask({ id: 'y', usage: { total: 9, models: {}, updatedAt: 'not-a-date' } }),
+    mkTask({ id: 'z', usage: { total: 11, models: {}, byDay: null } })
+  ])
+  assert.deepEqual(s.byDay, {})
+  assert.equal(s.total, 27)
+  assert.equal(s.topTasks.length, 3) // 总量/Top 不受日账缺失影响
 })
 
 test('aggregateUsageSummary: Top 任务按总量降序、最多 8 条、带 runs 计数', () => {
@@ -1057,6 +1101,32 @@ test('Token 消耗接线：settleRun 结算累加 + 按模型小计 + get-tasks 
   assert.match(cli, /React\.createElement\(TokenUsage, \{ usage: state\.usageSummary \}\)/) // 仪表盘插入消耗区
   assert.match(cli, /state\.usageSummary = \(d && d\.usageSummary\) \|\| null/) // 客户端取数
   assert.match(cli, /'⛁ ' \+ fmtTokens\(t\.usage\.total\)/)                     // 进行中/已完成卡片显示本任务累计
+})
+
+test('Token 日账接线：dispatch 记 byDay 本地日 + 仪表盘「今日 / 近 7 天」（源码级断言）', () => {
+  const host = hostSrc()
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(host, /t\.usage\.byDay\[dk\] = \(t\.usage\.byDay\[dk\] \|\| 0\) \+ u\.total/) // 结算时记一笔日账
+  assert.match(host, /var dk = localDayKey\(\)/)                                  // 键取结算时刻本地日
+  // 本地日口径：localDayKey 必须用本地 getters 拼（含 getFullYear/getMonth/getDate），不得用 toISOString
+  const dispatchSrc = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const dkBody = dispatchSrc.match(/function localDayKey\(d\) \{[\s\S]{0,300}?\n    \}/)
+  assert.ok(dkBody, 'dispatch.mjs 应定义 localDayKey')
+  assert.match(dkBody[0], /getFullYear\(\)/)
+  assert.match(dkBody[0], /getMonth\(\) \+ 1/)
+  assert.match(dkBody[0], /getDate\(\)/)
+  assert.equal(/toISOString/.test(dkBody[0]), false) // UTC 会让晚间消耗落到次日
+  assert.match(host, /if \(!t\.usage\.byDay\) t\.usage\.byDay = \{\}/)            // 老任务就地补日账（不改老字段形态）
+  assert.match(host, /s\.byDay\[lk\] = \(s\.byDay\[lk\] \|\| 0\) \+ u\.total/)     // 存量兜底归 updatedAt 本地日
+  // 仪表盘：大数字=今日（本地日 key 取 byDay，缺省 0）+ 累计小字 + 近 7 天迷你条形
+  assert.match(cli, /function lastNDays\(n\)/)
+  assert.match(cli, /var todayTok = byDay\[todayKey\] \|\| 0/)                    // 今日缺省 0（无日账不误报）
+  assert.match(cli, /'tokens（今日）'/)
+  assert.match(cli, /'（本看板）'/)                                               // 累计总量小字保留
+  assert.match(cli, /'近 7 天'/)
+  assert.match(cli, /k\.slice\(5\) \+ '：' \+ String\(v\) \+ ' tok'/)              // 条形 title：MM-DD：N tok
+  assert.match(cli, /background: isToday \? C\.brand : C\.nested/)                // 今天高亮 brand、其余浅底
+  assert.match(cli, /hasDayData \? React\.createElement/)                         // 7 天全空不渲染该区
 })
 
 // ===== 学习飞轮 v1：候选教训信号 + feedbackEnabled 开关 + 软召回 =====

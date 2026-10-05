@@ -1304,6 +1304,21 @@ function apply(ctx) {
     // usageSummary 由 host 从各任务 t.usage 现算（t.usage 来自 Worker/Verifier 会话 v4 日志的
     // assistant/message.usage 聚合）。这里只做展示、不做计费断言；日志读不到/还没有 run 结算时
     // usageSummary.total 为 0，一律显示「暂无数据」。
+    // 日账（usageSummary.byDay：{'YYYY-MM-DD': tokens}）用于「今日」大数字与「近 7 天」条形；
+    // dayKey 口径与 host 记账完全一致——本地 getters 拼，绝不用 toISOString()（UTC 会让
+    // 晚上 8 点后的消耗落到次日，今日消耗直接错位）。
+    function localDayKey(d) {
+      var x = d || new Date()
+      function p2(n) { return (n < 10 ? '0' : '') + n }
+      return x.getFullYear() + '-' + p2(x.getMonth() + 1) + '-' + p2(x.getDate())
+    }
+    // 近 n 天的本地日 key 序列（旧 → 新，最后一个是今天）；本地日期构造天然跨月/跨年正确
+    function lastNDays(n) {
+      var out = []
+      var now = new Date()
+      for (var i = n - 1; i >= 0; i--) out.push(localDayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - i)))
+      return out
+    }
     function fmtTokens(n) {
       var v = Number(n) || 0
       if (v >= 1000000000) return (v / 1000000000).toFixed(1) + 'B'
@@ -1330,13 +1345,35 @@ function apply(ctx) {
       var maxM = models.length ? (models[0].total || 1) : 1
       var top = u.topTasks || []
       var maxT = top.length ? (top[0].total || 1) : 1
+      // 日账：今日数字取本地日 key，没有日账（byDay 缺字段/老 host）时退化为 0，不炸也不误报
+      var byDay = (u.byDay && typeof u.byDay === 'object') ? u.byDay : {}
+      var todayKey = localDayKey()
+      var todayTok = byDay[todayKey] || 0
+      var days = lastNDays(7)
+      var maxDay = 1
+      var hasDayData = false
+      for (var di = 0; di < days.length; di++) { var dv = byDay[days[di]] || 0; if (dv > maxDay) maxDay = dv; if (dv > 0) hasDayData = true }
       function mini(label, value) { return React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, label + ' ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(value))) }
       return React.createElement('div', { style: box },
         head,
         React.createElement('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginBottom: 8 } },
-          React.createElement('span', { style: { fontSize: 20, fontWeight: 700, color: C.brand } }, fmtTokens(u.total)),
-          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, 'tokens（本看板累计）'),
+          React.createElement('span', { style: { fontSize: 20, fontWeight: 700, color: C.brand }, title: '今日消耗（本地日 ' + todayKey + '；一次 run 的消耗整笔记在结算日）' }, fmtTokens(todayTok)),
+          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, 'tokens（今日）'),
+          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '累计 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(u.total)), '（本看板）'),
           mini('输入', u.input), mini('输出', u.output), mini('缓存读', u.cacheRead), u.cacheWrite ? mini('缓存写', u.cacheWrite) : null),
+        // 近 7 天迷你条形：高按区间 max 归一（今天高亮 brand，其余浅底 + 边框），
+        // 7 天全为 0 时整块不渲染（零残留，不占版面）
+        hasDayData ? React.createElement('div', { style: { marginBottom: 8 } },
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '近 7 天'),
+          React.createElement('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 4 } },
+            days.map(function (k) {
+              var v = byDay[k] || 0
+              var isToday = k === todayKey
+              var h = v > 0 ? Math.max(3, Math.round(v / maxDay * 32)) : 3
+              return React.createElement('div', { key: k, title: k.slice(5) + '：' + String(v) + ' tok', style: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 } },
+                React.createElement('div', { style: { width: '100%', height: h, background: isToday ? C.brand : C.nested, border: '1px solid ' + (isToday ? C.brand : C.border), borderRadius: 2 } }),
+                React.createElement('span', { style: { fontSize: 8, color: isToday ? C.brand : C.text2, whiteSpace: 'nowrap' } }, k.slice(5)))
+            }))) : null,
         React.createElement('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap' } },
           React.createElement('div', { style: { flex: '1 1 240px', minWidth: 200 } },
             React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '按模型分布'),

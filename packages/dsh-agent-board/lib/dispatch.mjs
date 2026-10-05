@@ -226,8 +226,19 @@ export function createDispatch(ctx, state, deps) {
       await accumulateRunUsage(sid, rec)
     }
 
-    // 把一次 run 的 token 消耗累加到任务（t.usage）：总量/输入/输出/缓存读写 + 按模型小计 + runs 计数。
+    // 本地日期 key（YYYY-MM-DD）：byDay 日账的唯一口径。
+    // 必须用本地 getters 拼——toISOString() 是 UTC，晚上 8 点后的消耗会被记到次日，
+    // 「今日消耗」在东八区会从每天 08:00 起算，直接错位。
+    function localDayKey(d) {
+      var x = d || new Date()
+      function p2(n) { return (n < 10 ? '0' : '') + n }
+      return x.getFullYear() + '-' + p2(x.getMonth() + 1) + '-' + p2(x.getDate())
+    }
+
+    // 把一次 run 的 token 消耗累加到任务（t.usage）：总量/输入/输出/缓存读写 + 按模型小计 + runs 计数 + 日账。
     // 模型小计的 key：优先本次派发显式覆盖的模型（rec.model），否则用日志里记录的会话模型。
+    // 日账（byDay）：本次 run 的 total 整笔记到「结算时刻的本地日」——一次 run 不跨日拆分
+    // （跨零点的长 run 全算在结算日），换取实现极简与仪表盘「今日 / 近 7 天」可算。
     async function accumulateRunUsage(sid, rec) {
       var u = null
       try { u = readRunUsage(String(rec.run.id)) } catch (_) { u = null }
@@ -247,6 +258,10 @@ export function createDispatch(ctx, state, deps) {
           if (!t.usage.models) t.usage.models = {}
           var mk = rec.model || u.model || '(未知模型)'
           t.usage.models[mk] = (t.usage.models[mk] || 0) + u.total
+          // 日账：老任务没有 byDay 就地补（不改写老字段形态）；键是本地日 YYYY-MM-DD。
+          if (!t.usage.byDay) t.usage.byDay = {}
+          var dk = localDayKey()
+          t.usage.byDay[dk] = (t.usage.byDay[dk] || 0) + u.total
           t.usage.updatedAt = new Date().toISOString()
           return { ok: true }
         })
