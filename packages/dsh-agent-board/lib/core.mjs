@@ -158,8 +158,28 @@ export function normalizeBoard(d) {
 // ===== 状态流转 =====
 export function claimCheck(d, t, sid) { if (CLAIMABLE.indexOf(t.status) < 0) return 'cannot claim in ' + t.status; if (t.claimedBy && t.claimedBy !== sid && t.status === 'in-progress') return 'claimed by ' + t.claimedBy; if (d.boardMode === 'manual' || t.assignMode === 'manual') { if (t.assignee && t.assignee !== sid) return 'assigned to ' + t.assignee }; if (isb(t)) { var p = gpt(t, d.tasks); if (!p) return 'parent not found'; if (p.status !== 'in-progress' && p.status !== 'verifying') return 'parent not in-progress' }; var mc = d.tasks.filter(function (x) { return x.claimedBy === sid && (x.status === 'in-progress' || x.status === 'verifying') && !isb(x) }); if (!isb(t) && mc.length >= MAX_CLAIMED) return 'max ' + MAX_CLAIMED + ' active'; return null }
 export function claimApply(d, t, sid, note) { var ps = t.status; t.status = 'in-progress'; t.claimedBy = sid; t.claimedAt = new Date().toISOString(); ah(t, ps, 'in-progress', sid, note) }
-export function checkParentAuto(d, t) { if (!isb(t)) return null; var p = gpt(t, d.tasks); if (!p || p.status !== 'in-progress') return null; var s = gsb(p.id, d.tasks); if (s.every(function (x) { return x.status === 'resolved' })) { p.status = 'verifying'; p.resolvedAt = new Date().toISOString(); p.resolution = 'all subtasks resolved'; ah(p, 'in-progress', 'verifying', 'system', 'auto: all subtasks resolved'); return p }; return null }
-export function resolveApply(d, t, sid, status, resolution, note) { var ps = t.status; if (status === 'verifying' && t.pipeline && t.pipeline !== 'full') { status = 'resolved' } t.status = status; t.resolution = resolution || null; t.resolvedAt = new Date().toISOString(); ah(t, ps, status, sid, note); var r = { ok: true, task: t }; if (status === 'verifying' && isb(t)) { var s = gsb(t.parentId, d.tasks); if (s.every(function (x) { return x.status === 'resolved' || x.id === t.id })) { var p = gpt(t, d.tasks); if (p && p.status === 'in-progress') { p.status = 'verifying'; p.resolvedAt = new Date().toISOString(); p.resolution = 'all subtasks done'; ah(p, 'in-progress', 'verifying', 'system', 'auto'); r.parentUpdated = true } } }; return r }
+// 子任务「已了结」终态口径：resolved（已完成/已验收）+ cancelled（人主动放弃该子任务范围）。
+// 为什么 cancelled 也算：cancelled 是人的显式决定，该子任务范围已关闭；若不算，一张被取消的
+// 子任务会把 epic 永久钉在 in-progress（手动取消的卡反而制造死卡）。验收时人仍可在 epic 上驳回。
+// 注：archived 不算——归档是「收尾/清理」动作，不应反向推动父卡流转（父卡归档时会级联归档子任务）。
+export function isChildSettled(t) { return !!t && (t.status === 'resolved' || t.status === 'cancelled') }
+// 史诗父卡自动收口（共享 helper，唯一判定口径）：父卡存在、父卡 in-progress、且全部子任务 ∈ 终态完成集
+// → 父卡转 verifying（交人验收）。幂等：父卡已 verifying/resolved/archived 一律返回 null，重复调用无副作用。
+export function maybeAutoCloseParent(d, childTask) {
+  if (!d || !childTask || !isb(childTask)) return null
+  var p = gpt(childTask, d.tasks)
+  if (!p || p.status !== 'in-progress') return null
+  var s = gsb(p.id, d.tasks)
+  if (!s.length || !s.every(function (x) { return isChildSettled(x) })) return null
+  p.status = 'verifying'
+  p.resolvedAt = new Date().toISOString()
+  p.resolution = 'all subtasks resolved'
+  ah(p, 'in-progress', 'verifying', 'system', 'auto: all subtasks resolved')
+  return p
+}
+// 兼容名：既有调用点（verifyApply）与 TEAM_SPLIT_RULE / README 的对外语义名保持不变，内部委托共享 helper。
+export function checkParentAuto(d, t) { return maybeAutoCloseParent(d, t) }
+export function resolveApply(d, t, sid, status, resolution, note) { var ps = t.status; if (status === 'verifying' && t.pipeline && t.pipeline !== 'full') { status = 'resolved' } t.status = status; t.resolution = resolution || null; t.resolvedAt = new Date().toISOString(); ah(t, ps, status, sid, note); var r = { ok: true, task: t }; var p = maybeAutoCloseParent(d, t); if (p) { r.parentUpdated = true }; return r }
 export function verifyApply(d, t, sid, verdict, comment) { var ps = t.status; if (verdict === 'approved') { t.status = 'resolved'; t.verifiedAt = new Date().toISOString(); t.verifiedBy = sid; delete t.frozen; delete t.frozenAt; delete t.frozenBy; ah(t, ps, 'resolved', sid, 'approved' + (comment ? ': ' + comment : '')) } else { t.status = 'in-progress'; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'in-progress', sid, 'rejected' + (comment ? ': ' + comment : '')) }; var r = { ok: true, task: t }; if (verdict === 'approved' && isb(t)) { var p = checkParentAuto(d, t); if (p) { r.parentUpdated = true } }; return r }
 
 // ===== 史诗父卡语义层 =====

@@ -12,6 +12,8 @@ export function createDispatch(ctx, state, deps) {
     var rt = deps.rt, wt = deps.wt, mutateLocked = deps.mutateLocked, kickCycle = deps.kickCycle
     var rootForSession = deps.rootForSession, sessionCwd = deps.sessionCwd, withTimeout = deps.withTimeout, runsFor = deps.runsFor, feedbackOn = deps.feedbackOn
     var pushSysNote = deps.pushSysNote, maybeNotify = deps.maybeNotify, notifyTaskDone = deps.notifyTaskDone
+    // 派发即回执：spawn 成功后入 45s 聚合队列的「🚀 已派发」区（老 host 未注入 → 静默跳过）
+    var notifyDispatched = deps.notifyDispatched
     // 共享状态别名（本体由 index.mjs apply 统一构建并逐模块注入）
     var dispatchedEver = state.dispatchedEver
     var badModels = state.badModels
@@ -415,6 +417,8 @@ export function createDispatch(ctx, state, deps) {
         if (rec) {
           // claim 占位换成真实 run id；verifier run 单独记（claimedBy 保留 worker 的，供详情页跳转会话）
           await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t) { if (sp.role === 'worker' && t.claimedBy === 'spawn-pending') t.claimedBy = String(rec.run.id); if (sp.role === 'verifier' && t.verifierRun === 'spawn-pending') { t.verifierRun = String(rec.run.id); t.verifierRunAt = new Date().toISOString() } }; return t }, true)
+          // 派发即回执：spawn 真成功后才入队（占位阶段失败不通知）；经 deps 注入，未注入静默跳过（老 host 兼容）
+          if (typeof notifyDispatched === 'function') notifyDispatched(sid, sp.t, sp.role)
         } else if (sp.role === 'worker') {
           // spawn 失败 → 回 pending
           await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t && t.status === 'in-progress' && t.claimedBy === 'spawn-pending') { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', 'spawn 失败，回收重新排队') }; return t }, true)

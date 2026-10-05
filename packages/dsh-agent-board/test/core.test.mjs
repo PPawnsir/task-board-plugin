@@ -16,6 +16,7 @@ import { createRpc } from '../lib/rpc.mjs'
 // no-root 刷屏根治（task-muuf0o7a）专项：会话层幻影板防线 + 派发层 root 闸门直调断言
 import { createSession, isFullSessionId } from '../lib/session.mjs'
 import { createDispatch } from '../lib/dispatch.mjs'
+import { createNotify } from '../lib/notify.mjs'
 // host 端源码拼接（Phase 2 模块化后：薄壳 index.mjs + lib/*.mjs 领域模块），供源码级接线断言
 const HOST_SOURCES = ['../index.mjs', '../lib/policy.mjs', '../lib/usage.mjs', '../lib/session.mjs', '../lib/store.mjs', '../lib/notify.mjs', '../lib/dispatch.mjs', '../lib/rpc.mjs']
 function hostSrc() { return HOST_SOURCES.map(function (f) { return readFileSync(new URL(f, import.meta.url), 'utf8') }).join('\n') }
@@ -77,6 +78,82 @@ test('子任务全 resolved → 父任务自动 verifying', () => {
   const d = mkBoard([p, c1, c2])
   const r = core.verifyApply(d, c1, 'v', 'approved')
   assert.equal(r.parentUpdated, true); assert.equal(p.status, 'verifying')
+})
+
+// ===== 史诗自动收口补漏（task-muuoduri）：work 管线子任务也要收口 =====
+// 实证 bug：resolveApply 先把非 full 管线的 status 由 verifying 改写成 resolved，
+// 旧的父卡检查绑在 `status === 'verifying'` 分支上 → work 档子任务（无 Verifier）永不触发父卡收口，
+// epic 永久卡 in-progress。修法：判定抽成共享 helper maybeAutoCloseParent，resolveApply 落定后无条件调用。
+test('史诗收口①：work 管线子任务 resolve → 父卡自动转 verifying（核心回归）', () => {
+  const p = mkTask({ id: 'epic', status: 'in-progress' }) // epic 父卡（pipeline=direct，不下池）
+  const c = mkTask({ id: 'c1', parentId: 'epic', status: 'in-progress', pipeline: 'work' })
+  const d = mkBoard([p, c])
+  const r = core.resolveApply(d, c, 'w', 'verifying', 'done')
+  assert.equal(c.status, 'resolved')       // work 档：resolve 即落 resolved（无 Verifier）
+  assert.equal(r.parentUpdated, true)      // 父卡收口被触发（旧实现此处为 undefined → 永久卡死）
+  assert.equal(p.status, 'verifying')
+  assert.equal(p.resolution, 'all subtasks resolved')
+  assert.equal(p.history[p.history.length - 1].actor, 'system')
+})
+
+test('史诗收口②：full 档子任务 verify approved 收口仍然成立（既有防回归）', () => {
+  const p = mkTask({ id: 'epic', status: 'in-progress' })
+  const c = mkTask({ id: 'c1', parentId: 'epic', status: 'verifying', pipeline: 'full' })
+  const d = mkBoard([p, c])
+  const r = core.verifyApply(d, c, 'v', 'approved', 'ok')
+  assert.equal(r.parentUpdated, true)
+  assert.equal(p.status, 'verifying')
+})
+
+test('史诗收口③：cancelled 子任务计入终态完成集 → 父卡也能收口', () => {
+  const p = mkTask({ id: 'epic', status: 'in-progress' })
+  const c1 = mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' })
+  const c2 = mkTask({ id: 'c2', parentId: 'epic', status: 'cancelled' })
+  const c3 = mkTask({ id: 'c3', parentId: 'epic', status: 'in-progress', pipeline: 'work' })
+  const d = mkBoard([p, c1, c2, c3])
+  assert.equal(core.isChildSettled(c1), true)
+  assert.equal(core.isChildSettled(c2), true)  // 人主动取消 = 该子任务范围已了结
+  assert.equal(core.isChildSettled(c3), false)
+  assert.equal(core.isChildSettled(mkTask({ status: 'archived' })), false) // 归档不算（收尾动作，不反向推动）
+  const r = core.resolveApply(d, c3, 'w', 'verifying', 'done')
+  assert.equal(r.parentUpdated, true)
+  assert.equal(p.status, 'verifying')
+})
+
+test('史诗收口④：仍有 pending/in-progress 子任务 → 不收口', () => {
+  const p = mkTask({ id: 'epic', status: 'in-progress' })
+  const c1 = mkTask({ id: 'c1', parentId: 'epic', status: 'in-progress', pipeline: 'work' })
+  const c2 = mkTask({ id: 'c2', parentId: 'epic', status: 'pending' })
+  const d = mkBoard([p, c1, c2])
+  const r = core.resolveApply(d, c1, 'w', 'verifying', 'done')
+  assert.equal(c1.status, 'resolved')
+  assert.equal('parentUpdated' in r, false)
+  assert.equal(p.status, 'in-progress') // 未被误收口
+})
+
+test('史诗收口⑤：父卡已 verifying/resolved → 幂等不重复触发（无副作用）', () => {
+  const c = mkTask({ id: 'c1', parentId: 'epic', status: 'in-progress', pipeline: 'work' })
+  const pv = mkTask({ id: 'epic', status: 'verifying' })
+  const dv = mkBoard([pv, c])
+  assert.equal(core.maybeAutoCloseParent(dv, c), null)
+  assert.equal(pv.history.length, 0) // 无 history 追加 = 零副作用
+  const pr = mkTask({ id: 'epic', status: 'resolved' })
+  const dr = mkBoard([pr, c])
+  assert.equal(core.maybeAutoCloseParent(dr, c), null)
+  assert.equal(pr.history.length, 0)
+  // 无 parentId（顶层任务）与父卡不存在 → 一律 null
+  assert.equal(core.maybeAutoCloseParent(mkBoard([mkTask({ id: 'lonely' })]), mkTask({ id: 'lonely' })), null)
+  assert.equal(core.maybeAutoCloseParent(mkBoard([c]), c), null) // 父卡不在板上（悬空引用）
+})
+
+test('史诗收口⑥：checkParentAuto 兼容名委托共享 helper（单一判定口径）', () => {
+  const p = mkTask({ id: 'epic', status: 'in-progress' })
+  const c = mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' })
+  const d = mkBoard([p, c])
+  const got = core.checkParentAuto(d, c)
+  assert.equal(got, p)
+  assert.equal(p.status, 'verifying')
+  assert.equal(p.resolution, 'all subtasks resolved') // 口径文案统一（旧 resolveApply 分支的 'all subtasks done' 已退役）
 })
 
 // ===== 依赖 =====
@@ -1330,9 +1407,11 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
   // 两模块都从 core 解构引入（接线不断）；rpc.mjs 解构表尾部随调研门禁（task-mute6zpw）、调研遵循三件套（task-mutnj3a4）、tasksHash（task-mutrtwin）扩展
   assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT \} = core/)
   assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash \} = core/)
-  // 既有「全子任务 resolved → 父 verifying」逻辑不动（checkParentAuto 仍在 verifyApply 链路；core.mjs 不在 hostSrc 清单，单独读）
+  // 既有「全子任务 resolved → 父 verifying」逻辑不动（checkParentAuto 仍在 verifyApply 链路；
+  // 但其内部已委托共享 helper maybeAutoCloseParent——单一判定口径，core.mjs 不在 hostSrc 清单，单独读）
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
   assert.match(coreSrc, /if \(verdict === 'approved' && isb\(t\)\) \{ var p = checkParentAuto\(d, t\)/)
+  assert.match(coreSrc, /export function checkParentAuto\(d, t\) \{ return maybeAutoCloseParent\(d, t\) \}/)
 })
 
 // ===== 防再发：notify 逻辑单一来源（lib/notify.mjs）=====
@@ -1340,7 +1419,7 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
 // 函数声明提升后被头部 var x = deps.x 赋值覆盖，是永不执行的死代码——改错地方不产生效果，挪赋值顺序即引爆）。
 // 此处断言六个函数的定义只存在于 notify.mjs，任何模块再长出副本即红。
 test('notify 单一来源：notifyTaskDone/flushReceipts/deliverEscalation 等函数定义只存在于 lib/notify.mjs', () => {
-  const names = ['deliverEscalation', 'notifyMainWindow', 'maybeNotify', 'notifyTaskDone', 'pushSysNote', 'flushReceipts']
+  const names = ['deliverEscalation', 'notifyMainWindow', 'maybeNotify', 'notifyTaskDone', 'notifyDispatched', 'pushSysNote', 'flushReceipts']
   const others = ['../index.mjs', '../lib/policy.mjs', '../lib/usage.mjs', '../lib/session.mjs', '../lib/store.mjs', '../lib/dispatch.mjs', '../lib/rpc.mjs']
   const notifySrc = readFileSync(new URL('../lib/notify.mjs', import.meta.url), 'utf8')
   for (const name of names) {
@@ -1351,6 +1430,92 @@ test('notify 单一来源：notifyTaskDone/flushReceipts/deliverEscalation 等�
       assert.ok(!re.test(src), f + ' 不得再定义 ' + name + '（notify 逻辑唯一权威在 lib/notify.mjs，副本是僵尸死代码）')
     }
   }
+})
+
+// ===== 派发即回执（task-muuoduri）：notifyDispatched 入 45s 聚合队列「🚀 已派发」区 =====
+// createNotify 直调 harness：mock ctx.timer 捕获 45s 窗口回调（不自动触发 → 无 45s 真等待）；
+// root.followup 捕获投递文本；rt 按 o.board 返回看板快照（投递前状态过滤读的就是它）。
+function mkNotify(options) {
+  const o = options || {}
+  const captured = []
+  let board = o.board || { tasks: [] }
+  const state = { escNotifyTimers: {}, receiptBuf: {}, receiptedKeys: {}, sysNotesBuf: {} }
+  const ctx = { timer: { timeout: () => new Promise(() => {}) } } // 窗口回调不自动触发，测试按「满 5 条」同步冲刷
+  const root = { followup: (m) => { captured.push(m) }, whenIdle: () => Promise.resolve() }
+  const deps = {
+    rt: async () => board,
+    rootForSession: () => (o.noRoot ? null : root),
+    withTimeout: (p) => p,
+    isDispatched: (sid, id) => !!id,
+  }
+  const notify = createNotify(ctx, state, deps)
+  return { notify, state, captured, setBoard: (b) => { board = b } }
+}
+function textOf(m) { return m.content.map(c => c.text).join('\n') }
+const DTASK = (over) => mkTask(Object.assign({ id: 'dt1', title: '派发中的卡', status: 'in-progress', claimedBy: 'run-1', claimedAt: '2026-01-02T00:00:00Z' }, over || {}))
+// 顶开窗口：再入 4 条完成回执触发「满 5 条」同步冲刷（真实生产冲刷路径，无 45s 真等待）
+function pushFour(h) { for (const i of [1, 2, 3, 4]) h.notify.notifyTaskDone('s1', mkTask({ id: 'k' + i, title: 'K' + i, status: 'resolved', claimedBy: 'r' + i, resolvedAt: 'T' + i }), 'resolved') }
+
+test('派发回执①：notifyDispatched 入队（kind=dispatched + role）→ flush 出「🚀 已派发」区', async () => {
+  const h = mkNotify({ board: { tasks: [DTASK()] } })
+  h.notify.notifyDispatched('s1', DTASK(), 'worker')
+  const buf = h.state.receiptBuf.s1
+  assert.equal(buf.items.length, 1)
+  assert.equal(buf.items[0].kind, 'dispatched')
+  assert.equal(buf.items[0].role, 'worker')
+  pushFour(h)
+  await new Promise(r => setImmediate(r))
+  assert.equal(h.captured.length, 1)
+  const txt = textOf(h.captured[0])
+  assert.match(txt, /🚀 已派发 1 个：/)
+  assert.match(txt, /派发中的卡 \(dt1\) — Worker 执行中/)
+  assert.equal(h.captured[0].source.kind, 'plugin:dsh-agent-board')
+
+  // verifier 角色文案
+  const vt = mkTask({ id: 'v1', title: '验收中的卡', status: 'in-progress', claimedBy: 'w0', verifierRun: 'v-1' })
+  const h2 = mkNotify({ board: { tasks: [vt] } })
+  h2.notify.notifyDispatched('s1', vt, 'verifier')
+  pushFour(h2)
+  await new Promise(r => setImmediate(r))
+  assert.match(textOf(h2.captured[0]), /验收中的卡 \(v1\) — Verifier 验收中/)
+})
+
+test('派发回执②：flush 时任务已离场（非 in-progress）→ dispatched 项被丢弃', async () => {
+  const h = mkNotify({ board: { tasks: [mkTask({ id: 'fast', title: '10 秒探针', status: 'resolved', claimedBy: 'run-1' })] } })
+  h.notify.notifyDispatched('s1', mkTask({ id: 'fast', title: '10 秒探针', status: 'in-progress', claimedBy: 'run-1', claimedAt: 'T' }), 'worker')
+  assert.equal(h.state.receiptBuf.s1.items.length, 1) // 入队照常（派发时刻确实派发了）
+  pushFour(h)
+  await new Promise(r => setImmediate(r))
+  assert.equal(h.captured.length, 1)
+  const txt = textOf(h.captured[0])
+  assert.doesNotMatch(txt, /🚀 已派发/)   // 已离场的派发回执被丢弃
+  assert.doesNotMatch(txt, /10 秒探针/)   // 不与完成回执重复刷屏
+  assert.match(txt, /✅ 完成 4 个：/)      // 完成回执（主通道）照常投递
+})
+
+test('派发回执③：完成回执与派发回执同窗口 → 合并成一条消息', async () => {
+  const t = mkTask({ id: 'm1', title: '合并卡', status: 'in-progress', claimedBy: 'run-9', claimedAt: 'T' })
+  const h = mkNotify({ board: { tasks: [t] } })
+  h.notify.notifyDispatched('s1', t, 'worker')                                                              // 派发时刻
+  h.notify.notifyTaskDone('s1', Object.assign({}, t, { status: 'resolved', resolvedAt: 'T3' }), 'resolved')  // 完成时刻（同一窗口）
+  pushFour(h)
+  await new Promise(r => setImmediate(r))
+  assert.equal(h.captured.length, 1) // 一条消息，不是两条
+  const txt = textOf(h.captured[0])
+  assert.match(txt, /回执摘要（5 条）/)
+  assert.match(txt, /🚀 已派发 1 个：/)
+  assert.match(txt, /✅ 完成 4 个：/)
+})
+
+test('派发回执④：deps 未注入 notifyDispatched（老 host）→ 静默跳过，不抛错', () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  assert.match(dsp, /if \(typeof notifyDispatched === 'function'\) notifyDispatched\(sid, sp\.t, sp\.role\)/)
+  const idx = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
+  assert.match(idx, /notifyDispatched: notify\.notifyDispatched/) // index.mjs 接线在位
+  // 行为面：deps 未提供 isDispatched 时 notifyDispatched 照常入队（老 host 兼容，零依赖完成回执判定）
+  const h = mkNotify({ board: { tasks: [DTASK()] } })
+  assert.doesNotThrow(() => h.notify.notifyDispatched('s1', DTASK(), 'worker'))
+  assert.equal(h.state.receiptBuf.s1.items.length, 1)
 })
 
 // ===== 调研门禁·UI：无调研徽章 + 详情注入清单 + 创建表单 warning 展示（源码级断言）=====

@@ -1,7 +1,8 @@
 // dsh-agent-board — 通知层（lib/notify.mjs）
 // makeMsg（纯函数，模块级 export，rpc.mjs 直接 import）：插件来源消息构造。
 // createNotify(ctx, state, deps)：歧义上报 25s 去抖通知 / 回执批量聚合（45s 或满 5 条）+ 主窗口空闲门控 /
-// 系统异常通知队列 / 投递前按看板现状过滤过期项。共享状态全部经 state 显式注入。
+// 系统异常通知队列 / 投递前按看板现状过滤过期项（含 dispatched 派发回执的离场过滤）。共享状态全部经 state 显式注入。
+// 回执两类入口共用同一聚合队列：notifyTaskDone（完成/阻塞）+ notifyDispatched（派发即回执）。
 
     // makeMsg 支持插件来源标记（参考 dsh-notes 派发模式）：
     // form 'recall' = 背景回执（召回上下文，非指令）；'notice' = 需注意的通知（带一行 summary）
@@ -59,24 +60,39 @@ export function createNotify(ctx, state, deps) {
     // 回执幂等去重表：key = 任务id + 类别 + 完成事件指纹（deliverable/verification/resolvedAt/末条history 时间戳）。
     // 同一完成事件被任何路径（工具直报/run 结算/未来回归）重复通知时指纹一致 → 吞掉；
     // 驳回后重做完成 → 时间戳全换新 → 指纹不同 → 正常回执。
-    function notifyTaskDone(sid, t, kind) {
-      if (!t || !isDispatched(sid, t.claimedBy)) return
-      var lastHist = (t.history && t.history.length) ? String(t.history[t.history.length - 1].timestamp || '') : ''
-      var stamp = [kind, (t.deliverable && t.deliverable.at) || '', (t.verification && t.verification.at) || '', t.resolvedAt || '', lastHist].join('|')
-      var key = t.id + ':' + stamp
+    // 回执入队（共享内核，notifyTaskDone / notifyDispatched 两条入口共用同一 45s 聚合队列）：
+    // 幂等去重表 key = 任务id + 类别指纹 + 事件时间戳（1h TTL 清超龄键）；入队后满 5 条立即冲刷，
+    // 否则挂 45s 窗口（timer 不可用则同步冲刷）。
+    function pushReceipt(sid, key, item) {
       if (receiptedKeys[key]) return
       var rkeys = Object.keys(receiptedKeys)
       if (rkeys.length > 512) { var rnow = Date.now(); for (var ri = 0; ri < rkeys.length; ri++) { if (rnow - receiptedKeys[rkeys[ri]] > 3600000) delete receiptedKeys[rkeys[ri]] } }
       receiptedKeys[key] = Date.now()
       var buf = receiptBuf[sid] || (receiptBuf[sid] = { items: [], timer: null })
-      var lastNote = (t.history && t.history.length) ? String(t.history[t.history.length - 1].note || '') : ''
-      buf.items.push({ kind: kind, title: t.title, id: t.id, summary: (t.deliverable && t.deliverable.summary) || '', note: lastNote })
+      buf.items.push(item)
       if (buf.items.length >= 5) { flushReceipts(sid); return }
       if (!buf.timer) {
         var tm = ctx.timer
         if (tm) { var captured = buf; buf.timer = tm.timeout(45000).then(function () { if (receiptBuf[sid] === captured) flushReceipts(sid) }).catch(function () {}) }
         else flushReceipts(sid)
       }
+    }
+    function notifyTaskDone(sid, t, kind) {
+      if (!t || !isDispatched(sid, t.claimedBy)) return
+      var lastHist = (t.history && t.history.length) ? String(t.history[t.history.length - 1].timestamp || '') : ''
+      var stamp = [kind, (t.deliverable && t.deliverable.at) || '', (t.verification && t.verification.at) || '', t.resolvedAt || '', lastHist].join('|')
+      var lastNote = (t.history && t.history.length) ? String(t.history[t.history.length - 1].note || '') : ''
+      pushReceipt(sid, t.id + ':' + stamp, { kind: kind, title: t.title, id: t.id, summary: (t.deliverable && t.deliverable.summary) || '', note: lastNote })
+    }
+    // 派发即回执：任务被 Worker/Verifier 领走（spawn 成功）时入同一聚合队列，flush 出「🚀 已派发」区。
+    // 为什么与完成回执同队列：派发与完成常在同一 45s 窗口内（10 秒探针卡），分两条消息会刷屏；
+    // 同一条摘要里「已派发 → 完成/阻塞」相邻呈现，人一眼看清生命周期。role = worker/verifier。
+    // 判定用 claimedBy 真值（派发回执不依赖 dispatchedEver 的 run 记账——那条判定是给完成回执区分
+    // 「派发执行 vs 主窗口手动」用的；派发回执本身只可能由派发路径调用，天然是派发任务）。
+    function notifyDispatched(sid, t, role) {
+      if (!t || !t.id || !t.claimedBy) return
+      var stamp = 'dispatched|' + String(role || 'worker') + '|' + (t.claimedAt || t.verifierRunAt || '')
+      pushReceipt(sid, t.id + ':' + stamp, { kind: 'dispatched', role: String(role || 'worker'), title: t.title, id: t.id, summary: '', note: '' })
     }
     // 系统级异常通知队列（易失，随回执冲刷）：模型熔断/spawn 失败/孤儿回收/看门狗标记
     // taskId 可选：告警类通知（软超时提醒等）语义只对「任务仍在执行中」成立，
@@ -97,9 +113,13 @@ export function createNotify(ctx, state, deps) {
       function noteOf(status) { return status === 'verifying' ? '验证中' : '进行中' }
       // 组装投递文本（入参已是过滤后的存活项，避免用已丢弃项的计数）
       function composeText(items, notes) {
-        var done = [], blocked = []
-        for (var i = 0; i < items.length; i++) { (items[i].kind === 'resolved' ? done : blocked).push(items[i]) }
-        var lines = [done.length || blocked.length ? '📋 [任务看板] 回执摘要（' + items.length + ' 条）' : '📋 [任务看板] 系统通知', '']
+        var done = [], blocked = [], dispatched = []
+        for (var i = 0; i < items.length; i++) { (items[i].kind === 'resolved' ? done : (items[i].kind === 'dispatched' ? dispatched : blocked)).push(items[i]) }
+        var lines = [items.length ? '📋 [任务看板] 回执摘要（' + items.length + ' 条）' : '📋 [任务看板] 系统通知', '']
+        if (dispatched.length) {
+          lines.push('🚀 已派发 ' + dispatched.length + ' 个：')
+          for (var d = 0; d < dispatched.length && d < 8; d++) lines.push('  · ' + dispatched[d].title + ' (' + dispatched[d].id + ') — ' + (dispatched[d].role === 'verifier' ? 'Verifier 验收中' : 'Worker 执行中'))
+        }
         if (done.length) {
           lines.push('✅ 完成 ' + done.length + ' 个：')
           for (var j = 0; j < done.length && j < 8; j++) lines.push('  · ' + done[j].title + ' (' + done[j].id + ')' + (done[j].summary ? ' — ' + done[j].summary.slice(0, 120) : ''))
@@ -135,11 +155,16 @@ export function createNotify(ctx, state, deps) {
           }
           // b. 回执项：任务已 archived（人已手动归档 = 已知悉）→ 丢弃；
           //    resolved/blocked 保留（回执是主通道，任务查不到也保留，不能因读盘失败丢回执）
+          //    dispatched（派发即回执）：入队到 flush 之间任务可能已离场（10 秒探针卡快速完成、
+          //    被人取消/归档）——任务已不在 in-progress 说明「已派发」这条时效性信息已过期，
+          //    丢弃以免与同窗口的完成回执重复刷屏（完成回执本身就是主通道，信息不丢）。
+          //    rt 读盘失败（tt 为 null）时保留，不因瞬时读盘错误吞掉派发回执。
           var keptItems = []
           for (var j = 0; j < items.length; j++) {
             var it = items[j]
             var tt = findTask(it.id)
             if (tt && tt.status === 'archived') continue
+            if (it.kind === 'dispatched' && tt && tt.status !== 'in-progress') continue
             keptItems.push(it)
           }
           // c. 过滤后全空 → 不再打扰主窗口
@@ -153,5 +178,5 @@ export function createNotify(ctx, state, deps) {
       } else deliver().catch(function (e) { console.error('[task-board] receipt flush failed:', String(e)) })
     }
 
-    return { maybeNotify: maybeNotify, notifyTaskDone: notifyTaskDone, pushSysNote: pushSysNote }
+    return { maybeNotify: maybeNotify, notifyTaskDone: notifyTaskDone, notifyDispatched: notifyDispatched, pushSysNote: pushSysNote }
 }

@@ -56,6 +56,7 @@ export function apply(ctx) {
       rootForSession: session.rootForSession, sessionCwd: session.sessionCwd,
       withTimeout: session.withTimeout, runsFor: session.runsFor, feedbackOn: session.feedbackOn,
       pushSysNote: notify.pushSysNote, maybeNotify: notify.maybeNotify, notifyTaskDone: notify.notifyTaskDone,
+      notifyDispatched: notify.notifyDispatched,
     })
     storeDeps.poolCycle = dispatch.poolCycle // 晚绑定收口
     // 僵尸 epic 出清配套（反馈 n-mutma3mmwceq）：archive-task 门禁的活性判定。
