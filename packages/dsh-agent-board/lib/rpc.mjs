@@ -42,6 +42,16 @@ export function createRpc(ctx, state, deps) {
     var rt = deps.rt, mutateLocked = deps.mutateLocked
     var maybeNotify = deps.maybeNotify, notifyTaskDone = deps.notifyTaskDone
     var spawnOneShot = deps.spawnOneShot, accumulateRunUsage = deps.accumulateRunUsage, readContextPack = deps.readContextPack
+    // 上报通道的 run 收尾（task-muwkhqf8）：board_report/board_verdict 推进任务落定后，对当前 continuable
+    // Worker rec 补做「关 run 结局 + usage 落账 + 摘超时臂」。未接线（老宿主/测试桩）→ 静默跳过，
+    // 行为与本次改造前逐字一致（那时本来就没人做这件事）。
+    var reportRunSettled = (typeof deps.reportRunSettled === 'function') ? deps.reportRunSettled : null
+    // 上报即收尾的统一调用点：失败只记日志、绝不影响工具返回值（收尾是附加动作，工具通道的结果已落定）。
+    function settleReportedRun(taskId) {
+      if (!reportRunSettled) return Promise.resolve(false)
+      return Promise.resolve(reportRunSettled(toolSessionId(), taskId, { outcome: 'completed' }))
+        .catch(function (e) { console.error('[task-board] 上报通道 run 收尾失败 (task ' + taskId + '):', String(e)); return false })
+    }
     var pushSysNote = deps.pushSysNote, sessionCwd = deps.sessionCwd // 调研门禁③：epic 发布预检的投递通道与路径解析根
     // 僵尸 epic 出清（反馈 n-mutma3mmwceq）：archive 门禁的活性判定由 index.mjs 接线注入
     // （runsFor(sid)[taskId] 存在且 !settled 即活跃）。未注入时按「有活跃 run」兜底——
@@ -107,7 +117,7 @@ export function createRpc(ctx, state, deps) {
     ctx.tools.register(defineTool({ name: 'task_verify', description: '验收：approved→resolved，rejected→in-progress。子任务全完成父任务自动verifying。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, verdict: { type: 'string', enum: ['approved', 'rejected'] }, comment: { type: 'string' } }, required: ['taskId', 'verdict'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'verifying') return { ok: false, error: 'not verifying' }; var __vr = verifyApply(d, t, actor, args.verdict, args.comment); if (args.verdict === 'rejected') { t.verification = { verdict: 'rejected', summary: args.comment || '', checks: '', at: new Date().toISOString(), by: actor }; pushRejection(t, args.comment, '', t.verification.at, actor); __vr.hint = REJECT_REDISPATCH_HINT } return __vr }) } }))
     ctx.tools.register(defineTool({ name: 'task_archive', description: '归档已解决/已取消任务（无活跃 run 的 in-progress 僵尸卡也可归档，用于 parentKick 僵尸态出清）。', parameters: { type: 'object', properties: { taskId: { type: 'string' } }, required: ['taskId'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { var a = d.tasks; var t = a.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; var __ae = archiveErr(sid, t); if (__ae) return { ok: false, error: __ae }; var ps = t.status; t.status = 'archived'; t.archivedAt = new Date().toISOString(); ah(t, ps, 'archived', actor, 'archived'); var ca = 0; gsb(t.id, a).forEach(function (c) { if (c.status !== 'archived') { ah(c, c.status, 'archived', actor, 'cascade'); c.status = 'archived'; c.archivedAt = new Date().toISOString(); ca++ } }); var r = { ok: true, task: t }; if (ca) r.childrenArchived = ca; return r }) } }))
     ctx.tools.register(defineTool({ name: 'task_update', description: '更新任务字段，可选重置为 pending。dependsOn/pipeline 也可更新（环检测会拒绝成环依赖）。contextFiles 可更新预研文件清单。unfreeze:true 解除裁决挂起冻结（frozen）并触发派发。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' }, priority: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] }, assignMode: { type: 'string', enum: ['auto', 'manual'] }, assignee: { type: 'string' }, dependsOn: { type: 'array', items: { type: 'string' } }, contextFiles: { type: 'array', items: { type: 'string' }, description: '预研文件路径（替换式更新），派发时以文件清单（路径:L行号 — 一句用途）随首条 prompt 注入，内容由子代理按需 read 自取' }, contextNotes: { type: 'string', description: '预研笔记（替换式更新）：调研结论/原始需求/思路' }, pipeline: { type: 'string', enum: ['full', 'work', 'direct'] }, resetToPending: { type: 'boolean' }, unfreeze: { type: 'boolean', description: '解除冻结（frozen）并立即触发派发，用于 hold 裁决补完上下文后重新入池' }, publish: { type: 'boolean', description: '发布草稿为 pending（仅 draft 状态有效）' }, hooks: { type: 'object', additionalProperties: true, description: '史诗 hook 点位（仅主窗口可设）：{ pre?: { enabled?, prompt }, post?: { enabled?, prompt } } —— hook 点=一次真实 agent 运行（不是声明式命令）：pre 在子任务派发前跑一遍前置准备（未完成前该 epic 的子任务一张都不派），post 在全部子任务了结后跑一遍收口（完成后 epic 才转 verifying）。prompt 是薄框架契约（做什么由 hook agent 判断，吃不准会歧义上报）。传 null 清除，传 { pre: null } 只撤该点位。' } }, required: ['taskId'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (args.hooks !== undefined && resolveRoot(__ra) !== __ra) return { ok: false, error: 'hooks 仅主窗口可设（子代理无 hooks 权限）' }; if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); var existsFn = existsInSession(sid); var __res = await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; var __pre = null; if (args.title !== undefined) t.title = args.title; if (args.description !== undefined) t.description = args.description; if (args.priority !== undefined) t.priority = args.priority; if (args.assignMode !== undefined) t.assignMode = args.assignMode; if (args.assignee !== undefined) t.assignee = args.assignee || null; if (args.dependsOn !== undefined) { var derr = validateDeps(d, t.id, args.dependsOn); if (derr) return { ok: false, error: derr }; t.dependsOn = args.dependsOn } if (args.pipeline !== undefined) { t.pipeline = args.pipeline; t.pipelineAuto = false } if (args.contextFiles !== undefined) { if (!t.context) t.context = { files: [], docs: [], instructions: '', notes: '', relatedTasks: [], prerequisites: '' }; t.context.files = Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : [] } if (args.contextNotes !== undefined) { if (!t.context) t.context = { files: [], docs: [], instructions: '', notes: '', relatedTasks: [], prerequisites: '' }; t.context.notes = typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : '' } if (args.publish) { if (t.status !== 'draft') return { ok: false, error: 'not a draft' }; t.status = 'pending'; ah(t, 'draft', 'pending', actor, 'published'); /* 调研门禁③：发布的是 epic（有子任务）时轻量预检子任务调研注入，缺失挂返回值由锁外 pushSysNote 汇总 */ __pre = epicPrecheck(d.tasks, t.id, existsFn) } if (args.unfreeze && t.frozen) { delete t.frozen; delete t.frozenAt; delete t.frozenBy; ah(t, t.status, t.status, actor, '解除冻结，重新进入派发池') } if (args.resetToPending) { var ps = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; t.resolvedAt = null; t.resolution = null; delete t.retryCount; delete t.stuckSince; ah(t, ps, 'pending', actor, 'reset to pending after edit') }; if (args.hooks !== undefined) { var __he = applyHooks(t, args.hooks); if (__he.error) return { ok: false, error: __he.error } }; var __out = { ok: true, task: t }; if (__pre && __pre.missing.length) __out.epicPrecheck = __pre; return __out }); afterPublishPrecheck(sid, args.taskId, __res); return __res } }))
-    ctx.tools.register(defineTool({ name: 'task_create', description: '创建新任务到当前会话看板。acceptance 可选：硬性验收脚本命令（如 "node --test src/x.test.js"），Worker 必须实际运行、Verifier 必须独立复跑。dependsOn 可选：依赖任务 id 数组，依赖全部完成后才会被派发。pipeline 可选：full(默认,工作+验证)/work(只做不验)/direct(不进池，主窗口直接处理)。contextFiles 可选：你在调研中已经读过的关键文件路径数组——派发时以「文件清单」（每行「路径:L起-L止 — 一句用途」）随首条 prompt 一次性注入，只给路径与行号、不含内容本体（子代理用 read 工具按行号范围按需自取：执行时盘面更新鲜，也免了大文件正文撑爆 prompt 与随快照每轮重发），避免子代理从零重复调研。contextNotes 可选：调研结论/原始需求/思路等非文件类上下文，全文随首条 prompt 一次性注入（≤8000 字符）。【开发类任务（涉及代码改动/修复/特性）务必带文件调研】：把调研中读过的关键文件路径放进 contextFiles、结论思路放进 contextNotes——实测可让 Worker 省去 10~15 分钟从零 grep 定位的时间，且方向感天壤之别（无调研的 Worker 只能靠标题猜需求、极易跑偏）。调研门禁：pipeline=full/work 且 touches 非空而未带调研上下文时，返回将附 warning 提示。touches 可选：本任务将要改动的文件路径/glob 数组（如 "src/x.mjs"、"src/**"）——派发器在同一时刻只派发 touches 不冲突的任务，避免并行 Worker 改同一批文件互踩；任务持有文件锁（in-progress/verifying/resolved 都持有，锁持到归档才真释放——护住验收后-提交前的提交窗口期；cancelled 立即释放）。' + TASK_SIZE_CONTRACT, parameters: { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' }, priority: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] }, tags: { type: 'array', items: { type: 'string' } }, parentId: { type: 'string' }, instructions: { type: 'string' }, acceptance: { type: 'string' }, dependsOn: { type: 'array', items: { type: 'string' } }, contextFiles: { type: 'array', items: { type: 'string' }, description: '预研文件路径（相对 workspace 或绝对路径；可写「路径:L1-L2 — 一句用途」），派发时以文件清单随首条 prompt 注入（只给路径行号，内容由子代理按需 read 自取）' }, contextNotes: { type: 'string', description: '预研笔记：调研结论/原始需求/思路等（≤8000 字符），全文随首条 prompt 一次性注入' }, pipeline: { type: 'string', enum: ['full', 'work', 'direct'] }, touches: { type: 'array', items: { type: 'string' }, description: '本任务将改动的文件路径/glob（文件级排他锁）：与活动任务 touches 冲突时不派发，等锁释放；支持 "src/**" 目录、"./a/b.mjs"、裸文件名等写法' }, draft: { type: 'boolean', description: '创建为草稿（不派发）。Team 模式下缺省即为 true——补全 dependsOn/上下文后用 task_update publish=true 统一发布；非 Team 模式缺省 false，显式 draft:false 可跳过草稿' }, hooks: { type: 'object', additionalProperties: true, description: '史诗 hook 点位（仅主窗口可设）：{ pre?: { enabled?, prompt }, post?: { enabled?, prompt } } —— hook 点=一次真实 agent 运行（不是声明式命令）：pre 在子任务派发前跑一遍前置准备（未完成前该 epic 的子任务一张都不派），post 在全部子任务了结后跑一遍收口（完成后 epic 才转 verifying）。prompt 是薄框架契约（做什么由 hook agent 判断，吃不准会歧义上报）。传 null 清除，传 { pre: null } 只撤该点位。' } }, required: ['title'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (args.hooks !== undefined && resolveRoot(__ra) !== __ra) return { ok: false, error: 'hooks 仅主窗口可设（子代理无 hooks 权限）' }; if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { if (args.id && d.tasks.find(function (x) { return x.id === args.id })) return { ok: false, error: 'duplicate id: ' + args.id }; if (args.dependsOn && args.dependsOn.length) { var derr = validateDeps(d, args.id || '(pending)', args.dependsOn); if (derr) return { ok: false, error: derr } }; var now = new Date().toISOString(); /* Team 模式护栏：draft 缺省跟随 teamMode（先补齐依赖/上下文再统一 publish）；显式 draft:false 保留为立即派发的逃生门 */ var asDraft = args.draft === undefined ? !!d.teamMode : !!args.draft; var t = { id: args.id || ('task-' + Date.now().toString(36)), title: args.title, description: args.description || '', status: asDraft ? 'draft' : 'pending', priority: args.priority || 'medium', tags: args.tags || [], parentId: args.parentId || null, subtaskStrategy: null, assignMode: 'auto', assignee: null, context: { files: (Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : []), docs: [], instructions: args.instructions || '', notes: (typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : ''), relatedTasks: [], prerequisites: '' }, acceptance: args.acceptance || '', dependsOn: args.dependsOn || [], touches: normTouches(args.touches), pipeline: args.pipeline || '', claimedBy: null, claimedAt: null, createdAt: now, resolvedAt: null, verifiedAt: null, verifiedBy: null, archivedAt: null, resolution: null, waitingForTouches: null, messages: [], history: [{ from: 'created', to: asDraft ? 'draft' : 'pending', timestamp: now, actor: actor, note: asDraft ? 'created as draft' : 'created' }] }; if (args.hooks !== undefined) { var __hn = normalizeHooks(args.hooks); if (__hn.error) return { ok: false, error: __hn.error }; if (__hn.hooks && Object.keys(__hn.hooks).length) t.hooks = __hn.hooks } if (!t.pipeline) t.pipeline = classifyPipeline(t); t.pipelineAuto = !args.pipeline; d.tasks.push(t); /* 调研门禁 warning 族（与 create-task RPC 同口径，core 纯函数）：空描述/无调研上下文/整树 glob 三类软提示合并为一条（；分隔），不拦截创建 */ var __out = withSplitHint({ ok: true, task: t }, t, cfg(d).epicSplit); var __warns = createTaskWarnings(t); attachContextSuggestions(__out, __warns, t.touches, existsInSession(sid)); if (__warns.length) __out.warning = __warns.join('；'); return __out }) } }))
+    ctx.tools.register(defineTool({ name: 'task_create', description: '创建新任务到当前会话看板。acceptance 可选：硬性验收脚本命令（如 "node --test src/x.test.js"），Worker 必须实际运行、Verifier 必须独立复跑。dependsOn 可选：依赖任务 id 数组，依赖全部完成后才会被派发。pipeline 可选：full(默认,工作+验证)/work(只做不验)/direct(不进池，主窗口直接处理)。contextFiles 可选：你在调研中已经读过的关键文件路径数组——派发时以「文件清单」（每行「路径:L起-L止 — 一句用途」）随首条 prompt 一次性注入，只给路径与行号、不含内容本体（子代理用 read 工具按行号范围按需自取：执行时盘面更新鲜，也免了大文件正文撑爆 prompt 与随快照每轮重发），避免子代理从零重复调研。contextNotes 可选：调研结论/原始需求/思路等非文件类上下文，全文随首条 prompt 一次性注入（≤8000 字符）。【开发类任务（涉及代码改动/修复/特性）务必带文件调研】：把调研中读过的关键文件路径放进 contextFiles、结论思路放进 contextNotes——实测可让 Worker 省去 10~15 分钟从零 grep 定位的时间，且方向感天壤之别（无调研的 Worker 只能靠标题猜需求、极易跑偏）。调研门禁：pipeline=full/work 且 touches 非空而未带调研上下文时，返回将附 warning 提示。touches 可选：本任务将要改动的文件路径/glob 数组（如 "src/x.mjs"、"src/**"）——派发器在同一时刻只派发 touches 不冲突的任务，避免并行 Worker 改同一批文件互踩；任务持有文件锁（in-progress/verifying 持有，状态流转到 resolved/cancelled/archived 即释放——锁只护正在写的阶段，验收后-提交前的窗口期由主窗口提交纪律 + 史诗 post-hook 承接）。' + TASK_SIZE_CONTRACT, parameters: { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' }, priority: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] }, tags: { type: 'array', items: { type: 'string' } }, parentId: { type: 'string' }, instructions: { type: 'string' }, acceptance: { type: 'string' }, dependsOn: { type: 'array', items: { type: 'string' } }, contextFiles: { type: 'array', items: { type: 'string' }, description: '预研文件路径（相对 workspace 或绝对路径；可写「路径:L1-L2 — 一句用途」），派发时以文件清单随首条 prompt 注入（只给路径行号，内容由子代理按需 read 自取）' }, contextNotes: { type: 'string', description: '预研笔记：调研结论/原始需求/思路等（≤8000 字符），全文随首条 prompt 一次性注入' }, pipeline: { type: 'string', enum: ['full', 'work', 'direct'] }, touches: { type: 'array', items: { type: 'string' }, description: '本任务将改动的文件路径/glob（文件级排他锁）：与活动任务 touches 冲突时不派发，等锁释放；支持 "src/**" 目录、"./a/b.mjs"、裸文件名等写法' }, draft: { type: 'boolean', description: '创建为草稿（不派发）。Team 模式下缺省即为 true——补全 dependsOn/上下文后用 task_update publish=true 统一发布；非 Team 模式缺省 false，显式 draft:false 可跳过草稿' }, hooks: { type: 'object', additionalProperties: true, description: '史诗 hook 点位（仅主窗口可设）：{ pre?: { enabled?, prompt }, post?: { enabled?, prompt } } —— hook 点=一次真实 agent 运行（不是声明式命令）：pre 在子任务派发前跑一遍前置准备（未完成前该 epic 的子任务一张都不派），post 在全部子任务了结后跑一遍收口（完成后 epic 才转 verifying）。prompt 是薄框架契约（做什么由 hook agent 判断，吃不准会歧义上报）。传 null 清除，传 { pre: null } 只撤该点位。' } }, required: ['title'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (args.hooks !== undefined && resolveRoot(__ra) !== __ra) return { ok: false, error: 'hooks 仅主窗口可设（子代理无 hooks 权限）' }; if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { if (args.id && d.tasks.find(function (x) { return x.id === args.id })) return { ok: false, error: 'duplicate id: ' + args.id }; if (args.dependsOn && args.dependsOn.length) { var derr = validateDeps(d, args.id || '(pending)', args.dependsOn); if (derr) return { ok: false, error: derr } }; var now = new Date().toISOString(); /* Team 模式护栏：draft 缺省跟随 teamMode（先补齐依赖/上下文再统一 publish）；显式 draft:false 保留为立即派发的逃生门 */ var asDraft = args.draft === undefined ? !!d.teamMode : !!args.draft; var t = { id: args.id || ('task-' + Date.now().toString(36)), title: args.title, description: args.description || '', status: asDraft ? 'draft' : 'pending', priority: args.priority || 'medium', tags: args.tags || [], parentId: args.parentId || null, subtaskStrategy: null, assignMode: 'auto', assignee: null, context: { files: (Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : []), docs: [], instructions: args.instructions || '', notes: (typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : ''), relatedTasks: [], prerequisites: '' }, acceptance: args.acceptance || '', dependsOn: args.dependsOn || [], touches: normTouches(args.touches), pipeline: args.pipeline || '', claimedBy: null, claimedAt: null, createdAt: now, resolvedAt: null, verifiedAt: null, verifiedBy: null, archivedAt: null, resolution: null, waitingForTouches: null, messages: [], history: [{ from: 'created', to: asDraft ? 'draft' : 'pending', timestamp: now, actor: actor, note: asDraft ? 'created as draft' : 'created' }] }; if (args.hooks !== undefined) { var __hn = normalizeHooks(args.hooks); if (__hn.error) return { ok: false, error: __hn.error }; if (__hn.hooks && Object.keys(__hn.hooks).length) t.hooks = __hn.hooks } if (!t.pipeline) t.pipeline = classifyPipeline(t); t.pipelineAuto = !args.pipeline; d.tasks.push(t); /* 调研门禁 warning 族（与 create-task RPC 同口径，core 纯函数）：空描述/无调研上下文/整树 glob 三类软提示合并为一条（；分隔），不拦截创建 */ var __out = withSplitHint({ ok: true, task: t }, t, cfg(d).epicSplit); var __warns = createTaskWarnings(t); attachContextSuggestions(__out, __warns, t.touches, existsInSession(sid)); if (__warns.length) __out.warning = __warns.join('；'); return __out }) } }))
 
     // ===== RPC =====
     // get-tasks 是纯读路径（rt 只读文件）——poolCycle 由 15s 心跳 + 写入后 kickCycle 驱动，
@@ -134,7 +144,10 @@ export function createRpc(ctx, state, deps) {
       // 工作模式派生字段：UI 只读这一个字段决定三档选中态（不落盘，写入仍走 boardMode/teamMode）
       d.workMode = deriveWorkMode(d)
       // ===== board 级 token 消耗聚合（现算，不落盘）：总量 + 输入/输出/缓存读 + 按模型 + 任务 Top8 =====
-      d.usageSummary = aggregateUsageSummary(d.tasks)
+      // 统计范围（args.range 可选 { from, to } 本地日）：仪表盘的「统计范围」筛选对 Token 区的
+      // 模型分布 / Top8 / 累计生效——run 级数据只在 host，所以过滤必须在 host 做（客户端只拿聚合，没法自己裁）。
+      // 缺省/空范围 = 现状逐字不变（aggregateUsageSummary 内部判定，空串不算范围）。
+      d.usageSummary = aggregateUsageSummary(d.tasks, args && args.range)
       // 架构自省 L1：healthHints 现算（纯函数零存储零 IO，近 50 卡窗口），客户端「架构健康」区超阈值才显示
       d.healthHints = computeHealthHints(d.tasks)
       // 史诗父卡语义层：childStats 现算（零存储）——{ <parentId>: { total, settled, resolved, active, activeTitle } }，
@@ -327,12 +340,68 @@ export function createRpc(ctx, state, deps) {
     // 通道选择（v1.2.4）：steer 优先——下一个 step 边界即消费；followup 要等整个 turn 结束，
     // 长 turn 下干预形同失联（实测：Worker 单 turn 跑 10+ 分钟，「口径重写」类干预到位时活已按旧口径干完）。
     // steer 不可用（老宿主无此方法）或抛错时回退 followup。
+    //
+    // ===== continuable 通道补齐（task-muwox2ii，发版门禁 steer 套件 4/8 红的根因）=====
+    // 病根：投递条件写的是 rec.run.localAgent——那是**一次性 run 的句柄**；continuable rec 没有 run
+    //（持久子会话，卡1 起改由宿主续跑管理器持有，见 spawnOneShot 的 rec 形态），于是整段投递被跳过：
+    // 干预没进任何会话、delivered 恒 false、channel 恒 ''，Worker 全程收不到指令（steer e2e 的
+    // 「上报内容含干预标记」必红），而详情页仍记着「已干预」——人以为送达了。
+    // 修法：continuable rec 改走与卡2 续跑同一族通道，三态降级（能实时送达就绝不留成「事后注入」）：
+    //   ① 宿主 host-protocol 投递：Symbol.for('dsh.subagent.deliverPrompt') 是宿主为「适配器保留自有
+    //     source 描述」留的符号键入口（dsh-subagent 里 Symbol.for 注册、实例上挂同名方法），
+    //     delivery='steer' → 就近 step 边界消费；走它，子会话日志里记的仍是
+    //     source.kind='plugin:dsh-agent-board' 的看板消息——与一次性路径 agent.steer(插件消息) 的存档
+    //     形态一致（e2e 的「干预被消费」断言口径因此不用改）；
+    //   ② 该符号不可用/抛错（老宿主、跨进程代理面）→ 回退公开 sendMessage（卡2 续跑同通道；宿主内部
+    //     也是按 delivery='steer' 投递，只是 source 会被记成 agent-message）；
+    //   ③ 仍然送不到（无 childId / root 不在线 / 会话已死）→ 回退既有记录注入（现状行为：干预文本进
+    //     t.messages，下次派发随 prompt 注入），并在 history 里写明「未实时送达」，不让它冒充已送达。
+    // 一次性 rec 走的仍是原分支：agent.steer → agent.followup 逐字不变。
+    var DELIVER_PROMPT = (function () { try { return Symbol.for('dsh.subagent.deliverPrompt') } catch (_) { return null } })()
+    // 投递用的取消信号（与 dispatch.mjs 的 makeSignal 同形）：只覆盖「入队前」的取消，构造不出来时退化为哑信号。
+    function makeSignal() { try { return new AbortController().signal } catch (_) { return { aborted: false, addEventListener: function () {}, removeEventListener: function () {} } } }
+    async function deliverContinuableIntervention(sid, taskId, rec, msg) {
+      var childId = String((rec && rec.childId) || '')
+      var subagents = ctx.subagents
+      var parent = rootForSession(sid)
+      // 判活口径（主窗口 2026-10-06 干预锐化）：continuable rec 的「能不能安全投递」=
+      // childId 在 + **未被标记 settled**（立旗 = 结算通道正在认领 / 会话正在收尾，此刻投递要么打在
+      // 正在关门的会话上、要么静默丢失）；任一不满足即不投，直接落「未实时送达」记录注入。
+      // 刻意不照抄 dispatch.mjs 的 recIsLive：那是「幽灵回收」的**卡面证据**口径（注释明写不认
+      // rec.settled——抢先摘表项会丢交付物），回答的是「这条表项还算不算在跑」；这里只回答「能不能投」。
+      if (!childId || rec.settled === true || !subagents || !parent) return { delivered: false }
+      // 干预消息形态与一次性路径**同一个构造**（makeMsg）：文案/source 逐字一致，两条通道的存档可对齐比对。
+      var m = makeMsg('[高优先级干预] 来自主窗口/用户的指令：\n\n' + msg + '\n\n请优先响应此指令，然后继续当前任务。', 'notice', '高优干预: ' + taskId)
+      // 符号键读取本身也包 try：跨进程代理面对未知符号的取属性可能直接抛（取不到就按「老宿主」降级）
+      var host = null
+      try { host = DELIVER_PROMPT ? subagents[DELIVER_PROMPT] : null } catch (_) { host = null }
+      if (typeof host === 'function') {
+        try {
+          await host.call(subagents, parent, childId, m.content, m.source, makeSignal(), 'steer')
+          return { delivered: true, channel: 'steer' }
+        } catch (e) { console.error('[task-board] continuable 干预 host 投递失败 (task ' + taskId + '):', String(e)) }
+      }
+      if (typeof subagents.sendMessage === 'function') {
+        try {
+          await subagents.sendMessage(parent, childId, m.content, { signal: makeSignal() })
+          return { delivered: true, channel: 'steer' }
+        } catch (e) { console.error('[task-board] continuable 干预 sendMessage 回退失败 (task ' + taskId + '):', String(e)) }
+      }
+      return { delivered: false }
+    }
     async function doIntervene(sid, actor, taskId, msg) {
       if (!(msg || '').trim()) return { ok: false, error: 'message required' }
       var rec = runsFor(sid)[taskId]
       var delivered = false
       var channel = ''
-      if (rec && rec.run && rec.run.localAgent) {
+      var missedNote = ''
+      if (rec && rec.continuable === true) {
+        // continuable：没有本地 Agent 句柄，只能经宿主投递（三态降级见上）
+        var ivr = await deliverContinuableIntervention(sid, taskId, rec, msg)
+        delivered = ivr.delivered === true
+        channel = ivr.channel || ''
+        if (!delivered) missedNote = '（干预未能实时送达（会话不可用），已转为重派注入）'
+      } else if (rec && rec.run && rec.run.localAgent) {
         var agent = rec.run.localAgent
         var m = makeMsg('[高优先级干预] 来自主窗口/用户的指令：\n\n' + msg + '\n\n请优先响应此指令，然后继续当前任务。', 'notice', '高优干预: ' + taskId)
         if (typeof agent.steer === 'function') {
@@ -342,7 +411,7 @@ export function createRpc(ctx, state, deps) {
           try { agent.followup(m); delivered = true; channel = 'followup' } catch (_) {}
         }
       }
-      await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === taskId }); if (t) { if (!Array.isArray(t.messages)) t.messages = []; t.messages.push({ kind: 'intervention', text: msg, at: new Date().toISOString(), by: actor }); ah(t, t.status, t.status, actor, '高优干预: ' + msg.slice(0, 200) + (delivered ? '' : '（无活跃 run，随下次派发注入）')) }; return t })
+      await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === taskId }); if (t) { if (!Array.isArray(t.messages)) t.messages = []; t.messages.push({ kind: 'intervention', text: msg, at: new Date().toISOString(), by: actor }); ah(t, t.status, t.status, actor, '高优干预: ' + msg.slice(0, 200) + (delivered ? '' : (missedNote || '（无活跃 run，随下次派发注入）'))) }; return t })
       return { ok: true, delivered: delivered, channel: channel }
     }
     // 终止执行某任务的 run：一次性 dispose / continuable interrupt 后回 pending（verifying 则保持待审，由新 verifier 接手）
@@ -465,6 +534,14 @@ export function createRpc(ctx, state, deps) {
       })
       if (result && result.ok && result.escalated) maybeNotify(sid, result.task)
       if (result && result.ok && result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved') // 工具直报路径也要回执（work 档 board_report 直接落 resolved）
+      // ===== 上报通道收尾（task-muwkhqf8）=====
+      // 工具通道把任务推进到落定态（verifying/resolved）即代表这一轮 Worker 交付完成——此刻就把该 run
+      // 的记录收掉（关结局 + usage 落账 + 摘超时臂）。为什么不能只等 agent/status 的 idle：continuable
+      // Worker 的 idle 可能压根不到（伪 idle 被 rec.ran 二次守卫挡下 / 冷窗口 / 重启 / 事件丢失），
+      // 那时 run 记录永久停在 running → 软超时误报 + usage 漏计 + 硬超时对闲置会话补枪（本卡三症状）。
+      // 必须 await：上报返回前收尾落地，「上报成功但记录仍开着」的窗口归零。
+      // 失败/无活跃 rec 静默（收尾是附加动作，绝不因它让上报失败）；progress/escalate 不在此列。
+      if (result && result.ok && result.task && result.task.status !== 'in-progress') await settleReportedRun(result.task.id)
       return result
     } }))
     ctx.tools.register(defineTool({ name: 'board_verdict', description: '[任务看板 Verifier 专用] 提交验收结论。verdict=approved/rejected；summary=测试概要；checks=逐条核对证据。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, verdict: { type: 'string', enum: ['approved', 'rejected'] }, summary: { type: 'string' }, checks: { type: 'string' } }, required: ['taskId', 'verdict'] }, output: jo(), execute: async function (args) {

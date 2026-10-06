@@ -131,7 +131,14 @@
       var _R = React; var useState = _R.useState
       var _a = useState(state.rfOpen || false), open = _a[0], setOpen = _a[1]
       var rg = activeRange()
-      function setRange(from, to) { state.dateRange = { from: from, to: to }; notify() }
+      function setRange(from, to) {
+        state.dateRange = { from: from, to: to }
+        // 报告/总览是本地现算，notify 即可；Token 区的模型分布/Top8/累计要按范围重算，
+        // 而过滤在 host（run 级数据只在 host）→ 必须重拉一次 get-tasks（fetchTasks 会带上新范围）。
+        // fetchTasks 在 kernel 域定义，同处 apply 函数体 → 函数声明提升，此处可用。
+        if (typeof fetchTasks === 'function') fetchTasks()
+        notify()
+      }
       function preset(days) {
         if (days === 0) { setRange('', ''); return }
         var to = new Date(); var from = new Date(Date.now() - (days - 1) * 86400000)
@@ -159,8 +166,8 @@
               React.createElement('input', { type: 'date', value: rg.from, onChange: function (e) { setRange(e.target.value, rg.to) }, style: dateInput })),
             React.createElement('label', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 4 } }, '截至',
               React.createElement('input', { type: 'date', value: rg.to, onChange: function (e) { setRange(rg.from, e.target.value) }, style: dateInput })),
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '作用于报告与全局总览')),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 5 } }, '报告统计「时间范围内有活动」的任务；总览只显示范围内有活跃的会话。')) : null)
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '作用于报告、全局总览与 Token 区（模型分布/Top8/累计）')),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 5 } }, '报告统计「时间范围内有活动」的任务；总览只显示范围内有活跃的会话；Token 区按 run 的本地日落点过滤（今日与近 7 天为固定口径，不受范围影响）。')) : null)
     }
 
     function GlobalBoards() {
@@ -268,12 +275,29 @@
     function TokenUsage(props) {
       var u = props.usage
       var box = { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 }
-      var head = React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('bar-chart-3', 11), 'Token 消耗')
+      // 范围激活标记：Token 区的模型分布/Top8/累计已按「统计范围」过滤（host 侧重算），
+      // 不加标记的话用户没法判断看到的数字是全量还是范围内——标记与 RangeFilter 同源（activeRange）。
+      var tg = activeRange()
+      var tgOn = !!(tg.from || tg.to)
+      var head = React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('bar-chart-3', 11), 'Token 消耗',
+        tgOn ? React.createElement('span', { style: { fontSize: 9, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '模型分布 / 任务消耗 Top 8 / 累计已按统计范围过滤：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
       if (!u || !u.total) return React.createElement('div', { style: box }, head, React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无数据（Worker/Verifier 会话日志里还没有 usage 记录）'))
-      var models = Object.keys(u.byModel || {}).map(function (m) { return { model: m, total: u.byModel[m] || 0 } }).sort(function (a, b) { return b.total - a.total })
-      var maxM = models.length ? (models[0].total || 1) : 1
-      var top = u.topTasks || []
-      var maxT = top.length ? (top[0].total || 1) : 1
+      // ===== 主数字口径统一（task-muwq9u04）：模型分布行与 Top8 行的主数字一律显示**有效消耗**（e），
+      // 含缓存读的合计（t）退到 title 悬浮；否则同一块里「今日有效 3.7M」与「单任务 21M」并排自相矛盾
+      // （用户就是这么判成 bug 的）。数据源：host 的 byModelEff（模型有效分摊）与 topTasks[].effective；
+      // 老 host 缺 byModelEff / 老卡无五分量留账 → 退化用合计值并在 title 标 ~（口径不伪造）。
+      // 排序按**显示口径**（有效）降序：条形长度与行序一致，否则首行不是最长的条。
+      var models = Object.keys(u.byModel || {}).map(function (m) {
+        var tt = u.byModel[m] || 0
+        var ee = (u.byModelEff && typeof u.byModelEff[m] === 'number') ? u.byModelEff[m] : null
+        return { model: m, total: tt, eff: (ee === null ? tt : ee), approx: ee === null }
+      }).sort(function (a, b) { return b.eff - a.eff })
+      var maxM = models.length ? (models[0].eff || 1) : 1
+      var top = (u.topTasks || []).map(function (x) {
+        var ee = (typeof x.effective === 'number') ? x.effective : null
+        return { id: x.id, title: x.title, total: x.total, cacheRead: x.cacheRead, runs: x.runs, eff: (ee === null ? x.total : ee), approx: ee === null }
+      }).sort(function (a, b) { return b.eff - a.eff })
+      var maxT = top.length ? (top[0].eff || 1) : 1
       // 日账：今日数字取本地日 key，没有日账（byDay 缺字段/老 host）时退化为 0，不炸也不误报。
       // 读侧兼容两种单元形态：老 number（只有总量，有效值不可知）→ { t: n, e: null }。
       var byDay = (u.byDay && typeof u.byDay === 'object') ? u.byDay : {}
@@ -319,18 +343,22 @@
             }))) : null,
         React.createElement('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap' } },
           React.createElement('div', { style: { flex: '1 1 240px', minWidth: 200 } },
-            React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '按模型分布'),
+            React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '按模型分布（有效消耗）'),
             models.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无数据') : models.map(function (m) {
-              return React.createElement(UsageRow, { key: m.model, label: m.model, value: m.total, max: maxM, color: C.brand, title: m.model + '：' + String(m.total) + ' tokens' })
+              return React.createElement(UsageRow, { key: m.model, label: m.model, value: m.eff, max: maxM, color: C.brand, title: m.model + '：有效 ' + (m.approx ? '~' : '') + String(m.eff) + ' tokens（不含缓存读）' + (m.approx ? '——本模型无有效分量留账，以合计近似' : '') + ' · 含缓存读合计 ' + String(m.total) + ' tokens' })
             })),
           React.createElement('div', { style: { flex: '1 1 240px', minWidth: 200 } },
-            React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '任务消耗 Top 8'),
+            React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '任务消耗 Top 8（有效消耗）'),
             top.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无数据') : top.map(function (x) {
               var t = getTask(x.id)
-              return React.createElement(UsageRow, { key: x.id, label: x.title || x.id, value: x.total, max: maxT, color: C.ok, labelColor: t ? C.brand : C.text2, title: x.title + '（合计 ' + String(x.total) + ' tokens · 有效 ' + String((typeof x.effective === 'number') ? x.effective : (x.total - (x.cacheRead || 0))) + ' / 缓存读 ' + String(x.cacheRead || 0) + ' · ' + (x.runs || 0) + ' 次 run）' + (t ? '——点击查看详情' : ''), onClick: t ? function () { state.detailId = x.id; notify() } : undefined })
+              return React.createElement(UsageRow, { key: x.id, label: x.title || x.id, value: x.eff, max: maxT, color: C.ok, labelColor: t ? C.brand : C.text2, title: x.title + '（有效 ' + (x.approx ? '~' : '') + String(x.eff) + ' tokens（不含缓存读） · 含缓存读合计 ' + String(x.total) + ' · 其中缓存读 ' + String(x.cacheRead || 0) + ' · ' + (x.runs || 0) + ' 次 run）' + (x.approx ? '（老卡无五分量留账，有效值以合计近似）' : '') + (t ? '——点击查看详情' : ''), onClick: t ? function () { state.detailId = x.id; notify() } : undefined })
             }))),
         // 口径边界：本区只统计看板派发的 Worker/Verifier run，主窗口对话自身不越界纳入
-        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：仅看板派发的 Worker/Verifier run 消耗，不含主窗口对话；大数字与「近 7 天」为有效消耗（输入+输出+缓存写，不含缓存读），缓存读单列'))
+        // 范围说明（task-muwc7hjd）：用户常把 RangeFilter 当成「整页过滤」，但今日大数字与近 7 天柱子
+        // 是自身固定口径（今日=本地今天、近 7 天=最近 7 个本地日）——不随范围变，必须在文案里讲清，
+        // 否则「选了范围数字没变」看起来像 bug。模型分布/Top8/累计才是范围生效的三处。
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：仅看板派发的 Worker/Verifier run 消耗，不含主窗口对话；主数字（模型分布 / Top 8）与「今日」「近 7 天」均为有效消耗口径（输入+输出+缓存写，不含缓存读），含缓存读的合计在悬浮 title 里单列对照'),
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2, lineHeight: 1.5 } }, '统计范围作用于按模型分布 / 任务消耗 Top 8 / 累计三分量（按 run 的本地日落点过滤）；今日与「近 7 天」为固定口径，不随范围变化。'))
     }
 
     // ===== 架构健康提示区（架构自省 L1 · 数据源：state.healthHints）=====

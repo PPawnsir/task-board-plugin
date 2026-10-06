@@ -22,7 +22,7 @@ export function vt(d) { return d && typeof d === 'object' && Array.isArray(d.tas
 // 背景：并行 Worker 改同一批文件会互踩（diff 冲突/一方覆盖另一方）。任务可声明
 // touches: string[]（glob），派发器发现与「持锁任务的 touches」冲突
 // 则本轮跳过该候选（记入 pickDispatch 返回的 blockedTouches），等锁释放再派。
-// 持锁口径见 holdsFiles（in-progress/verifying/resolved 都持锁，归档才真释放）。
+// 持锁口径见 holdsFiles（in-progress + claimedBy / verifying 持锁；resolved/cancelled/archived 即放）。
 // 语义（宁可偏严不可漏拦）：
 //   1. 先归一化：\ → /、去 './' 前缀、去尾部 '/'；空串或非字符串忽略。
 //   2. a === b 视为冲突。
@@ -695,18 +695,21 @@ export function buildHookPrompt(epic, phase, childTasks) {
 }
 
 // ===== 文件锁持有集合（touches 排他）=====
-// 锁随卡的生命周期走，归档（archived）= 真释放（反馈 n-muupqg81u575：验收后-提交前窗口期
-// 锁已放，下一卡 Worker 污染同树 commit——连续批次三次复发）。
-// 持锁三态（声明了 touches 为前提）：
+// 口径（用户 2026-10-06 裁决）：锁只护「正在写」的阶段——**状态流转到已完成（resolved）即放锁**。
+// 这是对 task-muv7c8ja / e969f57「锁持到归档」的回调：归档应回归纯收纳动作，不再是释放点。
+// 原话：「文件锁归档后才解锁不合理，应该状态自动流转到已完成时解锁」（反馈 n-muupqg81u575 的
+// 真问题——验收后-提交前窗口期污染——改由流程承接，不再用长持锁兜底）。
+// 持锁两态（声明了 touches 为前提）：
 //   - in-progress + claimedBy：Worker 正在改文件（claimedBy 为空=占位未落座/僵尸，不算持锁）；
 //   - verifying：Worker 已停笔但**尚未落定**——驳回会回 in-progress 让同一批文件继续被改，
-//     且验收通过后的提交窗口期仍属于本卡（不再随 in-progress→verifying 放锁）；
-//   - resolved：验收/完成已通过，但主窗口还没提交——锁一直持到 archived。
-// 不持有：pending/blocked/draft（没有 Worker 在改文件）、cancelled（放弃语义：不再产出，
-// 立刻放锁，避免被废弃的卡长期堵住同批文件）、archived（已归档=真释放）。
-// 边界（有意为之的背压）：resolved 卡若长期不归档，后续冲突卡会一直 pending 滞留——
-// 这是逼主窗口验收后尽快归档的信号；UI 上 waitingForTouches 行会显示持锁卡 id（含 resolved 卡），
-// 滞留原因对用户可见，不需要额外的超时放锁逻辑。
+//     故锁不能在 in-progress→verifying 断（Verifier 只读，不参与排他）。
+// 即放（不持有）：resolved（完成即放，未归档也放）、cancelled（放弃语义=不再产出）、
+// archived（归档只是收纳，对锁零影响）、pending/blocked/draft（没有 Worker 在改文件）。
+// 承接关系（「验收后-提交前」窗口期为什么不再靠锁兜底）：
+//   ① 主窗口即时门禁纪律：收到完成回执就立即提交，不等不看别的卡（提交时点与回执对齐）；
+//   ② 史诗 post-hook：提交动作收进任务生命周期（post=done 才收口 epic），提交可追溯、可审计。
+//   锁只表达「文件正在被写」，「改动尚未提交」由上面两条承接——否则 resolved 卡长期不归档
+//   会一直堵住同批文件、把本可并行的批次全串行化，这正是本次回调要消除的代价。
 // 返回 [{id, touches}]，id 用于 blockedTouches.conflicts 展示"在等谁"。
 export function holdsFiles(d) {
   var out = []
@@ -714,7 +717,7 @@ export function holdsFiles(d) {
   for (var i = 0; i < d.tasks.length; i++) {
     var t = d.tasks[i]
     if (!t || !Array.isArray(t.touches) || !t.touches.length) continue
-    var holds = t.status === 'verifying' || t.status === 'resolved' || (t.status === 'in-progress' && !!t.claimedBy)
+    var holds = t.status === 'verifying' || (t.status === 'in-progress' && !!t.claimedBy)
     if (holds) out.push({ id: t.id, touches: t.touches })
   }
   return out

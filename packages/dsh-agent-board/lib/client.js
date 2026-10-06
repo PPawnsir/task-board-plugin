@@ -307,7 +307,18 @@ function apply(ctx) {
     function fetchTasks() {
       if (!state.sessionId) return
       var epoch = reqEpoch
-      rpc('get-tasks').then(function (d) {
+      // ===== 统计范围随轮询带给 host（Token 区的模型分布/Top8/累计要按范围重算）=====
+      // 为什么过滤在 host 做：run 级数据（runs[i].usage + runs[i].at）只在 host，客户端只拿聚合，
+      // 想按范围裁只能重拉一次 host 聚合——所以范围变化时由 RangeFilter 的 setRange 触发本函数（见 dashboard.js）。
+      // 空范围（两端皆空）不传 field：host 收到 undefined 即全量聚合，与老 host 的调用形态完全一致；
+      // 绝不用空字符串占位（host 侧 `from`/`to` 空串虽也判为无范围，但少传一个字段就少一处口径分叉）。
+      var rgSend = activeRange()
+      var rpcArgs = (rgSend.from || rgSend.to) ? { range: rgSend } : undefined
+      // 范围守卫：范围已在本轮响应回来前被改掉 → 这份响应属于旧范围，丢弃 usageSummary 赋值
+      // （否则旧范围的旧聚合会覆盖新范围的新聚合，用户看到「切了范围数字没变」直到下一次轮询）。
+      // 注意 tasksHash 短路只管 tasks：usageSummary 照常赋值（现状已对，保持）。
+      var rgKey = rgSend.from + '~' + rgSend.to
+      rpc('get-tasks', rpcArgs).then(function (d) {
         if (epoch !== reqEpoch) return // 会话已切换，丢弃过期响应
         if (d && d.error) { reportReadErr('看板数据刷新失败：' + d.error); return } // error 分支：保留旧 tasks/设置，绝不当空板渲染
         clearReadErr()
@@ -341,7 +352,18 @@ function apply(ctx) {
         state.softTimeoutMin = (d && d.softTimeoutMin) || 30
         state.hardTimeoutMin = (d && d.hardTimeoutMin) || 120
         state.poolStatus = (d && d.poolStatus) || null
-        state.usageSummary = (d && d.usageSummary) || null // token 消耗聚合（board 级，host 端现算）
+        // token 消耗聚合（board 级，host 端现算）：范围守卫——响应回来时范围若已变，保留旧值不覆盖
+        // （新范围的那次请求会带着新聚合回来；老 host 不返回该字段 → null，零渲染）
+        // ===== usageSummary 变化检测（task-muwq9u04：选范围不重渲染）=====
+        // 病根：范围切换只让 state.usageSummary 换对象，tasksHash 与四个 cfg 开关都不变 → 无 notify
+        // → Token 区冻在旧数字上，要等下一次任意 notify（改任务/切开关）才翻新。
+        // 为什么用「上一次的 JSON 串」比对而不是对象引用：host 每次 get-tasks 都现算聚合、**必然返回新对象**
+        // （引用比较恒真）→ 3s 轮询每轮都 notify，tasksHash 的渲染节约当场作废。JSON 串只在这份聚合
+        // 真变了时才不等（KB 级体积、3s 一次，代价可忽略）；赋值前先快照，赋值后比对。
+        var usageJsonPrev = JSON.stringify(state.usageSummary || null)
+        var rgNow = activeRange()
+        if (rgKey === (rgNow.from + '~' + rgNow.to)) state.usageSummary = (d && d.usageSummary) || null
+        var usageDelta = !tasksChanged && JSON.stringify(state.usageSummary || null) !== usageJsonPrev
         // 架构健康提示（架构自省 L1）：与 tasks 同源透传，HealthHints 组件直接读 state.healthHints，
         // 不再自持 rpc('get-tasks')——消灭仪表盘打开期间的双轮询。老 host 无此字段 → 空数组零渲染
         state.healthHints = (d && Array.isArray(d.healthHints)) ? d.healthHints : []
@@ -355,9 +377,10 @@ function apply(ctx) {
         state.notifyDone = cfgKnobOf(d, 'notifyDone')
         // 史诗拆分总开关（设置区「功能」）：同上——老 host 不返回 = 开（引导照旧），只有显式 false 才关
         state.epicSplit = cfgKnobOf(d, 'epicSplit')
-        // 开关有变 → 补一次 notify（tasksChanged 分支已在上面 notify 过，这里只管 hash 不变时被跳过的那次）
+        // 开关有变 / Token 区聚合有变 → 补一次 notify（tasksChanged 分支已在上面 notify 过，
+        // 这里只管 hash 不变时被跳过的那两次：开关乐观更新纠偏 + 统计范围切换后的新聚合）
         var cfgDelta = !tasksChanged && cfgKnobsChanged(cfgKnobs, state)
-        if (cfgDelta) notify()
+        if (cfgDelta || usageDelta) notify()
         applyIsRoot(!d || d.isRoot !== false) // 原始值只喂给防抖器，消费点一律读 isRootStable
         if (!state.isRootStable && state.open) { state.open = false; state.detailId = null } // 子代理会话（含连续 3 次 false 的真降级）：强制收起看板
         if (d && d.dispatchInfo && d.dispatchInfoAt && Date.now() - new Date(d.dispatchInfoAt).getTime() < 120000) { state.dispatchInfo = d.dispatchInfo } else { state.dispatchInfo = '' } // 瞬时通知 2min 内有效，过期强制清空（服务端写后不清曾致残留数天）
@@ -1147,7 +1170,7 @@ function apply(ctx) {
           if (r && r.ok === false && r.error === 'touches-conflict') {
             var ids = Array.isArray(r.conflicts) ? r.conflicts : []
             var names = ids.map(function (id) { var t2 = getTask(id); return (t2 ? t2.title : id) + ' (' + id + ')' }).join('、')
-            if (window.confirm('⚠️ 文件锁冲突：以下任务正持有同一批文件（touches 重叠；锁持到归档——verifying/resolved 卡也在持锁，等其归档即自动放行）：\n\n' + (names || ids.join('、')) + '\n\n强行并行可能互相覆盖改动/diff 冲突。仍要越权派发吗？')) return send(true)
+            if (window.confirm('⚠️ 文件锁冲突：以下任务正持有同一批文件（touches 重叠；in-progress/verifying 卡持锁，状态流转到 resolved/cancelled/归档 即自动放行）：\n\n' + (names || ids.join('、')) + '\n\n强行并行可能互相覆盖改动/diff 冲突。仍要越权派发吗？')) return send(true)
             setActionMsg('⛔ 已取消派发（等文件锁释放，或调整 touches 声明）')
             return { ok: false, cancelled: true }
           }
@@ -1440,7 +1463,14 @@ function apply(ctx) {
       var _R = React; var useState = _R.useState
       var _a = useState(state.rfOpen || false), open = _a[0], setOpen = _a[1]
       var rg = activeRange()
-      function setRange(from, to) { state.dateRange = { from: from, to: to }; notify() }
+      function setRange(from, to) {
+        state.dateRange = { from: from, to: to }
+        // 报告/总览是本地现算，notify 即可；Token 区的模型分布/Top8/累计要按范围重算，
+        // 而过滤在 host（run 级数据只在 host）→ 必须重拉一次 get-tasks（fetchTasks 会带上新范围）。
+        // fetchTasks 在 kernel 域定义，同处 apply 函数体 → 函数声明提升，此处可用。
+        if (typeof fetchTasks === 'function') fetchTasks()
+        notify()
+      }
       function preset(days) {
         if (days === 0) { setRange('', ''); return }
         var to = new Date(); var from = new Date(Date.now() - (days - 1) * 86400000)
@@ -1468,8 +1498,8 @@ function apply(ctx) {
               React.createElement('input', { type: 'date', value: rg.from, onChange: function (e) { setRange(e.target.value, rg.to) }, style: dateInput })),
             React.createElement('label', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 4 } }, '截至',
               React.createElement('input', { type: 'date', value: rg.to, onChange: function (e) { setRange(rg.from, e.target.value) }, style: dateInput })),
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '作用于报告与全局总览')),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 5 } }, '报告统计「时间范围内有活动」的任务；总览只显示范围内有活跃的会话。')) : null)
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '作用于报告、全局总览与 Token 区（模型分布/Top8/累计）')),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 5 } }, '报告统计「时间范围内有活动」的任务；总览只显示范围内有活跃的会话；Token 区按 run 的本地日落点过滤（今日与近 7 天为固定口径，不受范围影响）。')) : null)
     }
 
     function GlobalBoards() {
@@ -1577,12 +1607,29 @@ function apply(ctx) {
     function TokenUsage(props) {
       var u = props.usage
       var box = { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 }
-      var head = React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('bar-chart-3', 11), 'Token 消耗')
+      // 范围激活标记：Token 区的模型分布/Top8/累计已按「统计范围」过滤（host 侧重算），
+      // 不加标记的话用户没法判断看到的数字是全量还是范围内——标记与 RangeFilter 同源（activeRange）。
+      var tg = activeRange()
+      var tgOn = !!(tg.from || tg.to)
+      var head = React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('bar-chart-3', 11), 'Token 消耗',
+        tgOn ? React.createElement('span', { style: { fontSize: 9, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '模型分布 / 任务消耗 Top 8 / 累计已按统计范围过滤：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
       if (!u || !u.total) return React.createElement('div', { style: box }, head, React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无数据（Worker/Verifier 会话日志里还没有 usage 记录）'))
-      var models = Object.keys(u.byModel || {}).map(function (m) { return { model: m, total: u.byModel[m] || 0 } }).sort(function (a, b) { return b.total - a.total })
-      var maxM = models.length ? (models[0].total || 1) : 1
-      var top = u.topTasks || []
-      var maxT = top.length ? (top[0].total || 1) : 1
+      // ===== 主数字口径统一（task-muwq9u04）：模型分布行与 Top8 行的主数字一律显示**有效消耗**（e），
+      // 含缓存读的合计（t）退到 title 悬浮；否则同一块里「今日有效 3.7M」与「单任务 21M」并排自相矛盾
+      // （用户就是这么判成 bug 的）。数据源：host 的 byModelEff（模型有效分摊）与 topTasks[].effective；
+      // 老 host 缺 byModelEff / 老卡无五分量留账 → 退化用合计值并在 title 标 ~（口径不伪造）。
+      // 排序按**显示口径**（有效）降序：条形长度与行序一致，否则首行不是最长的条。
+      var models = Object.keys(u.byModel || {}).map(function (m) {
+        var tt = u.byModel[m] || 0
+        var ee = (u.byModelEff && typeof u.byModelEff[m] === 'number') ? u.byModelEff[m] : null
+        return { model: m, total: tt, eff: (ee === null ? tt : ee), approx: ee === null }
+      }).sort(function (a, b) { return b.eff - a.eff })
+      var maxM = models.length ? (models[0].eff || 1) : 1
+      var top = (u.topTasks || []).map(function (x) {
+        var ee = (typeof x.effective === 'number') ? x.effective : null
+        return { id: x.id, title: x.title, total: x.total, cacheRead: x.cacheRead, runs: x.runs, eff: (ee === null ? x.total : ee), approx: ee === null }
+      }).sort(function (a, b) { return b.eff - a.eff })
+      var maxT = top.length ? (top[0].eff || 1) : 1
       // 日账：今日数字取本地日 key，没有日账（byDay 缺字段/老 host）时退化为 0，不炸也不误报。
       // 读侧兼容两种单元形态：老 number（只有总量，有效值不可知）→ { t: n, e: null }。
       var byDay = (u.byDay && typeof u.byDay === 'object') ? u.byDay : {}
@@ -1628,18 +1675,22 @@ function apply(ctx) {
             }))) : null,
         React.createElement('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap' } },
           React.createElement('div', { style: { flex: '1 1 240px', minWidth: 200 } },
-            React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '按模型分布'),
+            React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '按模型分布（有效消耗）'),
             models.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无数据') : models.map(function (m) {
-              return React.createElement(UsageRow, { key: m.model, label: m.model, value: m.total, max: maxM, color: C.brand, title: m.model + '：' + String(m.total) + ' tokens' })
+              return React.createElement(UsageRow, { key: m.model, label: m.model, value: m.eff, max: maxM, color: C.brand, title: m.model + '：有效 ' + (m.approx ? '~' : '') + String(m.eff) + ' tokens（不含缓存读）' + (m.approx ? '——本模型无有效分量留账，以合计近似' : '') + ' · 含缓存读合计 ' + String(m.total) + ' tokens' })
             })),
           React.createElement('div', { style: { flex: '1 1 240px', minWidth: 200 } },
-            React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '任务消耗 Top 8'),
+            React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '任务消耗 Top 8（有效消耗）'),
             top.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无数据') : top.map(function (x) {
               var t = getTask(x.id)
-              return React.createElement(UsageRow, { key: x.id, label: x.title || x.id, value: x.total, max: maxT, color: C.ok, labelColor: t ? C.brand : C.text2, title: x.title + '（合计 ' + String(x.total) + ' tokens · 有效 ' + String((typeof x.effective === 'number') ? x.effective : (x.total - (x.cacheRead || 0))) + ' / 缓存读 ' + String(x.cacheRead || 0) + ' · ' + (x.runs || 0) + ' 次 run）' + (t ? '——点击查看详情' : ''), onClick: t ? function () { state.detailId = x.id; notify() } : undefined })
+              return React.createElement(UsageRow, { key: x.id, label: x.title || x.id, value: x.eff, max: maxT, color: C.ok, labelColor: t ? C.brand : C.text2, title: x.title + '（有效 ' + (x.approx ? '~' : '') + String(x.eff) + ' tokens（不含缓存读） · 含缓存读合计 ' + String(x.total) + ' · 其中缓存读 ' + String(x.cacheRead || 0) + ' · ' + (x.runs || 0) + ' 次 run）' + (x.approx ? '（老卡无五分量留账，有效值以合计近似）' : '') + (t ? '——点击查看详情' : ''), onClick: t ? function () { state.detailId = x.id; notify() } : undefined })
             }))),
         // 口径边界：本区只统计看板派发的 Worker/Verifier run，主窗口对话自身不越界纳入
-        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：仅看板派发的 Worker/Verifier run 消耗，不含主窗口对话；大数字与「近 7 天」为有效消耗（输入+输出+缓存写，不含缓存读），缓存读单列'))
+        // 范围说明（task-muwc7hjd）：用户常把 RangeFilter 当成「整页过滤」，但今日大数字与近 7 天柱子
+        // 是自身固定口径（今日=本地今天、近 7 天=最近 7 个本地日）——不随范围变，必须在文案里讲清，
+        // 否则「选了范围数字没变」看起来像 bug。模型分布/Top8/累计才是范围生效的三处。
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：仅看板派发的 Worker/Verifier run 消耗，不含主窗口对话；主数字（模型分布 / Top 8）与「今日」「近 7 天」均为有效消耗口径（输入+输出+缓存写，不含缓存读），含缓存读的合计在悬浮 title 里单列对照'),
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2, lineHeight: 1.5 } }, '统计范围作用于按模型分布 / 任务消耗 Top 8 / 累计三分量（按 run 的本地日落点过滤）；今日与「近 7 天」为固定口径，不随范围变化。'))
     }
 
     // ===== 架构健康提示区（架构自省 L1 · 数据源：state.healthHints）=====

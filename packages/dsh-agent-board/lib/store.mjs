@@ -181,7 +181,32 @@ export function createStore(ctx, state, deps) {
     function withLock(sid, fn) { var prev = fileLocks[sid] || Promise.resolve(); var p = prev.then(function () { return fn() }); fileLocks[sid] = p.catch(function () {}); return p }
     // 便捷：串行的 读→mutate→写。mutate(d) 返回值作为结果；mutate 返回 null/undefined 则不写
     // 写成功后异步触发一次 poolCycle（派发/回收反应快），按会话去抖避免连环触发
-    function kickCycle(sid) { if (cyclePending[sid]) return; cyclePending[sid] = true; var tm = ctx.timer; var go = function () { cyclePending[sid] = false; deps.poolCycle(sid).catch(function () {}) }; if (tm) tm.timeout(50).then(go); else Promise.resolve().then(go) }
+    // ===== 去抖 latch 的复位兜底（池冻结防御，task-muwlepg6）=====
+    // cyclePending 是「写盘后触发一次 cycle」的去抖闸门：置真 → 50ms 后复位 → 调 poolCycle。
+    // 旧实现 `tm.timeout(50).then(go)` 有两个恒真风险，任何一个都让**此后所有写盘都不再触发派发**
+    // （症状与「池被冻住」完全一致，且完全静默）：
+    //   ① 定时器 promise reject（插件热重载/宿主 timer 被回收）→ then 的 onFulfilled 永不执行，
+    //      go 不跑 → cyclePending[sid] 永远为 true；
+    //   ② 定时器 promise 永不落定（同源的宿主态异常）→ 同上。
+    // 修法：① 用 .then(go, go) 让 reject 也走复位；② latch 存**时间戳**而不是布尔，超过
+    // STALE_LATCH_MS（10s，正常去抖窗口的 200 倍——正常路径永远碰不到）即视为坏 latch，放行本次触发。
+    //   ③ poolCycle 调用本身再包一层 try/catch：deps.poolCycle 还没收口（null）时旧写法会在
+    //   then 回调里同步抛 TypeError → 变成无处理者的 promise 拒绝（reject 后 latch 也复位不了）。
+    var STALE_LATCH_MS = 10000
+    function kickCycle(sid) {
+      var latchedAt = cyclePending[sid]
+      if (latchedAt && Date.now() - latchedAt < STALE_LATCH_MS) return // 正常去抖：50ms 窗口内只排一次
+      cyclePending[sid] = Date.now()
+      var tm = ctx.timer
+      var go = function () {
+        cyclePending[sid] = 0
+        try {
+          var p = deps.poolCycle(sid)
+          if (p && typeof p.catch === 'function') p.catch(function () {})
+        } catch (e) { console.error('[task-board] kickCycle → poolCycle 调用失败:', String(e)) }
+      }
+      if (tm) tm.timeout(50).then(go, go); else Promise.resolve().then(go)
+    }
     function mutateLocked(sid, mutate, skipKick) { return withLock(sid, async function () { var d = await rt(sid); if (d && d.__noPersist) { console.error('[task-board] 看板暂时不可读，拒绝在空板上覆写（防瞬时读失败清板）: ' + sid); return { ok: false, error: '看板暂时不可读，请重试' } } var r = await mutate(d); if (r !== null && r !== undefined) { await wt(sid, d); if (!skipKick) kickCycle(sid); return r } return r }) }
 
     return { rt: rt, wt: wt, kickCycle: kickCycle, mutateLocked: mutateLocked }

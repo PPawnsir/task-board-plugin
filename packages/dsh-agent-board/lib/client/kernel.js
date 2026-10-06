@@ -294,7 +294,18 @@
     function fetchTasks() {
       if (!state.sessionId) return
       var epoch = reqEpoch
-      rpc('get-tasks').then(function (d) {
+      // ===== 统计范围随轮询带给 host（Token 区的模型分布/Top8/累计要按范围重算）=====
+      // 为什么过滤在 host 做：run 级数据（runs[i].usage + runs[i].at）只在 host，客户端只拿聚合，
+      // 想按范围裁只能重拉一次 host 聚合——所以范围变化时由 RangeFilter 的 setRange 触发本函数（见 dashboard.js）。
+      // 空范围（两端皆空）不传 field：host 收到 undefined 即全量聚合，与老 host 的调用形态完全一致；
+      // 绝不用空字符串占位（host 侧 `from`/`to` 空串虽也判为无范围，但少传一个字段就少一处口径分叉）。
+      var rgSend = activeRange()
+      var rpcArgs = (rgSend.from || rgSend.to) ? { range: rgSend } : undefined
+      // 范围守卫：范围已在本轮响应回来前被改掉 → 这份响应属于旧范围，丢弃 usageSummary 赋值
+      // （否则旧范围的旧聚合会覆盖新范围的新聚合，用户看到「切了范围数字没变」直到下一次轮询）。
+      // 注意 tasksHash 短路只管 tasks：usageSummary 照常赋值（现状已对，保持）。
+      var rgKey = rgSend.from + '~' + rgSend.to
+      rpc('get-tasks', rpcArgs).then(function (d) {
         if (epoch !== reqEpoch) return // 会话已切换，丢弃过期响应
         if (d && d.error) { reportReadErr('看板数据刷新失败：' + d.error); return } // error 分支：保留旧 tasks/设置，绝不当空板渲染
         clearReadErr()
@@ -328,7 +339,18 @@
         state.softTimeoutMin = (d && d.softTimeoutMin) || 30
         state.hardTimeoutMin = (d && d.hardTimeoutMin) || 120
         state.poolStatus = (d && d.poolStatus) || null
-        state.usageSummary = (d && d.usageSummary) || null // token 消耗聚合（board 级，host 端现算）
+        // token 消耗聚合（board 级，host 端现算）：范围守卫——响应回来时范围若已变，保留旧值不覆盖
+        // （新范围的那次请求会带着新聚合回来；老 host 不返回该字段 → null，零渲染）
+        // ===== usageSummary 变化检测（task-muwq9u04：选范围不重渲染）=====
+        // 病根：范围切换只让 state.usageSummary 换对象，tasksHash 与四个 cfg 开关都不变 → 无 notify
+        // → Token 区冻在旧数字上，要等下一次任意 notify（改任务/切开关）才翻新。
+        // 为什么用「上一次的 JSON 串」比对而不是对象引用：host 每次 get-tasks 都现算聚合、**必然返回新对象**
+        // （引用比较恒真）→ 3s 轮询每轮都 notify，tasksHash 的渲染节约当场作废。JSON 串只在这份聚合
+        // 真变了时才不等（KB 级体积、3s 一次，代价可忽略）；赋值前先快照，赋值后比对。
+        var usageJsonPrev = JSON.stringify(state.usageSummary || null)
+        var rgNow = activeRange()
+        if (rgKey === (rgNow.from + '~' + rgNow.to)) state.usageSummary = (d && d.usageSummary) || null
+        var usageDelta = !tasksChanged && JSON.stringify(state.usageSummary || null) !== usageJsonPrev
         // 架构健康提示（架构自省 L1）：与 tasks 同源透传，HealthHints 组件直接读 state.healthHints，
         // 不再自持 rpc('get-tasks')——消灭仪表盘打开期间的双轮询。老 host 无此字段 → 空数组零渲染
         state.healthHints = (d && Array.isArray(d.healthHints)) ? d.healthHints : []
@@ -342,9 +364,10 @@
         state.notifyDone = cfgKnobOf(d, 'notifyDone')
         // 史诗拆分总开关（设置区「功能」）：同上——老 host 不返回 = 开（引导照旧），只有显式 false 才关
         state.epicSplit = cfgKnobOf(d, 'epicSplit')
-        // 开关有变 → 补一次 notify（tasksChanged 分支已在上面 notify 过，这里只管 hash 不变时被跳过的那次）
+        // 开关有变 / Token 区聚合有变 → 补一次 notify（tasksChanged 分支已在上面 notify 过，
+        // 这里只管 hash 不变时被跳过的那两次：开关乐观更新纠偏 + 统计范围切换后的新聚合）
         var cfgDelta = !tasksChanged && cfgKnobsChanged(cfgKnobs, state)
-        if (cfgDelta) notify()
+        if (cfgDelta || usageDelta) notify()
         applyIsRoot(!d || d.isRoot !== false) // 原始值只喂给防抖器，消费点一律读 isRootStable
         if (!state.isRootStable && state.open) { state.open = false; state.detailId = null } // 子代理会话（含连续 3 次 false 的真降级）：强制收起看板
         if (d && d.dispatchInfo && d.dispatchInfoAt && Date.now() - new Date(d.dispatchInfoAt).getTime() < 120000) { state.dispatchInfo = d.dispatchInfo } else { state.dispatchInfo = '' } // 瞬时通知 2min 内有效，过期强制清空（服务端写后不清曾致残留数天）

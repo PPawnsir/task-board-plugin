@@ -665,43 +665,47 @@ test('touchesConflict: 与锁持有者逐条比对，返回冲突持有者 id', 
   assert.deepEqual(core.touchesConflict({ id: 'h1', touches: ['src/a.js'] }, holds), []) // 不和自己冲突
 })
 
-test('holdsFiles: in-progress(claimedBy) / verifying / resolved 三态持有文件锁，其余不持有', () => {
+test('holdsFiles: in-progress(claimedBy) / verifying 两态持有文件锁，resolved/cancelled/归档即放', () => {
   const tasks = [
     mkTask({ id: 'live', status: 'in-progress', claimedBy: 'run-1', touches: ['src/**'] }),
     mkTask({ id: 'notouch', status: 'in-progress', claimedBy: 'run-2' }),
     mkTask({ id: 'noclaim', status: 'in-progress' }),
     mkTask({ id: 'pending', status: 'pending', touches: ['src/a.js'] }),
-    // task-muv7c8ja：verifying/resolved 都持锁（锁随卡的生命周期走，归档才真释放）
+    // 锁只护「正在写」的阶段：in-progress→verifying 不断锁（驳回会回 in-progress 继续改同一批文件）
     mkTask({ id: 'verifying', status: 'verifying', touches: ['src/b.js'] }),
-    // resolved 卡不查 claimedBy（resolveApply 转 resolved 前 worker 已停笔，claimedBy 可能已清/保留）
+    // task-muwbtee1 / 用户 2026-10-06 裁决：状态流转到已完成（resolved）即放锁，未归档也放；
+    // cancelled（放弃语义）与 archived（归档=纯收纳动作）同样不持锁。
     mkTask({ id: 'resolved', status: 'resolved', touches: ['src/c.js'] }),
+    mkTask({ id: 'cancelled', status: 'cancelled', touches: ['src/d.js'] }),
+    mkTask({ id: 'archived', status: 'archived', touches: ['src/e.js'] }),
     mkTask({ id: 'empty', status: 'in-progress', claimedBy: 'run-3', touches: [] }),
   ]
   const holds = core.holdsFiles(mkBoard(tasks))
-  assert.deepEqual(holds.map(h => h.id), ['live', 'verifying', 'resolved'])
+  assert.deepEqual(holds.map(h => h.id), ['live', 'verifying'])
   assert.deepEqual(holds[0].touches, ['src/**'])
   assert.deepEqual(core.holdsFiles(null), [])
 })
 
-// ===== touches 锁延长至归档（task-muv7c8ja / 反馈 n-muupqg81u575）四类断言 =====
-test('touches 持锁①：resolved 未归档 + 同 touches 候选 → 候选不派发（验收后-提交前窗口期不放锁）', () => {
+// ===== touches 锁随工作态：resolved 即放（task-muwbtee1；用户 2026-10-06 裁决，回调 task-muv7c8ja）四类断言 =====
+test('touches 持锁①：resolved（未归档）即放锁 → 同 touches 候选下一轮自动放行', () => {
   const holder = mkTask({ id: 'holder', status: 'resolved', touches: ['src/**'] })
   const cand = mkTask({ id: 'cand', touches: ['src/a.js'], createdAt: '2026-01-02' })
   const r = core.pickDispatch(mkBoard([holder, cand]), 5, 0, null)
-  assert.deepEqual(r.pendings, [])                                        // 锁未放：候选一张都不派
-  assert.deepEqual(r.blockedTouches, [{ id: 'cand', conflicts: ['holder'] }]) // 滞留原因对 UI 可见（等的是 resolved 卡）
-  // 不依赖候选自身状态：resolved 持锁只与 touches 声明有关
-  assert.deepEqual(core.holdsFiles(mkBoard([holder])).map(h => h.id), ['holder'])
+  assert.deepEqual(r.pendings.map(t => t.id), ['cand'])   // 完成即放：候选不再被 resolved 卡滞留
+  assert.deepEqual(r.blockedTouches, [])                  // 不产生「等 resolved 卡」的等待展示态
+  // 不依赖候选自身状态：resolved 不持锁只与状态口径有关（归档与否无关）
+  assert.deepEqual(core.holdsFiles(mkBoard([holder])), [])
 })
 
-test('touches 持锁②：holder 归档后 → 候选下一轮自动放行（归档是唯一真释放点）', () => {
+test('touches 持锁②：归档回归纯收纳动作——archived 与 resolved 一样不持锁（不再是唯一真释放点）', () => {
   const holder = mkTask({ id: 'holder', status: 'resolved', touches: ['src/**'] })
   const cand = mkTask({ id: 'cand', touches: ['src/a.js'], createdAt: '2026-01-02' })
-  assert.deepEqual(core.pickDispatch(mkBoard([holder, cand]), 5, 0, null).pendings, []) // 归档前：拦住
-  holder.status = 'archived'                                                             // 主窗口提交后的归档动作
+  assert.deepEqual(core.pickDispatch(mkBoard([holder, cand]), 5, 0, null).pendings.map(t => t.id), ['cand'])
+  holder.status = 'archived'                                                              // 归档只是收纳
   const r = core.pickDispatch(mkBoard([holder, cand]), 5, 0, null)
-  assert.deepEqual(r.pendings.map(t => t.id), ['cand'])
+  assert.deepEqual(r.pendings.map(t => t.id), ['cand'])   // 放行结果与 resolved 态逐字相同（幂等无影响）
   assert.deepEqual(r.blockedTouches, [])
+  assert.deepEqual(core.holdsFiles(mkBoard([holder])), [])
 })
 
 test('touches 持锁③：cancelled 立即放锁（放弃语义=不再产出，不堵同批文件）', () => {
@@ -721,30 +725,67 @@ test('touches 持锁④：verifying 持锁拦候选，但 Verifier 派发（veri
   const r = core.pickDispatch(mkBoard([vt, cand]), 5, 5, null)
   assert.deepEqual(r.blockedTouches, [{ id: 'cand', conflicts: ['vt'] }])  // verifying 仍持锁
   assert.deepEqual(r.verifs.map(t => t.id), ['vt'])                       // 只读的 Verifier 不被 touches 拦
-  // 驳回会回 in-progress 继续改同一批文件 → 锁在 verifying 期间不能断
+  // 驳回会回 in-progress 继续改同一批文件 → 锁在 verifying 期间不能断（放锁点是 resolved，不是 verifying）
   assert.deepEqual(core.holdsFiles(mkBoard([vt])).map(h => h.id), ['vt'])
 })
 
-test('touches 锁生命周期接线（源码级）：holdsFiles 三态口径 + 不再有 resolved 放锁调用点', () => {
-  const src = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
-  // ① 三态持锁口径写在 holdsFiles 里（verifying 与 resolved 都持，in-progress 仍需 claimedBy）
-  assert.match(src, /var holds = t\.status === 'verifying' \|\| t\.status === 'resolved' \|\| \(t\.status === 'in-progress' && !!t\.claimedBy\)/)
-  // ② 锁不再随 in-progress→verifying 释放（旧注释口径已退役）
-  assert.doesNotMatch(src, /verifying 不持有/)
-  // ③ cancelled/archived 明确不在持锁集合里
-  assert.doesNotMatch(src, /t\.status === 'cancelled' && !!t\.claimedBy/)
-  // ④ 派发层不再有「resolved 时放锁」的动作调用（旧实现 releaseTouchesOnly 已不存在）
-  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
-  assert.doesNotMatch(dsp, /releaseTouchesOnly/)
+// ===== touches 锁生命周期·派发级集成（真跑 poolCycle，不是纯函数级断言）=====
+// e2e 场景 T 的本机等价物：场景 T 需要在宿主进程里跑（宿主须先加载新代码，见 task-muwbtee1 上报），
+// 这里用真 poolCycle + 真 resolveApply 把同一条语义链在本机钉死——
+// A（in-progress + claimedBy）持锁 → B（touches 重叠）本轮不派 + waitingForTouches 标注；
+// A 落到 resolved（**不归档**）→ 下一轮 poolCycle 直接派 B，并清掉等待展示态。
+test('poolCycle 集成：A resolved 即放锁 → B 下一轮被派发且 waitingForTouches 被清（e2e 场景 T 等价断言）', async () => {
+  const SID = 'session-test-0000-0000-000000000000'
+  const board = Object.assign(mkBoard([
+    mkTask({ id: 'A', status: 'in-progress', claimedBy: 'run-1', claimedAt: new Date().toISOString(), touches: ['e2e-lock/x.txt'] }),
+    mkTask({ id: 'B', touches: ['e2e-lock/**'], createdAt: '2026-01-02' }),
+  ]), { maxWorkers: 3 })
+  // 真 spawnOneShot：provider 可用 + startContinuable 返回不结算的 run（本用例只看「能不能拿到锁」）
+  const ctxOver = { subagents: { list: () => ['p1'], getProvider: () => ({ inheritsParentContext: false }), start: async () => ({ id: 'run-2', dispose() {}, result: new Promise(function () {}) }), startContinuable: async () => ({ childId: 'child-1', messageId: 'msg-1' }) } }
+  const { dispatch } = mkDispatch(board, { rootForSession: () => ({ id: SID }) }, ctxOver)
+  // 第 1 轮：A 持锁（in-progress + claimedBy）→ B 被拦下并在卡上标注在等谁
+  await dispatch.poolCycle(SID)
+  const A = board.tasks.find(t => t.id === 'A'), B = board.tasks.find(t => t.id === 'B')
+  assert.equal(A.status, 'in-progress')
+  assert.equal(B.status, 'pending')
+  assert.deepEqual(B.waitingForTouches, ['A'])
+  // A 完成：resolveApply 落 resolved，**不归档**（新口径的释放点就在这一步的状态流转）
+  core.resolveApply(board, A, 'run-1', 'resolved', 'done', 'worker 文本上报完成')
+  assert.equal(A.status, 'resolved')
+  // 第 2 轮：状态已流转到完成 → 锁即放 → B 被派发、等待展示态被清（归档与否无关）
+  await dispatch.poolCycle(SID)
+  assert.notEqual(B.status, 'pending')
+  assert.equal(B.waitingForTouches, undefined)
 })
 
-test('README 双份同步记录 touches 锁持到归档口径（锁生命周期 = 卡生命周期）', () => {
+test('touches 锁生命周期接线（源码级）：holdsFiles 两态口径 + 承接关系注释 + 无 resolved/归档放锁残留', () => {
+  const src = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  // ① 两态持锁口径写在 holdsFiles 里（verifying 与 in-progress+claimedBy；resolved 已移出持锁集合）
+  assert.match(src, /var holds = t\.status === 'verifying' \|\| \(t\.status === 'in-progress' && !!t\.claimedBy\)/)
+  // ② 旧「锁持到归档」三态口径已退役（verifying||resolved 的耦合判定与「持锁三态」标题都不再存在）
+  assert.doesNotMatch(src, /t\.status === 'verifying' \|\| t\.status === 'resolved'/)
+  assert.doesNotMatch(src, /持锁三态/)
+  // ③ 新口径 + 决策来源日期（用户指令）落款在注释里，防口径漂移
+  assert.match(src, /状态流转到已完成（resolved）即放锁/)
+  assert.match(src, /用户 2026-10-06 裁决/)
+  // ④ 承接关系（主窗口即时门禁纪律 + 史诗 post-hook）写进注释——窗口期不再靠长持锁兜底
+  assert.match(src, /主窗口即时门禁纪律/)
+  assert.match(src, /史诗 post-hook/)
+  // ⑤ 派发层不再有「resolved 时放锁」的动作调用（旧实现 releaseTouchesOnly 不存在）；
+  //    并写明锁是随状态现算的派生量、没有显式放锁点（resolved 由下一轮 tick 自然放行）
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(dsp, /releaseTouchesOnly/)
+  assert.match(dsp, /resolved\/cancelled\/archived 即放/)
+})
+
+test('README 双份同步记录 touches 锁随工作态口径（状态流转到 resolved 即释放）', () => {
   const pkg = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
   const root = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')
   assert.equal(pkg, root) // 两份 README 必须字节一致（npm run sync-readme 的约束）
-  for (const s of ['锁持到归档', 'verifying', 'resolved', 'cancelled']) {
+  for (const s of ['锁随工作态', 'in-progress', 'verifying', 'resolved', 'cancelled', '归档']) {
     assert.ok(pkg.includes(s), 'README 应记录 touches 锁口径：' + s)
   }
+  assert.ok(!pkg.includes('锁持到归档'), 'README 不应再记录「锁持到归档」旧口径')
 })
 
 // ===== 派发决策（touches 拦截）=====
@@ -762,7 +803,8 @@ test('pickDispatch: touches 与活动任务冲突 → 不进 pendings，记入 b
 
 test('pickDispatch: verifying 持有文件锁（锁未断），但 verifier 派发（verifs）不受 touches 影响', () => {
   const tasks = [
-    // task-muv7c8ja 后：verifying 仍持锁（驳回会回 in-progress 继续改同一批文件，验收后-提交前窗口期也属本卡）
+    // verifying 仍持锁（驳回会回 in-progress 继续改同一批文件；放锁点是状态流转到 resolved，
+    // 不是 in-progress→verifying——用户 2026-10-06 裁决）
     mkTask({ id: 'vt', status: 'verifying', pipeline: 'full', claimedBy: 'run-1', touches: ['src/**'] }),
     mkTask({ id: 'w1', touches: ['src/a.js'] }),
   ]
@@ -797,7 +839,7 @@ test('pickDispatch: frozen/dependsOn/escalation 优先级不变（touches 拦截
     mkTask({ id: 'holder', status: 'in-progress', claimedBy: 'run-1', touches: ['src/**'] }),
     mkTask({ id: 'fz', frozen: true, touches: ['src/a.js'] }),                 // 冻结 → 既有语义直接排除，不记 blockedTouches
     // dep 的 touches 走 lib/：只验「依赖未满足被既有语义排除」，不与 clash 抢同一把锁
-    // （holder 归档后 dep 的依赖即满足、会被派发并拿下 src/a.js，抢锁会掩盖本条想验的语义）
+    // （holder 落到 resolved 后 dep 的依赖即满足、会被派发并拿下 src/a.js，抢锁会掩盖本条想验的语义）
     mkTask({ id: 'dep', dependsOn: ['holder'], touches: ['lib/a.js'] }),
     mkTask({ id: 'esc', escalation: { question: 'q' }, touches: ['src/a.js'] }),// 待裁决 → 排除
     mkTask({ id: 'clash', touches: ['src/a.js'] }),                            // 唯一被 touches 拦下的
@@ -805,15 +847,20 @@ test('pickDispatch: frozen/dependsOn/escalation 优先级不变（touches 拦截
   const r = core.pickDispatch(mkBoard(tasks), 5, 0, null)
   assert.deepEqual(r.pendings, [])
   assert.deepEqual(r.blockedTouches, [{ id: 'clash', conflicts: ['holder'] }])
-  // 锁真释放（holder 归档；task-muv7c8ja 后 verifying/resolved 都还持锁）后，被拦任务下一轮自动恢复可派发
+  // 锁释放点（用户 2026-10-06 裁决）：verifying 仍持锁（驳回会回 in-progress 继续改同一批文件）；
+  // 状态流转到 resolved 才真释放（resolved/归档都不再持锁），被拦任务下一轮自动恢复可派发
   const b2 = mkBoard(tasks)
   b2.tasks[0].status = 'verifying'
   const r2 = core.pickDispatch(b2, 5, 0, null)
   assert.deepEqual(r2.blockedTouches, [{ id: 'clash', conflicts: ['holder'] }])  // verifying 仍持锁
-  b2.tasks[0].status = 'archived'
+  b2.tasks[0].status = 'resolved'
   const r3 = core.pickDispatch(b2, 5, 0, null)
   assert.ok(r3.pendings.map(t => t.id).indexOf('clash') >= 0)
   assert.deepEqual(r3.blockedTouches, [])
+  b2.tasks[0].status = 'archived'   // 归档幂等：已放锁态下结果逐字不变（归档回归纯收纳动作）
+  const r4 = core.pickDispatch(b2, 5, 0, null)
+  assert.ok(r4.pendings.map(t => t.id).indexOf('clash') >= 0)
+  assert.deepEqual(r4.blockedTouches, [])
 })
 test('normalizeBoard: touches 脏值（非数组）收敛为空数组，缺字段任务照常', () => {
   const legacy = { tasks: [{ id: 'a', touches: 'src/a.js' }, { id: 'b' }, { id: 'c', touches: ['src/c.js'] }] }
@@ -1370,7 +1417,7 @@ test('aggregateUsageSummary: 空任务/无 usage 任务 → 全零 + 空 Top', (
   assert.equal(s.total, 0); assert.equal(s.input, 0); assert.equal(s.output, 0); assert.equal(s.cacheRead, 0)
   assert.deepEqual(s.byModel, {}); assert.deepEqual(s.topTasks, [])
   assert.deepEqual(s.byDay, {}) // 日账缺省空对象（老看板/无 usage 不炸）
-  assert.deepEqual(aggregateUsageSummary(undefined), { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, effective: 0, byModel: {}, byDay: {}, topTasks: [] })
+  assert.deepEqual(aggregateUsageSummary(undefined), { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, effective: 0, byModel: {}, byModelEff: {}, byDay: {}, topTasks: [] })
 })
 
 test('aggregateUsageSummary: 总量/输入输出缓存拆分累加 + 按模型小计合并', () => {
@@ -1487,11 +1534,243 @@ test('aggregateUsageSummary: effective 字段与 effectiveTokens 导出一致（
   assert.equal(s.effective, effectiveTokens({ input: 3, output: 4, cacheRead: 99, cacheWrite: 5 }))
 })
 
+// ===== 统计范围（range）过滤：范围过滤在 host 做（run 级数据 t.runs[i].usage + t.runs[i].at 只在 host）=====
+// 测试侧独立构造 run 留账（含 at 时间戳 + 模型名），不复用实现内部函数——防「实现自证」。
+// 数据源位置是硬口径（task-muwq9u04 的 bug 根因）：run 记录数组挂在**任务级 t.runs**，
+// t.usage.runs 只是「结算次数」计数（number）——把计数当数组读会恒得空数组，范围过滤静默失效。
+const mkRun = (at, model, u) => ({ role: 'worker', id: 'r-' + at + '-' + model, at, model, outcome: 'ok', usage: u })
+const U = (input, output, cacheRead, cacheWrite) => ({ input, output, cacheRead, cacheWrite, total: input + output + cacheRead + cacheWrite })
+
+test('aggregateUsageSummary 范围过滤：逐 run 裁切（任务级 t.runs[]）+ 两端边界日 + 无 at 兜底', () => {
+  const t1 = mkTask({
+    id: 'a', title: 'A',
+    // 四条 run 合计与任务级 usage 五分量一致（总 700），便于核对「范围内只算入选 run」
+    runs: [
+      mkRun(localIso(2026, 9, 30, 23, 0), 'm-old', U(1, 1, 8, 0)),   // 范围外（09-30）
+      mkRun(localIso(2026, 10, 1, 8, 0), 'm-mid', U(3, 4, 100, 5)),  // 范围内（10-01）
+      mkRun(localIso(2026, 10, 5, 9, 0), 'm-new', U(6, 15, 152, 5)), // 范围外（10-05）
+      mkRun('', 'm-noat', U(100, 100, 100, 100))                     // 无 at 的老 run：裁不了 → 只在无范围时计入
+    ],
+    usage: { total: 700, input: 110, output: 120, cacheRead: 360, cacheWrite: 110, runs: 4, models: { 'm-x': 700 }, updatedAt: localIso(2026, 10, 2, 10, 0) }
+  })
+  const s = aggregateUsageSummary([t1], { from: '2026-10-01', to: '2026-10-03' })
+  assert.equal(s.total, 112)                                   // 只有 10-01 那条计入（3+4+100+5）
+  assert.equal(s.input, 3); assert.equal(s.output, 4)
+  assert.equal(s.cacheRead, 100); assert.equal(s.cacheWrite, 5)
+  assert.equal(s.effective, 12)                                // 有效 = 输入+输出+缓存写，不含缓存读
+  assert.deepEqual(s.byModel, { 'm-mid': 112 })                // 模型分布随范围收窄（run 级重算）
+  assert.deepEqual(s.byModelEff, { 'm-mid': 12 })              // 模型有效分摊同源（3+4+5）
+  assert.deepEqual(s.topTasks.map(x => x.id), ['a'])
+  assert.equal(s.topTasks[0].total, 112); assert.equal(s.topTasks[0].effective, 12)
+  assert.equal(s.topTasks[0].runs, 1)                          // 「N 次 run」在范围下报入选 run 数（旧版此处置 0）
+  // 边界包含性：只选范围首日 / 只选范围末日，两端都必须命中（闭区间口径）
+  assert.equal(aggregateUsageSummary([t1], { from: '2026-10-01', to: '2026-10-01' }).total, 112)
+  assert.equal(aggregateUsageSummary([t1], { from: '2026-10-05', to: '2026-10-05' }).total, 178)
+  assert.equal(aggregateUsageSummary([t1], { from: '2026-10-05', to: '2026-10-05' }).effective, 26) // 6+15+5
+  // 只给一端：from 不设上限 / to 不设下限
+  assert.equal(aggregateUsageSummary([t1], { from: '2026-10-05' }).total, 178)
+  assert.equal(aggregateUsageSummary([t1], { to: '2026-09-30' }).total, 10)
+  // 范围内一条 run 都不入选（含「无 at 的老 run」）→ 该任务零贡献，不进 total 也不进 Top8
+  const s0 = aggregateUsageSummary([t1], { from: '2020-01-01', to: '2020-01-02' })
+  assert.equal(s0.total, 0); assert.deepEqual(s0.topTasks, []); assert.deepEqual(s0.byModel, {}); assert.deepEqual(s0.byModelEff, {})
+  assert.deepEqual(s0.byDay, {}) // byDay 同步裁到范围内（范围外日不入）
+})
+
+test('aggregateUsageSummary 范围过滤：run 未记模型名时按任务级占比摊（模型键不消失、Σ 与入选总量对齐）', () => {
+  // 真实数据形状：r.model 常是空串（派发未覆盖模型时模型名只落在日志里），而 t.usage.models 用的是
+  // 日志记录的名字。若范围路径只认 r.model，这部分用量会凭空丢掉模型键——本机实测某个模型的整键
+  // （`deepseek-flash`）在切范围后消失，且「按模型分布」加起来 ≠ 累计。
+  const t = mkTask({
+    id: 'a', title: 'A',
+    runs: [
+      mkRun(localIso(2026, 10, 5, 9, 0), 'm-known', U(10, 10, 0, 0)),  // 合计 20：run 上有模型名
+      mkRun(localIso(2026, 10, 5, 10, 0), '', U(30, 30, 40, 0))        // 合计 100：无模型名（派发未覆盖）
+    ],
+    usage: { total: 120, input: 40, output: 40, cacheRead: 40, cacheWrite: 0, runs: 2, models: { 'm-known': 60, 'm-log': 60 }, updatedAt: localIso(2026, 10, 5, 10, 30) }
+  })
+  const s = aggregateUsageSummary([t], { from: '2026-10-05', to: '2026-10-05' })
+  assert.equal(s.total, 120); assert.equal(s.effective, 80)          // 有效 = 40+40+0（缓存读 40 不计）
+  assert.equal(Object.keys(s.byModel).length, 2)                     // 两个模型键都在（无名的按占比摊，不消失）
+  assert.equal(s.byModel['m-known'], 70)                             // 精确 20 + 摊派 60*(100/120)=50
+  assert.equal(s.byModel['m-log'], 50)
+  const sum = Object.keys(s.byModel).reduce((n, k) => n + s.byModel[k], 0)
+  assert.equal(sum, s.total)                                         // Σ byModel 与本次入选 total 对齐
+  assert.equal(s.byModelEff['m-known'], 20 + Math.round(60 * (60 / 120))) // 有效：精确 20 + 摊派 30
+  assert.equal(s.byModelEff['m-log'], 30)
+  const sumE = Object.keys(s.byModelEff).reduce((n, k) => n + s.byModelEff[k], 0)
+  assert.equal(sumE, s.effective)                                    // Σ byModelEff 与入选有效对齐
+})
+
+test('aggregateUsageSummary 范围过滤：topTasks 随范围收窄（回归：数据源错位时 Top8 与无范围逐字相同）', () => {
+  // 活体实证的回归形状（task-muwq9u04）：任务最后一次结算落在范围内（updatedAt=10-02），
+  // 但大头花在范围外（09-30）。修复前（把 t.usage.runs 计数当数组读 → 恒空数组 → 整任务退化成
+  // updatedAt 单日近似）该任务整笔 150 计入、「Top8 主数字与无范围逐字相同」——正是用户看到的现象。
+  const t = mkTask({
+    id: 'a', title: 'A',
+    runs: [
+      mkRun(localIso(2026, 9, 30, 9, 0), 'm-old', U(30, 20, 50, 0)),  // 合计 100（有效 50）：范围外
+      mkRun(localIso(2026, 10, 2, 9, 0), 'm-new', U(10, 10, 30, 0))   // 合计 50（有效 20）：范围内
+    ],
+    usage: { total: 150, input: 40, output: 30, cacheRead: 80, cacheWrite: 0, runs: 2, models: { 'm-x': 150 }, updatedAt: localIso(2026, 10, 2, 9, 30) }
+  })
+  const all = aggregateUsageSummary([t])
+  assert.equal(all.total, 150)                                     // 无范围：整笔
+  assert.equal(all.topTasks[0].total, 150); assert.equal(all.topTasks[0].effective, 70)
+  const r = aggregateUsageSummary([t], { from: '2026-10-02', to: '2026-10-02' })
+  assert.equal(r.total, 50)                                        // 范围内只算 10-02 那条
+  assert.deepEqual(r.topTasks.map(x => x.total), [50])
+  assert.deepEqual(r.topTasks.map(x => x.effective), [20])
+  assert.equal(r.topTasks[0].runs, 1)
+  assert.notDeepEqual(r.topTasks.map(x => x.total), all.topTasks.map(x => x.total)) // 逐字相同即回归（数据源错位）
+  assert.deepEqual(r.byModel, { 'm-new': 50 })                     // 模型分布同口径收窄（不是 {'m-x':150}）
+  assert.deepEqual(r.byModelEff, { 'm-new': 20 })
+})
+
+test('aggregateUsageSummary 范围过滤：无 range = 现状逐字不变（parity，含无 at 的 run 照旧全量计入）', () => {
+  const tasks = [
+    mkTask({
+      id: 'a', usage: {
+        total: 300, input: 10, output: 20, cacheRead: 260, cacheWrite: 10, runs: 2, models: { 'm-x': 300 },
+        updatedAt: localIso(2026, 10, 2, 10, 0)
+      },
+      runs: [mkRun(localIso(2026, 9, 30, 23, 0), 'm-old', U(1, 1, 8, 0)), mkRun('', 'm-noat', U(100, 100, 100, 100))]
+    }),
+    mkTask({ id: 'legacy', usage: { total: 500, input: 0, output: 0, cacheRead: 500, cacheWrite: 0, runs: 1, models: {}, updatedAt: localIso(2026, 10, 2, 11, 0) } }),
+    mkTask({ id: 'nodate', usage: { total: 9, input: 9, output: 0, cacheRead: 0, cacheWrite: 0, models: { 'm-z': 9 } } })
+  ]
+  const base = aggregateUsageSummary(tasks)
+  assert.deepEqual(aggregateUsageSummary(tasks, { from: '', to: '' }), base)  // 空范围与不传等价（客户端空范围即此形态）
+  assert.deepEqual(aggregateUsageSummary(tasks, {}), base)
+  assert.deepEqual(aggregateUsageSummary(tasks, null), base)                  // 老调用形态（只传 tasks）逐字不变
+  assert.equal(base.total, 809)                                               // 300 + 500 + 9（run 留账不参与无范围口径）
+  assert.deepEqual(base.byModel, { 'm-x': 300, 'm-z': 9 })
+  assert.deepEqual(base.byModelEff, { 'm-x': 40, 'm-z': 9 })                  // 无范围：任务级按「有效/总量」摊派
+  assert.equal(base.effective, 49)                                            // 40(a) + 0(legacy 无分量) + 9
+  // 无 runs 留账的老任务：无范围时照旧全量计入（parity 的关键一条）
+  assert.ok(base.topTasks.some(x => x.id === 'legacy'))
+})
+
+test('aggregateUsageSummary 范围过滤：无 run 级留账的老任务按 updatedAt 本地日判范围（近似口径，无日可判则不计入）', () => {
+  const legacy = mkTask({ id: 'old', usage: { total: 500, input: 0, output: 0, cacheRead: 500, cacheWrite: 0, runs: 1, models: {}, updatedAt: localIso(2026, 10, 2, 10, 30) } })
+  const keep = aggregateUsageSummary([legacy], { from: '2026-10-02', to: '2026-10-02' })
+  assert.equal(keep.total, 500)                                 // updatedAt 落在范围内 → 计入（近似归日）
+  assert.equal(keep.effective, 0)                               // 老任务只有总量：有效消耗仍按分量算（全 0）
+  assert.equal(aggregateUsageSummary([legacy], { from: '2026-10-03', to: '2026-10-03' }).total, 0) // 范围外 → 剔除
+  const noDate = mkTask({ id: 'nodate', usage: { total: 9, models: {} } })
+  assert.equal(aggregateUsageSummary([noDate], { from: '2026-10-01', to: '2026-10-31' }).total, 0) // 无日可判 → 宁可漏不错
+  assert.equal(aggregateUsageSummary([noDate]).total, 9)        // 无范围时照旧计入（parity）
+  // runs 条目存在但**都没落 usage**（老 run / 未结算）＝同样没有 run 级留账可裁 → 照样走 updatedAt 近似，
+  // 不能因为「有 runs 数组」就判该任务对范围零贡献（那会把老卡的真实消耗整块吞掉）
+  const bare = mkTask({
+    id: 'bare', runs: [{ role: 'worker', id: 'r1', at: localIso(2026, 10, 2, 9, 0), outcome: 'completed' }],
+    usage: { total: 77, input: 7, output: 7, cacheRead: 63, cacheWrite: 0, runs: 1, models: { 'm-bare': 77 }, updatedAt: localIso(2026, 10, 2, 9, 0) }
+  })
+  const bareKept = aggregateUsageSummary([bare], { from: '2026-10-02', to: '2026-10-02' })
+  assert.equal(bareKept.total, 77)
+  assert.deepEqual(bareKept.topTasks.map(x => x.id), ['bare'])
+  assert.deepEqual(bareKept.byModelEff, { 'm-bare': 14 })       // 有效 7+7+0=14，任务级按占比摊派（77/77）
+  assert.equal(aggregateUsageSummary([bare], { from: '2026-10-03', to: '2026-10-03' }).total, 0)
+})
+
+test('aggregateUsageSummary 范围过滤：byDay 同步裁到范围内（范围外日不入 byDay）', () => {
+  const t1 = mkTask({
+    id: 'a', usage: {
+      total: 100, input: 0, output: 0, cacheRead: 100, cacheWrite: 0, runs: 2, models: {},
+      updatedAt: localIso(2026, 10, 3, 10, 0),
+      byDay: { '2026-09-30': { t: 40, e: 40 }, '2026-10-03': { t: 60, e: 60 } }
+    }
+  })
+  const s = aggregateUsageSummary([t1], { from: '2026-10-01', to: '2026-10-31' })
+  assert.deepEqual(s.byDay, { '2026-10-03': { t: 60, e: 60 } }) // 域外的 09-30 不进 byDay
+  assert.equal(s.total, 100)                                    // 但任务级 total 不被 byDay 裁剪影响（无 runs 留账 → 按 updatedAt 判在范围内）
+})
+
+// ===== 统计范围接线（源码级断言）：host get-tasks 透传 + client 轮询带范围 + setRange 触发重拉 + UI 文案 =====
+test('Token 区统计范围接线：get-tasks 接 range 透传 + fetchTasks 带范围 + setRange 触发重拉（源码级断言）', () => {
+  const host = hostSrc()
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // host：get-tasks 把 args.range 透传给聚合（过滤在 host 做——run 级数据只在 host）
+  assert.match(host, /aggregateUsageSummary\(d\.tasks, args && args\.range\)/)
+  assert.match(host, /runs\[i\]\.usage/)                        // run 级留账（范围过滤的数据源，先于本次改动已在）
+  // client：轮询带上当前统计范围；空范围不传 field（老 host 调用形态逐字不变）
+  assert.match(cli, /var rgSend = activeRange\(\)/)
+  assert.match(cli, /var rpcArgs = \(rgSend\.from \|\| rgSend\.to\) \? \{ range: rgSend \} : undefined/)
+  assert.match(cli, /rpc\('get-tasks', rpcArgs\)/)
+  // 范围守卫：响应回来时范围已变则丢弃旧范围的聚合，不覆盖新范围的值
+  assert.match(cli, /if \(rgKey === \(rgNow\.from \+ '~' \+ rgNow\.to\)\) state\.usageSummary = \(d && d\.usageSummary\) \|\| null/)
+  // RangeFilter：setRange 触发重拉（报告/总览本地现算，Token 区必须回 host 重算）
+  assert.match(cli, /state\.dateRange = \{ from: from, to: to \}/)
+  assert.match(cli, /if \(typeof fetchTasks === 'function'\) fetchTasks\(\)/)
+  // UI：范围激活时 Token 区标题带标记 + 范围作用域 caption（今日/近 7 天固定口径写明）
+  assert.match(cli, /'范围内: ' \+ rangeLabel\(\)/)
+  assert.match(cli, /统计范围作用于按模型分布 \/ 任务消耗 Top 8 \/ 累计三分量/)
+  assert.match(cli, /今日与「近 7 天」为固定口径，不随范围变化/)
+})
+
+// ===== Token 区三连修（task-muwq9u04）：范围过滤数据源 / 选范围即渲染 / 主数字口径统一 =====
+test('Token 区①：范围过滤读**任务级 t.runs[]**（run 级留账真实位置），不再误读 usage.runs 计数（源码级断言）', () => {
+  const usageSrc = readFileSync(new URL('../lib/usage.mjs', import.meta.url), 'utf8')
+  // 数据源必须取自 t.runs（数组，条目带 at/model/usage）；t.usage.runs 只是「结算次数」计数（number）
+  assert.match(usageSrc, /var trs = Array\.isArray\(t\.runs\) \? t\.runs : \[\]/)
+  assert.equal(/Array\.isArray\(uRaw\.runs\)/.test(usageSrc), false) // 回归根因：把计数当数组读 → 恒空 → 过滤静默失效
+  assert.match(usageSrc, /if \(!dayInRange\(dayKeyOf\(r && r\.at\), range\)\) continue/)
+  // topTasks 与 total 同一份入选 run 数据（同一过滤口径，不再各算一遍）
+  assert.match(usageSrc, /models\[rm\] = \(models\[rm\] \|\| 0\) \+ ru\.total/)
+  assert.match(usageSrc, /modelsE\[rm\] = \(modelsE\[rm\] \|\| 0\) \+ effectiveTokens\(ru\)/)
+  assert.match(usageSrc, /s\.topTasks\.push\(\{ id: t\.id, title: t\.title, total: uTot, effective: uEff/)
+})
+
+test('Token 区②：usageSummary 变化纳入 notify 触发（选范围即渲染，JSON 串比对而非引用比）', () => {
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(cli, /var usageJsonPrev = JSON\.stringify\(state\.usageSummary \|\| null\)/) // 赋值前快照
+  assert.match(cli, /var usageDelta = !tasksChanged && JSON\.stringify\(state\.usageSummary \|\| null\) !== usageJsonPrev/)
+  assert.match(cli, /if \(cfgDelta \|\| usageDelta\) notify\(\)/)
+  // 顺序：快照 → 范围守卫下赋值 → 比对（先赋值后快照会把 delta 恒置 false）
+  const iSnap = cli.indexOf('var usageJsonPrev =')
+  const iAssign = cli.indexOf('state.usageSummary = (d && d.usageSummary) || null')
+  const iDelta = cli.indexOf('var usageDelta =')
+  const iNotify = cli.indexOf('if (cfgDelta || usageDelta) notify()')
+  assert.ok(iSnap >= 0 && iAssign > iSnap && iDelta > iAssign && iNotify > iDelta, 'usageSummary 变化检测顺序应为 快照→赋值→比对→notify')
+  // 反向断言：不得用引用比较（host 每轮都返回新对象 → 引用比恒真 → 3s 轮询每轮重渲染，tasksHash 节约作废）
+  assert.equal(/state\.usageSummary !== prevUsage/.test(cli), false)
+})
+
+test('Token 区③：Top8 与模型分布主数字取有效消耗（合计进 title），caption 写明口径统一（源码级断言）', () => {
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // 模型分布：主数字取 host 的 byModelEff（有效分摊），缺字段退化合计并标 ~
+  assert.match(cli, /var ee = \(u\.byModelEff && typeof u\.byModelEff\[m\] === 'number'\) \? u\.byModelEff\[m\] : null/)
+  assert.match(cli, /eff: \(ee === null \? tt : ee\), approx: ee === null/)
+  assert.match(cli, /value: m\.eff, max: maxM/)
+  assert.match(cli, /含缓存读合计 ' \+ String\(m\.total\) \+ ' tokens'/)
+  // Top8：主数字取 topTasks[].effective（老卡无分量才退化合计）
+  assert.match(cli, /var ee = \(typeof x\.effective === 'number'\) \? x\.effective : null/)
+  assert.match(cli, /eff: \(ee === null \? x\.total : ee\)/)
+  assert.match(cli, /value: x\.eff, max: maxT/)
+  assert.match(cli, /含缓存读合计 ' \+ String\(x\.total\)/)
+  // 排序按显示口径（有效）降序：条形长度与行序一致
+  assert.match(cli, /\}\)\.sort\(function \(a, b\) \{ return b\.eff - a\.eff \}\)/)
+  // 标题与 caption 写明口径统一（主数字均为有效消耗）
+  assert.match(cli, /'按模型分布（有效消耗）'/)
+  assert.match(cli, /'任务消耗 Top 8（有效消耗）'/)
+  assert.match(cli, /主数字（模型分布 \/ Top 8）与「今日」「近 7 天」均为有效消耗口径/)
+})
+
+test('Token 区③：byModelEff 与累计有效自洽（模型有效分摊不出「模型合计 > 累计有效」的矛盾）', () => {
+  const a = mkTask({ id: 'a', usage: { input: 10, output: 5, cacheRead: 900, cacheWrite: 5, total: 920, runs: 1, models: { 'm-1': 920 } } })
+  const b = mkTask({ id: 'b', usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 1, total: 30, runs: 1, models: { 'm-1': 10, 'm-2': 20 } } })
+  const s = aggregateUsageSummary([a, b])
+  assert.equal(s.effective, 23)                       // (10+5+5) + (1+1+1)
+  const sum = Object.keys(s.byModelEff).reduce((n, k) => n + s.byModelEff[k], 0)
+  assert.ok(Math.abs(sum - s.effective) <= Object.keys(s.byModelEff).length, 'Σ byModelEff 应与 effective 自洽（仅四舍五入误差）：' + sum)
+  assert.deepEqual(s.byModelEff, { 'm-1': 21, 'm-2': 2 })  // a 的 20 全归 m-1；b 的 3 按 10:20 摊成 1:2 → m-1 合计 21
+  assert.equal(s.byModel['m-1'], 930)
+})
+
 test('README 双份同步记录 Token 口径（有效消耗 / 近 7 天 / 缓存读单列 / 派发口径边界）', () => {
   const pkg = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
   const root = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')
   assert.equal(pkg, root) // 两份 README 必须字节一致（npm run sync-readme 的约束）
-  for (const s of ['今日有效消耗', '近 7 天', '有效消耗 = 输入 + 输出 + 缓存写（不含缓存读）', '不含主窗口对话', 'run 级留账']) {
+  for (const s of ['今日有效消耗', '近 7 天', '有效消耗 = 输入 + 输出 + 缓存写（不含缓存读）', '不含主窗口对话', 'run 级留账', '统计范围', '主数字口径统一', 't.runs[]']) {
     assert.ok(pkg.includes(s), 'README 应记录口径：' + s)
   }
 })
@@ -1553,7 +1832,7 @@ test('Token 消耗接线：settleRun 结算累加 + 按模型小计 + get-tasks 
   assert.match(host, /t\.usage\.models\[mk\] = \(t\.usage\.models\[mk\] \|\| 0\) \+ u\.total/) // 按模型小计累加
   assert.match(host, /rec\.model \|\| u\.model/)                                // 模型 key 来源：派发覆盖 > 日志记录
   assert.match(host, /inputTokens/)                                            // 字段名与真实 v4 日志一致
-  assert.match(host, /d\.usageSummary = aggregateUsageSummary\(d\.tasks\)/)     // get-tasks 现算聚合
+  assert.match(host, /d\.usageSummary = aggregateUsageSummary\(d\.tasks, args && args\.range\)/)     // get-tasks 现算聚合（带统计范围）
   assert.match(cli, /React\.createElement\(TokenUsage, \{ usage: state\.usageSummary \}\)/) // 仪表盘插入消耗区
   assert.match(cli, /state\.usageSummary = \(d && d\.usageSummary\) \|\| null/) // 客户端取数
   assert.match(cli, /'⛁ ' \+ fmtTokens\(t\.usage\.total\)/)                     // 进行中/已完成卡片显示本任务累计
@@ -1587,7 +1866,8 @@ test('Token 日账接线：dispatch 记 byDay 双指标（本地日）+ 仪表�
   assert.match(cli, /k\.slice\(5\) \+ '：有效 ' \+ String\(v\)/)                  // 条形 title：MM-DD：有效 N tok
   assert.match(cli, /含缓存读共 ' \+ String\(c\.t\) \+ ' tok'/)                    // 条形 title 补总量对照
   assert.match(cli, /口径：仅看板派发的 Worker\/Verifier run 消耗，不含主窗口对话/)    // 口径边界明示（不含主窗口）
-  assert.match(cli, /\/ 缓存读 ' \+ String\(x\.cacheRead \|\| 0\)/)                // Top8 title 补 有效 / 缓存读 拆分
+  assert.match(cli, /主数字（模型分布 \/ Top 8）与「今日」「近 7 天」均为有效消耗口径/)   // 主数字口径统一（task-muwq9u04）
+  assert.match(cli, /其中缓存读 ' \+ String\(x\.cacheRead \|\| 0\)/)                  // Top8 title 补 缓存读 拆分（合计/有效进 title）
   assert.match(cli, /background: isToday \? C\.brand : C\.nested/)                // 今天高亮 brand、其余浅底
   assert.match(cli, /hasDayData \? React\.createElement/)                         // 7 天全空不渲染该区
   assert.match(cli, /'（近似：老日账只有总量）'/)                                    // e 不可知 → 标 ~ 近似，不冒充有效值
@@ -2381,8 +2661,8 @@ const d = createDispatch(ctx, { knownSessions: {}, dispatchedEver: {}, badModels
 })
 await d.poolCycle(SID)
 const rec = runs['w6']
-listeners[0]({ agent: { id: 'child-ok' }, status: 'running' })
-listeners[0]({ agent: { id: 'child-ok' }, status: 'idle' })
+listeners[0]({ agent: { session: { id: 'child-ok' } }, status: 'running' })
+listeners[0]({ agent: { session: { id: 'child-ok' } }, status: 'idle' })
 for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r))
 console.log(JSON.stringify({ status: t.status, continual: !!(rec && rec.continuable), deliverable: t.deliverable || null, failedFail: failedFail }))
 `
@@ -2416,7 +2696,7 @@ test('可续跑 Worker②：agent/status running→idle → settle 推进任务�
   const h = mkContinuableDispatch(mkBoard([t]))
   await h.dispatch.poolCycle(FULL_SID)
   assert.equal(t.status, 'in-progress')
-  const fire = (status) => h.listeners[0].fn({ agent: { id: 'child-abc' }, status: status })
+  const fire = (status) => h.listeners[0].fn({ agent: { session: { id: 'child-abc' } }, status: status })
   // ① running：只标记「这一轮真跑起来了」，绝不结算（rec 仍在活跃表）
   fire('running')
   assert.equal(h.runs['w2'].ran, true)
@@ -2440,14 +2720,39 @@ test('可续跑 Worker②：agent/status running→idle → settle 推进任务�
   const t2 = mkTask({ id: 'w3', title: '另一张', status: 'pending' })
   const h2 = mkContinuableDispatch(mkBoard([t2]))
   await h2.dispatch.poolCycle(FULL_SID)
-  h2.listeners[0].fn({ agent: { id: '别人的会话' }, status: 'running' })
-  h2.listeners[0].fn({ agent: { id: '别人的会话' }, status: 'idle' })
+  h2.listeners[0].fn({ agent: { session: { id: '别人的会话' } }, status: 'running' })
+  h2.listeners[0].fn({ agent: { session: { id: '别人的会话' } }, status: 'idle' })
   await flush()
   assert.equal(t2.status, 'in-progress'); assert.equal(h2.runs['w3'].settled, false)
   // 未观测到 running 的伪 idle 被 rec.ran 守卫挡住（不拿瞬时 idle 结算成「空文本失败」）
-  h2.listeners[0].fn({ agent: { id: 'child-abc' }, status: 'idle' })
+  h2.listeners[0].fn({ agent: { session: { id: 'child-abc' } }, status: 'idle' })
   await flush()
   assert.equal(t2.status, 'in-progress'); assert.equal(h2.runs['w3'].settled, false)
+})
+
+test('可续跑 Worker②b：事件 payload 身份契约——agent 无 id 字段，身份在 agent.session.id（2026-10-06 热修防再发）', async () => {
+  // 事故根源：dsh-agent 的 Agent 接口（runtime-types.d.ts）没有 id 字段——身份在 agent.session.id。
+  // 旧实现读 agent.id 恒 undefined → cid='' 静默早退 → 事件结算通道自卡1上线从未在生产触发。
+  // 本条用「无 id 字段的真实形状」mock 锁住契约；agent.id 兜底分支也一并覆盖。
+  const t = mkTask({ id: 'w2b', title: '身份契约卡', status: 'pending' })
+  const h = mkContinuableDispatch(mkBoard([t]))
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(t.status, 'in-progress')
+  // 真实形状：agent 只有 session.id，没有 id——必须命中 rec 并结算（harness mock 恒返回 childId 'child-abc'）
+  h.listeners[0].fn({ agent: { session: { id: 'child-abc' } }, status: 'running' })
+  assert.equal(h.runs['w2b'].ran, true)
+  h.listeners[0].fn({ agent: { session: { id: 'child-abc' } }, status: 'idle' })
+  await flush()
+  assert.equal(t.status, 'pending') // 空文本降级臂回 pending（同②口径）
+  assert.equal(h.runs['w2b'], undefined)
+  // 防回归哨兵：若有人把身份读回 agent.id，上面两发事件将静默无效果——本断言会立刻红
+  const t2 = mkTask({ id: 'w2c', title: 'payload 缺 agent', status: 'pending' })
+  const h2 = mkContinuableDispatch(mkBoard([t2]))
+  await h2.dispatch.poolCycle(FULL_SID)
+  h2.listeners[0].fn({ status: 'idle' })            // 无 agent：静默跳过不炸
+  h2.listeners[0].fn({ agent: null, status: 'idle' }) // agent=null：同上
+  await flush()
+  assert.equal(t2.status, 'in-progress'); assert.equal(h2.runs['w2c'].settled, false)
 })
 
 test('可续跑 Worker③：workerContinuable=false → 逐字回退一次性路径（零 startContinuable 调用）', async () => {
@@ -2522,9 +2827,9 @@ test('可续跑 Worker 接线（源码级）：事件订阅走 ctx.effect 回收
   assert.match(dsp, /subagents\.interrupt\(rec\.childId, \{ kind: 'ancestor', agent: parent \}\)/)
   assert.match(dsp, /if \(rec\.continuable\) await endContinuable\(sid, rec\)\s*\n\s*else await rec\.run\.dispose\(\)/)
   assert.match(dsp, /rec\.resumeBlocked = true/)
-  assert.match(dsp, /withTimeout\(resultP, hardMs, rec\.role \+ ':' \+ t\.id\)/)
+  assert.match(dsp, /withTimeout\(abortableP, hardMs, rec\.role \+ ':' \+ t\.id\)/)
   // ④ 文本兜底复用 usage.mjs 现成读取器（与 agent-activity 同一套日志定位/分帧）+ 续跑基线（只认本轮新写字节）
-  assert.match(dsp, /var log = findRunLog\(childId\)/)
+  assert.match(dsp, /var log = findRunLog\(childId, sessionsRoot\)/)
   assert.match(dsp, /var buf = readLogBytes\(log, tail\)/)
   assert.match(dsp, /childSessionOutput\(rec\.childId, rec\.baselineBytes\)/)
   assert.match(dsp, /baselineBytes: logSizeOf\(childId\)/)
@@ -2643,9 +2948,9 @@ test('可续跑 Worker⑧（卡2②）：重派命中续跑 → sendMessage 冷�
   assert.equal(last.role, 'worker'); assert.equal(last.id, 'child-old')
   assert.equal(last.resume, true); assert.equal(last.continuable, true); assert.equal(last.outcome, 'running')
   // 续跑轮同样能被事件结算（与首派同一条通道）：running→idle（本环境读不到子会话日志 → 走「空文本按失败」）
-  h.listeners[0].fn({ agent: { id: 'child-old' }, status: 'running' })
+  h.listeners[0].fn({ agent: { session: { id: 'child-old' } }, status: 'running' })
   assert.equal(h.runs['r2'].ran, true)
-  h.listeners[0].fn({ agent: { id: 'child-old' }, status: 'idle' })
+  h.listeners[0].fn({ agent: { session: { id: 'child-old' } }, status: 'idle' })
   await flush(); await flush()
   assert.equal(t.status, 'pending')                            // 续跑也算一次尝试：失败照常重排
   assert.equal(t.retryCount, 1)                                // 三连败计数口径不受续跑影响（Step3）
@@ -2785,15 +3090,15 @@ const d = createDispatch(ctx, { knownSessions: {}, dispatchedEver: {}, badModels
 const idle = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)) }
 // 第一轮：冷复活后「一个字都没产出」（日志无新字节）→ 必须按失败重排，不许拿残留文本推进 verifying
 await d.poolCycle(SID)
-listeners[0]({ agent: { id: childId }, status: 'running' })
-listeners[0]({ agent: { id: childId }, status: 'idle' })
+listeners[0]({ agent: { session: { id: childId } }, status: 'running' })
+listeners[0]({ agent: { session: { id: childId } }, status: 'idle' })
 await idle()
 const stale = { status: t.status, retryCount: t.retryCount || 0, deliverable: t.deliverable || null }
 // 第二轮：真追加一帧（续跑轮真产出）→ 正常推进 verifying，交付物取自**新**文本
 await d.poolCycle(SID)
 fs.appendFileSync(logPath, frame('## 开发描述\\n续跑轮的新交付物\\n## 自测情况\\nok'))
-listeners[0]({ agent: { id: childId }, status: 'running' })
-listeners[0]({ agent: { id: childId }, status: 'idle' })
+listeners[0]({ agent: { session: { id: childId } }, status: 'running' })
+listeners[0]({ agent: { session: { id: childId } }, status: 'idle' })
 await idle()
 console.log(JSON.stringify({ stale: stale, ok: { status: t.status, deliverable: t.deliverable || null }, sent: sent }))
 `
@@ -3744,8 +4049,8 @@ function mkUsageDispatch(board, over, ctxOver) {
   return { dispatch, listeners, runs }
 }
 const fireIdle = async (h, childId) => {
-  h.listeners[0]({ agent: { id: childId }, status: 'running' })
-  h.listeners[0]({ agent: { id: childId }, status: 'idle' })
+  h.listeners[0]({ agent: { session: { id: childId } }, status: 'running' })
+  h.listeners[0]({ agent: { session: { id: childId } }, status: 'idle' })
   await flush(); await flush(); await flush()
 }
 
@@ -3814,6 +4119,159 @@ test('卡3④（基线）：one-shot 路径计账不变——整份日志全量�
     assert.equal(t.runs[t.runs.length - 1].continuable, undefined)
     // 一次性 run 不会被 reconcile 抢去做续跑（continuable 标记是唯一门禁）
     assert.equal(!!t.runs[t.runs.length - 1].continuable, false)
+  } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
+})
+
+// ===== 可续跑 Worker⑭（task-muwkhqf8 回归修复）：continuable 结算补关 run 记录（结局/usage/超时臂三件套）=====
+// 病根：continuable Worker 的 run 记录此前只有事件通道（agent/status running→idle → settleContinuable →
+// settleRun）会收尾。Worker 用 board_report 上报完成时任务已被工具通道推进到 verifying，若该 turn 的
+// idle 事件没被观测到（伪 idle 被 rec.ran 守卫挡下/冷窗口/重启/事件丢失），run 记录永久停在 outcome='running'
+// → ① 软超时臂对已完成 run 误报 ② usage 漏计 ③ 硬超时臂到期对已结算的闲置会话补枪。
+// 观察口径（活体形状，非源码断言）：真跑 poolCycle（真 spawnOneShot）+ 真 board_report 工具（execute）
+// + 真 usage 结算（真读 zstd 日志 + seq 水位线）+ mock timer 断言软臂被真清掉。
+// 可注入的 mock timer：与真实 ctx.timer 的**回调式**形态同构（timeout(cb, ms) 返回 dispose 闭包），
+// 记下每个 handle 是否被清 → 「超时臂摘除」在单测里可断言（promise 式桩做不到这点）。
+// interval 是必须项：createDispatch 会挂 15s 心跳（返回 disposer），缺了直接 TypeError。
+function mkTimerProbe() {
+  const handles = []
+  return {
+    handles,
+    timer: {
+      timeout: function (cb, ms) {
+        const h = { ms: ms, cancelled: false }
+        handles.push(h)
+        return function () { h.cancelled = true }
+      },
+      interval: function () { return function () {} },
+    },
+  }
+}
+function lastRun(t) { return t.runs[t.runs.length - 1] }
+
+test('可续跑 Worker⑭a（task-muwkhqf8）：board_report 完成 → runs[] 条目关账（completed+endedAt+usage 落账+usageRecorded）+ 软超时臂被摘除', async () => {
+  // 真日志：seq 0=模型，1=usage 33 → 增量口径落账 33（首轮水位线 0 = 全量）
+  // 桶名/childId 每条用例独占（node --test 内文件用例可并行，共用同一 root 会互相踩日志目录）
+  const L = mkLogRoot('b-cu1', 'child-cua', [frameOfSeq([
+    { type: 'request/context', seq: 0, data: { model: 'deepseek-flash' } },
+    usageEvent(1, { inputTokens: 20, outputTokens: 10, cacheReadTokens: 3, cacheWriteTokens: 0, totalTokens: 33 }),
+  ])])
+  const TP = mkTimerProbe()
+  try {
+    const t = mkTask({ id: 'cu1', title: 'continuable 回归卡', status: 'pending' })
+    const board = Object.assign(mkBoard([t]), { hardTimeoutMin: 360, softTimeoutMin: 30 })
+    const h = mkUsageDispatch(board, { sessionsRoot: L.root }, {
+      timer: TP.timer,
+      subagents: {
+        list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+        start: async () => ({ id: 'run-1', result: new Promise(function () {}), dispose: async function () {} }),
+        startContinuable: async () => ({ childId: 'child-cua', messageId: 'msg-1' }),
+        sendMessage: async () => 'msg-2', interrupt: () => {},
+      },
+    })
+    await h.dispatch.poolCycle(FULL_SID)
+    assert.equal(t.status, 'in-progress')
+    assert.equal(h.runs['cu1'].continuable, true)
+    // 派发即挂两级超时臂：软臂至少一个 handle（硬臂由 withTimeout 提供，桩里是恒等透传）
+    assert.ok(TP.handles.length >= 1, '派发必须挂上软超时臂')
+    // Worker 真调 board_report（工具通道）上报完成
+    const r = await mkRpcHandlers(board, { reportRunSettled: h.dispatch.settleReportedRun, runsFor: () => h.runs }).__tools['board_report'].execute(
+      { taskId: 'cu1', kind: 'complete', summary: '做完了', changes: '改了 a.mjs', selfTest: 'npm test 全绿', diffStat: '+1 -1' }, {})
+    assert.equal(r.ok, true)
+    assert.equal(t.status, 'verifying')
+    // 断言①：run 记录关账——结局 completed + endedAt 落 + usage 落账（增量口径）+ 幂等旗
+    const run = lastRun(t)
+    assert.equal(run.id, 'child-cua')
+    assert.equal(run.outcome, 'completed')
+    assert.ok(run.endedAt, 'outcome 关账必须同时落 endedAt')
+    assert.equal(run.usage.total, 33)
+    assert.equal(run.usage.input, 20)
+    assert.equal(run.usage.cacheRead, 3)
+    assert.equal(run.usageRecorded, true)   // 幂等旗：重复结算不二次记账
+    assert.equal(run.usageSeq, 1)           // 水位线落卡（续跑轮从此继续）
+    // 任务级 usage 同步累加 + 活跃表项摘除（任务已落定，不该再占 Worker 并发位）
+    assert.equal(t.usage.total, 33)
+    assert.equal(t.usage.runs, 1)
+    assert.equal(h.runs['cu1'], undefined)
+    // 断言②：两级超时臂被摘除——软臂 handle 收到 dispose
+    assert.ok(TP.handles.every(x => x.cancelled), '结算后软超时臂必须被真清掉（否则每 30min 刷假告警）')
+    // 断言③：重复上报（工具入口重入）不二次关账——任务已不在 in-progress，run 结局/endedAt/usage 均不动
+    const endedAt = run.endedAt
+    const r2 = await mkRpcHandlers(board, { reportRunSettled: h.dispatch.settleReportedRun, runsFor: () => h.runs }).__tools['board_report'].execute(
+      { taskId: 'cu1', kind: 'complete', summary: '再报一次', changes: '', selfTest: '', diffStat: '' }, {})
+    assert.equal(r2.ok, false)              // 工具门禁拒绝（not in-progress）
+    assert.equal(lastRun(t).endedAt, endedAt)
+    assert.equal(t.usage.total, 33)         // usage 不二次累加
+    assert.equal(t.usage.runs, 1)
+  } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
+})
+
+test('可续跑 Worker⑭b（task-muwkhqf8）：文本兜底入口（agent/status idle）同断言——completed+endedAt+usage 落账+超时臂摘除', async () => {
+  // 真日志：同一份日志里既有**助手文本**（文本通道据此推进 verifying）又有 usage 帧
+  const L = mkLogRoot('b-cu2', 'child-cub', [frameOfSeq([
+    { type: 'request/context', seq: 0, data: { model: 'deepseek-flash' } },
+    { type: 'assistant/message', seq: 1, data: { message: { role: 'assistant', content: [{ type: 'text', text: '## 开发描述\n文本通道完工\n## 自测情况\nok' }] } } },
+    usageEvent(2, { inputTokens: 7, outputTokens: 3, cacheReadTokens: 1, cacheWriteTokens: 0, totalTokens: 11 }),
+  ])])
+  const TP = mkTimerProbe()
+  try {
+    const t = mkTask({ id: 'cu2', title: '文本兜底卡', status: 'pending' })
+    const board = Object.assign(mkBoard([t]), { hardTimeoutMin: 360, softTimeoutMin: 30 })
+    const h = mkUsageDispatch(board, { sessionsRoot: L.root }, {
+      timer: TP.timer,
+      subagents: {
+        list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+        start: async () => ({ id: 'run-1', result: new Promise(function () {}), dispose: async function () {} }),
+        startContinuable: async () => ({ childId: 'child-cub', messageId: 'msg-1' }),
+        sendMessage: async () => 'msg-2', interrupt: () => {},
+      },
+    })
+    await h.dispatch.poolCycle(FULL_SID)
+    await fireIdle(h, 'child-cub') // running→idle：事件通道结算（文本兜底）
+    assert.equal(t.status, 'verifying')                 // 有助手文本 → 推进验收（不是「空文本按失败」）
+    const run = lastRun(t)
+    assert.equal(run.outcome, 'completed')              // 与一次性路径收尾口径一致
+    assert.ok(run.endedAt)
+    assert.equal(run.usage.total, 11)
+    assert.equal(run.usageRecorded, true)
+    assert.equal(t.usage.total, 11)
+    assert.ok(TP.handles.every(x => x.cancelled), '文本兜底结算同样摘除超时臂')
+    assert.equal(h.runs['cu2'], undefined)
+  } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
+})
+
+test('可续跑 Worker⑭c（task-muwkhqf8 回归）：上报与事件双通道先后到达 → usage 只记一笔、run 结局不被二次改写（幂等）', async () => {
+  const L = mkLogRoot('b-cu3', 'child-cuc', [frameOfSeq([
+    { type: 'request/context', seq: 0, data: { model: 'deepseek-flash' } },
+    { type: 'assistant/message', seq: 1, data: { message: { role: 'assistant', content: [{ type: 'text', text: '## 开发描述\n工具通道完工\n## 自测情况\nok' }] } } },
+    usageEvent(2, { inputTokens: 7, outputTokens: 3, cacheReadTokens: 1, cacheWriteTokens: 0, totalTokens: 11 }),
+  ])])
+  const TP = mkTimerProbe()
+  try {
+    const t = mkTask({ id: 'cu3', title: '双通道卡', status: 'pending' })
+    const board = Object.assign(mkBoard([t]), { hardTimeoutMin: 360, softTimeoutMin: 30 })
+    const h = mkUsageDispatch(board, { sessionsRoot: L.root }, {
+      timer: TP.timer,
+      subagents: {
+        list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+        start: async () => ({ id: 'run-1', result: new Promise(function () {}), dispose: async function () {} }),
+        startContinuable: async () => ({ childId: 'child-cuc', messageId: 'msg-1' }),
+        sendMessage: async () => 'msg-2', interrupt: () => {},
+      },
+    })
+    await h.dispatch.poolCycle(FULL_SID)
+    const r = await mkRpcHandlers(board, { reportRunSettled: h.dispatch.settleReportedRun, runsFor: () => h.runs }).__tools['board_report'].execute(
+      { taskId: 'cu3', kind: 'complete', summary: '完成', changes: '', selfTest: '', diffStat: '' }, {})
+    assert.equal(r.ok, true)
+    const endedAt = lastRun(t).endedAt
+    // 上报收尾后 idle 事件才到（rec 已摘除 + rec.settled 已立）→ 不二次关账、不二次记账
+    h.listeners[0]({ agent: { session: { id: 'child-cuc' } }, status: 'running' })
+    h.listeners[0]({ agent: { session: { id: 'child-cuc' } }, status: 'idle' })
+    await flush(); await flush(); await flush()
+    assert.equal(t.status, 'verifying')                 // 状态不被事件通道回退
+    assert.equal(lastRun(t).outcome, 'completed')       // 结局不被改写
+    assert.equal(lastRun(t).endedAt, endedAt)           // endedAt 不刷新
+    assert.equal(t.usage.total, 11)                     // usage 只有一笔
+    assert.equal(t.usage.runs, 1)
   } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
 })
 
@@ -4039,9 +4497,11 @@ test('fetchTasks 设置开关权威纠偏：hash 不变时配置变化补 notify
     assert.ok(src.indexOf("state." + k + " = cfgKnobOf(d, '" + k + "')") > iSnap, k + ' 赋值必须在快照之后')
   }
   assert.match(src, /var cfgDelta = !tasksChanged && cfgKnobsChanged\(cfgKnobs, state\)/)
-  assert.match(src, /if \(cfgDelta\) notify\(\)/)
+  // task-muwq9u04：usageSummary 变化与开关变化共用这一次补 notify（令牌区选范围即渲染）
+  assert.match(src, /var usageDelta = !tasksChanged && JSON\.stringify\(state\.usageSummary \|\| null\) !== usageJsonPrev/)
+  assert.match(src, /if \(cfgDelta \|\| usageDelta\) notify\(\)/)
   const iDelta = src.indexOf('var cfgDelta =')
-  const iNotify = src.indexOf('if (cfgDelta) notify()')
+  const iNotify = src.indexOf('if (cfgDelta || usageDelta) notify()')
   const iEsc = src.indexOf('if (tasksChanged) {\n          var newEsc')
   assert.ok(iDelta < iNotify && iEsc > iNotify, '补 notify 必须在配置赋值之后、escalation 分支之前')
   // ④ 既有渲染节约（tasksHash 短路）逐字保持——本次只加不删
@@ -4050,6 +4510,414 @@ test('fetchTasks 设置开关权威纠偏：hash 不变时配置变化补 notify
   // ⑤ 产物接线：client.js 为拼装产物，真源改动必须已重建（产物与源一致由 build-client --check 兜底）
   const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   assert.match(cli, /function cfgKnobOf\(src, key\)/)
-  assert.match(cli, /if \(cfgDelta\) notify\(\)/)
+  assert.match(cli, /if \(cfgDelta \|\| usageDelta\) notify\(\)/)
   assert.match(cli, /function setCfg\(key, next\)/)
+})
+
+// ===== 池冻结根修（task-muwlepg6）：幽灵占位 → capW=0 → 整池停止派发 =====
+// 活体事故形状（2026-10-06 实测看板）：首个 continuable Worker 经 board_report 完成后，活跃表项（rec）
+// 因当时还没有上报通道收尾而漏摘；此后每张卡漏一条，5 条残留 + 1 个真在跑 → poolCycle 的
+// activeW=6 > maxWorkers=3 → capW 恒 0 → 9 张 pending 卡一张都派不出去、verifying 卡的 Verifier 也
+// 永不 spawn（pickDispatch 的 busyTaskIds 认出自己的幽灵 rec）——而 force dispatch-task 手动通道
+// （不经 capW / busyTaskIds）一切正常。下面三条用例把该形状与本卡的三层防御钉死。
+test('池冻结根修①（根因复现）：活跃表残留被回收 → capW 不再被拖到 0，pending 卡当轮照常派发', async () => {
+  // 幽灵三态（覆盖活体里出现的三种卡面）：verifying（已交验收）/ resolved / archived，全都不可能是
+  // 「Worker 正在跑」的形态，各自都带一条同构的 continuable worker rec。
+  const gVerify = mkTask({ id: 'g-verify', title: '卡已交验收', status: 'verifying', claimedBy: 'ghost-1', claimedAt: '2026-10-06T10:29:28Z', runs: [{ role: 'worker', id: 'ghost-1', outcome: 'running', continuable: true, at: '2026-10-06T10:29:31Z' }] })
+  const gResolved = mkTask({ id: 'g-resolved', title: '卡已 resolved', status: 'resolved', claimedBy: 'ghost-2' })
+  const gArchived = mkTask({ id: 'g-archived', title: '卡已归档', status: 'archived', claimedBy: 'ghost-3' })
+  // 真在跑的活卡（in-progress + claimedBy === rec.id）：绝不能被回收——误杀等于整轮交付物丢失
+  const live = mkTask({ id: 'live1', title: '真在跑', status: 'in-progress', claimedBy: 'live-child' })
+  const p1 = mkTask({ id: 'p1', title: '待派 1', createdAt: '2026-01-01T00:00:01Z' })
+  const p2 = mkTask({ id: 'p2', title: '待派 2', createdAt: '2026-01-01T00:00:02Z' })
+  const p3 = mkTask({ id: 'p3', title: '待派 3', createdAt: '2026-01-01T00:00:03Z' })
+  const board = mkBoard([gVerify, gResolved, gArchived, live, p1, p2, p3])
+  const h = mkContinuableDispatch(board, { rootForSession: () => ({ id: FULL_SID }) })
+  const now = Date.now()
+  h.runs['g-verify'] = { id: 'ghost-1', childId: 'ghost-1', continuable: true, role: 'worker', taskId: 'g-verify', startedAt: now, settled: false }
+  h.runs['g-resolved'] = { id: 'ghost-2', childId: 'ghost-2', continuable: true, role: 'worker', taskId: 'g-resolved', startedAt: now, settled: false }
+  h.runs['g-archived'] = { id: 'ghost-3', childId: 'ghost-3', continuable: true, role: 'worker', taskId: 'g-archived', startedAt: now, settled: false }
+  h.runs['live1'] = { id: 'live-child', childId: 'live-child', continuable: true, role: 'worker', taskId: 'live1', startedAt: now, settled: false }
+  const logs = []
+  const origLog = console.log
+  console.log = function () { logs.push(Array.prototype.join.call(arguments, ' ')) }
+  try { await h.dispatch.poolCycle(FULL_SID) } finally { console.log = origLog }
+  // ① 幽灵条目全部摘除，活条目保留
+  assert.equal(h.runs['g-resolved'], undefined)
+  assert.equal(h.runs['g-archived'], undefined)
+  assert.ok(h.runs['live1'], 'in-progress + claimedBy===rec.id 的真在跑 Worker 绝不能被回收')
+  assert.ok(logs.some(s => /回收失效活跃表项（幽灵占位）3 个/.test(s)), '回收动作必须留痕（可观测，不静默）')
+  // ② 幽灵摘除后，那张 verifying 卡**当轮**就拿到了 Verifier（旧形状：busyTaskIds 认出它自己的幽灵 rec
+  //    → 该卡永远进不了 Verifier 派发）。同一 taskId 的活跃表项从「worker 幽灵」换成「verifier 真 run」，
+  //    正是「卡被解冻」的直接证据。
+  assert.equal(h.runs['g-verify'].role, 'verifier')
+  assert.deepEqual(h.log.oneShot.map(x => x.label), ['verifier:g-verify'])
+  assert.equal(gVerify.verifierRun, String(h.runs['g-verify'].id))
+  // ③ capW 恢复（maxWorkers=3 - 真活跃 1 = 2）：pending 卡当轮派发——修复前 activeW=4 → capW=0 → 一张不派
+  assert.deepEqual(h.log.continuable.map(x => x.label).sort(), ['worker:p1', 'worker:p2'])
+  assert.equal(p1.status, 'in-progress'); assert.equal(p2.status, 'in-progress')
+  assert.equal(p3.status, 'pending') // 并发上限内，留给下一轮（不是被幽灵卡住）
+  // ④ 幽灵的 run 结局用与两条结算通道**同一个** settleRunRecord 补上（不再永久停在 running）
+  assert.equal(gVerify.runs[0].outcome, 'completed')
+  assert.ok(gVerify.runs[0].endedAt)
+  assert.equal(gResolved.runs, undefined) // 无 runs[] 的卡照样摘表项，不因缺数据抛错
+  // ⑤ 池状态快照不再出现幽灵（旧形状：poolStatus 里 4 条 busy，其中 3 条是幽灵）
+  assert.deepEqual(board.poolStatus.workers.map(w => w.taskId), ['live1'])
+  // ⑥ 下一轮心跳照常（池子活过来了）：新 spawn 的 verifier rec 进快照、并发位如实计数——
+  //    activeW=3（live1+p1+p2）已到 maxWorkers 上限 → p3 仍按上限留在 pending（是上限，不是幽灵冻结）
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.deepEqual(board.poolStatus.workers.map(w => w.taskId).sort(), ['live1', 'p1', 'p2'])
+  assert.deepEqual(board.poolStatus.verifiers.map(w => w.taskId), ['g-verify'])
+  assert.equal(p3.status, 'pending')
+})
+
+test('池冻结根修②（防御）：派发单项异常不拖死同轮其余项，下一轮照常派发', async () => {
+  // 注入点选「派发即回执」回调（回执/通知层是真实世界里最容易炸的一环）：旧形状下它一抛就抛穿整个
+  // toSpawn 循环——本轮后面的卡全部留在 'spawn-pending'（worker 位靠 isOrphan 2min 回收，
+  // verifier/hook 位则没有任何自愈路径），且本轮派发整批作废。
+  const a = mkTask({ id: 'a1', title: 'A', createdAt: '2026-01-01T00:00:01Z' })
+  const b = mkTask({ id: 'b1', title: 'B', createdAt: '2026-01-01T00:00:02Z' })
+  let boom = true, n = 0
+  const spawned = []
+  const h = mkContinuableDispatch(mkBoard([a, b]),
+    { notifyDispatched: function () { if (boom) { boom = false; throw new Error('receipt boom') } } },
+    {
+      subagents: {
+        list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+        start: async (name, req) => { spawned.push(req.label); return { id: 'run-' + (++n), result: new Promise(function () {}), dispose: async function () {} } },
+        startContinuable: async (spec) => { spawned.push(spec.label); return { childId: 'child-' + (++n), messageId: 'm' } },
+      },
+    })
+  const errs = []
+  const origErr = console.error
+  console.error = function () { errs.push(Array.prototype.join.call(arguments, ' ')) }
+  try { await h.dispatch.poolCycle(FULL_SID) } finally { console.error = origErr }
+  // 异常被隔离并留痕（旧形状：异常抛穿 poolCycle，没有这一行）
+  assert.ok(errs.some(s => /派发单项异常/.test(s)), '单项异常必须被捕获并留痕')
+  // A 那次 spawn 其实成功了（异常发生在回执里）→ 认领位是真实 run id，两个 rec 都在活跃表
+  assert.equal(a.claimedBy, 'child-1')
+  assert.ok(h.runs['a1'] && h.runs['b1'])
+  // 同轮其余项照常派发（旧形状：B 永远停在 'spawn-pending'，只有 worker:a1 被 spawn）
+  assert.deepEqual(spawned.sort(), ['worker:a1', 'worker:b1'])
+  assert.equal(b.claimedBy, 'child-2')
+  // 下一轮照常派发：池没进入冻结态（新增 pending 卡立刻被派出去）
+  const c = mkTask({ id: 'c1', title: 'C', createdAt: '2026-01-01T00:00:03Z' })
+  h.board.tasks.push(c)
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(c.claimedBy, 'child-3')
+})
+
+test('池冻结根修③（防御）：spawn 抛异常时四种占位全清（worker/verifier/hook-pre/hook-post），下一轮照常派发', async () => {
+  // 异常点在 spawnOneShot 的 try **之外**（pickProvider → subagents.list()）：这是旧形状里最真实的
+  // 抛穿路径——旧代码不接这一抛，第一项就把整个循环带走，紧随其后的 verifier 与两个 hook 占位
+  // （spawn-pending / state='running'）全部变成死占位。
+  const w = mkTask({ id: 'w1', title: 'W', createdAt: '2026-01-01T00:00:01Z' })
+  const v = mkTask({ id: 'v1', title: 'V', status: 'verifying', createdAt: '2026-01-01T00:00:02Z' })
+  // claimedAt 取当下：本用例只验证「spawn 抛异常时的占位清理」，别让 isOrphan 的 2min 规则先把手动认领的
+  // 史诗回收成 pending（那会把 hook 场景变成 worker 场景，测不到本该测的那条路径）
+  const claimedAt = new Date().toISOString()
+  const epicPre = mkTask({ id: 'e1', title: 'E-pre', status: 'in-progress', claimedBy: 'main', claimedAt: claimedAt, hooks: { pre: { enabled: true, prompt: '准备', state: 'idle', runId: null } } })
+  const epicPost = mkTask({ id: 'e2', title: 'E-post', status: 'in-progress', claimedBy: 'main', claimedAt: claimedAt, hooks: { post: { enabled: true, prompt: '收口', state: 'running', pending: true } } })
+  let boom = true, n = 0
+  const spawned = []
+  const h = mkContinuableDispatch(mkBoard([w, v, epicPre, epicPost]), {}, {
+    subagents: {
+      list: () => { if (boom) throw new Error('subagents list boom'); return ['mock'] },
+      getProvider: () => ({ inheritsParentContext: false }),
+      start: async (name, req) => { spawned.push(req.label); return { id: 'run-' + (++n), result: new Promise(function () {}), dispose: async function () {} } },
+      startContinuable: async (spec) => { spawned.push(spec.label); return { childId: 'child-' + (++n), messageId: 'm' } },
+    },
+  })
+  const errs = []
+  const origErr = console.error
+  console.error = function () { errs.push(Array.prototype.join.call(arguments, ' ')) }
+  try { await h.dispatch.poolCycle(FULL_SID) } finally { console.error = origErr }
+  assert.equal(errs.filter(s => /派发单项异常/.test(s)).length, 4, '四项派发各自被隔离并留痕')
+  // 四种占位全部回收（旧形状：w 卡在 in-progress/spawn-pending，v 卡在 verifying/spawn-pending，
+  // e1 卡在 hooks.pre.state='running'（串行闸门永久关闭＝该史诗子任务永不派发），
+  // e2 卡在 verifierRun='spawn-pending' 且待跑标记已清（＝永久不收口））
+  assert.equal(w.status, 'pending'); assert.equal(w.claimedBy, null); assert.equal(w.claimedAt, null)
+  assert.equal(v.verifierRun, null); assert.equal(v.verifierRunAt, undefined)
+  assert.equal(epicPre.hooks.pre.state, 'idle'); assert.equal(epicPre.hooks.pre.runId, null); assert.equal(epicPre.hooks.pre.pending, true)
+  assert.equal(epicPost.verifierRun, null); assert.equal(epicPost.hooks.post.pending, true)
+  assert.deepEqual(Object.keys(h.runs), []) // 没有半成品 rec 占并发位
+  // 下一轮（spawn 恢复正常）照常派发四种角色——占位清干净的直接证据
+  boom = false
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.deepEqual(spawned.sort(), ['hook-post:e2', 'hook-pre:e1', 'verifier:v1', 'worker:w1'])
+  assert.equal(w.status, 'in-progress'); assert.match(String(w.claimedBy), /^child-/)
+  assert.ok(v.verifierRun && v.verifierRun !== 'spawn-pending')
+  assert.equal(epicPre.hooks.pre.state, 'running'); assert.ok(epicPre.hooks.pre.runId)
+  assert.ok(epicPost.verifierRun && epicPost.verifierRun !== 'spawn-pending'); assert.equal(epicPost.hooks.post.pending, false)
+  assert.equal(Object.keys(h.runs).length, 4)
+})
+
+test('池冻结根修④（防御）：settle 链里抛异常（kickCycle 注入）不拖死 tick，下一轮 poolCycle 照常派发', async () => {
+  // 结算链在 host 事件回调里跑（onAgentStatus → settleContinuable → settleRun → settleWorker）。这里在
+  // 结算尾部的 kickCycle 上注入异常（真实世界里它通往回执/通知层），验证：异常被结算链自己吃掉、
+  // 任务状态照常推进、且**下一轮 poolCycle 照常派发**（tick 没有被拖死）。
+  const w = mkTask({ id: 's1', title: '会结算的卡' })
+  const p = mkTask({ id: 'p9', title: '后续待派', createdAt: '2026-01-01T00:00:09Z' })
+  let boom = false, n = 0
+  const board = Object.assign(mkBoard([w, p]), { maxWorkers: 1 }) // 上限 1：第一轮只派 s1，p9 留给下一轮
+  const h = mkContinuableDispatch(board,
+    { kickCycle: function () { if (boom) throw new Error('kick boom') } },
+    {
+      subagents: {
+        list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+        start: async (name, req) => ({ id: 'run-' + (++n), result: new Promise(function () {}), dispose: async function () {} }),
+        startContinuable: async () => ({ childId: 'child-' + (++n), messageId: 'm' }),
+      },
+    })
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(w.status, 'in-progress'); assert.equal(p.status, 'pending') // 上限内只派 w
+  boom = true
+  const errs = []
+  const origErr = console.error
+  console.error = function () { errs.push(Array.prototype.join.call(arguments, ' ')) }
+  try {
+    h.listeners[0].fn({ agent: { session: { id: 'child-1' } }, status: 'running' })
+    h.listeners[0].fn({ agent: { session: { id: 'child-1' } }, status: 'idle' })
+    for (let i = 0; i < 4; i++) await flush()
+  } finally { console.error = origErr }
+  assert.ok(errs.some(s => /settle worker failed/.test(s)), '结算链异常必须被吃掉并留痕')
+  assert.equal(w.status, 'pending')   // 状态推进照常（空文本 → 失败重排）
+  assert.equal(w.retryCount, 1)
+  assert.equal(h.runs['s1'], undefined)
+  // tick 照常：下一轮 poolCycle 立刻把 s1 重新派出去（poolCycle 本体没有被结算异常拖死）
+  boom = false
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(w.status, 'in-progress')
+  assert.ok(h.runs['s1'])
+})
+
+test('池冻结根修⑤（接线，源码级）：幽灵回收在活跃度计数之前 + 轮异常隔离 + 去抖 latch 兜底复位', () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const sto = readFileSync(new URL('../lib/store.mjs', import.meta.url), 'utf8')
+  // ① 回收必须在 activeW 计数与 pickDispatch 之前（否则本轮依旧被幽灵拖住）
+  const iReap = dsp.indexOf('reapedN = await reapGhostRecs(sid, snap)')
+  const iCount = dsp.indexOf('if (rc0.role === \'worker\') activeW++')
+  assert.ok(iReap > 0 && iCount > iReap, '幽灵回收必须先于活跃度计数')
+  // ② 回收后重读快照（否则空闲快进的 wt(snap) 会把收尾结果覆盖回旧状态）
+  assert.match(dsp, /if \(reapedN > 0\) \{ try \{ snap = await rt\(sid\) \} catch \(_\) \{\} \}/)
+  // ③ 本轮主体包 try（整轮异常隔离），且刻意不设再入 latch
+  assert.match(dsp, /try \{ return await poolCycleBody\(sid, info, runs, snap\) \}/)
+  assert.match(dsp, /catch \(e\) \{ console\.error\('\[task-board\] poolCycle 本轮异常（已隔离，下一轮照常）/)
+  assert.match(dsp, /刻意\*\*不设\*\*再入守卫/)
+  // ④ 持锁段按阶段隔离（五段各自 try/catch，回调照样返回 d → 该写的池状态一定写下去）
+  assert.match(dsp, /回收段异常（本轮跳过回收，派发照常）/)
+  assert.match(dsp, /派发决策异常（本轮跳过派发，池状态照常写）/)
+  assert.match(dsp, /hook 段异常（本轮跳过 hook spawn）/)
+  assert.match(dsp, /touches 展示态计算异常（本轮跳过）/)
+  assert.match(dsp, /池状态快照异常（本轮跳过）/)
+  // ⑤ 派发单项隔离 + 统一占位回收出口（四角色）
+  assert.match(dsp, /async function releaseSpawnPlaceholder\(sid, sp, note\) \{/)
+  assert.match(dsp, /派发单项异常（已回收占位，继续本轮其余项）/)
+  assert.match(dsp, /await releaseSpawnPlaceholder\(sid, sp, 'spawn 失败，回收重新排队'\)/)
+  assert.match(dsp, /await releaseSpawnPlaceholder\(sid, sp, 'spawn 失败'\)/)
+  // ⑥ spawn-pending 死占位回收扩面到 in-progress（hook-post 的幂等占用位）
+  assert.match(dsp, /if \(t\.verifierRun === 'spawn-pending' && \(now - new Date\(t\.verifierRunAt \|\| 0\)\.getTime\(\)\) > 120000\)/)
+  assert.match(dsp, /reclaim-hook-pre/)
+  // ⑦ 去抖 latch：时间戳 + 兜底复位 + reject 也复位 + poolCycle 调用包 try/catch
+  assert.match(sto, /var STALE_LATCH_MS = 10000/)
+  assert.match(sto, /if \(latchedAt && Date\.now\(\) - latchedAt < STALE_LATCH_MS\) return/)
+  assert.match(sto, /tm\.timeout\(50\)\.then\(go, go\)/)
+  assert.match(sto, /kickCycle → poolCycle 调用失败/)
+})
+
+// ============================================================================
+// continuable 消息通道二修（task-muwox2ii，发版门禁 e2e 两条红的根因）
+//   Bug A：续跑指令把权威锚死在「上文历史契约」→ 仲裁后的新指示没人执行，任务收不了口（touches-freeze 场景 H 红）
+//   Bug B：doIntervene 只认 rec.run.localAgent（一次性 run 句柄）→ continuable Worker 收不到干预（steer 套件 4/8 红）
+// 断言①②③④ 与主窗口调研笔记一一对应。
+// ============================================================================
+
+// ===== Bug A ①（行为级）：仲裁消息原文随续跑指令投递 + 末尾立优先级声明 =====
+test('续跑优先级①（task-muwox2ii）：仲裁消息原文随续跑指令投递，末尾立「最新裁决优先于历史契约」声明', async () => {
+  const parent = { id: FULL_SID }
+  const sent = []
+  const t = mkTask({
+    id: 'pr1', title: '裁决续跑卡', status: 'pending',
+    // 真实形状：escalation（Worker 自己上报的疑问）+ arbitration（主窗口裁决答案）都在卡上
+    messages: [
+      { kind: 'escalation', text: '要不要继续做？', at: '2026-01-01T00:00:01Z', by: 'child-old' },
+      { kind: 'arbitration', text: '无需额外信息，直接按完成契约上报完成即可。', at: '2026-01-01T00:00:02Z', by: 'main', action: 'resume' },
+    ],
+    runs: [{ role: 'worker', id: 'child-old', at: '2026-01-01T00:00:00Z', model: '', outcome: 'incomplete', hardMin: 120, continuable: true }],
+  })
+  const h = mkContinuableDispatch(mkBoard([t]), { rootForSession: () => parent }, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => { throw new Error('续跑命中时不该走一次性路径') },
+      startContinuable: async () => { throw new Error('续跑命中时不该 fresh spawn') },
+      sendMessage: async (sender, targetId, content, options) => { sent.push({ sender: sender, targetId: targetId, content: content, options: options }); return 'msg-2' },
+    },
+  })
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(sent.length, 1)
+  const txt = sent[0].content[0].text
+  // ① 仲裁消息在续跑指令里**可见**（与 fresh spawn 的 buildWorkerPrompt 同源 core.buildMessages）
+  assert.match(txt, /### \[arbitration\] \(2026-01-01T00:00:02Z by main\)/)
+  assert.match(txt, /无需额外信息，直接按完成契约上报完成即可。/)
+  // ② 末尾的优先级声明：最新裁决/干预优先于历史契约，并显式给出「不要做其他事 vs 上报完成」的反例
+  assert.match(txt, /【优先级声明】/)
+  assert.match(txt, /本次消息与上面 messages 里的最新裁决\/干预，优先于上文历史中的原始任务契约/)
+  assert.match(txt, /两者冲突时以最新指示为准/)
+  assert.match(txt, /不要做其他事/)
+  // 声明在仲裁消息**之后**（最后一句才读到，不会被当成插入语）
+  assert.ok(txt.lastIndexOf('【优先级声明】') > txt.lastIndexOf('### [arbitration]'), '优先级声明必须在消息段之后')
+  // 旧文案逐字保留（老断言与老 Worker 的行为锚点不变）
+  assert.match(txt, /【断点续跑】/)
+  assert.match(txt, /第 2 次尝试/)
+  assert.match(txt, /任务契约与验收标准见上文历史/)
+  assert.match(txt, /吃不准就 board_report escalate/)
+})
+
+// ===== Bug A ②（源码级）：断言接线不被将来改动悄悄抹掉 =====
+test('续跑优先级②（源码级）：续跑文案用 core.buildMessages 带消息段 + 优先级声明文案在位且顺序正确', () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  assert.match(dsp, /try \{ msgs = core\.buildMessages\(t\) \} catch \(_\) \{\}/) // 与 fresh spawn 同源（截断口径一致）
+  assert.match(dsp, /该任务的最新消息（主窗口裁决\/高优干预\/驳回理由等，请务必遵循）：/)
+  assert.match(dsp, /【优先级声明】本次消息与上面 messages 里的最新裁决\/干预，优先于上文历史中的原始任务契约；两者冲突时以最新指示为准/)
+  const iMsgs = dsp.indexOf('该任务的最新消息（主窗口裁决')
+  const iDecl = dsp.indexOf('【优先级声明】本次消息与上面')
+  assert.ok(iMsgs > 0 && iDecl > iMsgs, '先拼消息段，再拼优先级声明')
+})
+
+// ===== Bug B ①④（行为级）：continuable rec 干预送得到 + e2e 断言口径（channel='steer'）不变 =====
+test('高优干预①（continuable）：rec 无 run 也走宿主投递——host-protocol 优先、保留插件 source、channel=steer', async () => {
+  const parent = { id: FULL_SID }
+  const hostCalls = []
+  const sent = []
+  const DELIVER = Symbol.for('dsh.subagent.deliverPrompt')
+  const board = mkBoard([mkTask({ id: 'iv1', title: 'continuable 干预卡', status: 'in-progress' })])
+  // continuable rec 的真实形态：无 run、有 childId（spawnOneShot 的 continuable 分支）
+  const runs = { iv1: { id: 'child-live', childId: 'child-live', continuable: true, ran: true, run: null, role: 'worker', taskId: 'iv1', startedAt: Date.now(), model: '', settled: false } }
+  const handlers = mkRpcHandlers(board, { runsFor: () => runs, rootForSession: () => parent }, {
+    subagents: {
+      [DELIVER]: async function (p, cid, content, source, signal, delivery) { hostCalls.push({ p: p, cid: cid, content: content, source: source, signal: signal, delivery: delivery }); return 'm1' },
+      sendMessage: async function (sender, cid, content, options) { sent.push({ sender: sender, cid: cid, content: content, options: options }); return 'm2' },
+    },
+  })
+  const r = await handlers['intervene-agent']({ taskId: 'iv1', message: '插一条高优指令：上报时带上标记 STEER-MARKER-ABC。' })
+  assert.equal(r.ok, true)
+  assert.equal(r.delivered, true, 'continuable rec 干预必须真的送达（旧实现整段被跳过 → delivered 恒 false）')
+  assert.equal(r.channel, 'steer', 'e2e 断言口径不变：channel 必须仍是 steer')
+  assert.equal(hostCalls.length, 1)
+  assert.deepEqual(sent, [], 'host-protocol 可用时不再重复走 sendMessage（一次干预只投一次）')
+  assert.equal(hostCalls[0].p, parent)                  // 授权者 = 活的直接父 Agent
+  assert.equal(hostCalls[0].cid, 'child-live')          // 目标 = 该 continuable 子会话
+  assert.equal(hostCalls[0].delivery, 'steer')          // 就近 step 边界消费（不是等整 turn 的 queue）
+  assert.ok(hostCalls[0].signal, '投递必须带 AbortSignal（SubagentSendMessageOptions 同族形态）')
+  assert.match(hostCalls[0].content[0].text, /STEER-MARKER-ABC/)                       // payload 含干预文本
+  assert.equal(hostCalls[0].source.kind, 'plugin:dsh-agent-board')                    // source 保留（e2e 消费断言靠它）
+  assert.equal(hostCalls[0].source.form, 'notice')
+  // 干预原文照旧落卡（详情页可见 + 后续派发随 prompt 注入，通道补充不改这条既有语义）
+  assert.equal(board.tasks[0].messages.filter((m) => m.kind === 'intervention').length, 1)
+  assert.equal(board.tasks[0].messages.filter((m) => m.kind === 'intervention')[0].text, '插一条高优指令：上报时带上标记 STEER-MARKER-ABC。')
+  // ===== 主窗口高优干预锐化（2026-10-06 活体实证）=====
+  // 病根补记：旧实现下 **continuable Worker 正在跑**（rec.continuable=true、run=null）时，干预依然落进
+  // 「（无活跃 run，随下次派发注入）」分支——「有无活跃 run」的判定本身对 continuable 误阴。此处把
+  // 「live continuable rec 的干预不落入该分支」锁成红绿断言。
+  const note1 = board.tasks[0].history[board.tasks[0].history.length - 1].note
+  assert.ok(!/无活跃 run/.test(note1), 'live continuable rec 干预不得落「无活跃 run」分支（旧实现正是在这里误阴）: ' + note1)
+  assert.ok(!/未实时送达/.test(note1), 'delivered=true 时不得带「未实时送达」后缀: ' + note1)
+  assert.match(note1, /^高优干预: 插一条高优指令：上报时带上标记 STEER-MARKER-ABC。$/)
+})
+
+// ===== Bug B ②（行为级）：一次性 rec 的既有两跳通道逐字不变 =====
+test('高优干预②（一次性 rec 逐字不变）：agent.steer 优先、steer 抛错回退 followup、零宿主投递', async () => {
+  const steered = [], followed = [], sent = []
+  const board = mkBoard([mkTask({ id: 'iv2', title: '一次性干预卡', status: 'in-progress' })])
+  const runs = { iv2: { id: 'run-1', run: { localAgent: { steer: function (m) { steered.push(m) }, followup: function (m) { followed.push(m) } } }, role: 'worker', taskId: 'iv2', settled: false } }
+  const handlers = mkRpcHandlers(board, { runsFor: () => runs, rootForSession: () => ({ id: FULL_SID }) }, {
+    subagents: { sendMessage: async function () { sent.push('不该走宿主投递'); return 'm' } },
+  })
+  let r = await handlers['intervene-agent']({ taskId: 'iv2', message: '口径重写：先做 B 再做 A。' })
+  assert.equal(r.ok, true); assert.equal(r.delivered, true); assert.equal(r.channel, 'steer')
+  assert.equal(steered.length, 1); assert.deepEqual(followed, [])
+  assert.deepEqual(sent, [])                                    // 一次性 rec 绝不进宿主投递分支
+  assert.equal(steered[0].source.kind, 'plugin:dsh-agent-board')
+  assert.equal(steered[0].source.form, 'notice')
+  assert.match(steered[0].content[0].text, /口径重写：先做 B 再做 A。/)
+  // steer 抛错 → 回退 followup（第三跳不变；老宿主没有 steer 时同样落这里）
+  runs.iv2 = { id: 'run-2', run: { localAgent: { steer: function () { throw new Error('no steer') }, followup: function (m) { followed.push(m) } } }, role: 'worker', taskId: 'iv2' }
+  r = await handlers['intervene-agent']({ taskId: 'iv2', message: '再插一条' })
+  assert.equal(r.delivered, true); assert.equal(r.channel, 'followup'); assert.equal(followed.length, 1)
+  // 无活跃 rec：只记录，history 说明文案逐字不变
+  const idle = mkTask({ id: 'iv8', title: '无活跃 run 卡', status: 'in-progress' })
+  board.tasks.push(idle)
+  r = await handlers['intervene-agent']({ taskId: 'iv8', message: '无 run 的干预' })
+  assert.equal(r.delivered, false); assert.equal(r.channel, '')
+  assert.match(idle.history[idle.history.length - 1].note, /^高优干预: 无 run 的干预（无活跃 run，随下次派发注入）$/)
+})
+
+// ===== Bug B ③（行为级）：continuable 回退链三态 =====
+test('高优干预③（continuable 回退链）：host 符号不可用 → sendMessage；两条都失败 → 记录注入 + history 留「未实时送达」', async () => {
+  const sent = []
+  const board = mkBoard([
+    mkTask({ id: 'iv4', title: '回退 sendMessage 卡', status: 'in-progress' }),
+    mkTask({ id: 'iv5', title: '死会话卡', status: 'in-progress' }),
+    mkTask({ id: 'iv6', title: '缺 childId 卡', status: 'in-progress' }),
+  ])
+  const runs = {
+    iv4: { id: 'child-a', childId: 'child-a', continuable: true, run: null, role: 'worker', taskId: 'iv4', settled: false },
+    iv5: { id: 'child-b', childId: 'child-b', continuable: true, run: null, role: 'worker', taskId: 'iv5', settled: false },
+    iv6: { id: 'rec-no-child', continuable: true, run: null, role: 'worker', taskId: 'iv6', settled: false },
+  }
+  // 老宿主面：ctx.subagents 上没有 host-protocol 符号键方法，只有公开 sendMessage；
+  // child-b 的会话已死（sendMessage 抛 NOT_RESUMABLE）
+  const handlers = mkRpcHandlers(board, { runsFor: () => runs, rootForSession: () => ({ id: FULL_SID }) }, {
+    subagents: {
+      sendMessage: async function (sender, targetId, content, options) {
+        if (targetId === 'child-b') throw new Error('subagent/not-resumable')
+        sent.push({ sender: sender, targetId: targetId, content: content, options: options })
+        return 'm'
+      },
+    },
+  })
+  // ① host 不可用 → 公开 sendMessage（卡2 续跑同通道），选项形态 { signal }
+  let r = await handlers['intervene-agent']({ taskId: 'iv4', message: 'STEER-回退-MARKER' })
+  assert.equal(r.ok, true); assert.equal(r.delivered, true); assert.equal(r.channel, 'steer')
+  assert.equal(sent.length, 1); assert.equal(sent[0].targetId, 'child-a')
+  assert.match(sent[0].content[0].text, /STEER-回退-MARKER/)
+  assert.ok(sent[0].options && sent[0].options.signal, 'sendMessage 选项形态必须是 { signal }')
+  // ② 会话已死 → 回退记录注入（现状行为），history 写明未实时送达
+  r = await handlers['intervene-agent']({ taskId: 'iv5', message: '送给死会话的干预' })
+  assert.equal(r.ok, true); assert.equal(r.delivered, false); assert.equal(r.channel, '')
+  const t5 = board.tasks.find((x) => x.id === 'iv5')
+  assert.equal(t5.messages.filter((m) => m.kind === 'intervention').length, 1)   // 干预原文照旧落卡（重派时会注入）
+  assert.match(t5.history[t5.history.length - 1].note, /高优干预: 送给死会话的干预（干预未能实时送达（会话不可用），已转为重派注入）$/)
+  // ③ 无 childId（老/异常 rec 形态）→ 同样回退记录注入，不留「已送达」假象
+  r = await handlers['intervene-agent']({ taskId: 'iv6', message: '缺 childId 的干预' })
+  assert.equal(r.delivered, false); assert.equal(r.channel, '')
+  const t6 = board.tasks.find((x) => x.id === 'iv6')
+  assert.match(t6.history[t6.history.length - 1].note, /干预未能实时送达（会话不可用），已转为重派注入/)
+  // ④ 已立 settled 旗（结算通道正在认领/会话收尾）→ **不投**（主窗口 2026-10-06 锐化的判活口径）：
+  //    投递会打在正在关门的会话上或静默丢失，故直接落记录注入；host/sendMessage 一次都不许调。
+  runs.iv7 = { id: 'child-settled', childId: 'child-settled', continuable: true, run: null, role: 'worker', taskId: 'iv7', settled: true }
+  board.tasks.push(mkTask({ id: 'iv7', title: '已结算 rec 卡', status: 'in-progress' }))
+  const sentBefore = sent.length
+  r = await handlers['intervene-agent']({ taskId: 'iv7', message: '送给已结算 rec 的干预' })
+  assert.equal(r.delivered, false); assert.equal(r.channel, '')
+  assert.equal(sent.length, sentBefore, 'settled rec 不得再投递（sendMessage 零调用）')
+  const t7 = board.tasks.find((x) => x.id === 'iv7')
+  assert.match(t7.history[t7.history.length - 1].note, /干预未能实时送达（会话不可用），已转为重派注入/)
+  assert.equal(t7.messages.filter((m) => m.kind === 'intervention').length, 1)
+  // 四条路径的干预原文都进 messages（通道选择不改变「记录一条干预」的既有语义）
+  assert.equal(t6.messages.filter((m) => m.kind === 'intervention').length, 1)
+})
+
+// ===== Bug B ④（源码级）：投递点接线不被将来改动悄悄抹掉 =====
+test('高优干预④（源码级）：continuable 投递点 = host-protocol 符号键 + sendMessage 回退，且分路在 rec.continuable 上', () => {
+  const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  assert.match(rpcSrc, /Symbol\.for\('dsh\.subagent\.deliverPrompt'\)/)                                  // 宿主适配器入口
+  assert.match(rpcSrc, /if \(rec && rec\.continuable === true\) \{/)                                     // 分路门禁
+  assert.match(rpcSrc, /await host\.call\(subagents, parent, childId, m\.content, m\.source, makeSignal\(\), 'steer'\)/)
+  assert.match(rpcSrc, /await subagents\.sendMessage\(parent, childId, m\.content, \{ signal: makeSignal\(\) \}\)/)
+  assert.match(rpcSrc, /if \(rec && rec\.run && rec\.run\.localAgent\) \{/)                              // 一次性路径原样保留
+  assert.match(rpcSrc, /干预未能实时送达（会话不可用），已转为重派注入/)
+  assert.match(rpcSrc, /if \(!childId \|\| rec\.settled === true \|\| !subagents \|\| !parent\) return \{ delivered: false \}/) // 判活口径（settled 旗）
+  // 回退链顺序：host 投递在 sendMessage 之前（能保留插件 source 的通道优先）
+  assert.ok(rpcSrc.indexOf('await host.call(subagents, parent, childId') < rpcSrc.indexOf('await subagents.sendMessage(parent, childId'), 'host 投递必须先于 sendMessage 回退')
 })

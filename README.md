@@ -104,9 +104,11 @@ dsh plugin --profile web remove dsh-agent-board
 
 - 仪表盘视图新增「Token 消耗」区：本看板累计**有效 / 缓存读 / 合计**三分量 + 输入 / 输出（缓存写非零时一并展示）拆分、按模型分布条形图、任务消耗 **Top 8**（标题可点击直达该任务详情，title 附「有效 N / 缓存读 M」拆分）；大数字为**今日有效消耗**（本地日口径，无日账则显示 0，旁附「含缓存读共 X」小字对照，有效值不可知时以总量近似并标 `~`）、旁附「累计（本看板）」三分量小字，下方「近 7 天」迷你条形按日展示近 7 天**有效消耗**（今天高亮，title 补总量对照，7 天全为 0 时不渲染）；进行中的卡片右上角显示本任务已累计消耗（`⛁ 数字`）；区底固定一行口径 caption：**仅看板派发的 Worker/Verifier run 消耗，不含主窗口对话**
 - 口径要点：**有效消耗 = 输入 + 输出 + 缓存写（不含缓存读）**。实证本板累计 10.3M 里缓存读占 9.7M（94%）、有效消耗仅 605K——总量被缓存读撑高约 17 倍，因此大数字与「近 7 天」一律用有效值，缓存读单列可查（差额一眼可见），避免「仪表盘与真实消耗差太多」
+- **主数字口径统一**（`task-muwq9u04`）：**按模型分布行与任务消耗 Top 8 行的主数字一律为有效消耗**（含缓存读的合计进悬浮 title），与「今日」「近 7 天」同口径——不再出现「今日有效 3.7M / 单任务 21M」这类同区并排的矛盾数字（模型有效分摊由 host 的 `byModelEff` 给出；老 host 缺该字段或老卡无五分量留账时，主数字退化用合计并在 title 标 `~`）
+- **统计范围接通 Token 区**（`task-muwc7hjd`）：仪表盘顶部的「统计范围」（快捷：今天 / 近 7 天 / 近 30 天 / 全部 + 自定义起止）现在同时作用于 Token 区的**按模型分布 / 任务消耗 Top 8 / 累计三分量**——范围变化即用新范围重拉 `get-tasks`，由 host 按每个 run 的本地日落点（`t.runs[i].at` → `YYYY-MM-DD`，两端闭区间）过滤：范围外 run 不计入 total/byModel/top，`byDay` 同步裁到范围内；范围激活时 Token 区标题带「范围内: …」标记。**今日大数字与「近 7 天」柱子是自身固定口径，不随范围变化**（区底第二行 caption 与范围筛选浮层均写明）。无范围（两端皆空）时聚合结果与旧版逐字一致（parity）；无 run 级留账（老卡 / runs 条目未落 usage）退化为按 `updatedAt` 本地日判定，无 `at` 的老 run 只在无范围时计入（宁可漏不错），run 未记模型名时按入选 run 占比摊任务级模型小计（合计与有效同法摊派，ΣbyModel 与入选总量、ΣbyModelEff 与入选有效各自对齐）。**数据源口径修正（`task-muwq9u04`）**：run 记录数组在**任务级 `t.runs[]`**（`t.usage.runs` 只是结算次数计数）——此前误把计数当数组读，范围过滤静默退化成 `updatedAt` 单日近似、Top 8 与无范围逐字相同；现已逐 run 精确裁切，且范围切换后客户端按 `usageSummary` 的 JSON 串比对补一次 notify（选范围即渲染，不等下一次任意刷新）
 - 数据来源：每次 Worker/Verifier run 结算时读该 run 的 v4 会话日志（`~/.dsh/sessions/*/<runId>/session.v4.jsonl.zstd`），把 `assistant/message` 事件的 `usage`（`inputTokens` / `outputTokens` / `cacheReadTokens` / `cacheWriteTokens` / `totalTokens`，字段形状以真实日志为准）按 zstd 帧逐帧累加到任务 `usage`（含按模型小计、`runs` 计数与 `byDay` 日账——本地日 `YYYY-MM-DD`，一次 run 整笔记在结算日；多轮重跑/驳回重做自动累加）；**run 级留账**：本次用量同时原样写回 `t.runs` 对应条目的 `usage`（五分量俱全），因此按天 / 按模型 / 按阶段任何维度都能从 runs 精确重建，口径若要再调整不必回头猜
 - `byDay` 为**双指标**形态 `{ t, e }`（`t` = 总量含缓存读，`e` = 有效消耗不含缓存读；一次 run 不跨日拆分）。聚合端兼容老数据：值是裸 number 的历史日账按 `{ t: n, e: null }` 处理——总量照常保留（「近 7 天」不会整段消失），有效值不可知就置 `null` 并由 UI 标 `~` 近似，**绝不把总量冒充有效值**
-- `get-tasks` 再现算 board 级 `usageSummary`（总量 / 有效合计 / 按模型 / Top8（带有效与缓存读拆分）/ 日账 `byDay`，不落盘额外表；老任务无 `byDay` 时整笔近似归到 `updatedAt` 的本地日，无 `updatedAt` 则不计入任何日）——**只做展示、不做计费断言**，日志读不到或没有 usage 时一律显示「暂无数据」
+- `get-tasks` 再现算 board 级 `usageSummary`（总量 / 有效合计 / 按模型（合计 `byModel` + 有效分摊 `byModelEff`，两者同源累加）/ Top8（带有效与缓存读拆分）/ 日账 `byDay`，不落盘额外表；老任务无 `byDay` 时整笔近似归到 `updatedAt` 的本地日，无 `updatedAt` 则不计入任何日）——**只做展示、不做计费断言**，日志读不到或没有 usage 时一律显示「暂无数据」；第二参 `range`（可选 `{ from, to }` 本地日）给定即只聚合该范围内的 run（口径见上条）
 - 统计口径边界：本区只统计**看板派发的 Worker/Verifier run**，**不含主窗口对话本身**（不越界统计，UI caption 已明示）
 - 「架构健康」区（架构自省 L1）：`get-tasks` 顺带对**近 50 张卡**现算四信号（纯函数零存储：touches 声明热度 ≥8 次且占比 ≥40% / 带 touches 任务滞留中位数 >2 倍 / 任务**执行**时长 p90 >45min（claimedAt→resolvedAt 纯干活口径，不含排队）/ 同路径驳回 ≥2 次），命中才在仪表盘渲染提示条（⚠️/ℹ️ 两级，最多 3 条）——让运行数据主动提示"该优化架构了"（如某文件反复成为锁热点=该拆），信号只建议不裁判
 - 统计区耗时同口径拆分：「平均排队 / 平均执行」双行展示（平均验收单列不变）
@@ -133,7 +135,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **依赖调度**：`dependsOn` 声明依赖（DFS 环检测），依赖全部完成后才会被派发，串行链路自动编排
 - **管线分档**：`full`（执行+验证）/ `work`（只做不验）/ `direct`（不进池，主窗口直接处理），创建时按规则自动分类、可手动覆盖
 - **硬性验收**：`acceptance` 字段写验收脚本命令，Worker 必须实际运行、Verifier 必须独立复跑
-- **文件级排他**：`touches` 声明本任务要改的文件/glob（如 `["src/**", "README.md"]`）；持有文件锁的任务（`in-progress`/`verifying`/`resolved`）与候选 touches 重叠就跳过本轮（卡片显示 `🔒 等文件释放`，详情页列出在等谁），**锁持到归档**：验收通过后继续持锁（护住「验收后-提交前」的提交窗口期），归档（含批量归档）才真释放，`cancelled` 立即放锁（放弃语义=不再产出）——避免并行 Worker 改同一批文件互踩。手动「派发」遇到冲突会列出冲突任务，确认后才以 `force` 越权派发
+- **文件级排他**：`touches` 声明本任务要改的文件/glob（如 `["src/**", "README.md"]`）；持有文件锁的任务（`in-progress`/`verifying`）与候选 touches 重叠就跳过本轮（卡片显示 `🔒 等文件释放`，详情页列出在等谁），**锁随工作态**：状态流转到已完成（`resolved`）即放锁，`cancelled`/归档同样不再持锁（归档回归纯收纳动作、不再是释放点）——锁只护「正在写」的阶段，「验收后-提交前」的窗口期由主窗口「回执到即提交」纪律 + 史诗 post-hook 承接，不用长持锁把整批串行化。避免并行 Worker 改同一批文件互踩；手动「派发」遇到冲突会列出冲突任务，确认后才以 `force` 越权派发
 - **里程碑进展通道**：Worker 每完成一个可验证的里程碑，可调用 `board_report`（`kind: "progress"`，`question` 写一行进展摘要 ≤200 字符）上报——进行中的卡片显示「📈 最近进展 · 相对时间」（覆盖式只留最新一条），详情页消息流保留全部 progress 条目
 - **防表演式汇报**：进展契约只写在 Worker prompt 里、且要求「有实际产物/结论才报」（禁止定时汇报）；progress **静默不通知主窗口**（不进回执聚合），也不写 `history` 流转记录，避免刷屏
 - **子任务**：父子层级 + 上下文继承 + 父任务自动流转 + 级联归档（僵尸态出清：`archive-task` 对「无活跃 run 的 in-progress」——典型如被 parentKick 推进后子任务已全部归档的史诗——直接放行，有活跃 run 的仍拒）；**归档子任务仍计入史诗进度并在详情留档可见**——进度分子口径 `settled = resolved | cancelled | archived`、分母也含归档，归档一张子卡不会再让史诗进度从 `0/10` 退化成 `0/9`（进度只增不减），全归档的父卡也照常显示徽章；详情子任务清单不排归档行（灰化 + 行尾「已归档」徽章 + 沉底排序，点击仍可进子卡看留档）
@@ -174,6 +176,9 @@ draft → pending → in-progress → verifying → resolved → archived
 - **重启 reconcile（找回活跃续跑 Worker）**：host 重启会清空内存里的活跃 run 表，但持久子会话还活着。首轮派发周期对「进行中且无活跃 run」的卡查一次 `listChildren(root)`：仍在列 → 重建 rec 观测（监听器本就在）并重挂两级超时臂、基线取当前日志字节数；不在列 → 视为会话已死，走硬超时等价物（回待办重排 + 留一行流转记录），不占 Worker 并发位
 - **usage 增量计账（按 seq 水位线）**：注意「一个持久子会话被结算多次」是新形态——整份日志全量累加会把前几轮的 token 反复记账（实测同一 childId 结算两次＝双倍）。现按 v4 日志事件自带的 `seq` 记水位线（落在 `t.runs[].usageSeq`）：每次结算只累加水位线之后的 `assistant/message` 增量，本轮没新增量就一行都不记；one-shot 路径（每 run 独立日志）行为逐字不变
 - **开关 `workerContinuable`（默认开）**：关掉即逐字回退旧的一次性路径（零 `startContinuable`/零 `sendMessage`/零 `interrupt`，结算仍走 `run.result`+`dispose`）；Verifier 与 hooks（`hook-pre`/`hook-post`）**保持一次性**，不受该开关影响
+- **结算双通道 + 池韧性（2026-10-06 事故修复）**：continuable 结算有事件通道（`agent/status` 的 running→idle，身份取 `agent.session.id`）与上报通道（`board_report` 落定即收尾）两条入口，任一到达即关账（结局/usage/超时臂三件套，幂等）；派发周期自带**幽灵活跃表项 GC**（卡面证据核对回收残留 rec，防残留把派发容量顶到 0 拖死全池）+ 整轮 try/catch 与逐卡隔离（单点异常只作废该卡该轮）+ 去抖 latch 时间戳兜底复位
+- **续跑指令优先级**：断点续跑指令会带上卡上 messages 原文（仲裁/干预/驳回理由），并声明**最新裁决/干预优先于历史原始契约**（冲突以最新为准）——冷复活子会话的历史里没有仲裁答案，不带原文它无从知晓
+- **高优干预实时送达 continuable Worker**：`task_intervene` 对 continuable rec 走宿主投递通道（保留插件 source，下一个 step 边界消费），会话不可用降级 `sendMessage` 冷复活投递，再不行回退「记录注入随重派送达」并在 history 注明
 
 ### 工作模式（三档）
 
@@ -189,7 +194,7 @@ draft → pending → in-progress → verifying → resolved → archived
 
 - **歧义裁决**：Worker 遇歧义不猜测，一律上报；裁决后新 Worker 携带答案接手（Team 托管档附带 system prompt 派发引导 + 默认草稿护栏）
 - **Verifier 验收**：`acceptance` 硬性验收脚本命令，Worker 必须实际运行、Verifier 必须独立复跑；跨档一致
-- **touches 排他**：`touches` 文件级排他锁在活动任务间生效，冲突任务跳过本轮派发，**锁持到归档**（`in-progress`/`verifying`/`resolved` 持有，归档释放，`cancelled` 立即释放）；跨档一致
+- **touches 排他**：`touches` 文件级排他锁在活动任务间生效，冲突任务跳过本轮派发，**锁随工作态**（`in-progress`/`verifying` 持有；状态流转到 `resolved` 即释放，`cancelled`/归档同样释放——归档不再承担解锁职责）；跨档一致
 - 孤儿回收、看门狗、级联归档、会话隔离同样三档一致
 
 Team 托管档独有（调度员体验）：
@@ -240,7 +245,7 @@ v1.6.0 起 host 端从单体 index.mjs（1487 行）拆为薄壳 + 7 个领域�
 | 模块 | 域 | 内容 |
 |---|---|---|
 | `policy.mjs` | 策略层 | 粒度治理软闸门 + 学习飞轮候选教训（纯函数零状态） |
-| `usage.mjs` | 统计 | v4 会话日志定位 / zstd 分帧 / token usage 聚合（纯函数；有效消耗 `effectiveTokens` + `byDay` 双指标 `{t,e}` 聚合，兼容老 number 日账；`sinceSeq` 水位线增量结算——同一持久子会话多次结算不重复计账） |
+| `usage.mjs` | 统计 | v4 会话日志定位 / zstd 分帧 / token usage 聚合（纯函数；有效消耗 `effectiveTokens` + `byModelEff` 模型有效分摊 + `byDay` 双指标 `{t,e}` 聚合，兼容老 number 日账；统计范围按任务级 `t.runs[].at` 逐 run 裁切；`sinceSeq` 水位线增量结算——同一持久子会话多次结算不重复计账） |
 | `session.mjs` | 会话 | root 解析缓存 / 会话 id 归一 / workMode 派生 / runsFor |
 | `store.mjs` | 持久化 | boardPath / rt / wt 原子落盘 / 跨重启继承 / fileLocks 串行化 / mutateLocked |
 | `notify.mjs` | 通知 | makeMsg / 歧义 25s 去抖 / 回执聚合 + 空闲门控 / 投递前过滤 |

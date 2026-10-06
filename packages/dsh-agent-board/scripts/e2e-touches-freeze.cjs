@@ -1,6 +1,9 @@
 // touches 文件排他 + 裁决 hold/freeze 专项 E2E（v1.4.0 新功能）
 // 场景 T：重叠 touches 的任务 B 在 A in-progress 期间被拦截（waitingForTouches 标注）；
-//         v1.7.2 锁延长语义：A resolved 未归档仍持锁（B 继续被拦），归档 A 才真放行；最终双双 resolved。
+//         语义演变史（三条口径，勿再回退）：v1.4.0 起「完成即释放」→ v1.7.2 短暂改为「锁持到归档」
+//         （task-muv7c8ja，为堵验收后-提交前窗口期）→ 2026-10-06 用户裁决回调为「状态流转到已完成
+//         （resolved）即释放」（task-muwbtee1）：A resolved（未归档）后 B 立即放行，归档回归纯收纳
+//         动作；窗口期改由主窗口提交纪律 + 史诗 post-hook 承接。最终 A/B 双双 resolved。
 // 场景 F：手动派发遇 touches 冲突返回 touches-conflict；force:true 越权强派。
 // 场景 H：Worker 上报歧义 → resolve-escalation action=hold 冻结（不自动重派）→
 //         观察 ≥40s 不被派发 → unfreeze-task 解冻 → 自动派发至 resolved。
@@ -78,16 +81,13 @@ const stamp = Date.now().toString(36);
   ok(aHeld, 'A 已派发（持锁）');
   ok(bBlockedSeen, 'B 被 touches 拦截（A 持锁期间 waitingForTouches 含 A）');
   ok(aHeld && bBlockedSeen && bBlockedSeen.status === 'pending' && aHeld.status === 'in-progress', '拦截瞬间语义正确（A in-progress / B pending）');
-  // v1.7.2 锁延长语义：A resolved 未归档仍持锁——B 继续被拦；归档 A 才真放行
+  // 新口径（task-muwbtee1，用户 2026-10-06 裁决）：状态流转到已完成（resolved）即放锁。
+  // A resolved（未归档）后 B 必须被放行——不复现 v1.7.2「resolved 继续持锁、等归档才放」的长持锁；
+  // 归档在本次语义里只是收纳动作，不承担解锁职责（故这里不再有 archive 释放段）。
   const aDone = await waitFor(A, (t) => t.status === 'resolved', 300000);
-  ok(aDone, 'A 完成（resolved，未归档仍持锁）');
-  await sleep(40000); // ≥2 次派发心跳：resolved 卡继续持锁，B 不得放行
-  const bStill = await getTask(B);
-  ok(bStill && bStill.status === 'pending' && Array.isArray(bStill.waitingForTouches) && bStill.waitingForTouches.includes(A), 'A resolved 未归档：B 仍被拦（锁持到归档）');
-  const arch = await rpc('archive-task', { taskId: A });
-  ok(arch && arch.ok === true, '归档 A（唯一真释放点）');
-  const bFreed = await waitFor(B, (t) => t.status === 'in-progress' || t.status === 'resolved' || t.status === 'verifying', 300000, 'B 放行');
-  ok(bFreed, 'A 归档后 B 放行（' + (bFreed && bFreed.status) + '）');
+  ok(aDone, 'A 完成（resolved，未归档）');
+  const bFreed = await waitFor(B, (t) => t.status === 'in-progress' || t.status === 'resolved' || t.status === 'verifying', 120000, 'B 放行');
+  ok(bFreed, 'A resolved 未归档：B 即被放行（锁随工作态，完成即释放）');
   const bDone = await waitFor(B, (t) => t.status === 'resolved', 300000);
   ok(aDone && bDone, 'A/B 最终双双 resolved');
 
