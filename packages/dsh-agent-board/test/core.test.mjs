@@ -115,7 +115,7 @@ test('史诗收口③：cancelled 子任务计入终态完成集 → 父卡也�
   assert.equal(core.isChildSettled(c1), true)
   assert.equal(core.isChildSettled(c2), true)  // 人主动取消 = 该子任务范围已了结
   assert.equal(core.isChildSettled(c3), false)
-  assert.equal(core.isChildSettled(mkTask({ status: 'archived' })), false) // 归档不算（收尾动作，不反向推动）
+  assert.equal(core.isChildSettled(mkTask({ status: 'archived' })), true) // 归档=人的显式了结，计入终态集（反馈 n-muw706h1uymy 根修：交错归档不再卡死父卡）
   const r = core.resolveApply(d, c3, 'w', 'verifying', 'done')
   assert.equal(r.parentUpdated, true)
   assert.equal(p.status, 'verifying')
@@ -155,6 +155,86 @@ test('史诗收口⑥：checkParentAuto 兼容名委托共享 helper（单一判
   assert.equal(got, p)
   assert.equal(p.status, 'verifying')
   assert.equal(p.resolution, 'all subtasks resolved') // 口径文案统一（旧 resolveApply 分支的 'all subtasks done' 已退役）
+})
+
+// ===== 史诗自动收口漏触发根修（task-mux3uvx3，反馈 n-muw706h1uymy，2026-10-06 实证）=====
+// 实证根因（repro 脚本逐条复现，嫌疑点逐个排除）：
+//   ① isChildSettled 旧口径不含 archived——「resolve 一张归档一张」的交错序列下，末子卡 resolve
+//      时兄卡已归档，`s.every(isChildSettled)` 永远凑不齐（resolveApply/verifyApply 的父卡钩子
+//      其实都跑了，是口径让它哑火）；
+//   ② archive 路径（task_archive 工具 / archive-task RPC）旧实现为内联代码，从不调用父卡检查——
+//      末子卡归档这一下补不上收口（僵尸子卡直接出清链路更是一直缺这钩子）。
+// 嫌疑排除：settleVerifier→verifyApply 路径的父卡钩子（checkParentAuto）一直在，非挂点。
+// 修法：isChildSettled 计入 archived（与 childStats 进度口径同源）+ archiveApply 共享 helper
+// （归档落定唯一入口）尾部挂 maybeAutoCloseParent。
+test('史诗收口⑦：交错 resolve+archive 序列——末子卡 resolve 时兄卡已归档也能收口（根因复现①）', () => {
+  const p = mkTask({ id: 'epic', status: 'in-progress' })
+  const c1 = mkTask({ id: 'c1', parentId: 'epic', status: 'in-progress', pipeline: 'work' })
+  const c2 = mkTask({ id: 'c2', parentId: 'epic', status: 'in-progress', pipeline: 'work' })
+  const c3 = mkTask({ id: 'c3', parentId: 'epic', status: 'in-progress', pipeline: 'work' })
+  const d = mkBoard([p, c1, c2, c3])
+  core.resolveApply(d, c1, 'w', 'verifying', 'done'); core.archiveApply(d, c1, 'tester')
+  assert.equal(c1.status, 'archived')
+  assert.equal(p.status, 'in-progress') // 未凑齐不收口（c2/c3 仍在跑）
+  core.resolveApply(d, c2, 'w', 'verifying', 'done'); core.archiveApply(d, c2, 'tester')
+  assert.equal(p.status, 'in-progress')
+  const r = core.resolveApply(d, c3, 'w', 'verifying', 'done') // 此刻 c1/c2 已 archived
+  assert.equal(r.parentUpdated, true)  // 旧口径此处为 undefined → epic 永久卡死
+  assert.equal(p.status, 'verifying')
+  assert.equal(p.resolution, 'all subtasks resolved')
+})
+
+test('史诗收口⑧：archiveApply 归档路径本身触发父卡检查——末子卡归档即收口（根因复现②，僵尸出清链路）', () => {
+  const p = mkTask({ id: 'epic', status: 'in-progress' })
+  const c1 = mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' })
+  const c2 = mkTask({ id: 'c2', parentId: 'epic', status: 'in-progress', claimedBy: null })
+  const d = mkBoard([p, c1, c2])
+  const r = core.archiveApply(d, c2, 'tester') // c2 从僵尸 in-progress 直接归档（v1.7.1 archiveErr 放行面）
+  assert.equal(c2.status, 'archived'); assert.ok(c2.archivedAt)
+  assert.equal(r.parentUpdated, true)  // 归档这一下补齐收口（旧实现无父卡钩子）
+  assert.equal(p.status, 'verifying')
+  assert.equal(p.resolution, 'all subtasks resolved')
+  // 顶层卡归档（无 parentId）不触父卡检查、返回体无 parentUpdated
+  const solo = mkTask({ id: 'solo', status: 'resolved' })
+  const r2 = core.archiveApply(mkBoard([solo]), solo, 'tester')
+  assert.equal(solo.status, 'archived'); assert.equal('parentUpdated' in r2, false)
+})
+
+test('史诗收口⑨：archiveApply 级联归档父卡不误触收口 + history/note 口径保持', () => {
+  // 父卡归档 → 级联子卡；父卡自身无 parentId（maybeAutoCloseParent 第一闸门拦），
+  // 级联子卡也不做父卡检查（父卡已 archived 非 in-progress，检查也必返回 null）——零意外流转
+  const p = mkTask({ id: 'epic', status: 'in-progress' })
+  const c1 = mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' })
+  const c2 = mkTask({ id: 'c2', parentId: 'epic', status: 'in-progress', claimedBy: null })
+  const d = mkBoard([p, c1, c2])
+  const r = core.archiveApply(d, p, 'tester', 'manual archive')
+  assert.equal(p.status, 'archived')
+  assert.equal(r.childrenArchived, 2)
+  assert.equal(c1.status, 'archived'); assert.equal(c2.status, 'archived')
+  assert.equal('parentUpdated' in r, false)
+  assert.equal(p.history[0].note, 'manual archive') // note 参数透传（RPC 'manual archive' / 工具 'archived'）
+  assert.equal(c2.history[c2.history.length - 1].note, 'cascade')
+})
+
+test('史诗收口⑩：post hook 未收口的 epic 走归档路径同样只挂闸门不转 verifying（hooks 语义不变）', () => {
+  const epi = mkTask({ id: 'epic', status: 'in-progress', hooks: { post: { enabled: true, prompt: '收口', state: 'idle' } } })
+  const c1 = mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' })
+  const c2 = mkTask({ id: 'c2', parentId: 'epic', status: 'resolved' })
+  const d = mkBoard([epi, c1, c2])
+  const r = core.archiveApply(d, c2, 'tester') // 末子卡归档触发父卡检查
+  assert.equal(r.parentUpdated, true)          // 检查跑了（返回父卡）
+  assert.equal(epi.status, 'in-progress')      // 但不直接转 verifying——post 闸门照旧
+  assert.equal(epi.hooks.post.pending, true)
+  assert.equal(epi.hooks.post.state, 'running')
+  assert.equal(epi.resolution, undefined)
+  // post 已 done 的 epic：归档路径正常收口（与 resolve/verify 路径同口径）
+  const e2 = mkTask({ id: 'e2', status: 'in-progress', hooks: { post: { enabled: true, prompt: '收口', state: 'done' } } })
+  const k1 = mkTask({ id: 'k1', parentId: 'e2', status: 'archived' })
+  const k2 = mkTask({ id: 'k2', parentId: 'e2', status: 'resolved' })
+  const d2 = mkBoard([e2, k1, k2])
+  const r2 = core.archiveApply(d2, k2, 'tester')
+  assert.equal(r2.parentUpdated, true)
+  assert.equal(e2.status, 'verifying')
 })
 
 // ===== 依赖 =====
@@ -2267,8 +2347,8 @@ test('aggregateChildStats: 归档口径注释写明僵尸卡近似 + 旧「归�
   // 防回归：聚合循环里不得再按 archived 跳过
   assert.doesNotMatch(coreSrc, /aggregateChildStats[\s\S]{0,600}?status === 'archived'\) continue/)
   assert.match(coreSrc, /if \(!t \|\| !isb\(t\)\) continue/)
-  // 与父卡自动收口口径（isChildSettled，archived 不算）刻意分离，注释里写明区别
-  assert.match(coreSrc, /与 isChildSettled（父卡自动收口口径，archived 不算）/)
+  // 与父卡自动收口口径（isChildSettled）现已同口径：archived 计入终态集，注释里写明（反馈 n-muw706h1uymy）
+  assert.match(coreSrc, /与 isChildSettled（父卡自动收口口径）现已同口径/)
   // 僵尸放行本身的门禁注释仍在 rpc.mjs（口径来源不悬空）
   const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
   assert.match(rpcSrc, /in-progress 且无活跃 run\s+→ 放行（parentKick 僵尸态出清/)
@@ -3631,6 +3711,74 @@ test('task_archive 工具：与 archive-task RPC 同一门禁口径（僵尸放�
   h = mkRpcHandlers(mkBoard([t]), { hasActiveRun: () => true })
   r = await h.__tools['task_archive'].execute({ taskId: 'z3' }, {})
   assert.equal(r.ok, false); assert.match(r.error, /cannot archive/)
+})
+
+// ===== 反馈修复（task-mux3uvx3，反馈 n-muw706h1uymy）：归档路径触发父卡收口 + task_resolve 守卫对齐 =====
+test('归档双通道触发父卡自动收口：archive-task RPC 与 task_archive 工具同一 archiveApply 口径', async () => {
+  // RPC 通道：归档末子卡 → 父卡 in-progress → verifying
+  const p = mkTask({ id: 'ep', status: 'in-progress' })
+  const k1 = mkTask({ id: 'k1', parentId: 'ep', status: 'resolved' })
+  const k2 = mkTask({ id: 'k2', parentId: 'ep', status: 'resolved' })
+  const board = mkBoard([p, k1, k2])
+  const h = mkRpcHandlers(board)
+  const r = await h['archive-task']({ taskId: 'k2' })
+  assert.equal(r.ok, true); assert.equal(r.parentUpdated, true)
+  assert.equal(p.status, 'verifying')
+  assert.equal(p.resolution, 'all subtasks resolved')
+  // 工具通道同口径
+  const p2 = mkTask({ id: 'ep2', status: 'in-progress' })
+  const j1 = mkTask({ id: 'j1', parentId: 'ep2', status: 'resolved' })
+  const j2 = mkTask({ id: 'j2', parentId: 'ep2', status: 'resolved' })
+  const h2 = mkRpcHandlers(mkBoard([p2, j1, j2]))
+  const r2 = await h2.__tools['task_archive'].execute({ taskId: 'j2' }, {})
+  assert.equal(r2.ok, true); assert.equal(r2.parentUpdated, true); assert.equal(p2.status, 'verifying')
+  // 未凑齐不收口（还剩在跑子卡）：归档其中一张已 resolved 的，父卡不动
+  const p3 = mkTask({ id: 'ep3', status: 'in-progress' })
+  const m1 = mkTask({ id: 'm1', parentId: 'ep3', status: 'resolved' })
+  const m2 = mkTask({ id: 'm2', parentId: 'ep3', status: 'in-progress' })
+  const h3 = mkRpcHandlers(mkBoard([p3, m1, m2]), { hasActiveRun: () => true })
+  const r3 = await h3['archive-task']({ taskId: 'm1' })
+  assert.equal(r3.ok, true); assert.equal('parentUpdated' in r3, false); assert.equal(p3.status, 'in-progress')
+})
+
+test('batch-op archive：整批落定后触发父卡收口（第三条归档路径同口径）；未凑齐不收口', async () => {
+  // 末两张子卡一次批量归档 → 父卡 verifying（旧路径归档后从不查父卡 → 同样卡死）
+  const p = mkTask({ id: 'bp', status: 'in-progress' })
+  const b1 = mkTask({ id: 'b1', parentId: 'bp', status: 'resolved' })
+  const b2 = mkTask({ id: 'b2', parentId: 'bp', status: 'resolved' })
+  const b3 = mkTask({ id: 'b3', parentId: 'bp', status: 'cancelled' })
+  const h = mkRpcHandlers(mkBoard([p, b1, b2, b3]))
+  const r = await h['batch-op']({ op: 'archive', ids: ['b1', 'b2', 'b3'] })
+  assert.equal(r.ok, true); assert.equal(r.done, 3); assert.equal(r.parentsClosed, 1)
+  assert.equal(p.status, 'verifying')
+  // 未凑齐（还有在跑子卡）→ 不收口、不挂 parentsClosed 字段（返回体老契约不变）
+  const p2 = mkTask({ id: 'bp2', status: 'in-progress' })
+  const d1 = mkTask({ id: 'd1', parentId: 'bp2', status: 'resolved' })
+  const d2 = mkTask({ id: 'd2', parentId: 'bp2', status: 'in-progress' })
+  const h2 = mkRpcHandlers(mkBoard([p2, d1, d2]))
+  const r2 = await h2['batch-op']({ op: 'archive', ids: ['d1'] })
+  assert.equal(r2.ok, true); assert.equal('parentsClosed' in r2, false); assert.equal(p2.status, 'in-progress')
+  // 不级联：批量只动显式选中的 id（与单卡 archiveApply 的级联刻意不同）
+  assert.equal(d2.status, 'in-progress')
+})
+
+test('task_resolve 工具：claimedBy=null 的 in-progress 卡放行主窗口（对齐 RPC 口径）；他人认领照旧拒', async () => {
+  // claimedBy=null（parentKick 僵尸 epic / 手动置 in-progress 的无人认领卡）→ 放行（工具已有主窗口门禁）
+  const t1 = mkTask({ id: 'u1', status: 'in-progress', claimedBy: null })
+  const r1 = await mkRpcHandlers(mkBoard([t1])).__tools['task_resolve'].execute({ taskId: 'u1', status: 'blocked' }, {})
+  assert.equal(r1.ok, true); assert.equal(t1.status, 'blocked')
+  // verifying + resolution 同样放行（父卡检查仍由 resolveApply 内部触发，行为不变）
+  const t2 = mkTask({ id: 'u2', status: 'in-progress', claimedBy: null, pipeline: 'full' })
+  const r2 = await mkRpcHandlers(mkBoard([t2])).__tools['task_resolve'].execute({ taskId: 'u2', status: 'verifying', resolution: '手动兜底' }, {})
+  assert.equal(r2.ok, true); assert.equal(t2.status, 'verifying')
+  // 他人认领 → 照旧拒（既有守卫场景不回归）
+  const t3 = mkTask({ id: 'u3', status: 'in-progress', claimedBy: 'other' })
+  const r3 = await mkRpcHandlers(mkBoard([t3])).__tools['task_resolve'].execute({ taskId: 'u3', status: 'verifying', resolution: 'x' }, {})
+  assert.equal(r3.ok, false); assert.match(r3.error, /not claimed by you/); assert.equal(t3.status, 'in-progress')
+  // 本人认领 → 放行
+  const t4 = mkTask({ id: 'u4', status: 'in-progress', claimedBy: 'tester', pipeline: 'full' })
+  const r4 = await mkRpcHandlers(mkBoard([t4])).__tools['task_resolve'].execute({ taskId: 'u4', status: 'verifying', resolution: 'x' }, {})
+  assert.equal(r4.ok, true); assert.equal(t4.status, 'verifying')
 })
 
 test('反馈修复接线断言：index.mjs 注入 hasActiveRun + get-tasks 附 tasksHash + kernel 短路分支（源码级）', () => {

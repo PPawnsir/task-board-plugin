@@ -184,11 +184,17 @@ export function normalizeBoard(d) {
 // ===== 状态流转 =====
 export function claimCheck(d, t, sid) { if (CLAIMABLE.indexOf(t.status) < 0) return 'cannot claim in ' + t.status; if (t.claimedBy && t.claimedBy !== sid && t.status === 'in-progress') return 'claimed by ' + t.claimedBy; if (d.boardMode === 'manual' || t.assignMode === 'manual') { if (t.assignee && t.assignee !== sid) return 'assigned to ' + t.assignee }; if (isb(t)) { var p = gpt(t, d.tasks); if (!p) return 'parent not found'; if (p.status !== 'in-progress' && p.status !== 'verifying') return 'parent not in-progress' }; var mc = d.tasks.filter(function (x) { return x.claimedBy === sid && (x.status === 'in-progress' || x.status === 'verifying') && !isb(x) }); if (!isb(t) && mc.length >= MAX_CLAIMED) return 'max ' + MAX_CLAIMED + ' active'; return null }
 export function claimApply(d, t, sid, note) { var ps = t.status; t.status = 'in-progress'; t.claimedBy = sid; t.claimedAt = new Date().toISOString(); ah(t, ps, 'in-progress', sid, note) }
-// 子任务「已了结」终态口径：resolved（已完成/已验收）+ cancelled（人主动放弃该子任务范围）。
+// 子任务「已了结」终态口径：resolved（已完成/已验收）+ cancelled（人主动放弃该子任务范围）
+// + archived（归档=人的显式了结，与 childStats 进度口径同源）。
 // 为什么 cancelled 也算：cancelled 是人的显式决定，该子任务范围已关闭；若不算，一张被取消的
 // 子任务会把 epic 永久钉在 in-progress（手动取消的卡反而制造死卡）。验收时人仍可在 epic 上驳回。
-// 注：archived 不算——归档是「收尾/清理」动作，不应反向推动父卡流转（父卡归档时会级联归档子任务）。
-export function isChildSettled(t) { return !!t && (t.status === 'resolved' || t.status === 'cancelled') }
+// 为什么 archived 也算（反馈 n-muw706h1uymy 实证修）：旧口径「归档不算」会在「resolve 一张归档
+// 一张」的交错序列下制造死卡——末子卡 resolve 时兄卡已归档，终态集永远凑不齐，epic 永久卡
+// in-progress（真实盘面：childStats 3/3 settled，父卡停在 in-progress）。归档动作本身即人的显式
+// 了结（archiveErr 门禁只放行 resolved/cancelled/无活跃 run 的僵尸卡），计入终态集语义成立。
+// 安全性：父卡归档级联子卡时父卡已是 archived（非 in-progress），maybeAutoCloseParent 第一道
+// 状态闸门即拦，级联不会反向误推动父卡。
+export function isChildSettled(t) { return !!t && (t.status === 'resolved' || t.status === 'cancelled' || t.status === 'archived') }
 // 史诗父卡自动收口（共享 helper，唯一判定口径）：父卡存在、父卡 in-progress、且全部子任务 ∈ 终态完成集
 // → 父卡转 verifying（交人验收）。幂等：父卡已 verifying/resolved/archived 一律返回 null，重复调用无副作用。
 export function maybeAutoCloseParent(d, childTask) {
@@ -226,6 +232,27 @@ export function maybeAutoCloseParent(d, childTask) {
 export function checkParentAuto(d, t) { return maybeAutoCloseParent(d, t) }
 export function resolveApply(d, t, sid, status, resolution, note) { var ps = t.status; if (status === 'verifying' && t.pipeline && t.pipeline !== 'full') { status = 'resolved' } t.status = status; t.resolution = resolution || null; t.resolvedAt = new Date().toISOString(); ah(t, ps, status, sid, note); var r = { ok: true, task: t }; var p = maybeAutoCloseParent(d, t); if (p) { r.parentUpdated = true }; return r }
 export function verifyApply(d, t, sid, verdict, comment) { var ps = t.status; if (verdict === 'approved') { t.status = 'resolved'; t.verifiedAt = new Date().toISOString(); t.verifiedBy = sid; delete t.frozen; delete t.frozenAt; delete t.frozenBy; ah(t, ps, 'resolved', sid, 'approved' + (comment ? ': ' + comment : '')) } else { t.status = 'in-progress'; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'in-progress', sid, 'rejected' + (comment ? ': ' + comment : '')) }; var r = { ok: true, task: t }; if (verdict === 'approved' && isb(t)) { var p = checkParentAuto(d, t); if (p) { r.parentUpdated = true } }; return r }
+// 归档落定（task_archive 工具与 archive-task RPC 共享，单一行为口径；门禁 archiveErr 留在
+// rpc.mjs——活性判定依赖 index.mjs 注入的 hasActiveRun，core 保持纯函数）：置 archived +
+// 级联归档子卡 + 触发父卡自动收口。
+// 父卡检查是本路径的必挂钩子（反馈 n-muw706h1uymy 根因②）：旧实现归档后不查父卡，
+// 「末子卡归档」这一下永远补不上收口——isChildSettled 计入 archived 后，本钩子是交错
+// resolve+archive 序列与僵尸子卡直接出清（v1.7.1 放行面）两条链路的最后保险。
+// 父卡带 post hook 时 maybeAutoCloseParent 内部照旧只挂闸门（pending+running），不直接转
+// verifying——hooks 语义逐字不变。note 由调用方给（工具 'archived' / RPC 'manual archive'）。
+export function archiveApply(d, t, actor, note) {
+  var ps = t.status
+  t.status = 'archived'
+  t.archivedAt = new Date().toISOString()
+  ah(t, ps, 'archived', actor, note || 'archived')
+  var ca = 0
+  gsb(t.id, d.tasks).forEach(function (c) { if (c.status !== 'archived') { ah(c, c.status, 'archived', actor, 'cascade'); c.status = 'archived'; c.archivedAt = new Date().toISOString(); ca++ } })
+  var r = { ok: true, task: t }
+  if (ca) r.childrenArchived = ca
+  var p = maybeAutoCloseParent(d, t) // 归档路径同样触发父卡自动收口（isChildSettled 已计 archived）
+  if (p) r.parentUpdated = true
+  return r
+}
 
 // ===== 史诗 hooks=agent run（宿主生命周期接线）=====
 // 定位：hook 点 = 一次**真实 agent 运行**（不是声明式命令、不走 shell），挂在 epic 卡上、
@@ -381,8 +408,9 @@ export function parentKickOnDispatch(d, t) { if (!isb(t)) return null; var p = g
 // 正是用户报的「有子任务完成后史诗进度从 0/10 变 0/9」。进度只增不减是这条口径的红线。
 // 近似说明：v1.7.1 起 archive-task 放行「无活跃 run 的 in-progress 僵尸卡」，故 archived 不再严格
 // 等于「曾经完成」；但归档动作本身仍是人的显式了结，进度语义上计入是对的（僵尸出清场景里父卡
-// 通常随之归档，不影响在板卡片的展示）。注意与 isChildSettled（父卡自动收口口径，archived 不算）
-// 的区别：那条管「是否推动父卡流转」，本条只管「进度分母/分子的展示口径」，两者刻意不合并。
+// 通常随之归档，不影响在板卡片的展示）。与 isChildSettled（父卡自动收口口径）现已同口径：
+// archived 同样计入终态集（反馈 n-muw706h1uymy 修复——归档不入终态会让交错归档的 epic 永久
+// 卡死）；进度展示与收口流转共用同一「了结」语义，展示 n/n settled 时父卡必已具备收口条件。
 export function aggregateChildStats(tasks) {
   var out = {}
   var list = Array.isArray(tasks) ? tasks : []
