@@ -7,6 +7,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import zlib from 'node:zlib'
+import { spawnSync } from 'node:child_process'
 import * as core from '../lib/core.mjs'
 // 粒度治理（软闸门）住在 lib/policy.mjs（策略层，纯函数）、usage 聚合住在 lib/usage.mjs，
 // 均由 index.mjs 薄壳 re-export（对外契约不变），这里仍从 index.mjs 导入直接断言
@@ -420,8 +421,9 @@ test('派发接线：Worker 首条 prompt 带瘦身清单（笔记全文 + 清�
   const t = mkTask({ id: 'c1', status: 'pending', context: { files: ['lib/core.mjs:L100-L140 — 清单组装与锚点归一'], notes: '调研结论：走瘦身分离，文件正文由我自己 read' } })
   const h = mkHookDispatch(mkBoard([t]))
   await h.dispatch.poolCycle(FULL_SID)
-  const w = h.spawned.find((s) => s.label === 'worker:c1')
-  assert.ok(w, 'Worker 已按真实派发路径 spawn')
+  // Worker 默认走 continuable 路径（workerContinuable 缺省 true）：从 spawnedContinuable 取实收 prompt
+  const w = h.spawnedContinuable.find((s) => s.label === 'worker:c1')
+  assert.ok(w, 'Worker 已按真实派发路径 spawn（continuable）')
   assert.match(w.text, /### 主窗口调研笔记/); assert.match(w.text, /调研结论：走瘦身分离，文件正文由我自己 read/)  // 笔记全文
   assert.match(w.text, /### 调研文件清单/); assert.match(w.text, /- lib\/core\.mjs:L100-L140 — 清单组装与锚点归一/)        // 清单行
   assert.match(w.text, /按需用 read 工具自行读取，不要全量盲读/)                                                            // 自取指引
@@ -1328,7 +1330,7 @@ test('驳回全量带回接线（源码级）：三条驳回路径都调 pushRej
   const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
   assert.equal((rpc.match(/pushRejection\(t, /g) || []).length, 3) // board_verdict 工具 + verify-task RPC + task_verify 工具
-  assert.match(dsp, /pushRejection\(t, vsecs\.verifySummary, vsecs\.checks, t\.verification\.at, String\(rec\.run\.id\)\)/)
+  assert.match(dsp, /pushRejection\(t, vsecs\.verifySummary, vsecs\.checks, t\.verification\.at, String\(rec\.id\)\)/)
   assert.equal((hostSrc().match(/pushRejection\(t, /g) || []).length, 4) // 三条路径 + Verifier 文本结算
   assert.match(coreSrc, /export function pushRejection/)
   assert.match(coreSrc, /kind: 'rejection'/)
@@ -1498,7 +1500,7 @@ test('Token run 级留账：accumulateRunUsage 把本次用量写回对应 t.run
   const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
   // 五分量原样写回 runs 条目：任何维度（按天/按模型/按阶段）都能从 runs 精确重建，不必回头猜
   assert.match(dsp, /if \(Array\.isArray\(t\.runs\)\)/)
-  assert.match(dsp, /if \(String\(t\.runs\[ri\] && t\.runs\[ri\]\.id\) === String\(rec\.run\.id\)\)/)
+  assert.match(dsp, /if \(String\(t\.runs\[ri\] && t\.runs\[ri\]\.id\) === String\(rec\.id\)\)/)
   assert.match(dsp, /t\.runs\[ri\]\.usage = \{ input: u\.input \|\| 0, output: u\.output \|\| 0, cacheRead: u\.cacheRead \|\| 0, cacheWrite: u\.cacheWrite \|\| 0, total: u\.total \|\| 0 \}/)
   assert.match(dsp, /break/) // 命中即停（同一 runId 只记一次）
   // 倒序查找 + 找不到就跳过：runs 条目由 recordRunHistory 先行写入、closeRunHistory 更新结局，正常必存在
@@ -2195,8 +2197,11 @@ test('hooks 只许主窗口设置：create-task/update-task RPC 与 task_create/
 // ===== hooks 接线（host 侧）：pre 闸门 spawn / post 补 spawn / hook run 结算分派（直调 + 源码级）=====
 // poolCycle 直调 harness（带 subagents）：spawnOneShot 走真实路径，捕获 provider/label/prompt；
 // run.result 用永不落定的 Promise（本用例只验证「谁被 spawn 了、prompt 对不对」，不触发结算）。
+// 分流口径（task-muw5gnhv）：Worker 默认走 startContinuable → 记入 spawnedContinuable；
+// verifier/hook run 照旧走 start → 记入 spawned（两族 label 同名，故分开收集避免断言串味）。
 function mkHookDispatch(board, over) {
   const spawned = []
+  const spawnedContinuable = []
   const runs = {}
   const boardRef = { b: board }
   const ctx = {
@@ -2208,6 +2213,10 @@ function mkHookDispatch(board, over) {
       start: async (name, req) => {
         spawned.push({ name, label: req.label, text: req.prompt[0].text, parent: req.parent })
         return { id: 'run-' + spawned.length, result: new Promise(function () {}), dispose: async function () {} }
+      },
+      startContinuable: async (spec) => {
+        spawnedContinuable.push({ name: spec.provider, label: spec.label, text: spec.request.prompt[0].text, parent: spec.request.parent })
+        return { childId: 'child-' + spawnedContinuable.length, messageId: 'msg-' + spawnedContinuable.length }
       },
     },
   }
@@ -2221,7 +2230,7 @@ function mkHookDispatch(board, over) {
     sessionCwd: () => '', withTimeout: (p) => p, runsFor: () => runs, feedbackOn: () => true,
     pushSysNote: () => {}, maybeNotify: () => {}, notifyTaskDone: () => {},
   }, over || {}))
-  return { dispatch, spawned, runs, board: boardRef }
+  return { dispatch, spawned, spawnedContinuable, runs, board: boardRef }
 }
 
 test('poolCycle 接线①：pre=idle → 不派子任务，改 spawn hook-pre run（prompt=薄框架+契约）', async () => {
@@ -2234,8 +2243,11 @@ test('poolCycle 接线①：pre=idle → 不派子任务，改 spawn hook-pre ru
   const board = mkBoard([epi, child, epi2, child2])
   const h = mkHookDispatch(board)
   await h.dispatch.poolCycle(FULL_SID)
-  const labels = h.spawned.map(s => s.label).sort()
+  // 分流断言（task-muw5gnhv）：hook run 照旧一次性 start，Worker 走 startContinuable
+  const labels = h.spawned.map(s => s.label).concat(h.spawnedContinuable.map(s => s.label)).sort()
   assert.deepEqual(labels, ['hook-pre:epic', 'worker:z1'])   // 只 spawn hook + 无关卡片照常派，无 c1 的 Worker
+  assert.deepEqual(h.spawned.map(s => s.label), ['hook-pre:epic'])       // hook 不走 continuable
+  assert.deepEqual(h.spawnedContinuable.map(s => s.label), ['worker:z1']) // Worker 走 continuable
   assert.equal(child.status, 'pending')                    // 串行闸门：子任务原地待命
   assert.equal(child2.status, 'in-progress')               // 无关卡片不受闸门影响
   assert.equal(epi.hooks.pre.state, 'running')             // 状态机推进（写在卡上，重启可恢复）
@@ -2253,8 +2265,9 @@ test('poolCycle 接线①：pre=done → 子任务正常派发（闸门放行，
   const child = mkTask({ id: 'c1', parentId: 'epic', status: 'pending' })
   const h = mkHookDispatch(mkBoard([epi, child]))
   await h.dispatch.poolCycle(FULL_SID)
-  assert.equal(h.spawned.length, 1)
-  assert.equal(h.spawned[0].label, 'worker:c1')            // 派的是 Worker
+  assert.equal(h.spawned.length, 0)                        // 无 hook run
+  assert.equal(h.spawnedContinuable.length, 1)             // 派的是 Worker（默认 continuable 路径）
+  assert.equal(h.spawnedContinuable[0].label, 'worker:c1')
   assert.equal(child.status, 'in-progress')
 })
 
@@ -2292,6 +2305,249 @@ test('poolCycle 接线③：老 epic（无 hooks）→ 子任务了结仍直接 
   // 老 epic 收口后进 verifying 会照常派 Verifier（既有行为未变）；对照组只有 hook-pre 一条 run
   assert.deepEqual(h.spawned.map(s => s.label).sort(), ['hook-pre:hooked', 'verifier:epic'])
   assert.equal(epi.hooks, undefined)
+})
+
+// ===== 可续跑 Worker（task-muw5gnhv 卡1）：continuable 分流 / turn 结算观测 / 回退开关 =====
+// 观察口径：ctx.on('agent/status') 的注册回调 + runsFor 的 rec 形态 + 任务状态机推进。
+// 分流②③的 spawn 双路 mock 内建「同一次派发只会命中一条路」的互斥断言（调用即记名）。
+function mkContinuableDispatch(board, over, ctxOver) {
+  const log = { continuable: [], oneShot: [] }
+  const listeners = []
+  // runs 表必须与 state.activeRuns[sid] **同一对象**：spawnOneShot 经 runsFor 写 rec，
+  // agent/status 监听器经 state.activeRuns 读 rec——两处不同表就永远命中不到（真实 session.runsFor
+  // 正是与 activeRuns 同源的访问器）。
+  const runs = {}
+  const activeRuns = { [FULL_SID]: runs }
+  const base = {
+    fs: {}, get: function () { return null },
+    timer: null,
+    // 真实 cordis 的 ctx.effect 会**立即执行**回调取其 disposer（订阅由此当场建立）——
+    // 桩里必须照做，否则 ctx.on 永远不被触达，事件通道的接线就测不到。
+    effect: function (f) { var d = f(); return function () { if (typeof d === 'function') d() } },
+    on: function (name, fn) { listeners.push({ name: name, fn: fn }); return function () {} },
+    subagents: {
+      list: () => ['mock'],
+      getProvider: () => ({ inheritsParentContext: false }),
+      start: async (name, req) => {
+        log.oneShot.push({ name: name, label: req.label })
+        return { id: 'run-1', result: new Promise(function () {}), dispose: async function () {} }
+      },
+      startContinuable: async (spec) => {
+        log.continuable.push({ name: spec.provider, label: spec.label, text: spec.request.prompt[0].text })
+        return { childId: 'child-abc', messageId: 'msg-1' }
+      },
+    },
+  }
+  const dispatch = createDispatch(
+    Object.assign(base, ctxOver || {}),
+    { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: activeRuns },
+    Object.assign({
+      rt: async () => board, wt: async () => {}, mutateLocked: async (sid, fn) => fn(board), kickCycle: () => {},
+      rootForSession: () => ({ id: FULL_SID }),
+      withTimeout: (p) => p, runsFor: () => runs, feedbackOn: () => true,
+      pushSysNote: () => {}, maybeNotify: () => {}, notifyTaskDone: () => {},
+    }, over || {}))
+  return { dispatch, log, listeners, runs, board }
+}
+const flush = () => new Promise(r => setImmediate(r))
+
+// 子进程探针源码（可续跑 Worker⑤ 用）：只在子进程里执行「真跑一次 continuable 派发 + 真读会话日志 + 真结算」。
+// 为什么必须子进程：findRunLog 走 os.homedir()（进程内首次调用即缓存），临时 HOME 只有在进程启动前
+// 设好才生效——同进程改 env 既无效又会带偏其它用例与真实看板目录。
+const PROBE_CONTINUABLE_SOURCE = `
+const { createDispatch } = await import('./lib/dispatch.mjs')
+const SID = 'session-test-0000-0000-000000000000'
+const listeners = []
+const runs = {}
+let failedFail = 0
+const origErr = console.error
+console.error = function () { var s = Array.prototype.join.call(arguments, ' '); if (/未读到 assistant 文本/.test(s)) failedFail++; origErr.apply(console, arguments) }
+const ctx = {
+  fs: {}, get: () => null, timer: null,
+  effect: function (f) { var d = f(); return function () { if (typeof d === 'function') d() } },
+  on: function (n, f) { listeners.push(f); return function () {} },
+  subagents: {
+    list: () => ['mock'],
+    getProvider: () => ({ inheritsParentContext: false }),
+    start: async () => ({ id: 'run-1', result: new Promise(() => {}), dispose: async () => {} }),
+    startContinuable: async () => ({ childId: 'child-ok', messageId: 'm1' }),
+  },
+}
+const t = { id: 'w6', title: '卡', description: '', status: 'pending', priority: 'medium', tags: [], parentId: null, assignMode: 'auto', assignee: null, context: { instructions: '' }, acceptance: '', dependsOn: [], pipeline: 'full', claimedBy: null, claimedAt: null, createdAt: '2026-01-01T00:00:00Z', resolvedAt: null, history: [], messages: [] }
+const board = { version: 11, ownerSession: SID, boardMode: 'auto', maxWorkers: 3, tasks: [t] }
+const d = createDispatch(ctx, { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: { [SID]: runs } }, {
+  rt: async () => board, wt: async () => {}, mutateLocked: async (s, f) => f(board), kickCycle: () => {}, rootForSession: () => ({ id: SID }),
+  withTimeout: (p) => p, runsFor: () => runs, feedbackOn: () => true, pushSysNote: () => {}, maybeNotify: () => {}, notifyTaskDone: () => {},
+})
+await d.poolCycle(SID)
+const rec = runs['w6']
+listeners[0]({ agent: { id: 'child-ok' }, status: 'running' })
+listeners[0]({ agent: { id: 'child-ok' }, status: 'idle' })
+for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r))
+console.log(JSON.stringify({ status: t.status, continual: !!(rec && rec.continuable), deliverable: t.deliverable || null, failedFail: failedFail }))
+`
+
+test('可续跑 Worker①：worker 走 startContinuable（rec 持 childId），verifier 照旧走 start（分流断言）', async () => {
+  const w = mkTask({ id: 'w1', title: 'Worker 卡', status: 'pending' })
+  const v = mkTask({ id: 'v1', title: '待验收卡', status: 'verifying' })
+  const h = mkContinuableDispatch(mkBoard([w, v]))
+  await h.dispatch.poolCycle(FULL_SID)
+  // Worker → continuable（默认开关开）
+  assert.deepEqual(h.log.continuable.map(x => x.label), ['worker:w1'])
+  // Verifier → 一次性 start（不因开关改道）
+  assert.deepEqual(h.log.oneShot.map(x => x.label), ['verifier:v1'])
+  // rec 结构：id=childId（会话 id 语义不变，t.runs/claimedBy 都靠它）、持 childId、标记 continuable、无 run
+  const rec = h.runs['w1']
+  assert.equal(rec.id, 'child-abc'); assert.equal(rec.childId, 'child-abc')
+  assert.equal(rec.continuable, true); assert.equal(rec.run, null); assert.equal(rec.settled, false); assert.equal(rec.ran, false)
+  assert.equal(rec.role, 'worker'); assert.equal(rec.taskId, 'w1'); assert.equal(typeof rec.startedAt, 'number')
+  // 任务侧接线照旧：claimedBy 落 childId（详情页/会话跳转语义不变）+ runs 历史留档同 id
+  assert.equal(w.claimedBy, 'child-abc')
+  assert.deepEqual(w.runs.map(r => r.id), ['child-abc'])
+  // verifier 的 rec 仍是旧形态（有 run、无 continuable）
+  assert.equal(h.runs['v1'].continuable, undefined)
+  assert.equal(String(h.runs['v1'].id), 'run-1')
+  // 订阅已注册且事件名正确（回退开关不影响的公共通道）
+  assert.deepEqual(h.listeners.map(l => l.name), ['agent/status'])
+})
+
+test('可续跑 Worker②：agent/status running→idle → settle 推进任务（真跑事件回调，非源码断言）', async () => {
+  const t = mkTask({ id: 'w2', title: '会失败的卡', status: 'pending' })
+  const h = mkContinuableDispatch(mkBoard([t]))
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(t.status, 'in-progress')
+  const fire = (status) => h.listeners[0].fn({ agent: { id: 'child-abc' }, status: status })
+  // ① running：只标记「这一轮真跑起来了」，绝不结算（rec 仍在活跃表）
+  fire('running')
+  assert.equal(h.runs['w2'].ran, true)
+  assert.equal(t.status, 'in-progress')
+  assert.equal(h.runs['w2'].settled, false)
+  // ② idle：turn 结束 → 走 settleWorker 的任务推进语义。本用例的环境里读不到子会话日志（无真实日志文件），
+  //   故走「空文本按失败结算」的既有降级臂：in-progress → pending 重排（retryCount 首次 fail = 1），
+  //   而不是被误判成「空完成」推进到 verifying。
+  fire('idle')
+  await flush()
+  assert.equal(t.status, 'pending')
+  assert.equal(t.retryCount, 1)
+  assert.equal(t.claimedBy, null)
+  assert.equal(h.runs['w2'], undefined) // 结算即摘除活跃表项
+  const last = t.history[t.history.length - 1]
+  assert.match(last.note, /worker 失败/)
+  // 幂等：rec 已摘除后再来 idle 事件不炸、不重复计数
+  fire('idle'); await flush()
+  assert.equal(t.retryCount, 1)
+  // 非本 rec 的会话 id 不误伤：另一个 child 的 idle 事件被忽略
+  const t2 = mkTask({ id: 'w3', title: '另一张', status: 'pending' })
+  const h2 = mkContinuableDispatch(mkBoard([t2]))
+  await h2.dispatch.poolCycle(FULL_SID)
+  h2.listeners[0].fn({ agent: { id: '别人的会话' }, status: 'running' })
+  h2.listeners[0].fn({ agent: { id: '别人的会话' }, status: 'idle' })
+  await flush()
+  assert.equal(t2.status, 'in-progress'); assert.equal(h2.runs['w3'].settled, false)
+  // 未观测到 running 的伪 idle 被 rec.ran 守卫挡住（不拿瞬时 idle 结算成「空文本失败」）
+  h2.listeners[0].fn({ agent: { id: 'child-abc' }, status: 'idle' })
+  await flush()
+  assert.equal(t2.status, 'in-progress'); assert.equal(h2.runs['w3'].settled, false)
+})
+
+test('可续跑 Worker③：workerContinuable=false → 逐字回退一次性路径（零 startContinuable 调用）', async () => {
+  const t = mkTask({ id: 'w4', title: '回退卡', status: 'pending' })
+  const board = Object.assign(mkBoard([t]), { workerContinuable: false })
+  const h = mkContinuableDispatch(board)
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.deepEqual(h.log.continuable, [])                  // 回退：continuable 路径一次都不进
+  assert.deepEqual(h.log.oneShot.map(x => x.label), ['worker:w4'])
+  const rec = h.runs['w4']
+  assert.equal(rec.continuable, undefined)                 // 旧 rec 形态逐字不变
+  assert.equal(rec.childId, undefined)
+  assert.equal(String(rec.id), 'run-1')                    // id 仍等于 run.id
+  assert.ok(rec.run && typeof rec.run.dispose === 'function') // 旧结算通道（run.result + dispose）在位
+  assert.equal(t.claimedBy, 'run-1')                       // 任务侧写回同旧口径
+})
+
+test('可续跑 Worker④：startContinuable 失败 → spawn 回 null，任务回 pending（不卡 spawn-pending）', async () => {
+  const t = mkTask({ id: 'w5', title: '起不来的卡', status: 'pending' })
+  const h = mkContinuableDispatch(mkBoard([t]), {}, {
+    subagents: {
+      list: () => ['mock'],
+      getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => { throw new Error('不该走一次性路径') },
+      startContinuable: async () => { throw new Error('continuation unavailable') },
+    },
+  })
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(t.status, 'pending')          // 回收重新排队（不是卡在 in-progress/spawn-pending）
+  assert.equal(t.claimedBy, null)
+  assert.equal(t.claimedAt, null)
+  assert.equal(h.runs['w5'], undefined)      // 无活跃 rec（失败不占并发位）
+  const last = t.history[t.history.length - 1]
+  assert.match(last.note, /spawn 失败，回收重新排队/)
+})
+
+test('可续跑 Worker⑤：idle 后从子会话 v4 日志读到助手文本 → 走文本通道推进 verifying（真读真日志）', async () => {
+  // 子会话日志定位走 os.homedir()（进程内首次调用即缓存），故用临时 HOME + child_process 隔离子进程跑，
+  // 不能在主进程改 HOME——同进程的其它用例/真实看板目录都会被带偏。
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tbc-'))
+  const frames = [{ type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: '## 开发描述\n续跑 Worker 完工\n## 自测情况\nok' }] } } }]
+  const chunks = [zlib.zstdCompressSync(Buffer.from(JSON.stringify(frames[0]) + '\n'))]
+  fs.mkdirSync(path.join(tmp, '.dsh', 'sessions', 'b1', 'child-ok'), { recursive: true })
+  fs.writeFileSync(path.join(tmp, '.dsh', 'sessions', 'b1', 'child-ok', 'session.v4.jsonl.zstd'), Buffer.concat(chunks))
+  try {
+    const child = spawnSync(process.execPath, ['-e', PROBE_CONTINUABLE_SOURCE], { env: Object.assign({}, process.env, { HOME: tmp, USERPROFILE: tmp }), encoding: 'utf8' })
+    assert.equal(child.status, 0, 'probe 失败: ' + child.stderr)
+    const out = JSON.parse(child.stdout.trim().split('\n').pop())
+    assert.equal(out.status, 'verifying')                 // 文本通道：有助手文本 → 正常推进 verifying
+    assert.equal(out.continual, true)                     // 走的确实是 continuable 路径
+    assert.match(out.deliverable.summary, /续跑 Worker 完工/) // 交付物来自真日志读到的文本（非空完成）
+    assert.equal(out.failedFail, 0)                       // 没有走「空文本按失败」的降级臂
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
+})
+
+test('可续跑 Worker 接线（源码级）：事件订阅走 ctx.effect 回收 + 过渡态不 interrupt + 硬超时旧兜底', () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  // ① 双路 spawn：Worker+开关开才走 startContinuable（verifier/hook 不受影响）
+  assert.match(dsp, /var useContinuable = role === 'worker' && c\.workerContinuable !== false/)
+  assert.match(dsp, /var cs = await subagents\.startContinuable\(\{ provider: providerName, label: req\.label, request: req, signal: req\.signal \}\)/)
+  // ② 结算观测：agent/status 订阅 + running→idle + rec.ran 二次守卫 + effect 回收
+  assert.match(dsp, /ctx\.effect\(function \(\) \{ return ctx\.on\('agent\/status', onAgentStatus\) \}\)/)
+  assert.match(dsp, /if \(status !== 'idle' && status !== 'running'\) return/) // running 事件必须放行（rec.ran 的唯一来源）
+  assert.match(dsp, /if \(status === 'running'\) \{ rec\.ran = true; return \}/)
+  assert.match(dsp, /if \(!rec\.ran \|\| rec\.settled\) return/)
+  assert.match(dsp, /await settleRun\(sid, rec, \{ output: \[\{ type: 'text', text: text \}\], stopReason: text\.trim\(\) \? 'completed' : 'error' \}, null\)/)
+  // ③ 过渡态：本卡不 interrupt（卡2 接），endContinuable 是占位；硬超时仍走旧 withTimeout 兜底。
+  //    断言口径：文件里对 continuable **子会话**不出现任何 interrupt 调用（注释里的
+  //    「卡2 才把这里换成 subagents.interrupt」是设计留痕，故排除注释行后再断言）。
+  assert.match(dsp, /async function endContinuable\(rec\) \{/)
+  assert.match(dsp, /卡2 才接超时\/中止臂/)
+  const dspCode = dsp.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n')
+  assert.equal(/subagents\.interrupt|\.interrupt\(/.test(dspCode), false) // 卡1 绝不调 interrupt
+  assert.match(dsp, /withTimeout\(resultP, hardMs, role \+ ':' \+ t\.id\)/)
+  // ④ 文本兜底复用 usage.mjs 现成读取器（与 agent-activity 同一套日志定位/分帧）
+  assert.match(dsp, /var log = findRunLog\(childId\)/)
+  assert.match(dsp, /var buf = readLogBytes\(log, 2 \* 1024 \* 1024\)/)
+  // ⑤ 板级开关三件套（cfg 兜底 / normalizeBoard 补缺省 / seed 初值 / set-board-config 白名单 / get-tasks 透出）
+  assert.match(coreSrc, /workerContinuable: d\.workerContinuable !== false/)
+  assert.match(coreSrc, /if \(typeof d\.workerContinuable !== 'boolean'\) d\.workerContinuable = true/)
+  assert.match(coreSrc, /epicSplit: true, workerContinuable: true, minWorkers: 1/)
+  assert.match(rpcSrc, /else if \(args\.key === 'workerContinuable'\) d\.workerContinuable = !!args\.value/)
+  assert.match(rpcSrc, /d\.workerContinuable = cfg\(d\)\.workerContinuable/)
+  // ⑥ 手动终止/活动查询对 continuable rec 不炸（id 统一取 rec.id，dispose 分路）
+  assert.match(rpcSrc, /try \{ if \(rec\.run\) await rec\.run\.dispose\(\) \} catch \(_\) \{\}/)
+  // ⑦ 卸载清理对 continuable rec 不炸（判空 + 立 settled 旗 + 原位清空）
+  assert.match(dsp, /if \(r0 && r0\.run\) r0\.run\.dispose\(\); if \(r0\) r0\.settled = true/)
+})
+
+test('可续跑 Worker⑥：插件卸载清理对 continuable rec 不炸且清空表（真跑 disposer）', async () => {
+  const t = mkTask({ id: 'w7', title: '卸载卡', status: 'pending' })
+  const teardown = []
+  const h = mkContinuableDispatch(mkBoard([t]), {}, { effect: function (f) { var d = f(); teardown.push(d); return function () { if (typeof d === 'function') d() } } })
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(typeof h.runs['w7'], 'object') // 派发后有活跃 rec
+  for (const fn of teardown) if (typeof fn === 'function') fn() // 模拟插件停止：跑 ctx.effect 的 disposer
+  assert.equal(h.runs['w7'], undefined)       // 原位清空（旧引用看不到残留 rec）
+  assert.equal(t.status, 'in-progress')       // 清理只放行结算，不擅自推进任务状态
 })
 
 test('hooks 接线（源码级）：spawnOneShot 三态 prompt + settleRun 分派 + pre/post 占用与 spawn 失败回收', () => {
@@ -2489,8 +2745,9 @@ test('回执开关①：cfg/normalizeBoard/seed 三处缺省均为 true（老板
 
 test('回执开关②：notifyDispatch=false → spawn 成功也不入派发回执（真跑 poolCycle + 真 spawnOneShot）', async () => {
   const calls = []
-  // 真 spawnOneShot 需要一个可用 provider：start 返回永不结算的 run（派发回执只看 spawn 成功，不看结局）
-  const ctxOver = { subagents: { list: () => ['p1'], getProvider: () => ({ inheritsParentContext: false }), start: async () => ({ id: 'run-1', dispose() {}, result: new Promise(function () {}) }) } }
+  // 真 spawnOneShot 需要一个可用 provider：start/startContinuable 都返回永不结算的 run
+  // （派发回执只看 spawn 成功，不看结局）；两条路都 mock，用例才对「Worker 默认 continuable」无感。
+  const ctxOver = { subagents: { list: () => ['p1'], getProvider: () => ({ inheritsParentContext: false }), start: async () => ({ id: 'run-1', dispose() {}, result: new Promise(function () {}) }), startContinuable: async () => ({ childId: 'child-1', messageId: 'msg-1' }) } }
   function run(flag) {
     const board = Object.assign(mkBoard([mkTask({ id: 'dt1', title: '被派的卡' })]), { maxWorkers: 3, notifyDispatch: flag })
     return mkDispatch(board, {
@@ -2512,28 +2769,37 @@ test('回执开关②：notifyDispatch=false → spawn 成功也不入派发回�
 
 test('回执开关③b：notifyDone=false → worker 三连败转 blocked 也不入完成回执（真跑结算路径）', async () => {
   const done = []
-  // run 立即失败（Promise.reject）→ settleRun 走失败分支 → retryCount 2→3 → blocked（状态机不受开关影响）
-  const ctxOver = { subagents: { list: () => ['p1'], getProvider: () => ({ inheritsParentContext: false }), start: async () => ({ id: 'run-1', dispose() {}, result: Promise.reject(new Error('boom')) }) } }
-  async function run(flag) {
+  // run 立即失败（Promise.reject）→ settleRun 走失败分支 → retryCount 2→3 → blocked（状态机不受开关影响）。
+  // 两条 spawn 路都挂上立即失败的结局：Worker 默认走 continuable（spawnOneShot 里约定的
+  // continuableResult 测试钩子），workerContinuable=false 时才落到一次性 run.result。
+  const ctxOver = { subagents: { list: () => ['p1'], getProvider: () => ({ inheritsParentContext: false }), start: async () => ({ id: 'run-1', dispose() {}, result: Promise.reject(new Error('boom')) }), startContinuable: async () => ({ childId: 'child-1', messageId: 'msg-1' }) } }
+  async function run(flag, continuable) {
     done.length = 0
     const runs = {} // 稳定 runs 表：settleRun 靠 runsFor(sid)[taskId] === rec 认领本次 run
-    const board = Object.assign(mkBoard([mkTask({ id: 'dt2', title: '会失败的卡', retryCount: 2 })]), { maxWorkers: 3, notifyDone: flag })
+    const board = Object.assign(mkBoard([mkTask({ id: 'dt2', title: '会失败的卡', retryCount: 2 })]), { maxWorkers: 3, notifyDone: flag, workerContinuable: continuable })
     const h = mkDispatch(board, {
       rootForSession: () => ({ id: FULL_SID }),
       runsFor: () => runs,
+      // 测试钩子：continuable 没有 run.result，这里注入一个立即失败的结果
+      // （生产不注入 → 永不落定，结算只走 agent/status 的 idle）
+      continuableResult: () => Promise.reject(new Error('boom')),
       notifyTaskDone: (sid, t, kind) => done.push({ id: t.id, kind: kind, status: t.status }),
     }, ctxOver)
     await h.dispatch.poolCycle(FULL_SID)
     for (let i = 0; i < 3; i++) await new Promise(r => setImmediate(r)) // 结算链（含 closeRunHistory/usage）全在微任务里
     return { h, board }
   }
-  // 关：照常 blocked（卡该阻塞就阻塞），只是一条完成回执都不发
-  const off = await run(false)
+  // 关（continuable 默认路径）：照常 blocked（卡该阻塞就阻塞），只是一条完成回执都不发
+  const off = await run(false, true)
   assert.equal(off.board.tasks[0].status, 'blocked')
   assert.deepEqual(done, [])
   // 开：同一路径照常回执（证明闸门没误伤完成回执主通道）
-  const on = await run(true)
+  const on = await run(true, true)
   assert.equal(on.board.tasks[0].status, 'blocked')
+  assert.deepEqual(done, [{ id: 'dt2', kind: 'blocked', status: 'blocked' }])
+  // 回退路径（workerContinuable=false）：一次性 run.result 结算语义逐字不变（同一断言恒成立）
+  const legacy = await run(true, false)
+  assert.equal(legacy.board.tasks[0].status, 'blocked')
   assert.deepEqual(done, [{ id: 'dt2', kind: 'blocked', status: 'blocked' }])
 })
 
@@ -3077,6 +3343,20 @@ test('epicSplit 透出：get-tasks 返回确定布尔值（缺省 true / 显式 
   assert.equal((await h['get-tasks']({})).epicSplit, true)
 })
 
+test('workerContinuable 透出：get-tasks 返回确定布尔值（缺省 true / 显式 false），set-board-config 白名单落盘', async () => {
+  const board = mkBoard([])
+  const h = mkRpcHandlers(board)
+  assert.equal((await h['get-tasks']({})).workerContinuable, true) // 老看板缺字段 → true（新行为即默认）
+  assert.equal((await h['set-board-config']({ key: 'workerContinuable', value: false })).ok, true)
+  assert.equal(board.workerContinuable, false)
+  assert.equal((await h['get-tasks']({})).workerContinuable, false) // 回退开关可读可写（客户端按需渲染开关）
+  await h['set-board-config']({ key: 'workerContinuable', value: true })
+  assert.equal((await h['get-tasks']({})).workerContinuable, true)
+  // 脏值口径：非布尔落盘值在读路径被 cfg 归一为 true（与 notifyDispatch 同款）
+  board.workerContinuable = 'no'
+  assert.equal((await h['get-tasks']({})).workerContinuable, true)
+})
+
 test('epicSplit 行为：关掉后 create-task 不附 suggestSplit，但显式 parentId 建子卡 + 史诗自动收口照常（机制不禁）', async () => {
   const board = mkBoard([])
   const h = mkRpcHandlers(board)
@@ -3103,7 +3383,7 @@ test('epicSplit 接线（源码级）：缓存同步 / Team 引导段门禁 / �
   // 配置层（core.mjs：cfg 兜底 / seed 初值 / normalizeBoard 老看板补齐）
   assert.match(coreSrc, /epicSplit: d\.epicSplit !== false/)
   assert.match(coreSrc, /if \(typeof d\.epicSplit !== 'boolean'\) d\.epicSplit = true/)
-  assert.match(coreSrc, /notifyDone: true, epicSplit: true, minWorkers: 1/) // seed 缺省开
+  assert.match(coreSrc, /notifyDone: true, epicSplit: true, workerContinuable: true, minWorkers: 1/) // seed 缺省开（workerContinuable 随 task-muw5gnhv 插入 epicSplit 与 minWorkers 之间）
   // 缓存链路：rt() 读盘同步 + set-board-config 当场回填（Team 提示词是同步组装，只能读缓存）
   assert.match(src, /epicSplitCache\[sid\] = nd\.epicSplit !== false/)
   assert.match(src, /function epicSplitOn\(sid\) \{ return epicSplitCache\[sid\] !== false \}/)

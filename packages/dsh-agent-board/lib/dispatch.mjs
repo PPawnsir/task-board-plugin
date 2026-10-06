@@ -3,7 +3,7 @@
 // token 消耗累加 / poolCycle 派发周期（孤儿回收+占位 claim+池快照）/ 15s 心跳 / 插件卸载清理 /
 // Team 模式 systemPrompt 引导段 / 预研上下文瘦身清单（调研笔记全文 + 文件清单，随首条 prompt 一次性注入）。
 import * as core from './core.mjs'
-import { readRunUsage } from './usage.mjs'
+import { readRunUsage, findRunLog, readLogBytes, readLogFrames } from './usage.mjs'
 import { splitRuleOf, pushRejectLesson } from './policy.mjs'
 const { ah, cfg, claimApply, resolveApply, verifyApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection } = core
 
@@ -131,22 +131,56 @@ export function createDispatch(ctx, state, deps) {
         if (slash > 0) req.agentOptions = { provider: modelOverride.slice(0, slash), model: modelOverride.slice(slash + 1) }
         else req.agentOptions = { model: modelOverride }
       }
-      var run
-      try { run = await subagents.start(providerName, req) } catch (e) {
-        if (modelOverride) { console.error('[task-board] model override failed, fallback to parent model:', String(e)); delete req.agentOptions; try { run = await subagents.start(providerName, req) } catch (e2) { console.error('[task-board] spawn ' + role + ' failed:', String(e2)); return null } }
-        else { console.error('[task-board] spawn ' + role + ' failed:', String(e)); return null }
-      }
+      // ===== spawn 两条路径（task-muw5gnhv 卡1：可续跑 Worker + 回退开关）=====
+      // 开关开（缺省）→ Worker 走 continuable：subagents.startContinuable 建**持久子会话**
+      //   （返回 {childId, messageId}，无 run.result 承诺），turn 结算改由 host 事件
+      //   agent/status 的 running→idle 触发 settleWorker（卡2 才在此基础上做续跑/超时 interrupt）。
+      // 开关关 / verifier / hook run → 逐字回退旧的 subagents.start()（一次性 run，run.result 结算）。
+      // 模型覆盖的回退语义两条路径共用：带 agentOptions 首次失败 → 去掉覆盖用父级模型再试一次
+      //   （provider 的 prepareContinuable/start 都在第一步就校验模型，失败时都不会留下半建子会话）。
       var c = cfg(dsnap)
-      var rec = { run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, settled: false }
+      var useContinuable = role === 'worker' && c.workerContinuable !== false
+      var run
+      var childId = ''
+      try {
+        if (useContinuable) {
+          var cs = await subagents.startContinuable({ provider: providerName, label: req.label, request: req, signal: req.signal })
+          childId = String(cs && cs.childId || '')
+          if (!childId) throw new Error('startContinuable 未返回 childId')
+        } else {
+          run = await subagents.start(providerName, req)
+        }
+      } catch (e) {
+        if (modelOverride) {
+          console.error('[task-board] model override failed, fallback to parent model:', String(e))
+          delete req.agentOptions
+          try {
+            if (useContinuable) {
+              var cs2 = await subagents.startContinuable({ provider: providerName, label: req.label, request: req, signal: req.signal })
+              childId = String(cs2 && cs2.childId || '')
+              if (!childId) throw new Error('startContinuable 未返回 childId')
+            } else run = await subagents.start(providerName, req)
+          } catch (e2) { console.error('[task-board] spawn ' + role + ' failed:', String(e2)); return null }
+        } else { console.error('[task-board] spawn ' + role + ' failed:', String(e)); return null }
+      }
+      // rec 统一形态：id = 该次 run 的子会话 id（continuable 是 childId，一次性是 run.id——
+      // 会话 id 语义不变，t.runs[].id / claimedBy / verifierRun / poolStatus.runId / 详情页跳转全部照旧）。
+      // rec.run 只在一次性路径存在（dispose/result 的来源）；continuable 路径 rec.continuable=true，
+      // 用 rec.childId 定位 host 事件、dispose 走 drain（卡1 先不 interrupt，见 settleContinuable）。
+      var rec = useContinuable
+        ? { id: childId, childId: childId, continuable: true, ran: false, run: null, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, settled: false }
+        : { id: String(run.id), run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, settled: false }
       runsFor(sid)[t.id] = rec
       if (!dispatchedEver[sid]) dispatchedEver[sid] = {}
-      dispatchedEver[sid][String(run.id)] = true
+      dispatchedEver[sid][String(rec.id)] = true
       // 历史会话留档：每次派发都追加一条 {role,id,at,model}，任务完成后仍可回看
       // 各阶段（含重试的第 1/2/3 次 Worker）会话——否则 claimedBy/verifierRun 只留最后一次
-      recordRunHistory(sid, t.id, role, String(run.id), modelOverride, c.hardTimeoutMin).catch(function () {})
+      recordRunHistory(sid, t.id, role, String(rec.id), modelOverride, c.hardTimeoutMin).catch(function () {})
       // ===== 两级超时：软超时只提醒主窗口（由人决定继续等待或终止），硬超时兜底 dispose =====
       // 一次性 run 没有看门狗：完全依赖人工决策时，人不在线挂死的 run 会永久占用并发位，
       // 所以保留硬上限作为最后防线（默认 120min，可配置）。
+      // ⚠️ 过渡态（task-muw5gnhv 卡1）：continuable 路径的硬超时仍走旧 dispose 兜底结算，
+      // 不 interrupt 子会话（子代理可能继续跑）——卡2 才把这里换成 subagents.interrupt。
       var startedAt = rec.startedAt
       var softMs = c.softTimeoutMin * 60000
       var hardMs = c.hardTimeoutMin * 60000
@@ -161,7 +195,12 @@ export function createDispatch(ctx, state, deps) {
           softArm() // 持续提醒直到结算或硬超时
         }).catch(function () {})
       })()
-      withTimeout(run.result, hardMs, role + ':' + t.id).then(function (res) { finish(res, null) }).catch(function (e) { finish(null, e) })
+      // continuable 没有 run.result：用永不落定的 Promise 占位——结算唯一入口是 agent/status 的 idle
+      // （硬超时那条臂由 withTimeout 提供，语义与一次性路径一致：到期走失败结算）。
+      // 测试钩子 deps.continuableResult：单测要验证「continuable 路径的失败/超时结算」时替换这个占位
+      // （生产不注入 → 保持永不落定）。
+      var resultP = useContinuable ? (typeof deps.continuableResult === 'function' ? deps.continuableResult(rec) : new Promise(function () {})) : run.result
+      withTimeout(resultP, hardMs, role + ':' + t.id).then(function (res) { finish(res, null) }).catch(function (e) { finish(null, e) })
       return rec
     }
 
@@ -169,7 +208,12 @@ export function createDispatch(ctx, state, deps) {
     async function settleRun(sid, rec, res, err) {
       if (runsFor(sid)[rec.taskId] !== rec) return // 已被 terminate 等路径处理
       delete runsFor(sid)[rec.taskId]
-      try { await rec.run.dispose() } catch (_) {}
+      // 清理：一次性 run 走 dispose（既有语义逐字不变）；continuable 走 drain/不断言——
+      // 卡1 只结算不 interrupt（子会话被 interrupt 后仍可被 sendMessage 唤醒，故此处不断言其死亡）。
+      try {
+        if (rec.continuable) await endContinuable(rec)
+        else await rec.run.dispose()
+      } catch (_) {}
       var output = outputText(res)
       var failed = !!err || (res && res.stopReason && res.stopReason !== 'completed')
       var errText = err ? String(err) : (res && (res.diagnostic || res.stopReason) || '')
@@ -179,11 +223,61 @@ export function createDispatch(ctx, state, deps) {
         else await settleVerifier(sid, rec, output, failed, errText)
       } catch (e) { console.error('[task-board] settle ' + rec.role + ' failed (task ' + rec.taskId + '):', String(e)) }
       // 历史会话留档：记录该次 run 的结局（完成/失败/硬超时），详情页可据此标注阶段状态
-      closeRunHistory(sid, rec.taskId, String(rec.run.id), failed ? (err ? 'timeout/error' : 'incomplete') : 'completed').catch(function () {})
+      closeRunHistory(sid, rec.taskId, String(rec.id), failed ? (err ? 'timeout/error' : 'incomplete') : 'completed').catch(function () {})
       // ===== token 消耗结算：读该次 run 的 v4 日志聚合 usage，累加到任务 =====
       // 放在状态推进之后：统计是附加信息，读日志失败/无 usage 时静默跳过，绝不影响结算语义。
       // Worker 失败重试、驳回重做都会各走一次 settleRun，因此多轮消耗天然累加（runs 计数）。
       await accumulateRunUsage(sid, rec)
+    }
+
+    // ===== 可续跑 Worker 的 turn 结算（task-muw5gnhv 卡1）=====
+    // 与一次性路径的关系：任务推进语义**完全复用** settleWorker（board_report 工具优先、文本兜底同构），
+    // 差别只在「怎么知道 turn 完了」与「怎么收尾」：
+    //   · 一次性：run.result 落定 → settleRun(res,err)（有结构化结果/失败原因）；
+    //   · continuable：没有 run.result，只能靠 host 事件 agent/status 的 running→idle 观测 turn 结束
+    //     （见 onAgentStatus）。因此这里没有 res：输出文本从子会话 v4 日志尾部的 assistant/message 兜底读；
+    //     日志读不到且文本为空时按失败结算（走 pending 重试），**绝不当成「空完成」推进到 verifying**——
+    //     否则一次「没跑起来就 idle」的事件会把任务误判为有交付物。
+    async function settleContinuable(sid, rec) {
+      if (runsFor(sid)[rec.taskId] !== rec) return // 已被 terminate/硬超时等路径认领
+      var text = ''
+      try { text = childSessionOutput(rec.childId) } catch (e) { console.error('[task-board] continuable 输出读取失败 (' + rec.childId + '):', String(e)) }
+      if (!text.trim()) console.error('[task-board] continuable child ' + rec.childId + ' idle 但未读到 assistant 文本，按失败结算（任务 ' + rec.taskId + '）')
+      await settleRun(sid, rec, { output: [{ type: 'text', text: text }], stopReason: text.trim() ? 'completed' : 'error' }, null)
+    }
+
+    // continuable 子会话的收尾：本卡**不 interrupt**（卡2 才接超时/中止臂），只记录事件——
+    // 子会话是持久会话，turn 结束即闲置，不释放也无副作用；硬超时兜底路径同样只经此处。
+    async function endContinuable(rec) {
+      // 过渡态占位：保留钩子位置，卡2 在此调 subagents.interrupt(childId, {kind:'ancestor', agent: parent})
+      return rec
+    }
+
+    // 读子会话 v4 日志尾部的助手文本（continuable 路径的文本兜底通道）：
+    // 与 rpc.mjs agent-activity 同一套 helper/事件形状（assistant/message.content[].text），
+    // 只是这里要的是**最后一条完整助手文本**（供 settleWorker 解析分段格式 / [ESCALATE]）。
+    // 只读尾部 2MB：回复在末尾，整份读大日志会拖慢结算路径；读不到一律返回 ''（调用方按失败处理）。
+    function childSessionOutput(childId) {
+      if (!childId) return ''
+      var log = findRunLog(childId)
+      if (!log) return ''
+      var buf = readLogBytes(log, 2 * 1024 * 1024)
+      if (!buf) return ''
+      var frames = readLogFrames(buf, 0)
+      var out = ''
+      for (var fi = 0; fi < frames.length; fi++) {
+        var evs = frames[fi]
+        for (var i = 0; i < evs.length; i++) {
+          var e = evs[i]; var dta = (e && e.data) || {}
+          if (!e || e.type !== 'assistant/message') continue
+          var msg = dta.message || {}
+          var blocks = Array.isArray(msg.content) ? msg.content : []
+          var parts = []
+          for (var b = 0; b < blocks.length; b++) { if (blocks[b] && blocks[b].type === 'text' && blocks[b].text) parts.push(String(blocks[b].text)) }
+          if (parts.length) out = parts.join('\n') // 帧从新到旧：最后命中覆盖前值 → 得到最新一条助手文本
+        }
+      }
+      return out
     }
 
     // 本地日期 key（YYYY-MM-DD）：byDay 日账的唯一口径。
@@ -212,7 +306,7 @@ export function createDispatch(ctx, state, deps) {
     // e 不可知就置 null（宁可展示上标 ~ 近似，也不伪造一个「有效值」）。
     async function accumulateRunUsage(sid, rec) {
       var u = null
-      try { u = readRunUsage(String(rec.run.id)) } catch (_) { u = null }
+      try { u = readRunUsage(String(rec.id)) } catch (_) { u = null }
       if (!u || !u.total) return
       var eff = effectiveOf(u)
       try {
@@ -246,7 +340,7 @@ export function createDispatch(ctx, state, deps) {
           // 正常结算路径必存在；只有手写/裁剪过的历史任务会缺，缺了也不该阻断聚合累加。
           if (Array.isArray(t.runs)) {
             for (var ri = t.runs.length - 1; ri >= 0; ri--) {
-              if (String(t.runs[ri] && t.runs[ri].id) === String(rec.run.id)) {
+              if (String(t.runs[ri] && t.runs[ri].id) === String(rec.id)) {
                 t.runs[ri].usage = { input: u.input || 0, output: u.output || 0, cacheRead: u.cacheRead || 0, cacheWrite: u.cacheWrite || 0, total: u.total || 0 }
                 break
               }
@@ -256,6 +350,48 @@ export function createDispatch(ctx, state, deps) {
           return { ok: true }
         })
       } catch (e) { console.error('[task-board] usage accumulate failed (task ' + rec.taskId + '):', String(e)) }
+    }
+
+    // ===== host 事件订阅：agent/status（continuable Worker 的 turn 结算触发器，task-muw5gnhv 卡1）=====
+    // 事件契约（host Event 目录实证）：'agent/status'(payload: { agent, status: 'idle'|'running' })。
+    // 「子代理 turn 完成」在事件面就是 running→idle；continuable 没有 run.result promise，故这是唯一可靠的
+    // 结算信号。订阅形态：ctx.on（本插件 host 侧首个事件订阅点），一律走 ctx.effect 回收——
+    // 插件卸载/HMR 重载时监听器必须随之注销，否则重载后同一事件会被多份旧闭包重复结算（重复结算虽被
+    // rec.settled / runsFor 认领双重挡住，但旧闭包里过期的 state 引用本身就是内存泄漏）。
+    // 二次守卫 rec.ran：只有**观测到过 running** 的 rec 才允许被 idle 结算。理由：startContinuable 返回后
+    // 子会话可能先报一个瞬时 idle（驱动尚未接上/冷复活窗口），若拿它结算，任务会以「空文本」被推进/回退。
+    // 真实 turn 必然先 running 后 idle，因此该守卫只挡伪 idle，不挡正常结算。
+    function onAgentStatus(payload) {
+      try {
+        // ⚠️ 不能在此只放行 idle：running 事件正是 rec.ran 的唯一来源（见下方守卫），
+        // 早退会让 rec.ran 永远 false → idle 永远不结算（任务只能等硬超时）——本实现踩过的坑。
+        var status = payload && payload.status
+        if (status !== 'idle' && status !== 'running') return
+        var agent = payload.agent
+        var cid = agent ? String(agent.id) : ''
+        if (!cid) return
+        var table = state.activeRuns
+        // 事件按会话 id 命中活跃 rec：continuable rec 的 childId 就是子会话 id（= agent.id），
+        // 故这里是 O(1) 的 rec.childId 比对，不做任何 agent 注册表扫描。
+        Object.keys(table).forEach(function (sid) {
+          var rr = table[sid]; if (!rr) return
+          Object.keys(rr).forEach(function (k) {
+            var rec = rr[k]
+            if (!rec || !rec.continuable || rec.childId !== cid) return
+            if (status === 'running') { rec.ran = true; return }
+            if (!rec.ran || rec.settled) return
+            rec.settled = true // 先立旗：堵住硬超时臂与重复事件的并发重入
+            settleContinuable(sid, rec).catch(function (e) { console.error('[task-board] settleContinuable failed (task ' + rec.taskId + '):', String(e)) })
+          })
+        })
+      } catch (e) { console.error('[task-board] agent/status 处理失败:', String(e)) }
+    }
+    // 注册（cordis 标准事件订阅）：返回的 disposer 交给 ctx.effect 回收。
+    // 老宿主/测试桩上没有 ctx.on 时静默跳过——派发照常，只是没有事件结算通道（一次性路径本就不需要）。
+    if (typeof ctx.on === 'function') {
+      try {
+        ctx.effect(function () { return ctx.on('agent/status', onAgentStatus) })
+      } catch (e) { console.error('[task-board] agent/status 订阅失败:', String(e)) }
     }
 
     async function settleWorker(sid, rec, output, failed, errText) {
@@ -272,22 +408,22 @@ export function createDispatch(ctx, state, deps) {
           // 失败原因落卡（截断 300）：卡片详情页可直接查看最近失败原因，排查三连败不再靠猜
           t.lastError = String(errText || '').slice(0, 300)
           t.retryCount = (t.retryCount || 0) + 1
-          if (t.retryCount >= 3) { var ps = t.status; t.status = 'blocked'; ah(t, ps, 'blocked', String(rec.run.id), 'worker 失败 x' + t.retryCount + '（' + String(errText).slice(0, 120) + '），待人工介入'); return { task: t, blocked: true } }
-          var ps2 = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, ps2, 'pending', String(rec.run.id), 'worker 失败（' + String(errText).slice(0, 80) + '），重新排队 (' + t.retryCount + '/3)')
+          if (t.retryCount >= 3) { var ps = t.status; t.status = 'blocked'; ah(t, ps, 'blocked', String(rec.id), 'worker 失败 x' + t.retryCount + '（' + String(errText).slice(0, 120) + '），待人工介入'); return { task: t, blocked: true } }
+          var ps2 = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, ps2, 'pending', String(rec.id), 'worker 失败（' + String(errText).slice(0, 80) + '），重新排队 (' + t.retryCount + '/3)')
           return { task: t, retry: true }
         }
         if (/\[ESCALATE\]/i.test(output || '')) {
-          t.escalation = { question: output.slice(0, 2000), at: new Date().toISOString(), by: String(rec.run.id) }
+          t.escalation = { question: output.slice(0, 2000), at: new Date().toISOString(), by: String(rec.id) }
           if (!Array.isArray(t.messages)) t.messages = []
-          t.messages.push({ kind: 'escalation', text: output.slice(0, 4000), at: t.escalation.at, by: String(rec.run.id) })
-          ah(t, 'in-progress', 'in-progress', String(rec.run.id), 'worker 上报歧义（文本通道），待主窗口裁决')
+          t.messages.push({ kind: 'escalation', text: output.slice(0, 4000), at: t.escalation.at, by: String(rec.id) })
+          ah(t, 'in-progress', 'in-progress', String(rec.id), 'worker 上报歧义（文本通道），待主窗口裁决')
           return { task: t, escalated: true }
         }
         // 文本降级路径：分段格式上报
         var secs = parseSections(output)
         delete t.retryCount; delete t.stuckSince; delete t.lastError // 成功路径：失败计数/卡死标记/最近失败原因一并清除
-        t.deliverable = { summary: secs.summary || output.slice(0, 600), changes: secs.changes || '', selfTest: secs.selfTest || '', diff: (secs.diff || '').slice(0, 4000), at: new Date().toISOString(), by: String(rec.run.id) }
-        resolveApply(d, t, String(rec.run.id), 'verifying', output || 'Worker 完成', 'worker 文本上报完成')
+        t.deliverable = { summary: secs.summary || output.slice(0, 600), changes: secs.changes || '', selfTest: secs.selfTest || '', diff: (secs.diff || '').slice(0, 4000), at: new Date().toISOString(), by: String(rec.id) }
+        resolveApply(d, t, String(rec.id), 'verifying', output || 'Worker 完成', 'worker 文本上报完成')
         return { task: t }
       })
       if (!result) return
@@ -323,13 +459,13 @@ export function createDispatch(ctx, state, deps) {
         var approved = vm[1].toUpperCase() === 'APPROVED'
         var vsecs = parseSections(trimmed)
         delete t.stuckSince; delete t.verifyRetries; delete t.lastError // 成功给出结论：卡死标记/重试计数/最近失败原因一并清除
-        t.verification = { verdict: approved ? 'approved' : 'rejected', summary: vsecs.verifySummary || trimmed.slice(0, 600), checks: vsecs.checks || '', at: new Date().toISOString(), by: String(rec.run.id) }
-        verifyApply(d, t, String(rec.run.id), approved ? 'approved' : 'rejected', trimmed.slice(0, 200))
+        t.verification = { verdict: approved ? 'approved' : 'rejected', summary: vsecs.verifySummary || trimmed.slice(0, 600), checks: vsecs.checks || '', at: new Date().toISOString(), by: String(rec.id) }
+        verifyApply(d, t, String(rec.id), approved ? 'approved' : 'rejected', trimmed.slice(0, 200))
         if (!approved) {
           t.rejectCount = (t.rejectCount || 0) + 1
           // 驳回包全量带回（task-muvg15p5）：summary + checks（逐条核对证据）落 messages，
           // 随 buildMessages 注入重派 Worker prompt——history 里只有 200 字截断，Worker 据此无法返工
-          pushRejection(t, vsecs.verifySummary, vsecs.checks, t.verification.at, String(rec.run.id))
+          pushRejection(t, vsecs.verifySummary, vsecs.checks, t.verification.at, String(rec.id))
           // 学习飞轮 v1：Verifier 驳回 → 候选教训（场景/错误做法/来源），随 t.verification.at 判重
           pushRejectLesson(d, t, vsecs.verifySummary || trimmed, t.verification.at)
           if (t.rejectCount >= 3) { t.status = 'blocked'; ah(t, 'in-progress', 'blocked', 'system', 'verifier 驳回 x' + t.rejectCount + '，待人工裁决') }
@@ -357,7 +493,7 @@ export function createDispatch(ctx, state, deps) {
     async function settleHook(sid, rec, output, failed, errText) {
       var phase = rec.role === 'hook-pre' ? 'pre' : 'post'
       var esc = /\[ESCALATE\]/i.test(output || '')
-      var runId = String(rec.run.id)
+      var runId = String(rec.id)
       // 完成回执开关（notifyDone）：hook 收口把 epic 推进到 blocked/verifying 同样算完成回执，一视同仁
       var doneOn = true
       var result = await mutateLocked(sid, function (d) {
@@ -460,7 +596,7 @@ export function createDispatch(ctx, state, deps) {
         // UI 池状态：来自活跃 run（一次性模型：没有成员名册，只有在跑的任务）。
         // hook run 也归「verifiers」区展示（同一格里都是非 Worker 的一次性 run）。
         d.poolStatus = { workers: [], verifiers: [] }
-        Object.keys(runs).forEach(function (k) { var rc = runs[k]; d.poolStatus[rc.role === 'worker' ? 'workers' : 'verifiers'].push({ id: k, num: '-', busy: true, taskId: rc.taskId, runId: String(rc.run.id), done: 0, queueLen: 0, suspect: false, model: rc.model || '' }) })
+        Object.keys(runs).forEach(function (k) { var rc = runs[k]; d.poolStatus[rc.role === 'worker' ? 'workers' : 'verifiers'].push({ id: k, num: '-', busy: true, taskId: rc.taskId, runId: String(rc.id), done: 0, queueLen: 0, suspect: false, model: rc.model || '' }) })
         if (info.length > 0) { d.dispatchInfo = info.join('; '); d.dispatchInfoAt = new Date().toISOString() }
         else if (d.dispatchInfo && (!d.dispatchInfoAt || Date.now() - new Date(d.dispatchInfoAt).getTime() > 90000)) { delete d.dispatchInfo; delete d.dispatchInfoAt } // 瞬时通知：90s TTL 过期即清，不再永久残留
         return d
@@ -472,7 +608,7 @@ export function createDispatch(ctx, state, deps) {
         var rec = await spawnOneShot(sid, sp.t, sp.role)
         if (rec) {
           // claim 占位换成真实 run id；verifier/hook-post run 单独记（claimedBy 保留 worker 的，供详情页跳转会话）
-          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t) { if (sp.role === 'worker' && t.claimedBy === 'spawn-pending') t.claimedBy = String(rec.run.id); if ((sp.role === 'verifier' || sp.role === 'hook-post') && t.verifierRun === 'spawn-pending') { t.verifierRun = String(rec.run.id); t.verifierRunAt = new Date().toISOString() }; if (sp.role === 'hook-pre' && t.hooks && t.hooks.pre) t.hooks.pre.runId = String(rec.run.id) }; return t }, true)
+          await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t) { if (sp.role === 'worker' && t.claimedBy === 'spawn-pending') t.claimedBy = String(rec.id); if ((sp.role === 'verifier' || sp.role === 'hook-post') && t.verifierRun === 'spawn-pending') { t.verifierRun = String(rec.id); t.verifierRunAt = new Date().toISOString() }; if (sp.role === 'hook-pre' && t.hooks && t.hooks.pre) t.hooks.pre.runId = String(rec.id) }; return t }, true)
           // 派发即回执：spawn 真成功后才入队（占位阶段失败不通知）；经 deps 注入，未注入静默跳过（老 host 兼容）
           // 回执开关（设置区「通知」）：notifyDispatch=false → 派发回执整条跳过（spawn 照常，只闭嘴）；
           // 闸门读本轮 poolCycle 已取的 cfg 快照 c（无额外读盘），老看板缺字段 → cfg 归一为 true。
@@ -498,8 +634,14 @@ export function createDispatch(ctx, state, deps) {
       return result
     }
 
-    // 插件停止时清理所有活跃 run
-    ctx.effect(function () { return function () { Object.keys(state.activeRuns).forEach(function (psid) { var rr = state.activeRuns[psid]; Object.keys(rr).forEach(function (k) { try { rr[k].run.dispose() } catch (_) {} }) }); state.activeRuns = {} } })
+    // 插件停止时清理所有活跃 run。
+    // continuable rec 没有 run（持久子会话，本卡不 interrupt）——两件事必须做：
+    //   ① 判空（否则 rr[k].run.dispose() 抛 TypeError，虽被 catch 但整条清理链断在这里）；
+    //   ② 立 settled 旗（让软/硬超时臂与事件结算一起放行，卸载后不该再有状态推进）。
+    // 表的处置保持既有语义：逐会话原位清空（旧引用不会看到残留 rec）+ 顶层容器换新（与原实现的
+    // state.activeRuns = {} 等价）。原位清空是必要的——runsFor(sid) 返回的是每会话子对象，
+    // 只换顶层容器会把这些子对象连同里面的 rec 一起漏掉。
+    ctx.effect(function () { return function () { Object.keys(state.activeRuns).forEach(function (psid) { var rr = state.activeRuns[psid]; Object.keys(rr).forEach(function (k) { try { var r0 = rr[k]; if (r0 && r0.run) r0.run.dispose(); if (r0) r0.settled = true } catch (_) {} ; delete rr[k] }) }); state.activeRuns = {} } })
     // Host 侧调度心跳：每 15s 对所有已知会话跑 poolCycle（客户端轮询只是触发器之一，面板关闭/后台节流时照常运转）
     ;(function () { var tm = ctx.timer; if (!tm) return; var disposeTick = tm.interval(function () { var cutoff = Date.now() - 1800000; Object.keys(knownSessions).forEach(function (sid) { if (knownSessions[sid] < cutoff) delete knownSessions[sid]; else poolCycle(sid).catch(function () {}) }) }, 15000); ctx.effect(function () { return disposeTick }) })()
 

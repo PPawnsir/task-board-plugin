@@ -35,7 +35,9 @@ export function apply(ctx) {
       epicSplitCache: {},  // 史诗拆分总开关缓存（rt()/set-board-config 同步，Team 引导段读取）
       fileLocks: {},       // 每会话一条 promise 链，串行化所有 读-改-写
       cyclePending: {},    // kickCycle 50ms 去抖
-      activeRuns: {},      // sid -> { taskId: { run, role, taskId, startedAt, model } }
+      activeRuns: {},      // sid -> { taskId: { id, run, role, taskId, startedAt, model, settled, continuable?, childId?, ran? } }
+                           //   id = 该次 run 的子会话 id（一次性=run.id，continuable=childId，语义统一）；
+                           //   continuable Worker 无 run（持久子会话），turn 结算靠 agent/status 事件见 dispatch.mjs
       dispatchedEver: {},  // sid -> { runId: true }（回执判定：区分派发执行 vs 主窗口手动）
       badModels: {},       // 模型熔断坏名单（sid|model → true）
       escNotifyTimers: {}, // 歧义通知 25s 去抖（同任务新调度顶替旧调度）

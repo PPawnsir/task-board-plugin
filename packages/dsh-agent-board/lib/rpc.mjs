@@ -125,6 +125,9 @@ export function createRpc(ctx, state, deps) {
       // 这里给出确定布尔值，UI 勾选态不依赖客户端各自的兜底写法。
       d.notifyDispatch = cfg(d).notifyDispatch
       d.notifyDone = cfg(d).notifyDone
+      // Worker 可续跑开关（workerContinuable，缺省 true）：与上面两键同款——读路径用 cfg 归一后的值，
+      // 老看板缺字段也返回 true（新行为即默认），客户端不需要自己猜缺省。消费点只在派发引擎。
+      d.workerContinuable = cfg(d).workerContinuable
       // 史诗拆分总开关（设置区「功能」小节）同法显式透出确定布尔值：老 host 不返回时客户端按「缺字段=开」兜底，
       // UI 勾选态不依赖各自兜底写法。
       d.epicSplit = cfg(d).epicSplit
@@ -156,8 +159,10 @@ export function createRpc(ctx, state, deps) {
     handle('agent-activity', async function (args) {
       var sid = rpcSessionId(args)
       var rec = runsFor(sid)[args.taskId]
-      if (!rec || !rec.run) return { ok: true, activity: null, reason: 'no active run' }
-      var child = String(rec.run.id)
+      if (!rec) return { ok: true, activity: null, reason: 'no active run' }
+      // 会话 id 统一取 rec.id：continuable Worker 的 rec 没有 run（rec.run=null，只有 childId），
+      // 一次性 run 的 rec.id === rec.run.id——两条路径在这里同构。
+      var child = String(rec.id)
       try {
         // 子会话日志定位：直接扫描 ~/.dsh/sessions/*/<child>/session.vN.jsonl.zstd
         // （不再从看板路径反推 workspace——那依赖进程 cwd 凑巧等于工作区，曾是隐性 bug）
@@ -346,7 +351,9 @@ export function createRpc(ctx, state, deps) {
       var label = 'no-active-run'
       if (rec) {
         delete runsFor(sid)[taskId]; label = rec.role + ':' + taskId
-        try { await rec.run.dispose() } catch (_) {}
+        // 清理：一次性 run 走 dispose；continuable 的 rec 没有 run（持久子会话，本卡不 interrupt——
+        // 卡2 接 interrupt/drain 时在这里补 subagents.interrupt(childId, {kind:'ancestor', agent: root})）
+        try { if (rec.run) await rec.run.dispose() } catch (_) {}
         // 手动终止的 run 不会走 settleRun（runsFor 已摘除，结算路径会早退），
         // 但它确实消耗了 token——在这里补一次结算，避免终止即丢账。
         await accumulateRunUsage(sid, rec)
@@ -399,9 +406,9 @@ export function createRpc(ctx, state, deps) {
       if (!t) return { ok: false, error: 'task disappeared' }
       var rec = await spawnOneShot(sid, t, role)
       if (rec) {
-        if (role === 'worker') { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === args.taskId }); if (t2 && t2.claimedBy === 'spawn-pending') t2.claimedBy = String(rec.run.id); return t2 }, true) }
-        if (role === 'verifier') { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === args.taskId }); if (t2) t2.verifierRun = String(rec.run.id); return t2 }, true) }
-        return { ok: true, runId: String(rec.run.id) }
+        if (role === 'worker') { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === args.taskId }); if (t2 && t2.claimedBy === 'spawn-pending') t2.claimedBy = String(rec.id); return t2 }, true) }
+        if (role === 'verifier') { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === args.taskId }); if (t2) t2.verifierRun = String(rec.id); return t2 }, true) }
+        return { ok: true, runId: String(rec.id) }
       }
       // spawn 失败 → 回退
       if (role === 'worker') { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === args.taskId }); if (t2 && t2.status === 'in-progress' && t2.claimedBy === 'spawn-pending') { t2.status = 'pending'; t2.claimedBy = null; t2.claimedAt = null; ah(t2, 'in-progress', 'pending', 'system', 'spawn 失败') }; return t2 }, true) }
@@ -519,7 +526,7 @@ export function createRpc(ctx, state, deps) {
     // 史诗拆分总开关 epicSplit（UI「功能」小节）：布尔原样落盘 + **当场回填 epicSplitCache**——Team 提示词
     // 组装是同步函数只能读缓存，不回填就得等下一次 rt() 读盘才生效（关掉后仍按旧的劝拆一轮，体感是开关没生效）。
     // 与 feedbackEnabled 同款双写；机制面（parentId 建子卡/自动收口/hooks）不看这个键。
-    handle('set-board-config', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { if (args.key === 'maxWorkers') d.maxWorkers = Math.max(1, Math.min(10, args.value || 3)); else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } return { ok: true } }) })
+    handle('set-board-config', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { if (args.key === 'maxWorkers') d.maxWorkers = Math.max(1, Math.min(10, args.value || 3)); else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'workerContinuable') d.workerContinuable = !!args.value; else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } return { ok: true } }) })
     handle('create-task', async function (args) { var sid = rpcSessionId(args); /* 短 id 防幻影板（task-muuf0o7a）：截断/不完整 sessionId 建出的板永远匹配不到活 root（每 15s 刷屏元凶），显式报错优于静默建幻影板；import- 前缀板由 isFullSessionId 放行 */ if (!isFullSessionId(sid)) return { ok: false, error: 'sessionId 不完整（疑似截断短 id），拒绝创建任务: ' + sid }; var actor = getActorId(); /* hooks 只许主窗口设置（角色门禁） */ if (args.hooks !== undefined && hooksDenied(actor)) return { ok: false, error: HOOKS_MAIN_ONLY }; return mutateLocked(sid, function (d) { var nHooks = null; if (args.hooks !== undefined) { var hn = normalizeHooks(args.hooks); if (hn.error) return { ok: false, error: hn.error }; nHooks = hn.hooks } if (args.id && d.tasks.find(function (x) { return x.id === args.id })) return { ok: false, error: 'duplicate id' }; if (args.dependsOn && args.dependsOn.length) { var derr = validateDeps(d, args.id || '(pending)', args.dependsOn); if (derr) return { ok: false, error: derr } }; var now = new Date().toISOString(); /* Team 模式护栏：draft 缺省跟随 teamMode（先补齐依赖/上下文再统一 publish）；显式 draft:false 保留为立即派发的逃生门 */ var asDraft = args.draft === undefined ? !!d.teamMode : !!args.draft; var t = { id: args.id || ('task-' + Date.now().toString(36)), title: args.title || 'Untitled', description: args.description || '', status: asDraft ? 'draft' : 'pending', priority: args.priority || 'medium', tags: args.tags || [], parentId: args.parentId || null, subtaskStrategy: null, assignMode: 'auto', assignee: null, context: { files: (Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : []), docs: [], instructions: args.instructions || '', notes: (typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : ''), relatedTasks: [], prerequisites: '' }, acceptance: args.acceptance || '', dependsOn: args.dependsOn || [], touches: normTouches(args.touches), pipeline: args.pipeline || '', claimedBy: null, claimedAt: null, createdAt: now, resolvedAt: null, verifiedAt: null, verifiedBy: null, archivedAt: null, resolution: null, waitingForTouches: null, messages: [], history: [{ from: 'created', to: asDraft ? 'draft' : 'pending', timestamp: now, actor: actor, note: asDraft ? 'created as draft' : 'created' }] }; if (nHooks && Object.keys(nHooks).length) t.hooks = nHooks; if (!t.pipeline) { t.pipeline = classifyPipeline(t); t.pipelineAuto = true }; d.tasks.push(t); /* 调研门禁 warning 族（与并行 UI 卡约定字段名 warning，core 纯函数统一口径）：空描述/无调研上下文/整树 glob 三类软提示合并为一条（；分隔），不拦截创建；字段可选，老 client 无感 */ var out = withSplitHint({ ok: true, task: t }, t, cfg(d).epicSplit); var warns = createTaskWarnings(t); attachContextSuggestions(out, warns, t.touches, existsInSession(sid)); if (warns.length) out.warning = warns.join('；'); return out }) })
     handle('list-children', async function (args) { var sid = rpcSessionId(args); var subs = ctx.subagents; if (!subs) return { ok: true, children: [] }; try { var list = await subs.listChildren(sid); var children = (list || []).map(function (c) { return { id: String(c.sessionId || c.id || ''), label: String(c.label || c.title || c.mode || '') } }).filter(function (c) { return c.id.length > 0 }); return { ok: true, children: children } } catch (e) { return { ok: true, children: [], error: String(e) } } })
     // ===== #14 批量操作：archive（仅 resolved/cancelled）/ set-priority（全部）/ delete（真删，无 undo）=====

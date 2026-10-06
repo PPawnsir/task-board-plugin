@@ -126,10 +126,15 @@ export function classifyPipeline(t) {
 // 边界：task_create 工具描述里的 TASK_SIZE_CONTRACT 是**静态工具契约**（工具定义会快照进 request header，
 //   dsh-session 校验 description 必须是 string），没有按板动态能力，因此不随本开关走——这也是「关引导」
 //   只覆盖两处**动态引导**（Team 提示词条款 + suggestSplit 软提示）的原因。
+// Worker 可续跑开关 workerContinuable（task-muw5gnhv，缺省 true = 新行为即默认）：门禁**只在
+//   dispatch.spawnOneShot 的 Worker 分支**生效——true 走 subagents.startContinuable（rec 持 childId，
+//   turn 结算靠 host 事件 agent/status running→idle），false 逐字回退旧的 subagents.start() 一次性路径
+//   （run.result 结算）。Verifier/hook run 一律照旧 one-shot，不看这个键（它们无续跑语义）。
+//   消费点只有派发引擎（spawn 时读一次 cfg 快照），所以不需要 feedbackEnabled/epicSplit 那样的热路径缓存。
 export function cfg(d) {
   var soft = Math.max(1, Math.min(480, d.softTimeoutMin || 30))
   var hard = Math.max(soft, Math.min(1440, d.hardTimeoutMin || 120))
-  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false }
+  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false, workerContinuable: d.workerContinuable !== false }
 }
 
 // ===== 看板数据目录（跨重启继承用）=====
@@ -146,7 +151,7 @@ export function boardHome() { return path.join(boardDirName(), '.dsh') }
 // ownerCwd（跨重启继承）：创建该看板的会话工作区路径，继承判定全靠它——取不到就省略字段
 // （绝不落空串，否则「路径读不到的多个会话」会被误判成同一工作区）。
 export function seed(sid, ownerCwd) {
-  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, poolStatus: { workers: [], verifiers: [] }, tasks: [] }
+  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, poolStatus: { workers: [], verifiers: [] }, tasks: [] }
   if (typeof ownerCwd === 'string' && ownerCwd) d.ownerCwd = ownerCwd
   return d
 }
@@ -156,6 +161,8 @@ export function seed(sid, ownerCwd) {
 // feedbackEnabled 兼容：老看板没有该字段（或落了脏值）一律补 true——默认开，行为与 v1 之前一致。
 // notifyDispatch/notifyDone（回执开关）同法：老看板文件没有该字段 → 补 true，缺省开 = 现状不变。
 // epicSplit（史诗拆分总开关）同法：老看板没有该字段（或脏值）→ 补 true，缺省开 = 引导照旧。
+// workerContinuable（Worker 可续跑开关）同法：老看板没有该字段（或脏值）→ 补 true，
+// 即老看板读进来就按新行为（可续跑 Worker）派发；显式落 false 才是逐字回退旧一次性路径。
 export function normalizeBoard(d) {
   if (d && typeof d === 'object') {
     if (!d.poolStatus || typeof d.poolStatus !== 'object' || !Array.isArray(d.poolStatus.workers) || !Array.isArray(d.poolStatus.verifiers)) d.poolStatus = { workers: [], verifiers: [] }
@@ -163,6 +170,7 @@ export function normalizeBoard(d) {
     if (typeof d.notifyDispatch !== 'boolean') d.notifyDispatch = true
     if (typeof d.notifyDone !== 'boolean') d.notifyDone = true
     if (typeof d.epicSplit !== 'boolean') d.epicSplit = true
+    if (typeof d.workerContinuable !== 'boolean') d.workerContinuable = true
     if (Array.isArray(d.tasks)) {
       for (var i = 0; i < d.tasks.length; i++) {
         var t = d.tasks[i]
