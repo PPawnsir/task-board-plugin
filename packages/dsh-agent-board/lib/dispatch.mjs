@@ -1,7 +1,9 @@
 // dsh-agent-board — 派发引擎（lib/dispatch.mjs）
 // createDispatch(ctx, state, deps)：一次性子代理 spawn/结算（软+硬两级超时）/ run 历史留档 /
 // token 消耗累加 / poolCycle 派发周期（孤儿回收+占位 claim+池快照）/ 15s 心跳 / 插件卸载清理 /
-// Team 模式 systemPrompt 引导段 / 预研上下文瘦身清单（调研笔记全文 + 文件清单，随首条 prompt 一次性注入）。
+// Team 模式 systemPrompt 引导段 / 预研上下文瘦身清单（调研笔记全文 + 文件清单，随首条 prompt 一次性注入）/
+// 可续跑 Worker（continuable：硬超时 interrupt 留存 + 重派 sendMessage 冷复活续跑 + 失败回退 fresh spawn）。
+import { statSync } from 'node:fs'
 import * as core from './core.mjs'
 import { readRunUsage, findRunLog, readLogBytes, readLogFrames } from './usage.mjs'
 import { splitRuleOf, pushRejectLesson } from './policy.mjs'
@@ -66,32 +68,77 @@ export function createDispatch(ctx, state, deps) {
       return buildContextPackSection(files, notes.slice(0, 8000))
     }
 
-    // 历史会话留档：t.runs = [{ role, id, at, model, outcome, endedAt }]，上限 20 条
+    // 历史会话留档：t.runs = [{ role, id, at, model, outcome, endedAt, continuable?, resume?, noResume? }]，上限 20 条
     // 目的：任务流转到 resolved/archived 后，详情页仍能选择跳转到任一历史阶段的会话
     // （Worker 首次/重试、Verifier 各次），而不是只剩最后一次 run id。
-    async function recordRunHistory(sid, taskId, role, runId, model, hardMin) {
+    // 卡2 追加三个标记位（都是**续跑判定的唯一依据**，不再另建内存表——重启后从卡上原样恢复）：
+    //   continuable：该 run 是持久子会话，超时/失败后可被 sendMessage 冷复活（一次性 run 无此标记 → 不可续跑）；
+    //   resume：本条本身就是一次续跑记录（详情页可区分「首派 / 续跑」）；
+    //   noResume：该子会话不可信（interrupt 失败/无 root 可授权）→ 重派直接 fresh spawn，不做空唤醒。
+    async function recordRunHistory(sid, taskId, role, runId, model, hardMin, continuable, resume) {
       try {
         await mutateLocked(sid, function (d) {
           var t = d.tasks.find(function (x) { return x.id === taskId })
           if (!t) return null // 找不到任务：返回 null 不写盘
           if (!Array.isArray(t.runs)) t.runs = []
-          t.runs.push({ role: role, id: runId, at: new Date().toISOString(), model: model || '', outcome: 'running', hardMin: hardMin || 120 })
+          var e = { role: role, id: runId, at: new Date().toISOString(), model: model || '', outcome: 'running', hardMin: hardMin || 120 }
+          if (continuable) e.continuable = true
+          if (resume) e.resume = true
+          t.runs.push(e)
           if (t.runs.length > 20) t.runs = t.runs.slice(-20)
           return { ok: true } // mutateLocked 契约：回调返回 null/undefined 则跳过写盘——必须显式返回非空值，否则 runs 永不落盘
         })
       } catch (e) { console.error('[task-board] recordRunHistory failed:', String(e)) }
     }
-    async function closeRunHistory(sid, taskId, runId, outcome) {
+    async function closeRunHistory(sid, taskId, runId, outcome, flags) {
       try {
         await mutateLocked(sid, function (d) {
           var t = d.tasks.find(function (x) { return x.id === taskId })
           if (!t || !Array.isArray(t.runs)) return null // 找不到任务/无 runs：返回 null 不写盘
           for (var i = t.runs.length - 1; i >= 0; i--) {
-            if (t.runs[i].id === runId) { t.runs[i].outcome = outcome; t.runs[i].endedAt = new Date().toISOString(); break }
+            if (t.runs[i].id === runId) {
+              t.runs[i].outcome = outcome; t.runs[i].endedAt = new Date().toISOString()
+              // flags.noResume：子会话不可信（interrupt 抛错 / 拿不到可授权的活父 Agent）→
+              // 这条 run 永久失去续跑资格（resumeTarget 据此回退 fresh spawn，绝不去空唤醒）。
+              if (flags && flags.noResume) t.runs[i].noResume = true
+              break
+            }
           }
           return { ok: true } // 同上：显式返回非空值触发写盘
         })
       } catch (e) { console.error('[task-board] closeRunHistory failed:', String(e)) }
+    }
+
+    // ===== 续跑资格判定（卡2）：纯读 t.runs，零 IO =====
+    // 从最后一条 Worker run 倒着看，只有「该 run 是 continuable（持久子会话，可冷复活）＋ 结局是超时/失败
+    // ＋ 未被标记 noResume」才够格——返回可唤醒的 childId，否则返回 ''（不够格）。
+    // 一次性 run 没有 continuable 标记（没有可唤醒的会话），故天然零命中：回退开关下整条续跑路径逐字不生效。
+    // 只看**最后一条 Worker run**：更早的 run 即使失败，其会话也已被后续 run 取代（续跑要接着最新断点）。
+    function resumeTarget(t) {
+      if (!t || !Array.isArray(t.runs)) return ''
+      for (var i = t.runs.length - 1; i >= 0; i--) {
+        var r = t.runs[i]
+        if (!r || r.role !== 'worker') continue
+        if (r.continuable !== true || r.noResume === true) return ''
+        if (r.outcome !== 'timeout/error' && r.outcome !== 'incomplete') return ''
+        return String(r.id || '')
+      }
+      return ''
+    }
+    // 「第 N 次尝试」的 N：该任务已有的 Worker run 条数 + 本次。t.runs 被 20 条上限裁剪或老卡没有 runs[]
+    // 时退化用 retryCount + 1（口径略粗但方向一致）。只用于续跑文案，不参与任何状态机判断。
+    function workerAttemptNo(t) {
+      var n = 0
+      if (t && Array.isArray(t.runs)) for (var i = 0; i < t.runs.length; i++) { if (t.runs[i] && t.runs[i].role === 'worker') n++ }
+      if (!n) n = (t && t.retryCount) || 0
+      return n + 1
+    }
+    // continuable 子会话日志的当前字节数（续跑基线）：续跑轮结算时只读这之后的字节，从而只认
+    // 「本轮新写的助手文本」。护栏理由：子会话是同一个会话，上一轮（被中断那次）的助手文本仍在日志里——
+    // 若续跑轮一个字都没产出，绝不能把上一轮的残留文本当成「本轮交付物」推进 verifying（那是假完成）。
+    // 读不到日志返回 0 → 退化为「按整段日志读」（与卡1 同口径），不因日志缺失改变结算语义。
+    function logSizeOf(childId) {
+      try { var log = findRunLog(childId); if (!log) return 0; return statSync(log).size || 0 } catch (_) { return 0 }
     }
 
     async function spawnOneShot(sid, t, role) {
@@ -175,12 +222,20 @@ export function createDispatch(ctx, state, deps) {
       dispatchedEver[sid][String(rec.id)] = true
       // 历史会话留档：每次派发都追加一条 {role,id,at,model}，任务完成后仍可回看
       // 各阶段（含重试的第 1/2/3 次 Worker）会话——否则 claimedBy/verifierRun 只留最后一次
-      recordRunHistory(sid, t.id, role, String(rec.id), modelOverride, c.hardTimeoutMin).catch(function () {})
-      // ===== 两级超时：软超时只提醒主窗口（由人决定继续等待或终止），硬超时兜底 dispose =====
-      // 一次性 run 没有看门狗：完全依赖人工决策时，人不在线挂死的 run 会永久占用并发位，
-      // 所以保留硬上限作为最后防线（默认 120min，可配置）。
-      // ⚠️ 过渡态（task-muw5gnhv 卡1）：continuable 路径的硬超时仍走旧 dispose 兜底结算，
-      // 不 interrupt 子会话（子代理可能继续跑）——卡2 才把这里换成 subagents.interrupt。
+      recordRunHistory(sid, t.id, role, String(rec.id), modelOverride, c.hardTimeoutMin, !!rec.continuable).catch(function () {})
+      // ===== 两级超时臂（软提醒 + 硬超时结算）：本体在 armTimeouts，fresh spawn 与续跑共用 =====
+      armTimeouts(sid, rec, t, c)
+      return rec
+    }
+
+    // ===== 两级超时：软超时只提醒主窗口（由人决定继续等待或终止），硬超时兜底结算 =====
+    // 一次性 run 没有看门狗：完全依赖人工决策时，人不在线挂死的 run 会永久占用并发位，
+    // 所以保留硬上限作为最后防线（默认 120min，可配置）。
+    // 两条 spawn 路共用这条臂（卡2 从 spawnOneShot 抽出）：续跑轮也必须挂——否则冷复活的子会话挂死
+    // 会永久占用 Worker 并发位，且再没有下一次重派。
+    // 硬超时到期本身只是「失败结算」的触发器（语义与一次性路径一致），收尾动作按 rec 分流
+    // （见 settleRun）：continuable → interrupt 留存（重派时 sendMessage 冷复活续跑）；一次性 → run.dispose()。
+    function armTimeouts(sid, rec, t, c) {
       var startedAt = rec.startedAt
       var softMs = c.softTimeoutMin * 60000
       var hardMs = c.hardTimeoutMin * 60000
@@ -191,7 +246,7 @@ export function createDispatch(ctx, state, deps) {
           if (rec.settled) return
           var mins = Math.round((Date.now() - startedAt) / 60000)
           // 带 taskId：投递前会按任务现状复查，任务已完成/落定的过期告警直接丢弃（避免误报）
-          pushSysNote(sid, '⏱ 任务「' + t.title + '」的 ' + role + '（' + t.id + '）已运行 ' + mins + ' 分钟仍未完成——如属正常长任务可忽略；需要干预可在看板详情页「立即终止」（硬超时 ' + c.hardTimeoutMin + ' 分钟后将自动终止并重试）', t.id)
+          pushSysNote(sid, '⏱ 任务「' + t.title + '」的 ' + rec.role + '（' + t.id + '）已运行 ' + mins + ' 分钟仍未完成——如属正常长任务可忽略；需要干预可在看板详情页「立即终止」（硬超时 ' + c.hardTimeoutMin + ' 分钟后将自动终止并重试）', t.id)
           softArm() // 持续提醒直到结算或硬超时
         }).catch(function () {})
       })()
@@ -199,19 +254,59 @@ export function createDispatch(ctx, state, deps) {
       // （硬超时那条臂由 withTimeout 提供，语义与一次性路径一致：到期走失败结算）。
       // 测试钩子 deps.continuableResult：单测要验证「continuable 路径的失败/超时结算」时替换这个占位
       // （生产不注入 → 保持永不落定）。
-      var resultP = useContinuable ? (typeof deps.continuableResult === 'function' ? deps.continuableResult(rec) : new Promise(function () {})) : run.result
-      withTimeout(resultP, hardMs, role + ':' + t.id).then(function (res) { finish(res, null) }).catch(function (e) { finish(null, e) })
-      return rec
+      var resultP = rec.continuable ? (typeof deps.continuableResult === 'function' ? deps.continuableResult(rec) : new Promise(function () {})) : rec.run.result
+      withTimeout(resultP, hardMs, rec.role + ':' + t.id).then(function (res) { finish(res, null) }).catch(function (e) { finish(null, e) })
     }
 
-    // run 结算：保证 dispose；工具通道（board_report/board_verdict）已推进状态的话文本路径跳过
+    // ===== 重派续跑（卡2）：命中「上次 continuable Worker run 结局=超时/失败」的 pending 任务 =====
+    // 不 spawn 新 Worker，改 subagents.sendMessage(活父 Agent, childId, 断点续跑指令)：子会话从持久化
+    // **冷复活**，带着自己上一轮的全部上下文（读过什么、改到哪、哪些命令跑通了）接着干——
+    // 超时重派不再从零开始。指令是薄框架文案：只要求「盘点工作树 + 从断点继续」，具体怎么做由它判断。
+    // 三态返回：{ rec } 续跑成功 / { fallback } 续跑不可用（调用方落回 fresh spawn，并把原因写进任务消息）/
+    //           null 压根不适用（无可续跑 run / 宿主没有 sendMessage 能力）——此时调用方走原 fresh spawn，
+    //           一次性回退开关（workerContinuable=false）下的行为因此逐字不变。
+    // 授权形状取 dsh-subagent 的 SubagentSendMessageOptions：{ signal }（sender 必须是**活的直接父 Agent**，
+    // 服务端按邻接关系校验；子会话不在线则从持久化冷复活，不可复活时 reject → 这里转成 fallback）。
+    async function tryResumeWorker(sid, t) {
+      var subagents = ctx.subagents
+      if (!subagents || typeof subagents.sendMessage !== 'function') return null
+      var childId = resumeTarget(t)
+      if (!childId) return null
+      var parent = rootForSession(sid)
+      if (!parent) return { fallback: 'root 会话不在线，无法授权续跑' }
+      // cfg 提前取好：sendMessage 返回后要**零 await** 地登记 rec（事件通道必须马上能看到它，
+      // 否则冷复活子会话的 running→idle 可能在注册前跑完，结算就只能干等硬超时）。
+      var c = cfg(await rt(sid))
+      var attempt = workerAttemptNo(t)
+      var text = '【断点续跑】你之前执行此任务被中断（第 ' + attempt + ' 次尝试）。先盘点当前工作树状态（git status/diff）与你已完成的步骤，从断点继续；任务契约与验收标准见上文历史。吃不准就 board_report escalate。'
+      try {
+        await subagents.sendMessage(parent, childId, [{ type: 'text', text: text }], { signal: makeSignal() })
+      } catch (e) {
+        // NOT_RESUMABLE / 邻接校验失败 / 任何错：一律回退 fresh spawn（本函数不抛，调用方按 rec 为 null 处理）。
+        return { fallback: String(e) }
+      }
+      var rec = { id: childId, childId: childId, continuable: true, resumed: true, ran: false, run: null, role: 'worker', taskId: t.id, startedAt: Date.now(), model: '', settled: false, baselineBytes: logSizeOf(childId) }
+      runsFor(sid)[t.id] = rec
+      if (!dispatchedEver[sid]) dispatchedEver[sid] = {}
+      dispatchedEver[sid][childId] = true
+      armTimeouts(sid, rec, t, c)
+      // runs[] 追加一条**续跑记录**（role:'worker', id:childId 与原 run 同 id=同一会话, resume:true）：
+      // 详情页可区分首派/续跑，且它成为续跑资格判定的最新依据。
+      // 这条**必须 await**：竞速下（冷复活子会话立刻 idle）closeRunHistory 可能先落地，
+      // 那会找不到条目、结局留在 running → 该 run 永久失去续跑资格。
+      await recordRunHistory(sid, t.id, 'worker', childId, '', c.hardTimeoutMin, true, true)
+      return { rec: rec }
+    }
+
+    // run 结算：保证收尾；工具通道（board_report/board_verdict）已推进状态的话文本路径跳过
     async function settleRun(sid, rec, res, err) {
       if (runsFor(sid)[rec.taskId] !== rec) return // 已被 terminate 等路径处理
       delete runsFor(sid)[rec.taskId]
-      // 清理：一次性 run 走 dispose（既有语义逐字不变）；continuable 走 drain/不断言——
-      // 卡1 只结算不 interrupt（子会话被 interrupt 后仍可被 sendMessage 唤醒，故此处不断言其死亡）。
+      // 收尾分路（卡2）：一次性 run 走 dispose（既有语义逐字不变）；continuable 走 interrupt——
+      // **只打断当前 turn，不销毁子会话**（Activation/未认领收件箱/已发布后代全部保留），
+      // idle 后仍可被 sendMessage 冷复活，这正是重派续跑的前提。
       try {
-        if (rec.continuable) await endContinuable(rec)
+        if (rec.continuable) await endContinuable(sid, rec)
         else await rec.run.dispose()
       } catch (_) {}
       var output = outputText(res)
@@ -222,15 +317,17 @@ export function createDispatch(ctx, state, deps) {
         else if (rec.role === 'hook-pre' || rec.role === 'hook-post') await settleHook(sid, rec, output, failed, errText)
         else await settleVerifier(sid, rec, output, failed, errText)
       } catch (e) { console.error('[task-board] settle ' + rec.role + ' failed (task ' + rec.taskId + '):', String(e)) }
-      // 历史会话留档：记录该次 run 的结局（完成/失败/硬超时），详情页可据此标注阶段状态
-      closeRunHistory(sid, rec.taskId, String(rec.id), failed ? (err ? 'timeout/error' : 'incomplete') : 'completed').catch(function () {})
+      // 历史会话留档：记录该次 run 的结局（完成/失败/硬超时），详情页可据此标注阶段状态；
+      // 结局同时是**续跑资格**的唯一依据（continuable + timeout/error|incomplete → 下次重派改续跑），
+      // noResume 旗（interrupt 失败）一并落卡，让重派直接回退 fresh spawn。
+      closeRunHistory(sid, rec.taskId, String(rec.id), failed ? (err ? 'timeout/error' : 'incomplete') : 'completed', rec.continuable ? { noResume: rec.resumeBlocked === true } : null).catch(function () {})
       // ===== token 消耗结算：读该次 run 的 v4 日志聚合 usage，累加到任务 =====
       // 放在状态推进之后：统计是附加信息，读日志失败/无 usage 时静默跳过，绝不影响结算语义。
       // Worker 失败重试、驳回重做都会各走一次 settleRun，因此多轮消耗天然累加（runs 计数）。
       await accumulateRunUsage(sid, rec)
     }
 
-    // ===== 可续跑 Worker 的 turn 结算（task-muw5gnhv 卡1）=====
+    // ===== 可续跑 Worker 的 turn 结算（task-muw5gnhv 卡1；卡2 加续跑基线）=====
     // 与一次性路径的关系：任务推进语义**完全复用** settleWorker（board_report 工具优先、文本兜底同构），
     // 差别只在「怎么知道 turn 完了」与「怎么收尾」：
     //   · 一次性：run.result 落定 → settleRun(res,err)（有结构化结果/失败原因）；
@@ -241,15 +338,32 @@ export function createDispatch(ctx, state, deps) {
     async function settleContinuable(sid, rec) {
       if (runsFor(sid)[rec.taskId] !== rec) return // 已被 terminate/硬超时等路径认领
       var text = ''
-      try { text = childSessionOutput(rec.childId) } catch (e) { console.error('[task-board] continuable 输出读取失败 (' + rec.childId + '):', String(e)) }
+      // 续跑轮（rec.baselineBytes>0）只读基线之后的字节：本轮没写东西就是空文本 → 按失败重排，
+      // 不会把上一轮（被中断那次）残留的助手文本冒充成本轮交付物（同一条失败臂，语义不变）。
+      try { text = childSessionOutput(rec.childId, rec.baselineBytes) } catch (e) { console.error('[task-board] continuable 输出读取失败 (' + rec.childId + '):', String(e)) }
       if (!text.trim()) console.error('[task-board] continuable child ' + rec.childId + ' idle 但未读到 assistant 文本，按失败结算（任务 ' + rec.taskId + '）')
       await settleRun(sid, rec, { output: [{ type: 'text', text: text }], stopReason: text.trim() ? 'completed' : 'error' }, null)
     }
 
-    // continuable 子会话的收尾：本卡**不 interrupt**（卡2 才接超时/中止臂），只记录事件——
-    // 子会话是持久会话，turn 结束即闲置，不释放也无副作用；硬超时兜底路径同样只经此处。
-    async function endContinuable(rec) {
-      // 过渡态占位：保留钩子位置，卡2 在此调 subagents.interrupt(childId, {kind:'ancestor', agent: parent})
+    // continuable 子会话的收尾（卡2：**interrupt 留存，不销毁**）——
+    // 失败/硬超时结算时只发一个取消信号打断当前 turn：Activation、未认领的收件箱、已发布后代全部保留，
+    // 子会话 idle 后仍能被 sendMessage 冷复活（Step2 续跑的前提）；一次性路径的 dispose 不动。
+    // authority 形状取 dsh-subagent 的 SubagentInterruptAuthority：{kind:'ancestor', agent: 活的直接父 Agent}；
+    // 该调用同步 fire-and-return（发完取消信号即返回，目标可能到下一个可观察点才真正停下）。
+    // interrupt 失败（会话已死 / 权限不符 / 宿主无此能力）→ **绝不阻断结算**：任务照常回 pending 重排；
+    // 只给 rec 立 resumeBlocked 旗 → 该 run 落 noResume 标记，重派时直接 fresh spawn（不空唤醒、不卡死）。
+    async function endContinuable(sid, rec) {
+      if (!rec || !rec.childId) return rec
+      var subagents = ctx.subagents
+      if (!subagents || typeof subagents.interrupt !== 'function') return rec
+      var parent = rootForSession(sid)
+      if (!parent) { rec.resumeBlocked = true; return rec }
+      try {
+        subagents.interrupt(rec.childId, { kind: 'ancestor', agent: parent })
+      } catch (e) {
+        rec.resumeBlocked = true
+        console.error('[task-board] interrupt 失败，该子会话不再续跑（重派回退 fresh spawn）child ' + rec.childId + ':', String(e))
+      }
       return rec
     }
 
@@ -257,11 +371,20 @@ export function createDispatch(ctx, state, deps) {
     // 与 rpc.mjs agent-activity 同一套 helper/事件形状（assistant/message.content[].text），
     // 只是这里要的是**最后一条完整助手文本**（供 settleWorker 解析分段格式 / [ESCALATE]）。
     // 只读尾部 2MB：回复在末尾，整份读大日志会拖慢结算路径；读不到一律返回 ''（调用方按失败处理）。
-    function childSessionOutput(childId) {
+    // minBytes > 0（续跑轮）：只读文件该偏移之后的字节——帧从新到旧，切在半帧上的那一帧由
+    // readLogFrames 逐帧 catch 降级丢弃；本轮没产出任何助手文本就返回 ''（走「空文本按失败」）。
+    function childSessionOutput(childId, minBytes) {
       if (!childId) return ''
       var log = findRunLog(childId)
       if (!log) return ''
-      var buf = readLogBytes(log, 2 * 1024 * 1024)
+      var tail = 2 * 1024 * 1024
+      if (typeof minBytes === 'number' && minBytes > 0) {
+        var sz = 0
+        try { sz = statSync(log).size || 0 } catch (_) { sz = 0 }
+        if (sz <= minBytes) return '' // 续跑基线之后一个字节都没写 → 本轮没有交付物
+        tail = sz - minBytes
+      }
+      var buf = readLogBytes(log, tail)
       if (!buf) return ''
       var frames = readLogFrames(buf, 0)
       var out = ''
@@ -605,7 +728,33 @@ export function createDispatch(ctx, state, deps) {
       // 锁外 spawn（慢操作）；占位 claim 已保证不会被别的 cycle 重复派发
       for (var k = 0; k < toSpawn.length; k++) {
         var sp = toSpawn[k]
-        var rec = await spawnOneShot(sid, sp.t, sp.role)
+        var rec = null
+        var resumeFallback = ''
+        // ===== 重派优先走「冷复活续跑」（卡2）=====
+        // 只在 Worker 角色 + workerContinuable 开（缺省）时尝试：命中「上次 continuable run 结局=超时/失败」
+        // 的任务时 sendMessage 唤醒原 child（不 spawn 新会话）。不适用（null）或失败（fallback）都落到下面的
+        // fresh spawn——开关关掉时这段整段短路，一次性回退路径因此逐字不变（断言⑤）。
+        if (sp.role === 'worker' && c.workerContinuable !== false) {
+          var rr = await tryResumeWorker(sid, sp.t)
+          if (rr && rr.rec) rec = rr.rec
+          else if (rr && rr.fallback) resumeFallback = rr.fallback
+        }
+        // 续跑失败才回退 fresh spawn：**先把说明写进任务消息再 spawn**——新 Worker 的首条 prompt 由
+        // buildWorkerPrompt 从任务对象组装（含 messages），这样它自己就能看到「上一轮续跑为何没接上」，
+        // 而不是只留在详情页给人事后翻账。返回的 t 是写盘后那份，直接用它 spawn。
+        if (!rec && resumeFallback) {
+          try {
+            var noted = await mutateLocked(sid, function (d) {
+              var t2 = d.tasks.find(function (x) { return x.id === sp.t.id })
+              if (!t2) return null
+              if (!Array.isArray(t2.messages)) t2.messages = []
+              t2.messages.push({ kind: 'resume-fallback', text: '断点续跑不可用（' + String(resumeFallback).slice(0, 300) + '），已回退全新 Worker 重跑。', at: new Date().toISOString(), by: 'system' })
+              return { t: t2 }
+            }, true)
+            if (noted && noted.t) sp.t = noted.t
+          } catch (e) { console.error('[task-board] 续跑回退说明落卡失败 (task ' + sp.t.id + '):', String(e)) }
+        }
+        if (!rec) rec = await spawnOneShot(sid, sp.t, sp.role)
         if (rec) {
           // claim 占位换成真实 run id；verifier/hook-post run 单独记（claimedBy 保留 worker 的，供详情页跳转会话）
           await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t) { if (sp.role === 'worker' && t.claimedBy === 'spawn-pending') t.claimedBy = String(rec.id); if ((sp.role === 'verifier' || sp.role === 'hook-post') && t.verifierRun === 'spawn-pending') { t.verifierRun = String(rec.id); t.verifierRunAt = new Date().toISOString() }; if (sp.role === 'hook-pre' && t.hooks && t.hooks.pre) t.hooks.pre.runId = String(rec.id) }; return t }, true)

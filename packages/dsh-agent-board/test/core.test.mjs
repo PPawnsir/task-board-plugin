@@ -949,10 +949,10 @@ test('粒度治理接线：工具描述/Team 提示词/双出口返回体均已�
 // 幻影板防线（task-muuf0o7a）落地后，create-task 对不完整短 id 直接报错——mock 默认 sid
 // 必须是完整形态（session-xxxx-xxxx-...），否则全量 create-task 用例会被防线拦住。
 const FULL_SID = 'session-test-0000-0000-000000000000'
-function mkRpcHandlers(board, extra) {
+function mkRpcHandlers(board, extra, ctxExtra) {
   const state = { handlers: {}, teamModeCache: {}, feedbackCache: {}, epicSplitCache: {} }
   const tools = {} // 工具通道捕获：双通道接线测试经 __tools['task_create'].execute(...) 直调
-  const ctx = { tools: { register(t) { tools[t.name] = t } }, effect() {}, webServer: { register() { return () => {} } } }
+  const ctx = Object.assign({ tools: { register(t) { tools[t.name] = t } }, effect() {}, webServer: { register() { return () => {} } } }, ctxExtra || {})
   const deps = Object.assign({
     getActorId: () => 'tester', resolveRoot: (x) => x,
     toolSessionId: () => FULL_SID, rpcSessionId: () => FULL_SID,
@@ -2503,7 +2503,7 @@ test('可续跑 Worker⑤：idle 后从子会话 v4 日志读到助手文本 →
   } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
 })
 
-test('可续跑 Worker 接线（源码级）：事件订阅走 ctx.effect 回收 + 过渡态不 interrupt + 硬超时旧兜底', () => {
+test('可续跑 Worker 接线（源码级）：事件订阅走 ctx.effect 回收 + 硬超时 interrupt 留存 + 重派续跑接线', () => {
   const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
   const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
@@ -2516,26 +2516,36 @@ test('可续跑 Worker 接线（源码级）：事件订阅走 ctx.effect 回收
   assert.match(dsp, /if \(status === 'running'\) \{ rec\.ran = true; return \}/)
   assert.match(dsp, /if \(!rec\.ran \|\| rec\.settled\) return/)
   assert.match(dsp, /await settleRun\(sid, rec, \{ output: \[\{ type: 'text', text: text \}\], stopReason: text\.trim\(\) \? 'completed' : 'error' \}, null\)/)
-  // ③ 过渡态：本卡不 interrupt（卡2 接），endContinuable 是占位；硬超时仍走旧 withTimeout 兜底。
-  //    断言口径：文件里对 continuable **子会话**不出现任何 interrupt 调用（注释里的
-  //    「卡2 才把这里换成 subagents.interrupt」是设计留痕，故排除注释行后再断言）。
-  assert.match(dsp, /async function endContinuable\(rec\) \{/)
-  assert.match(dsp, /卡2 才接超时\/中止臂/)
-  const dspCode = dsp.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n')
-  assert.equal(/subagents\.interrupt|\.interrupt\(/.test(dspCode), false) // 卡1 绝不调 interrupt
-  assert.match(dsp, /withTimeout\(resultP, hardMs, role \+ ':' \+ t\.id\)/)
-  // ④ 文本兜底复用 usage.mjs 现成读取器（与 agent-activity 同一套日志定位/分帧）
+  // ③ 卡2 Step1：硬超时/失败结算对 continuable 子会话改 interrupt（留存不销毁），一次性仍 dispose；
+  //    authority 形状取 dsh-subagent 的 SubagentInterruptAuthority，interrupt 异常被吞进 resumeBlocked 不阻断结算。
+  assert.match(dsp, /async function endContinuable\(sid, rec\) \{/)
+  assert.match(dsp, /subagents\.interrupt\(rec\.childId, \{ kind: 'ancestor', agent: parent \}\)/)
+  assert.match(dsp, /if \(rec\.continuable\) await endContinuable\(sid, rec\)\s*\n\s*else await rec\.run\.dispose\(\)/)
+  assert.match(dsp, /rec\.resumeBlocked = true/)
+  assert.match(dsp, /withTimeout\(resultP, hardMs, rec\.role \+ ':' \+ t\.id\)/)
+  // ④ 文本兜底复用 usage.mjs 现成读取器（与 agent-activity 同一套日志定位/分帧）+ 续跑基线（只认本轮新写字节）
   assert.match(dsp, /var log = findRunLog\(childId\)/)
-  assert.match(dsp, /var buf = readLogBytes\(log, 2 \* 1024 \* 1024\)/)
-  // ⑤ 板级开关三件套（cfg 兜底 / normalizeBoard 补缺省 / seed 初值 / set-board-config 白名单 / get-tasks 透出）
+  assert.match(dsp, /var buf = readLogBytes\(log, tail\)/)
+  assert.match(dsp, /childSessionOutput\(rec\.childId, rec\.baselineBytes\)/)
+  assert.match(dsp, /baselineBytes: logSizeOf\(childId\)/)
+  // ⑤ 卡2 Step2/Step3：重派续跑接线（sendMessage 冷复活 + 薄框架断点续跑指令 + runs[] 续跑记录 +
+  //    失败回退 fresh spawn）+ 三连败计数不受续跑影响（续跑同样走 settleWorker 的 retryCount 口径）
+  assert.match(dsp, /await subagents\.sendMessage\(parent, childId, \[\{ type: 'text', text: text \}\], \{ signal: makeSignal\(\) \}\)/)
+  assert.match(dsp, /【断点续跑】你之前执行此任务被中断（第 ' \+ attempt \+ ' 次尝试）/)
+  assert.match(dsp, /await recordRunHistory\(sid, t\.id, 'worker', childId, '', c\.hardTimeoutMin, true, true\)/)
+  assert.match(dsp, /if \(sp\.role === 'worker' && c\.workerContinuable !== false\) \{/)
+  assert.match(dsp, /kind: 'resume-fallback'/)
+  assert.match(dsp, /if \(r\.continuable !== true \|\| r\.noResume === true\) return ''/) // 续跑资格：一次性 run/已标 noResume 一律不够格
+  assert.match(dsp, /if \(r\.outcome !== 'timeout\/error' && r\.outcome !== 'incomplete'\) return ''/) // 只续「超时/失败」的断点
+  // ⑥ 板级开关三件套（cfg 兜底 / normalizeBoard 补缺省 / seed 初值 / set-board-config 白名单 / get-tasks 透出）
   assert.match(coreSrc, /workerContinuable: d\.workerContinuable !== false/)
   assert.match(coreSrc, /if \(typeof d\.workerContinuable !== 'boolean'\) d\.workerContinuable = true/)
   assert.match(coreSrc, /epicSplit: true, workerContinuable: true, minWorkers: 1/)
   assert.match(rpcSrc, /else if \(args\.key === 'workerContinuable'\) d\.workerContinuable = !!args\.value/)
   assert.match(rpcSrc, /d\.workerContinuable = cfg\(d\)\.workerContinuable/)
-  // ⑥ 手动终止/活动查询对 continuable rec 不炸（id 统一取 rec.id，dispose 分路）
+  // ⑦ 手动终止/活动查询对 continuable rec 不炸（id 统一取 rec.id，dispose 分路）
   assert.match(rpcSrc, /try \{ if \(rec\.run\) await rec\.run\.dispose\(\) \} catch \(_\) \{\}/)
-  // ⑦ 卸载清理对 continuable rec 不炸（判空 + 立 settled 旗 + 原位清空）
+  // ⑧ 卸载清理对 continuable rec 不炸（判空 + 立 settled 旗 + 原位清空）
   assert.match(dsp, /if \(r0 && r0\.run\) r0\.run\.dispose\(\); if \(r0\) r0\.settled = true/)
 })
 
@@ -2548,6 +2558,280 @@ test('可续跑 Worker⑥：插件卸载清理对 continuable rec 不炸且清�
   for (const fn of teardown) if (typeof fn === 'function') fn() // 模拟插件停止：跑 ctx.effect 的 disposer
   assert.equal(h.runs['w7'], undefined)       // 原位清空（旧引用看不到残留 rec）
   assert.equal(t.status, 'in-progress')       // 清理只放行结算，不擅自推进任务状态
+})
+
+// ===== 可续跑 Worker（task-muw5h2ps 卡2）：硬超时 interrupt + 重派冷复活续跑 + 失败回退 fresh spawn =====
+// 观察口径：真跑 poolCycle（真 spawnOneShot / 真 tryResumeWorker）+ 真事件通道（agent/status）+ 卡上留档
+// （t.runs/结局）——不断言实现细节，断言「谁被调了、任务变成什么样」。
+// 断言①～⑤ 对应卡2 三条 Step：①硬超时→interrupt 留存（不 dispose）；②重派 sendMessage 续跑（不 spawn 新 Worker）；
+// ③续跑失败回退 fresh spawn + 任务消息留说明；④interrupt 失败不卡死且重派回退；⑤回退开关下一次性路径零变化。
+test('可续跑 Worker⑦（卡2①）：硬超时 → interrupt 留存（不 dispose），任务回 pending 且 run 留「continuable+超时」结局', async () => {
+  const parent = { id: FULL_SID }
+  const calls = { interrupt: [] }
+  let disposed = 0
+  const t = mkTask({ id: 'r1', title: '超时卡', status: 'pending' })
+  const h = mkContinuableDispatch(mkBoard([t]), {
+    rootForSession: () => parent,
+    // 硬超时臂：直接拒绝（等价 withTimeout 到期）——走的是与真实到期逐字相同的失败结算
+    withTimeout: () => Promise.reject(new Error('timeout: worker:r1 after 120min')),
+  }, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => ({ id: 'run-1', result: new Promise(function () {}), dispose: async function () { disposed++ } }),
+      startContinuable: async () => ({ childId: 'child-abc', messageId: 'msg-1' }),
+      interrupt: (id, auth) => calls.interrupt.push({ id: id, auth: auth }),
+    },
+  })
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush(); await flush(); await flush()
+  // ① 硬超时收尾 = interrupt（子会话 idle 留存，等重派冷复活），不是销毁/丢弃
+  assert.equal(calls.interrupt.length, 1)
+  assert.equal(calls.interrupt[0].id, 'child-abc')
+  // authority 形状 = dsh-subagent 的 SubagentInterruptAuthority：{kind:'ancestor', agent: 活的直接父 Agent}
+  assert.deepEqual(calls.interrupt[0].auth, { kind: 'ancestor', agent: parent })
+  assert.equal(disposed, 0)                    // continuable 路径绝不 dispose（rec 也没有 run）
+  // 任务侧语义与现状一致：失败结算 → 回 pending 重排、count +1
+  assert.equal(t.status, 'pending')
+  assert.equal(t.retryCount, 1)
+  assert.equal(t.claimedBy, null)
+  assert.equal(h.runs['r1'], undefined)        // 结算即摘除活跃表项
+  // runs 留档是续跑资格的唯一依据：continuable + timeout/error（首派不带 resume 标记）
+  const last = t.runs[t.runs.length - 1]
+  assert.equal(last.outcome, 'timeout/error')
+  assert.equal(last.continuable, true)
+  assert.equal(last.resume, undefined)
+  assert.equal(last.noResume, undefined)
+})
+
+test('可续跑 Worker⑧（卡2②）：重派命中续跑 → sendMessage 冷复活（零新 spawn），指令含「断点续跑/第 2 次尝试」，runs[] 追加 resume 记录', async () => {
+  const parent = { id: FULL_SID }
+  const sent = []
+  const spawned = []
+  // 上次 continuable Worker run 结局=超时（形状即⑦那条路径产生的真实留档）
+  const t = mkTask({ id: 'r2', title: '续跑卡', status: 'pending', runs: [{ role: 'worker', id: 'child-old', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true }] })
+  const h = mkContinuableDispatch(mkBoard([t]), { rootForSession: () => parent }, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => { spawned.push('one-shot'); return { id: 'run-1', result: new Promise(function () {}), dispose: async function () {} } },
+      startContinuable: async () => { spawned.push('continuable'); return { childId: 'child-new', messageId: 'msg-1' } },
+      sendMessage: async (sender, targetId, content, options) => { sent.push({ sender: sender, targetId: targetId, content: content, options: options }); return 'msg-2' },
+    },
+  })
+  await h.dispatch.poolCycle(FULL_SID)
+  // ② 发的是续跑指令，目标是上次那个子会话
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].sender, parent)                       // sender = 活的直接父 Agent（服务端按邻接校验）
+  assert.equal(sent[0].targetId, 'child-old')
+  const txt = sent[0].content[0].text
+  assert.match(txt, /【断点续跑】/)
+  assert.match(txt, /第 2 次尝试/)                            // N = 已有 Worker run 数(1) + 本次
+  assert.match(txt, /git status\/diff/)                       // 先盘点工作树
+  assert.match(txt, /从断点继续/)
+  assert.match(txt, /任务契约与验收标准见上文历史/)
+  assert.match(txt, /board_report escalate/)                  // 吃不准就上报
+  assert.ok(sent[0].options && sent[0].options.signal, 'sendMessage 选项形态必须是 SubagentSendMessageOptions { signal }')
+  assert.deepEqual(spawned, [])                               // 零新 spawn（两条 spawn 路都没进）
+  // 任务侧：占位 claim 换成真实 childId；活跃 rec 重新挂上（turn 结算仍靠 agent/status 事件）
+  assert.equal(t.status, 'in-progress')
+  assert.equal(t.claimedBy, 'child-old')
+  const rec = h.runs['r2']
+  assert.equal(rec.childId, 'child-old'); assert.equal(rec.continuable, true); assert.equal(rec.resumed, true)
+  assert.equal(rec.ran, false); assert.equal(rec.settled, false)
+  assert.equal(typeof rec.baselineBytes, 'number')             // 续跑基线（只认本轮新写字节）
+  // runs[] 追加一条续跑记录：role=worker / id=childId（同一会话）/ resume 标记
+  const last = t.runs[t.runs.length - 1]
+  assert.equal(last.role, 'worker'); assert.equal(last.id, 'child-old')
+  assert.equal(last.resume, true); assert.equal(last.continuable, true); assert.equal(last.outcome, 'running')
+  // 续跑轮同样能被事件结算（与首派同一条通道）：running→idle（本环境读不到子会话日志 → 走「空文本按失败」）
+  h.listeners[0].fn({ agent: { id: 'child-old' }, status: 'running' })
+  assert.equal(h.runs['r2'].ran, true)
+  h.listeners[0].fn({ agent: { id: 'child-old' }, status: 'idle' })
+  await flush(); await flush()
+  assert.equal(t.status, 'pending')                            // 续跑也算一次尝试：失败照常重排
+  assert.equal(t.retryCount, 1)                                // 三连败计数口径不受续跑影响（Step3）
+  assert.equal(h.runs['r2'], undefined)
+  assert.equal(t.runs[t.runs.length - 1].outcome, 'incomplete') // 续跑轮结局落档（下一轮仍够格续跑）
+})
+
+test('可续跑 Worker⑨（卡2③）：续跑失败（NOT_RESUMABLE）→ 回退 fresh spawn，任务消息留一行说明并随首条 prompt 注入', async () => {
+  const parent = { id: FULL_SID }
+  const sent = []
+  const prompts = []
+  const t = mkTask({ id: 'r3', title: '回退卡', status: 'pending', runs: [{ role: 'worker', id: 'child-dead', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'incomplete', hardMin: 120, continuable: true }] })
+  const h = mkContinuableDispatch(mkBoard([t]), { rootForSession: () => parent }, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => { throw new Error('不该走一次性路径') },
+      startContinuable: async (spec) => { prompts.push(spec.request.prompt[0].text); return { childId: 'child-new', messageId: 'msg-1' } },
+      sendMessage: async (sender, targetId) => { sent.push(targetId); throw new Error('subagent/not-resumable') },
+    },
+  })
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.deepEqual(sent, ['child-dead'])        // 确实先试了续跑（冷复活失败）
+  assert.equal(prompts.length, 1)               // 失败 → 回退 fresh spawn（全新 Worker）
+  assert.equal(t.claimedBy, 'child-new')
+  // 任务消息里留一行说明（详情页可见）
+  const note = (t.messages || []).find((m) => m.kind === 'resume-fallback')
+  assert.ok(note, '续跑回退必须留说明')
+  assert.match(note.text, /断点续跑不可用/)
+  assert.match(note.text, /not-resumable/)      // 原因带出，可追溯
+  // 说明写在 spawn **之前**：新 Worker 的首条 prompt 里就能看到（否则「留一行说明」只是给人事后翻账）
+  assert.match(prompts[0], /### \[resume-fallback\]/)
+  assert.match(prompts[0], /断点续跑不可用/)
+})
+
+test('可续跑 Worker⑩（卡2④）：interrupt 失败 → 结算不卡死（照常回 pending）且 run 标 noResume，重派直接 fresh spawn 不空唤醒', async () => {
+  const parent = { id: FULL_SID }
+  const sent = []
+  const spawned = []
+  let timeouts = 0
+  const t = mkTask({ id: 'r4', title: '打断失败卡', status: 'pending' })
+  const h = mkContinuableDispatch(mkBoard([t]), {
+    rootForSession: () => parent,
+    // 只有第一轮的硬超时臂到期（第二轮让它永不落定，便于断言「重派后停在 in-progress」）
+    withTimeout: () => { timeouts++; return timeouts === 1 ? Promise.reject(new Error('timeout: worker:r4 after 120min')) : new Promise(function () {}) },
+  }, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => { throw new Error('不该走一次性路径') },
+      startContinuable: async () => { spawned.push('spawn'); return { childId: 'child-' + spawned.length, messageId: 'm' } },
+      interrupt: () => { throw new Error('UNAUTHORIZED: 会话已死') },
+      sendMessage: async (sender, targetId) => { sent.push(targetId); return 'msg' },
+    },
+  })
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush(); await flush(); await flush()
+  // 第一轮：正常首派（continuable 路径）→ 硬超时结算 → interrupt 抛错被吞进结算（不抛穿 poolCycle、
+  // 不阻断状态机）：任务照常回 pending 重排
+  assert.deepEqual(spawned, ['spawn'])          // 首派确实走了 continuable 路径
+  assert.equal(t.status, 'pending')
+  assert.equal(t.retryCount, 1)
+  const first = t.runs[t.runs.length - 1]
+  assert.equal(first.outcome, 'timeout/error')
+  assert.equal(first.noResume, true)            // 子会话不可信 → 该 run 失去续跑资格
+  // 重派：noResume → 不回空唤醒，直接 fresh spawn（回退路径）
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.deepEqual(sent, [])                    // 零 sendMessage（不空唤醒）
+  assert.deepEqual(spawned, ['spawn', 'spawn']) // 本轮恰好一次 fresh spawn
+  assert.equal(t.status, 'in-progress')
+  assert.equal(t.claimedBy, 'child-2')
+})
+
+test('可续跑 Worker⑪（卡2⑤）：workerContinuable=false → 续跑机制整体短路（零 sendMessage/零 interrupt），一次性 dispose 兜底逐字不变', async () => {
+  const parent = { id: FULL_SID }
+  const sent = []
+  const interrupted = []
+  let disposed = 0
+  // 即使卡上留着「continuable + 超时失败」的 run，开关关掉也必须零续跑（门禁在开关，不在 run 标记）
+  const t = mkTask({ id: 'r5', title: '回退开关卡', status: 'pending', runs: [{ role: 'worker', id: 'child-old', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true }] })
+  const board = Object.assign(mkBoard([t]), { workerContinuable: false })
+  const h = mkContinuableDispatch(board, { rootForSession: () => parent }, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => ({ id: 'run-1', result: Promise.reject(new Error('boom')), dispose: async function () { disposed++ } }),
+      startContinuable: async () => { throw new Error('开关关：不该走 continuable') },
+      sendMessage: async (sender, targetId) => { sent.push(targetId); return 'msg' },
+      interrupt: (id) => { interrupted.push(id) },
+    },
+  })
+  await h.dispatch.poolCycle(FULL_SID)
+  for (let i = 0; i < 4; i++) await flush()
+  assert.deepEqual(sent, [])                    // 零冷复活
+  assert.deepEqual(interrupted, [])             // 零 interrupt（一次性路径只 dispose）
+  assert.ok(disposed >= 1)                      // 旧兜底照旧（run.dispose）
+  assert.equal(t.status, 'pending')             // 失败结算语义不变
+  assert.equal(t.retryCount, 1)
+  assert.equal(h.runs['r5'], undefined)
+  const last = t.runs[t.runs.length - 1]
+  assert.equal(last.continuable, undefined)     // 一次性 run 不留 continuable 标记 → 天然不可续跑
+  assert.equal(last.outcome, 'timeout/error')
+})
+
+// 子进程探针（卡2 续跑基线护栏）：真建 v4 日志 → 真续跑 → 区分「续跑轮没产出（旧文本不得冒充交付物）」
+// 与「续跑轮真产出（正常推进 verifying）」。必须子进程：findRunLog 走 os.homedir() 且进程内首次调用即缓存。
+const PROBE_RESUME_BASELINE_SOURCE = `
+const fs = await import('node:fs')
+const path = await import('node:path')
+const zlib = await import('node:zlib')
+const { createDispatch } = await import('./lib/dispatch.mjs')
+const SID = 'session-test-0000-0000-000000000000'
+const childId = 'child-old'
+const logDir = path.join(process.env.HOME, '.dsh', 'sessions', 'b1', childId)
+fs.mkdirSync(logDir, { recursive: true })
+const logPath = path.join(logDir, 'session.v4.jsonl.zstd')
+function frame(text) { return zlib.zstdCompressSync(Buffer.from(JSON.stringify({ type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text: text }] } } }) + '\\n')) }
+fs.writeFileSync(logPath, frame('## 开发描述\\n上一轮（被中断那次）的残留文本，绝不能被当成续跑轮的交付物'))
+const listeners = []
+const runs = {}
+const sent = []
+const ctx = {
+  fs: {}, get: () => null, timer: null,
+  effect: function (f) { var d = f(); return function () { if (typeof d === 'function') d() } },
+  on: function (n, f) { listeners.push(f); return function () {} },
+  subagents: {
+    list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+    start: async () => ({ id: 'run-1', result: new Promise(() => {}), dispose: async () => {} }),
+    startContinuable: async () => ({ childId: 'child-x', messageId: 'm' }),
+    sendMessage: async (sender, target) => { sent.push(target); return 'm2' },
+    interrupt: () => {},
+  },
+}
+const t = { id: 'w9', title: '续跑基线卡', description: '', status: 'pending', priority: 'medium', tags: [], parentId: null, assignMode: 'auto', assignee: null, context: { instructions: '' }, acceptance: '', dependsOn: [], pipeline: 'full', claimedBy: null, claimedAt: null, createdAt: '2026-01-01T00:00:00Z', resolvedAt: null, history: [], messages: [], runs: [{ role: 'worker', id: childId, at: '2026-01-01T00:00:00Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true }] }
+const board = { version: 11, ownerSession: SID, boardMode: 'auto', maxWorkers: 3, tasks: [t] }
+const d = createDispatch(ctx, { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: { [SID]: runs } }, {
+  rt: async () => board, wt: async () => {}, mutateLocked: async (s, f) => f(board), kickCycle: () => {}, rootForSession: () => ({ id: SID }),
+  withTimeout: () => new Promise(() => {}), runsFor: () => runs, feedbackOn: () => true, pushSysNote: () => {}, maybeNotify: () => {}, notifyTaskDone: () => {},
+})
+const idle = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)) }
+// 第一轮：冷复活后「一个字都没产出」（日志无新字节）→ 必须按失败重排，不许拿残留文本推进 verifying
+await d.poolCycle(SID)
+listeners[0]({ agent: { id: childId }, status: 'running' })
+listeners[0]({ agent: { id: childId }, status: 'idle' })
+await idle()
+const stale = { status: t.status, retryCount: t.retryCount || 0, deliverable: t.deliverable || null }
+// 第二轮：真追加一帧（续跑轮真产出）→ 正常推进 verifying，交付物取自**新**文本
+await d.poolCycle(SID)
+fs.appendFileSync(logPath, frame('## 开发描述\\n续跑轮的新交付物\\n## 自测情况\\nok'))
+listeners[0]({ agent: { id: childId }, status: 'running' })
+listeners[0]({ agent: { id: childId }, status: 'idle' })
+await idle()
+console.log(JSON.stringify({ stale: stale, ok: { status: t.status, deliverable: t.deliverable || null }, sent: sent }))
+`
+
+test('可续跑 Worker⑫（卡2 续跑基线）：续跑轮没产出 → 残留旧文本不得冒充交付物（按失败重排）；真产出 → 正常推进 verifying', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tbc2-'))
+  try {
+    const child = spawnSync(process.execPath, ['-e', PROBE_RESUME_BASELINE_SOURCE], { env: Object.assign({}, process.env, { HOME: tmp, USERPROFILE: tmp }), encoding: 'utf8' })
+    assert.equal(child.status, 0, 'probe 失败: ' + child.stderr)
+    const out = JSON.parse(child.stdout.trim().split('\n').pop())
+    assert.deepEqual(out.sent, ['child-old', 'child-old'])   // 两轮都是真续跑（sendMessage 冷复活）
+    // 第一轮：日志里明明有完整的分段格式文本，但那是上一轮的残留 → 只认基线之后的新字节 → 空文本按失败
+    assert.equal(out.stale.status, 'pending')
+    assert.equal(out.stale.retryCount, 1)
+    assert.equal(out.stale.deliverable, null)
+    // 第二轮：基线之后真追加了一帧 → 正常走文本通道推进 verifying，交付物取新文本
+    assert.equal(out.ok.status, 'verifying')
+    assert.match(out.ok.deliverable.summary, /续跑轮的新交付物/)
+    assert.doesNotMatch(out.ok.deliverable.summary, /残留文本/)
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
+})
+
+test('可续跑 Worker⑬（卡2 手动终止臂）：终止 continuable run → interrupt 留存（零 dispose），任务回 pending 且刻意不留续跑资格', async () => {
+  const parent = { id: FULL_SID }
+  const calls = { interrupt: [] }
+  const t = mkTask({ id: 'mt1', title: '手动终止卡', status: 'in-progress', claimedBy: 'child-live', runs: [{ role: 'worker', id: 'child-live', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'running', hardMin: 120, continuable: true }] })
+  const board = mkBoard([t])
+  // 活跃 rec：continuable 形态（无 run，只能 interrupt）
+  const runs = { mt1: { id: 'child-live', childId: 'child-live', continuable: true, ran: true, run: null, role: 'worker', taskId: 'mt1', startedAt: Date.now(), model: '', settled: false } }
+  const h = mkRpcHandlers(board, { rootForSession: () => parent, runsFor: () => runs }, { subagents: { interrupt: (id, auth) => calls.interrupt.push({ id: id, auth: auth }) } })
+  const r = await h['terminate-agent']({ taskId: 'mt1' })
+  assert.equal(r.ok, true); assert.equal(r.terminated, 'worker:mt1')
+  // 终止 = interrupt 留存（不是 dispose）：authority 形状同硬超时臂
+  assert.deepEqual(calls.interrupt, [{ id: 'child-live', auth: { kind: 'ancestor', agent: parent } }])
+  assert.equal(runs.mt1, undefined)                 // 活跃表摘除（结算通道随之关闭，不会被 idle 事件误结算）
+  assert.equal(t.status, 'pending'); assert.equal(t.claimedBy, null) // 既有语义：重新排队
+  // 刻意不留续跑资格：结局停在 running → resumeTarget 不认（重派走 fresh spawn，不唤醒刚被终止的子会话）
+  assert.equal(t.runs[t.runs.length - 1].outcome, 'running')
 })
 
 test('hooks 接线（源码级）：spawnOneShot 三态 prompt + settleRun 分派 + pre/post 占用与 spawn 失败回收', () => {

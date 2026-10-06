@@ -345,15 +345,25 @@ export function createRpc(ctx, state, deps) {
       await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === taskId }); if (t) { if (!Array.isArray(t.messages)) t.messages = []; t.messages.push({ kind: 'intervention', text: msg, at: new Date().toISOString(), by: actor }); ah(t, t.status, t.status, actor, '高优干预: ' + msg.slice(0, 200) + (delivered ? '' : '（无活跃 run，随下次派发注入）')) }; return t })
       return { ok: true, delivered: delivered, channel: channel }
     }
-    // 终止执行某任务的 run：dispose 并回 pending（verifying 则保持待审，由新 verifier 接手）
+    // 终止执行某任务的 run：一次性 dispose / continuable interrupt 后回 pending（verifying 则保持待审，由新 verifier 接手）
     async function doTerminate(sid, actor, taskId) {
       var rec = runsFor(sid)[taskId]
       var label = 'no-active-run'
       if (rec) {
         delete runsFor(sid)[taskId]; label = rec.role + ':' + taskId
-        // 清理：一次性 run 走 dispose；continuable 的 rec 没有 run（持久子会话，本卡不 interrupt——
-        // 卡2 接 interrupt/drain 时在这里补 subagents.interrupt(childId, {kind:'ancestor', agent: root})）
+        // 清理：一次性 run 走 dispose（既有语义逐字不变）；continuable 的 rec 没有 run（持久子会话），
+        // 卡2 起改走 **interrupt 留存**（task-muw5h2ps）：只打断当前 turn、不销毁子会话——否则「手动终止」
+        // 之后旧 Worker 仍在改同一棵树，与新派发的 Worker 并行写盘（终止按钮反而制造双写）。
+        // 手动终止**刻意不留续跑资格**：run 结局停在 running（不 closeRunHistory）→ 重派走 fresh spawn，
+        // 不把用户刚终止的子会话又唤醒（终止语义 = 重新排队，不是续跑）。
+        // interrupt 失败（会话已死 / 无 root 可授权）静默跳过：任务照常回 pending 重排，不卡死。
         try { if (rec.run) await rec.run.dispose() } catch (_) {}
+        if (rec.continuable) {
+          try {
+            var subs = ctx.subagents, rroot = rootForSession(sid)
+            if (subs && typeof subs.interrupt === 'function' && rroot) subs.interrupt(rec.childId, { kind: 'ancestor', agent: rroot })
+          } catch (_) {}
+        }
         // 手动终止的 run 不会走 settleRun（runsFor 已摘除，结算路径会早退），
         // 但它确实消耗了 token——在这里补一次结算，避免终止即丢账。
         await accumulateRunUsage(sid, rec)
