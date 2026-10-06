@@ -237,10 +237,11 @@
     // usageSummary 由 host 从各任务 t.usage 现算（t.usage 来自 Worker/Verifier 会话 v4 日志的
     // assistant/message.usage 聚合）。这里只做展示、不做计费断言；日志读不到/还没有 run 结算时
     // usageSummary.total 为 0，一律显示「暂无数据」。
-    // 日账（usageSummary.byDay：{'YYYY-MM-DD': {t,e}}）用于「今日」大数字与「近 7 天」条形。
+    // 日账（usageSummary.byDayFull：{'YYYY-MM-DD': {t,e}}）用于「今日」大数字与「近 7 天」条形。
     // 双指标口径：t = 总量（含缓存读）、e = 有效消耗（输入+输出+缓存写，不含缓存读）。
     // e === null 表示该日只有老形态 number 日账 / 存量兜底（没有逐 run 拆分，有效值不可知）——
-    // 展示时退化为 t 并在文案/title 上标 ~ 近似，绝不把总量冒充有效值。
+    // 旧口径日不拿 t 冒充有效（task-muwsnyqv ③：本板 10-05 t=154M 含 97% 缓存读曾被画成巨柱）：
+    // 今日大数字显示「—」+ title 说明，近 7 天画矮灰柱 + tooltip 标「旧口径数据（仅总量）」。
     // dayKey 口径与 host 记账完全一致——本地 getters 拼，绝不用 toISOString()（UTC 会让
     // 晚上 8 点后的消耗落到次日，今日消耗直接错位）。
     function localDayKey(d) {
@@ -298,47 +299,56 @@
         return { id: x.id, title: x.title, total: x.total, cacheRead: x.cacheRead, runs: x.runs, eff: (ee === null ? x.total : ee), approx: ee === null }
       }).sort(function (a, b) { return b.eff - a.eff })
       var maxT = top.length ? (top[0].eff || 1) : 1
-      // 日账：今日数字取本地日 key，没有日账（byDay 缺字段/老 host）时退化为 0，不炸也不误报。
+      // 日账：今日数字取本地日 key，没有日账（缺字段/老 host）时退化为 0，不炸也不误报。
       // 读侧兼容两种单元形态：老 number（只有总量，有效值不可知）→ { t: n, e: null }。
-      var byDay = (u.byDay && typeof u.byDay === 'object') ? u.byDay : {}
+      // 固定口径数据源（task-muwsnyqv ②）：「今日」「近 7 天」读**未过滤**的 byDayFull——caption
+      // 承诺这两处不随统计范围变，读范围内 byDay 会让「今天被范围裁掉」时大数字凭空归零（实证）。
+      // 老 host 缺 byDayFull → 退化读 byDay（范围内口径，数值可能偏小但形态一致，不炸）。
+      var byDay = (u.byDayFull && typeof u.byDayFull === 'object') ? u.byDayFull : ((u.byDay && typeof u.byDay === 'object') ? u.byDay : {})
       function dayOf(v) {
         if (v && typeof v === 'object') return { t: Number(v.t) || 0, e: (v.e === 0 || v.e) ? Number(v.e) || 0 : null }
         return { t: Number(v) || 0, e: null }
       }
       var todayKey = localDayKey()
       var todayCell = dayOf(byDay[todayKey])
-      // 有效消耗缺失（老日账/存量兜底）→ 大数字退化为总量并打 approx 标 ~，口径不伪造
-      var todayApprox = todayCell.e === null
-      var todayEff = todayApprox ? todayCell.t : todayCell.e
+      // 旧口径日（e===null 且有总量：老 number 日账/存量兜底，只有含缓存读的总量）不拿 t 冒充有效
+      // （task-muwsnyqv ③）——大数字显示「—」+ title 说明；t=0 且无日账 = 今日尚无结算，照常显示 0。
+      var todayLegacy = todayCell.e === null && todayCell.t > 0
+      var todayEff = todayCell.e === null ? 0 : todayCell.e
       var days = lastNDays(7)
       var maxDay = 1
       var hasDayData = false
-      for (var di = 0; di < days.length; di++) { var dc = dayOf(byDay[days[di]]); var dv = (dc.e === null ? dc.t : dc.e); if (dv > maxDay) maxDay = dv; if (dc.t > 0 || dc.e > 0) hasDayData = true }
+      var hasLegacy = false
+      // maxDay 只按有效消耗归一：旧口径日（e===null）的 t 含缓存读（本板实测占 97%），参与归一会
+      // 把其余日子的有效柱压成平地（task-muwsnyqv ③：10-05 t=154M 巨柱就是这么来的）。
+      for (var di = 0; di < days.length; di++) { var dc = dayOf(byDay[days[di]]); if (dc.e !== null && dc.e > maxDay) maxDay = dc.e; if (dc.e === null && dc.t > 0) hasLegacy = true; if (dc.t > 0 || dc.e > 0) hasDayData = true }
       function mini(label, value) { return React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, label + ' ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(value))) }
       // 累计三分量：有效（真实成本）+ 缓存读（占了 total 的大头，必须单列才看得出虚高来源）+ 合计
       var effTotal = (typeof u.effective === 'number') ? u.effective : ((u.input || 0) + (u.output || 0) + (u.cacheWrite || 0))
       return React.createElement('div', { style: box },
         head,
         React.createElement('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginBottom: 8 } },
-          React.createElement('span', { style: { fontSize: 20, fontWeight: 700, color: C.brand }, title: '今日有效消耗（本地日 ' + todayKey + '）= 输入+输出+缓存写，不含缓存读；一次 run 的消耗整笔记在结算日' + (todayApprox ? '。本条日账来自老形态/存量兜底数据，有效值不可知，此处以总量近似（标 ~）' : '') }, (todayApprox ? '~' : '') + fmtTokens(todayEff)),
-          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, 'tokens（今日有效' + (todayApprox ? ' · 近似' : '') + '）'),
-          todayCell.t > todayEff ? React.createElement('span', { style: { fontSize: 10, color: C.text2 }, title: '今日总量（含缓存读）——与有效消耗的差额就是缓存读' }, '含缓存读共 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(todayCell.t))) : null,
+          React.createElement('span', { style: { fontSize: 20, fontWeight: 700, color: todayLegacy ? C.text2 : C.brand }, title: todayLegacy ? ('今日有效消耗不可知：该日账为旧口径数据（仅总量 ' + fmtTokens(todayCell.t) + ' tok，含缓存读），总量不冒充有效值') : ('今日有效消耗（本地日 ' + todayKey + '）= 输入+输出+缓存写，不含缓存读；一次 run 的消耗整笔记在结算日') }, todayLegacy ? '—' : fmtTokens(todayEff)),
+          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, 'tokens（今日有效' + (todayLegacy ? ' · 旧口径不可知' : '') + '）'),
+          todayCell.t > todayEff ? React.createElement('span', { style: { fontSize: 10, color: C.text2 }, title: '今日总量（含缓存读）——与有效消耗的差额就是缓存读' + (todayLegacy ? '；该日为旧口径数据，有效消耗不可知' : '') }, '含缓存读共 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(todayCell.t))) : null,
           React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '累计（本看板） 有效 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(effTotal)), ' · 缓存读 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(u.cacheRead)), ' · 合计 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(u.total))),
           mini('输入', u.input), mini('输出', u.output), u.cacheWrite ? mini('缓存写', u.cacheWrite) : null),
         // 近 7 天迷你条形：高按区间 max 归一（今天高亮 brand，其余浅底 + 边框），
-        // 柱高一律取**有效消耗**；e 不可知的日退化为总量（title 标 ~ 近似）。
-        // 7 天全为 0 时整块不渲染（零残留，不占版面）
+        // 柱高一律取**有效消耗**；e 不可知的旧口径日不拿总量冒充——画固定矮灰柱（tooltip 标明
+        // 「旧口径数据（仅总量，含缓存读）」），有效柱高不被缓存读撑歪。7 天全为 0 时整块不渲染。
         hasDayData ? React.createElement('div', { style: { marginBottom: 8 } },
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '近 7 天（有效消耗）'),
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '近 7 天（有效消耗）', hasLegacy ? React.createElement('span', { style: { fontSize: 9, fontWeight: 400, marginLeft: 6 } }, '灰柱 = 旧口径数据（仅总量）') : null),
           React.createElement('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 4 } },
             days.map(function (k) {
               var c = dayOf(byDay[k])
-              var approx = c.e === null
-              var v = approx ? c.t : c.e
+              // 旧口径日（e===null 且有总量）：不拿 t 冒充有效画柱（task-muwsnyqv ③）——
+              // 画固定矮灰柱 + tooltip 标明；有效日柱高照常按有效消耗归一。
+              var legacy = c.e === null && c.t > 0
+              var v = legacy ? 0 : (c.e || 0)
               var isToday = k === todayKey
-              var h = v > 0 ? Math.max(3, Math.round(v / maxDay * 32)) : 3
-              return React.createElement('div', { key: k, title: k.slice(5) + '：有效 ' + String(v) + (approx ? '（近似：老日账只有总量）' : '') + ' tok' + (c.t > v ? ' / 含缓存读共 ' + String(c.t) + ' tok' : ''), style: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 } },
-                React.createElement('div', { style: { width: '100%', height: h, background: isToday ? C.brand : C.nested, border: '1px solid ' + (isToday ? C.brand : C.border), borderRadius: 2 } }),
+              var h = legacy ? 6 : (v > 0 ? Math.max(3, Math.round(v / maxDay * 32)) : 3)
+              return React.createElement('div', { key: k, title: legacy ? (k.slice(5) + '：旧口径数据（仅总量 ' + String(c.t) + ' tok，含缓存读；有效消耗不可知，不拿总量画柱）') : (k.slice(5) + '：有效 ' + String(v) + ' tok' + (c.t > v ? ' / 含缓存读共 ' + String(c.t) + ' tok' : '')), style: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 } },
+                React.createElement('div', { style: { width: '100%', height: h, background: legacy ? C.border : (isToday ? C.brand : C.nested), border: '1px solid ' + (legacy ? C.border2 : (isToday ? C.brand : C.border)), borderRadius: 2 } }),
                 React.createElement('span', { style: { fontSize: 8, color: isToday ? C.brand : C.text2, whiteSpace: 'nowrap' } }, k.slice(5)))
             }))) : null,
         React.createElement('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap' } },

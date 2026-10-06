@@ -186,7 +186,8 @@ function dayCell(v) {
 // 为什么在 host 侧过滤：run 级数据（runs[i].usage 五分量 + runs[i].at 时间戳）只在 host，
 // 客户端轮询只拿聚合——范围筛选只能在这一层做，客户端没法自己裁。
 // 口径：run 的本地日落点 localDayKey(run.at) 判 in/out；范围外 run 不计入 total/byModel/top，
-// byDay 也同步裁到范围内（范围外日不入 byDay）。
+// byDay 也同步裁到范围内（范围外日不入 byDay；run 留账任务按入选 run 逐日重建，to 端闭区间）。
+// byDayFull 与范围无关恒为全量（task-muwsnyqv ②）——客户端「今日」「近 7 天」固定口径读它。
 // 缺省（无 range / from 与 to 皆空）= 现状逐字不变（parity）：不引入任何新的过滤分支语义，
 // 老任务（无 runs 留账）与无 at 的老 run 照旧全量计入。
 function normDayKey(v) {
@@ -231,12 +232,37 @@ function runUsageOf(r) {
 // 「按任务 updatedAt 单日近似」，于是切范围后 topTasks 与无范围逐字相同（用户活体实证：选 2026-10-05
 // 后 total/byDay 收窄、Top8 第一名仍是全量 48M 的那张卡）。现在改为逐 run 精确裁切。
 export function aggregateUsageSummary(tasks, range) {
-  var s = { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, effective: 0, byModel: {}, byModelEff: {}, byDay: {}, topTasks: [] }
+  var s = { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, effective: 0, byModel: {}, byModelEff: {}, byDay: {}, byDayFull: {}, topTasks: [] }
   var list = Array.isArray(tasks) ? tasks : []
   var hasRange = rangeOn(range)
   for (var i = 0; i < list.length; i++) {
     var t = list[i]; var uRaw = t && t.usage
     if (!uRaw) continue
+    // ===== byDayFull：未过滤全量日账（task-muwsnyqv ②）=====
+    // 「今日」「近 7 天」是固定口径（客户端 caption 承诺不随统计范围变），数据源必须是全量日账——
+    // 只读范围内裁剪的 byDay 时，「今天被范围裁掉」会让今日大数字凭空归零（活体实证：范围
+    // {10-05,10-06} 下今日条目整丢）。口径与无范围 byDay 逐字同源：任务级 uRaw.byDay 逐日合并
+    // （老 number → e=null 不猜），无 byDay 的存量任务整笔归 updatedAt 本地日；与下方范围判定
+    // 完全解耦（范围外任务照样计入 byDayFull），无范围时 byDayFull 与 byDay 内容一致（parity）。
+    var byF = (uRaw.byDay && typeof uRaw.byDay === 'object') ? uRaw.byDay : null
+    var hasByF = false
+    for (var bk0 in byF) { if (Object.prototype.hasOwnProperty.call(byF, bk0)) { hasByF = true; break } }
+    if (hasByF) {
+      for (var dk0 in byF) {
+        if (!Object.prototype.hasOwnProperty.call(byF, dk0)) continue
+        var c0 = dayCell(byF[dk0])
+        // 合并规则与 byDay 相同：任一来源 e 不可知 → 该日 e=null（不假装算得出）；全部已知才累加。
+        var cur0 = s.byDayFull[dk0] || { t: 0, e: undefined }
+        cur0.t += c0.t
+        if (c0.e === null) cur0.e = null
+        else if (cur0.e !== null) cur0.e = (cur0.e || 0) + c0.e
+        if (cur0.e === undefined) cur0.e = null
+        s.byDayFull[dk0] = cur0
+      }
+    } else if (numOr0(uRaw.total)) {
+      var lkF = dayKeyOf(uRaw.updatedAt)
+      if (lkF) { var lcF = s.byDayFull[lkF] || { t: 0, e: undefined }; lcF.t += numOr0(uRaw.total); lcF.e = null; s.byDayFull[lkF] = lcF }
+    }
     // 过滤层只决定「这次任务贡献哪些用量」，下游累加口径（模型/Top/byDay）逐字不动。
     var u = uRaw
     if (hasRange) {
@@ -248,6 +274,7 @@ export function aggregateUsageSummary(tasks, range) {
       var covered = 0 // 落了 usage 的 run 数（判「有没有 run 级留账可裁」——与 at 无关）
       var modeledTot = 0 // 入选 run 里**记了模型名**的那部分总量（剩下的按任务级占比摊，见下）
       var modeledEff = 0
+      var dayB = null // 入选 run 的逐日归桶（重建范围内 byDay，见下）
       for (var ri = 0; ri < trs.length; ri++) {
         var r = trs[ri]
         var ru = runUsageOf(r)
@@ -257,6 +284,17 @@ export function aggregateUsageSummary(tasks, range) {
         picked++
         uSum.total += ru.total; uSum.input += ru.input; uSum.output += ru.output
         uSum.cacheRead += ru.cacheRead; uSum.cacheWrite += ru.cacheWrite
+        // byDay 同步重建（task-muwsnyqv ①）：旧版合成的 u 丢 byDay/updatedAt → 范围内日账整块消失
+        // （「今天被吞」实证：range 含今天时 total/effective 含今天、byDay 却无今天）。按入选 run 的
+        // at 本地日逐日归桶——与范围过滤同一落点口径（dayInRange 两端闭区间：d > to 才丢），
+        // from=to=今天 时今天必在 byDay。run 级五分量俱全 → e 恒为已知有效值（不是 null）。
+        var rd = dayKeyOf(r && r.at)
+        if (rd) {
+          if (!dayB) dayB = {}
+          var dc1 = dayB[rd] || { t: 0, e: 0 }
+          dc1.t += ru.total; dc1.e += effectiveTokens(ru)
+          dayB[rd] = dc1
+        }
         // 按模型分布同步按范围收窄：模型 key 与结算同源（派发覆盖 > 日志记录），run 留账里没记模型名
         // → 退化为任务级模型小计，但只在本次有 run 入选时摊（否则等于把范围外消耗算进来）。
         // 合计与有效（byModel / byModelEff）同一轮同源累加，两条口径不各算一遍。
@@ -289,7 +327,7 @@ export function aggregateUsageSummary(tasks, range) {
             modelsE[tmKeys[ti]] = (modelsE[tmKeys[ti]] || 0) + Math.round(numOr0(taskModels[tmKeys[ti]]) * ratioE)
           }
         }
-        u = { total: uSum.total, input: uSum.input, output: uSum.output, cacheRead: uSum.cacheRead, cacheWrite: uSum.cacheWrite, models: models || {}, modelEff: modelsE || {}, runs: picked }
+        u = { total: uSum.total, input: uSum.input, output: uSum.output, cacheRead: uSum.cacheRead, cacheWrite: uSum.cacheWrite, models: models || {}, modelEff: modelsE || {}, runs: picked, byDay: dayB || {} }
       } else if (!covered) {
         // 无 run 级留账可裁（本功能上线前的存量卡；或 runs 条目全都没落 usage）：没有 run 级时间戳，
         // 整笔退化为「updatedAt 的本地日」这一近似口径（与 byDay 存量兜底同源）；无 updatedAt / 解析失败 →

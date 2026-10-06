@@ -1417,7 +1417,7 @@ test('aggregateUsageSummary: 空任务/无 usage 任务 → 全零 + 空 Top', (
   assert.equal(s.total, 0); assert.equal(s.input, 0); assert.equal(s.output, 0); assert.equal(s.cacheRead, 0)
   assert.deepEqual(s.byModel, {}); assert.deepEqual(s.topTasks, [])
   assert.deepEqual(s.byDay, {}) // 日账缺省空对象（老看板/无 usage 不炸）
-  assert.deepEqual(aggregateUsageSummary(undefined), { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, effective: 0, byModel: {}, byModelEff: {}, byDay: {}, topTasks: [] })
+  assert.deepEqual(aggregateUsageSummary(undefined), { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, effective: 0, byModel: {}, byModelEff: {}, byDay: {}, byDayFull: {}, topTasks: [] })
 })
 
 test('aggregateUsageSummary: 总量/输入输出缓存拆分累加 + 按模型小计合并', () => {
@@ -1868,9 +1868,91 @@ test('Token 日账接线：dispatch 记 byDay 双指标（本地日）+ 仪表�
   assert.match(cli, /口径：仅看板派发的 Worker\/Verifier run 消耗，不含主窗口对话/)    // 口径边界明示（不含主窗口）
   assert.match(cli, /主数字（模型分布 \/ Top 8）与「今日」「近 7 天」均为有效消耗口径/)   // 主数字口径统一（task-muwq9u04）
   assert.match(cli, /其中缓存读 ' \+ String\(x\.cacheRead \|\| 0\)/)                  // Top8 title 补 缓存读 拆分（合计/有效进 title）
-  assert.match(cli, /background: isToday \? C\.brand : C\.nested/)                // 今天高亮 brand、其余浅底
+  assert.match(cli, /background: legacy \? C\.border : \(isToday \? C\.brand : C\.nested\)/) // 旧口径日灰柱、今天高亮 brand、其余浅底
   assert.match(cli, /hasDayData \? React\.createElement/)                         // 7 天全空不渲染该区
-  assert.match(cli, /'（近似：老日账只有总量）'/)                                    // e 不可知 → 标 ~ 近似，不冒充有效值
+  // e 不可知的旧口径日：不拿总量冒充有效——今日「—」/ 柱形矮灰柱 + tooltip 标明（task-muwsnyqv ③，
+  // 旧「标 ~ 近似」分支已除，见三连修测试的反向断言）
+  assert.match(cli, /旧口径数据（仅总量/)
+})
+
+// ===== Token 口径三连修（task-muwsnyqv）：byDay 闭区间 / byDayFull 固定口径 / 旧口径不冒充 =====
+test('Token 三连修①：byDay 范围 to 闭区间 + 入选 run 重建日账（from=to=今天 时 byDay 有今天）', () => {
+  // 活体实证形状：range{from:'2026-10-05',to:'2026-10-06'} 时 total/effective 含今天而 byDay 整丢——
+  // 病根是 picked 路径合成的 u 丢 byDay/updatedAt。修复后按入选 run 的 at 本地日逐日重建。
+  const t1 = mkTask({
+    id: 'a', title: 'A',
+    runs: [
+      mkRun(localIso(2026, 10, 5, 8, 0), 'm-x', U(3, 4, 100, 5)),   // 10-05：t=112 e=12
+      mkRun(localIso(2026, 10, 6, 9, 0), 'm-x', U(6, 15, 152, 5))   // 10-06（今天）：t=178 e=26
+    ],
+    usage: { total: 290, input: 9, output: 19, cacheRead: 252, cacheWrite: 10, runs: 2, models: { 'm-x': 290 }, updatedAt: localIso(2026, 10, 6, 10, 0), byDay: { '2026-10-05': { t: 112, e: 12 }, '2026-10-06': { t: 178, e: 26 } } }
+  })
+  const s = aggregateUsageSummary([t1], { from: '2026-10-05', to: '2026-10-06' })
+  assert.equal(s.total, 290)                                                        // run 级过滤：两天都计入
+  assert.deepEqual(s.byDay, { '2026-10-05': { t: 112, e: 12 }, '2026-10-06': { t: 178, e: 26 } }) // to 端闭区间：10-06 不丢
+  // 两端边界各一条：from=to=边界日 → 当日必在 byDay（run 级重建，日 key 与范围过滤同口径 r.at）
+  assert.deepEqual(aggregateUsageSummary([t1], { from: '2026-10-06', to: '2026-10-06' }).byDay, { '2026-10-06': { t: 178, e: 26 } })
+  assert.deepEqual(aggregateUsageSummary([t1], { from: '2026-10-05', to: '2026-10-05' }).byDay, { '2026-10-05': { t: 112, e: 12 } })
+  // 范围内日账与入选 total 自洽（Σ byDay.t === s.total，run 级重建不丢账）
+  const sum = Object.keys(s.byDay).reduce((n, k) => n + s.byDay[k].t, 0)
+  assert.equal(sum, s.total)
+  // run 级重建的 e 恒为已知有效值（五分量俱全），不出现 null
+  assert.equal(s.byDay['2026-10-06'].e, 26)
+})
+
+test('Token 三连修②：byDayFull 未过滤全量与 byDay 并存（今日/近 7 天固定口径数据源）+ 客户端接线', () => {
+  const t1 = mkTask({
+    id: 'a', title: 'A',
+    runs: [
+      mkRun(localIso(2026, 10, 5, 8, 0), 'm-x', U(3, 4, 100, 5)),
+      mkRun(localIso(2026, 10, 6, 9, 0), 'm-x', U(6, 15, 152, 5))
+    ],
+    usage: { total: 290, input: 9, output: 19, cacheRead: 252, cacheWrite: 10, runs: 2, models: { 'm-x': 290 }, updatedAt: localIso(2026, 10, 6, 10, 0), byDay: { '2026-10-05': { t: 112, e: 12 }, '2026-10-06': { t: 178, e: 26 } } }
+  })
+  const s = aggregateUsageSummary([t1], { from: '2026-10-06', to: '2026-10-06' })
+  assert.deepEqual(s.byDay, { '2026-10-06': { t: 178, e: 26 } })                                  // byDay：范围内
+  assert.deepEqual(s.byDayFull, { '2026-10-05': { t: 112, e: 12 }, '2026-10-06': { t: 178, e: 26 } }) // byDayFull：全量不受裁
+  // 范围外任务也进 byDayFull（固定口径不随范围），但不进 total/byDay
+  const tOut = mkTask({ id: 'out', usage: { total: 50, input: 1, output: 1, cacheRead: 48, cacheWrite: 0, runs: 1, models: {}, updatedAt: localIso(2026, 10, 1, 9, 0) } })
+  const s2 = aggregateUsageSummary([t1, tOut], { from: '2026-10-06', to: '2026-10-06' })
+  assert.equal(s2.total, 178)                                              // 范围外任务不进 total
+  assert.deepEqual(s2.byDay, { '2026-10-06': { t: 178, e: 26 } })          // 也不进范围内 byDay
+  assert.deepEqual(s2.byDayFull['2026-10-01'], { t: 50, e: null })         // 但进 byDayFull（存量兜底归 updatedAt，e 不可知=null）
+  // 无范围：byDayFull 与 byDay 内容一致（parity，老 host 行为逐字不变）
+  const s3 = aggregateUsageSummary([t1])
+  assert.deepEqual(s3.byDayFull, s3.byDay)
+  // 老 number 形态日账：byDayFull 同样 e=null 不猜（不冒充有效值）
+  const legacy = mkTask({ id: 'old', usage: { total: 600, models: {}, byDay: { '2026-10-01': 600 } } })
+  assert.deepEqual(aggregateUsageSummary([legacy]).byDayFull, { '2026-10-01': { t: 600, e: null } })
+  // 纯函数：入参对象未被就地改写
+  assert.deepEqual(t1.usage.byDay, { '2026-10-05': { t: 112, e: 12 }, '2026-10-06': { t: 178, e: 26 } })
+  // 接线（源码级）：host 聚合骨架带 byDayFull；客户端今日/近 7 天读 byDayFull，老 host 缺字段退化 byDay
+  const usageSrc = readFileSync(new URL('../lib/usage.mjs', import.meta.url), 'utf8')
+  assert.match(usageSrc, /byDayFull: \{\}/)
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(cli, /var byDay = \(u\.byDayFull && typeof u\.byDayFull === 'object'\) \? u\.byDayFull : \(\(u\.byDay && typeof u\.byDay === 'object'\) \? u\.byDay : \{\}\)/)
+})
+
+test('Token 三连修③：e=null 旧口径日不拿 t 冒充有效（今日「—」/ 灰柱 + tooltip，源码级断言）', () => {
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // 柱形：e===null 的日子走 legacy 灰柱分支，柱高不再吃 t 兜底
+  assert.match(cli, /var legacy = c\.e === null && c\.t > 0/)
+  assert.match(cli, /var v = legacy \? 0 : \(c\.e \|\| 0\)/)
+  assert.match(cli, /'：旧口径数据（仅总量 '/)                               // 柱形 tooltip 标旧口径
+  assert.match(cli, /灰柱 = 旧口径数据（仅总量）/)                            // 有近 7 天旧口径日时表头图例
+  // maxDay 只按有效值归一（t 不参与，含缓存读的巨柱压不平其他天）
+  assert.match(cli, /if \(dc\.e !== null && dc\.e > maxDay\) maxDay = dc\.e/)
+  // 今日大数字：旧口径日显示「—」+ title 说明，不再 ~t 冒充
+  assert.match(cli, /var todayLegacy = todayCell\.e === null && todayCell\.t > 0/)
+  assert.match(cli, /todayLegacy \? '—' : fmtTokens\(todayEff\)/)
+  assert.match(cli, /今日有效消耗不可知：该日账为旧口径数据（仅总量/)
+  // 反向断言：旧的 t 兜底冒充分支已除（柱形与今日两处都不再有 e===null → 用 t 的路径）
+  assert.equal(/c\.e === null \? c\.t : c\.e/.test(cli), false)
+  assert.equal(/todayApprox \? todayCell\.t : todayCell\.e/.test(cli), false)
+  assert.equal(/（近似：老日账只有总量）/.test(cli), false)
+  // README 双份记录老数据处理口径
+  const pkg = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  assert.ok(pkg.includes('旧口径'), 'README 应记录旧口径日（e=null）不拿总量冒充有效的处理')
 })
 
 // ===== 调研 ROI 行 token 有效口径（task-muupnnq5）=====
