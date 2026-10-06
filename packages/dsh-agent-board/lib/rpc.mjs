@@ -8,7 +8,7 @@
 import * as core from './core.mjs'
 import path from 'node:path'
 import fsNode from 'node:fs'
-import { findRunLog, readLogBytes, readLogFrames, aggregateUsageSummary } from './usage.mjs'
+import { findRunLog, readLogBytes, readLogFrames, aggregateUsageSummary, readMainWindowUsage } from './usage.mjs'
 import { TASK_SIZE_CONTRACT, withSplitHint, pushRejectLesson, pushArbitrationLesson } from './policy.mjs'
 import { makeMsg } from './notify.mjs'
 import { computeHealthHints } from './health.mjs'
@@ -40,6 +40,8 @@ export function createRpc(ctx, state, deps) {
     var getActorId = deps.getActorId, resolveRoot = deps.resolveRoot, toolSessionId = deps.toolSessionId, rpcSessionId = deps.rpcSessionId
     var rootForSession = deps.rootForSession, deriveWorkMode = deps.deriveWorkMode, runsFor = deps.runsFor
     var rt = deps.rt, mutateLocked = deps.mutateLocked
+    // 主窗口消耗（task-muwsol23）：测试可注入临时日志根；生产 undefined → findRunLog 回退 ~/.dsh/sessions
+    var sessionsRoot = (typeof deps.sessionsRoot === 'string' && deps.sessionsRoot) ? deps.sessionsRoot : undefined
     var maybeNotify = deps.maybeNotify, notifyTaskDone = deps.notifyTaskDone
     var spawnOneShot = deps.spawnOneShot, accumulateRunUsage = deps.accumulateRunUsage, readContextPack = deps.readContextPack
     // 上报通道的 run 收尾（task-muwkhqf8）：board_report/board_verdict 推进任务落定后，对当前 continuable
@@ -73,6 +75,8 @@ export function createRpc(ctx, state, deps) {
     var teamModeCache = state.teamModeCache
     var feedbackCache = state.feedbackCache
     var epicSplitCache = state.epicSplitCache
+    // 主窗口消耗增量尾读缓存（task-muwsol23）：本体在 index.mjs state 构建；测试桩 state 缺字段时就地补
+    if (!state.mainWindowUsageCache) state.mainWindowUsageCache = {}
     // RPC handlers 表必须在最前面初始化：后面的 handle(...) 调用依赖它（var 只提升声明不提升赋值）
     var handlers = state.handlers
     function handle(method, fn) { handlers[method] = fn }
@@ -148,6 +152,15 @@ export function createRpc(ctx, state, deps) {
       // 模型分布 / Top8 / 累计生效——run 级数据只在 host，所以过滤必须在 host 做（客户端只拿聚合，没法自己裁）。
       // 缺省/空范围 = 现状逐字不变（aggregateUsageSummary 内部判定，空串不算范围）。
       d.usageSummary = aggregateUsageSummary(d.tasks, args && args.range)
+      // ===== 主窗口（本会话对话）消耗单列（task-muwsol23）=====
+      // 数据源 = 本看板所属主会话自己的 v4 日志，readMainWindowUsage 增量尾读聚合
+      // （缓存 state.mainWindowUsageCache，键=会话 id：文件不变零读、变大只读增量、变小/轮换全量重读一次）。
+      // 隔离红线：只挂 usageSummary.mainWindow——**不进 Top8 / 「本看板累计」/ 架构健康与学习飞轮基数**
+      // （那些仍只读 d.tasks 的 run 留账，本行挂账发生在聚合完成之后，互不影响）。
+      // 随统计范围裁剪（assistant/message 事件本地日落点）；读不到/无 usage/任何失败 → null 不挂字段
+      // （客户端静默不渲染该行），函数本体全 try/catch 绝不抛进 3s 轮询。
+      var __mw = readMainWindowUsage(sid, sessionsRoot, args && args.range, state.mainWindowUsageCache)
+      if (__mw) d.usageSummary.mainWindow = __mw
       // 架构自省 L1：healthHints 现算（纯函数零存储零 IO，近 50 卡窗口），客户端「架构健康」区超阈值才显示
       d.healthHints = computeHealthHints(d.tasks)
       // 史诗父卡语义层：childStats 现算（零存储）——{ <parentId>: { total, settled, resolved, active, activeTitle } }，

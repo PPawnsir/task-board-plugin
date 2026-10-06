@@ -15,7 +15,7 @@
 //
 // 兼容 re-export：对外导出契约不变（单测与历史引用直接 import 自本文件）。
 export { TASK_SIZE_CONTRACT, SUGGEST_SPLIT_TEXT, TEAM_SPLIT_RULE, suggestSplitOf, withSplitHint, splitRuleOf } from './lib/policy.mjs'
-export { findRunLog, readRunUsage, aggregateUsageSummary, effectiveTokens, taskEffectiveTokens } from './lib/usage.mjs'
+export { findRunLog, readRunUsage, aggregateUsageSummary, effectiveTokens, taskEffectiveTokens, readMainWindowUsage } from './lib/usage.mjs'
 import { createSession } from './lib/session.mjs'
 import { createStore } from './lib/store.mjs'
 import { createNotify } from './lib/notify.mjs'
@@ -45,6 +45,8 @@ export function apply(ctx) {
       receiptBuf: {},      // 回执 45s/满 5 条聚合窗口
       receiptedKeys: {},   // 回执幂等去重（完成事件指纹，1h TTL）
       sysNotesBuf: {},     // 系统级异常通知队列（随回执冲刷）
+      mainWindowUsageCache: {}, // 主窗口消耗增量尾读缓存（task-muwsol23）：sid → { size, mtimeMs, 聚合五分量+byDay }，
+                                //   文件不变零读 / 变大只读增量 / 变小全量重读一次；纯内存不落盘，重启自然全量一次
     }
     // ===== 模块接线（依赖顺序：session → store → notify → dispatch → rpc）=====
     var session = createSession(ctx, state)

@@ -391,3 +391,128 @@ export function aggregateUsageSummary(tasks, range) {
   s.topTasks = s.topTasks.slice(0, 8)
   return s
 }
+
+// ===== 主窗口（本会话对话）Token 消耗：增量尾读主会话自己的 v4 日志（task-muwsol23）=====
+// 与 readRunUsage 的差异：主会话日志持续增长（可达数万事件），3s 轮询下每轮全量读会把
+// 同步 IO 摊进轮询热路径——这里按「文件偏移水位」增量尾读，缓存条目由调用方持有（键=会话 id）：
+//   { size, mtimeMs, total, input, output, cacheRead, cacheWrite, effective, byDay, hasUsage }
+//   - size = 已结算到的文件偏移；只推进到「最后一个完整解压帧」的末尾——尾部半帧（写入中）
+//     不结算，下轮从该偏移重读（绝不丢事件、绝不重复计账）；
+//   - 文件变大 → 只读 [size, 新size) 的新增字节段（3s 轮询稳态零全量重读）；
+//   - 文件变小（日志轮换/截断）→ 缓存作废，全量重读一次（封顶 64MB，与 readRunUsage 同一护栏）；
+//   - 文件不变 → 零读直接用缓存聚合值。
+// 聚合口径与 Worker 完全同源：五分量（input/output/cacheRead/cacheWrite/total）+ e=input+output+cacheWrite，
+// 日落点取 assistant/message 事件的 time 字段（epoch ms）的本地日（与 run 口径同一 localDayKey）。
+// 范围裁剪：缓存里存的是**未裁剪**全量聚合；range（{from,to} 本地日）在出参时按 byDay 逐日裁
+// （与 run 口径同一 dayInRange，两端闭区间），范围内 total/effective/cacheRead 由入选日重算——
+// 无日可判（无 time/坏 time）的事件只进平账不进任何日，范围下自然被裁（宁可漏不错）。
+// 隔离红线：返回值只挂 usageSummary.mainWindow——不进 Top8 / 「本看板累计」/ 架构健康与学习飞轮基数。
+// 失败静默降级：日志不存在/不可读/解不出任何 usage → null（客户端不渲染该行），绝不抛进轮询。
+var MAINWIN_LOG_CAP = 64 * 1024 * 1024
+// 聚合器初始形态（也是缓存条目形态）
+function mainWinAcc() {
+  return { size: 0, mtimeMs: 0, total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, effective: 0, byDay: {}, hasUsage: false }
+}
+// 事件时间戳（v4 事件的 time 字段，epoch ms）→ 本地日 key；缺失/非法返回 ''（不进任何日账）
+function dayKeyOfMs(ms) {
+  var t = Number(ms)
+  if (!isFinite(t) || t <= 0) return ''
+  var d = new Date(t)
+  if (isNaN(d.getTime())) return ''
+  return localDayKey(d)
+}
+// 把 buf 内全部完整帧的 assistant/message usage 累加进 acc；返回「结算到」的相对偏移。
+// 帧序旧→新扫（追加写）：中间坏帧跳过但照样结算掉（坏帧永远读不回来，别让水位卡住）；
+// 最后一段解压失败 = 尾部半帧（写入进行中）→ 停在它的起点，下轮写完整后重读。
+function mainWinAggregateFrames(acc, buf) {
+  var offs = []
+  var at = buf.indexOf(ZSTD_MAGIC)
+  while (at >= 0) { offs.push(at); at = buf.indexOf(ZSTD_MAGIC, at + 1) }
+  var consumed = 0
+  for (var k = 0; k < offs.length; k++) {
+    var end = k + 1 < offs.length ? offs[k + 1] : buf.length
+    var lines = null
+    try {
+      lines = zstdDecompressSync(buf.subarray(offs[k], end)).toString('utf8').split('\n')
+    } catch (_) {
+      if (k === offs.length - 1) break // 尾部半帧：不结算，下轮从它的起点重读
+      consumed = end; continue
+    }
+    for (var i = 0; i < lines.length; i++) {
+      if (!lines[i]) continue
+      var e
+      try { e = JSON.parse(lines[i]) } catch (_) { continue }
+      if (!e || e.type !== 'assistant/message') continue
+      var u = e.data && e.data.usage
+      if (!u) continue
+      var inp = numOr0(u.inputTokens), outp = numOr0(u.outputTokens)
+      var cr = numOr0(u.cacheReadTokens), cw = numOr0(u.cacheWriteTokens)
+      var tot = numOr0(u.totalTokens) || (inp + outp + cr + cw)
+      var eff = inp + outp + cw
+      acc.total += tot; acc.input += inp; acc.output += outp
+      acc.cacheRead += cr; acc.cacheWrite += cw; acc.effective += eff
+      acc.hasUsage = true
+      var dk = dayKeyOfMs(e.time)
+      if (dk) {
+        var cell = acc.byDay[dk] || { t: 0, e: 0, cr: 0 }
+        cell.t += tot; cell.e += eff; cell.cr += cr
+        acc.byDay[dk] = cell
+      }
+    }
+    consumed = end
+  }
+  return consumed
+}
+// 主窗口消耗读取入口。cacheStore 缺省（undefined/非对象）→ 不缓存每次全量读（测试/老宿主兜底）。
+// 出参 byDay 单元为 { t, e, cr }（t=总量含缓存读，e=有效，cr=缓存读）——范围裁剪要按日重算
+// 三个口径，故比 run 日账 {t,e} 多带一个缓存读分量；出参是副本，改出参不污染缓存。
+export function readMainWindowUsage(sessionId, sessionsRoot, range, cacheStore) {
+  try {
+    if (!sessionId) return null
+    var log = findRunLog(sessionId, sessionsRoot)
+    if (!log) return null
+    var st = null
+    try { st = fsNode.statSync(log) } catch (_) { return null }
+    var store = (cacheStore && typeof cacheStore === 'object') ? cacheStore : null
+    var key = String(sessionId)
+    var acc = store ? store[key] : null
+    if (acc && st.size < acc.size) acc = null // 日志轮换/截断（文件变小）→ 缓存作废全量重读
+    if (!acc) {
+      var buf0 = readLogBytes(log, MAINWIN_LOG_CAP)
+      if (!buf0) return null
+      var base0 = st.size - buf0.length // 封顶截断时只丢最老帧（buf 起点对应绝对偏移 base0）
+      acc = mainWinAcc()
+      acc.size = base0 + mainWinAggregateFrames(acc, buf0)
+      acc.mtimeMs = st.mtimeMs
+      if (store) store[key] = acc
+    } else if (st.size > acc.size) {
+      // 增量尾读：只读新增字节段 [acc.size, st.size)；读取失败保留旧聚合值出数（降级不闪断，下轮再试）
+      var buf1 = readLogBytes(log, st.size - acc.size)
+      if (buf1) { acc.size += mainWinAggregateFrames(acc, buf1); acc.mtimeMs = st.mtimeMs }
+    }
+    // st.size === acc.size → 零读直接用缓存
+    if (!acc.hasUsage) return null // 还没有任何 usage 事件 → 静默（客户端不渲染该行）
+    var out = { total: 0, effective: 0, cacheRead: 0, byDay: {} }
+    if (rangeOn(range)) {
+      for (var dk in acc.byDay) {
+        if (!Object.prototype.hasOwnProperty.call(acc.byDay, dk)) continue
+        if (!dayInRange(dk, range)) continue
+        var c = acc.byDay[dk]
+        out.byDay[dk] = { t: c.t, e: c.e, cr: c.cr }
+        out.total += c.t; out.effective += c.e; out.cacheRead += c.cr
+      }
+    } else {
+      out.total = acc.total; out.effective = acc.effective; out.cacheRead = acc.cacheRead
+      for (var dk2 in acc.byDay) {
+        if (!Object.prototype.hasOwnProperty.call(acc.byDay, dk2)) continue
+        var c2 = acc.byDay[dk2]
+        out.byDay[dk2] = { t: c2.t, e: c2.e, cr: c2.cr }
+      }
+    }
+    return out
+  } catch (e) {
+    // 展示统计绝不影响轮询：任何意外一律记日志降级为「无该行」
+    console.error('[task-board] readMainWindowUsage failed (' + sessionId + '):', String(e))
+    return null
+  }
+}
