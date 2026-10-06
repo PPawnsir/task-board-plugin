@@ -466,6 +466,19 @@
       var _a = useState(false), open = _a[0], setOpen = _a[1]
       var _p = useState(null), pos = _p[0], setPos = _p[1]
       var ref = useRef(null); var btnRef = useRef(null)
+      // 开关点击即时反馈（反馈：勾选几秒才同步，task-muw5uudk）：
+      // checked 是受控值（读 Props→state，由 3s 轮询通知才更新），此前 onChange 只发 rpc →
+      // 点下去要等 set-board-config + fetchTasks 双往返（安静板卡上 tasksHash 不变还会被渲染节约吃掉）才翻面。
+      // 口径：**先写 state + notify（点击瞬时翻面）→ 再 rpc('set-board-config') → 失败回滚 state + notify
+      // 并复用错误条 reportReadErr（沿用「读路径错误防线」：绝不让开关停在未落盘的值上）**。
+      // 成功路径的权威纠偏在 kernel.fetchTasks（配置变化检测），此处不重复 fetchTasks：3s 轮询自会带回真值。
+      function cfgRollback(key, prev) { state[key] = prev; notify() }
+      function setCfg(key, next) {
+        var prev = !!state[key] // 乐观更新前的值，失败回滚用
+        state[key] = next === true // 归一成布尔：默认开口径由服务端权威值（fetchTasks）纠偏
+        notify() // 立即翻面，不等 rpc
+        rpc('set-board-config', { key: key, value: next === true }).catch(function (e) { cfgRollback(key, prev); reportReadErr('设置保存失败：' + readErrText(e)) })
+      }
       useEffect(function () { if (!open) return; function onDown(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }; document.addEventListener('mousedown', onDown); return function () { document.removeEventListener('mousedown', onDown) } }, [open])
       function toggle() {
         // position:fixed + 视口坐标：面板容器是 overflow:hidden + maxHeight:60vh，
@@ -494,16 +507,16 @@
           // 学习飞轮 v1 总开关：关掉后不生成候选教训、prompt 不提软召回、详情页不渲染「沉淀」按钮
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '学习反馈'),
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
-            React.createElement('input', { type: 'checkbox', checked: !!props.feedbackEnabled, onChange: function (e) { rpc('set-board-config', { key: 'feedbackEnabled', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('input', { type: 'checkbox', checked: !!props.feedbackEnabled, onChange: function (e) { setCfg('feedbackEnabled', e.target.checked) } }),
             React.createElement('span', null, '候选教训（Verifier 驳回/仲裁结论自动生成候选，Worker prompt 提示先检索历史教训）')),
           // 回执开关（用户要求「回执可以做一个开关，放到设置里」）：派发/完成两类回执各自可关，缺省都开。
           // 只影响回执播报，不影响派发与状态机；歧义裁决通知不在此闸门内（见下行说明文案）。
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '通知'),
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
-            React.createElement('input', { type: 'checkbox', checked: props.notifyDispatch !== false, onChange: function (e) { rpc('set-board-config', { key: 'notifyDispatch', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('input', { type: 'checkbox', checked: props.notifyDispatch !== false, onChange: function (e) { setCfg('notifyDispatch', e.target.checked) } }),
             React.createElement('span', null, '⚡ 派发回执（任务被 Worker/Verifier 领走时播报）')),
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260, marginTop: 3 } },
-            React.createElement('input', { type: 'checkbox', checked: props.notifyDone !== false, onChange: function (e) { rpc('set-board-config', { key: 'notifyDone', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('input', { type: 'checkbox', checked: props.notifyDone !== false, onChange: function (e) { setCfg('notifyDone', e.target.checked) } }),
             React.createElement('span', null, '✅ 完成回执（任务完成或阻塞时聚合播报）')),
           React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '歧义裁决通知不受这两个开关影响（任务等人裁决必须提醒）'),
           // 史诗拆分总开关（板级 epicSplit，缺省 true）：**只关引导，不禁机制**——关掉后 Team 提示词不再
@@ -511,7 +524,7 @@
           // 子卡、史诗自动收口/hooks 状态机照常（用户/主窗口明确要拆时不受阻）。勾选态缺字段=开，与 host 同口径。
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '功能'),
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
-            React.createElement('input', { type: 'checkbox', checked: props.epicSplit !== false, onChange: function (e) { rpc('set-board-config', { key: 'epicSplit', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('input', { type: 'checkbox', checked: props.epicSplit !== false, onChange: function (e) { setCfg('epicSplit', e.target.checked) } }),
             React.createElement('span', null, '🧩 史诗拆分：大任务引导拆为 epic + 子任务')),
           React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '关掉只停引导：显式 parentId 建子卡与史诗自动收口照常工作')) : null)
     }

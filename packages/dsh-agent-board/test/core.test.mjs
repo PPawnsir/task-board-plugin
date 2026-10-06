@@ -1751,8 +1751,8 @@ test('学习飞轮接线：两处触发点 + push-lesson 开关拦截 + prompt/�
   assert.match(host, /feedbackOn\(String\(agent\.id\)\) \? '\\n' \+ LESSON_RECALL_HINT/)
   assert.match(coreSrc, /if \(feedbackEnabled !== false\) p \+= '\\n\\n' \+ LESSON_RECALL_HINT/)
   // 客户端：开关读取 + 设置区 checkbox + 候选卡片「沉淀」按钮 + 关闭即整块不渲染
-  assert.match(cli, /state\.feedbackEnabled = !\(d && d\.feedbackEnabled === false\)/)
-  assert.match(cli, /key: 'feedbackEnabled', value: e\.target\.checked/)
+  assert.match(cli, /state\.feedbackEnabled = cfgKnobOf\(d, 'feedbackEnabled'\)/)
+  assert.match(cli, /setCfg\('feedbackEnabled', e\.target\.checked\)/) // 乐观路径（task-muw5uudk）
   assert.match(cli, /'lesson-candidate': \{ color: C\.brand, label: '候选教训', icon: 'book-open' \}/)
   assert.match(cli, /rpc\('push-lesson', \{ taskId: props\.taskId, text: String\(m\.text \|\| ''\) \}\)/)
   assert.match(cli, /if \(!state\.feedbackEnabled\) msgs = msgs\.filter\(function \(m\) \{ return m && m\.kind !== 'lesson-candidate' \}\)/)
@@ -3114,12 +3114,13 @@ test('回执开关⑤：设置弹层「通知」小节两行开关 + set-board-c
   assert.match(cli, /'通知'/)
   assert.match(cli, /'⚡ 派发回执（任务被 Worker\/Verifier 领走时播报）'/)
   assert.match(cli, /'✅ 完成回执（任务完成或阻塞时聚合播报）'/)
-  assert.match(cli, /checked: props\.notifyDispatch !== false, onChange: function \(e\) \{ rpc\('set-board-config', \{ key: 'notifyDispatch', value: e\.target\.checked \}\)/)
-  assert.match(cli, /checked: props\.notifyDone !== false, onChange: function \(e\) \{ rpc\('set-board-config', \{ key: 'notifyDone', value: e\.target\.checked \}\)/)
+  // 开关行走乐观路径（task-muw5uudk：点击瞬时翻面，rpc 与失败回滚在 setCfg 内；键名分别断言）
+  assert.match(cli, /checked: props\.notifyDispatch !== false, onChange: function \(e\) \{ setCfg\('notifyDispatch', e\.target\.checked\) \}/)
+  assert.match(cli, /checked: props\.notifyDone !== false, onChange: function \(e\) \{ setCfg\('notifyDone', e\.target\.checked\) \}/)
   assert.match(cli, /歧义裁决通知不受这两个开关影响/)
   // 透传链路：state 读取（老 host 缺字段=开）→ TopPanel useState → PoolCfgPopover props
-  assert.match(cli, /state\.notifyDispatch = !\(d && d\.notifyDispatch === false\)/)
-  assert.match(cli, /state\.notifyDone = !\(d && d\.notifyDone === false\)/)
+  assert.match(cli, /state\.notifyDispatch = cfgKnobOf\(d, 'notifyDispatch'\)/) // 读取口径单点定义（task-muw5uudk）
+  assert.match(cli, /state\.notifyDone = cfgKnobOf\(d, 'notifyDone'\)/) // 读取口径单点定义（task-muw5uudk）
   assert.match(cli, /useState\(state\.notifyDispatch\)/)
   assert.match(cli, /feedbackEnabled: fbEnabled, notifyDispatch: ndOn, notifyDone: nnOn/)
   // host 通道：set-board-config 白名单两键布尔原样存 + get-tasks 显式透出确定布尔值
@@ -3682,9 +3683,9 @@ test('epicSplit 接线（源码级）：缓存同步 / Team 引导段门禁 / �
   // ③ UI：入池配置弹层「功能」小节一行开关（勾选态缺字段=开）+ 状态透传链
   assert.match(cli, /'功能'/)
   assert.match(cli, /'🧩 史诗拆分：大任务引导拆为 epic \+ 子任务'/)
-  assert.match(cli, /checked: props\.epicSplit !== false, onChange: function \(e\) \{ rpc\('set-board-config', \{ key: 'epicSplit', value: e\.target\.checked \}\)/)
+  assert.match(cli, /checked: props\.epicSplit !== false, onChange: function \(e\) \{ setCfg\('epicSplit', e\.target\.checked\) \}/)
   assert.match(cli, /关掉只停引导：显式 parentId 建子卡与史诗自动收口照常工作/)
-  assert.match(cli, /state\.epicSplit = !\(d && d\.epicSplit === false\)/)
+  assert.match(cli, /state\.epicSplit = cfgKnobOf\(d, 'epicSplit'\)/) // 读取口径单点定义（task-muw5uudk）
   assert.match(cli, /useState\(state\.epicSplit\)/)
   assert.match(cli, /epicSplit: esOn/)
 })
@@ -3938,4 +3939,117 @@ test('README 双份同步记录可续跑 Worker 三件套（continuable / 重启
   ]) {
     assert.ok(pkg.includes(s), 'README 应记录可续跑 Worker 口径：' + s)
   }
+})
+
+// ===== 设置开关点击即时反馈（task-muw5uudk：乐观更新 + config 变化补渲染）=====
+// 用户实证「池配置弹层勾选点击几秒才同步」。两段根因：
+//   ① 受控 checkbox（checked 读 props）无乐观更新 → 点击要等 set-board-config + fetchTasks 双往返才翻面；
+//   ② fetchTasks 在 tasksHash 不变时跳过 notify（渲染节约设计），config 字段照常赋值但无 notify →
+//      开关要等下一次任意 notify（安静板卡数秒）才翻面。
+// 断言口径：抽真函数原文执行（不猜注释）+ 源码级接线。键名/字段名从源码动态解析——新增开关自动纳入断言。
+test('池配置开关乐观更新：每个开关先写 state+notify 再 rpc，失败回滚并复用错误条（源码级实执）', async () => {
+  const src = readFileSync(new URL('../lib/client/dashboard.js', import.meta.url), 'utf8')
+  function sliceFn(name, next) {
+    const start = src.indexOf('function ' + name + '(')
+    assert.ok(start >= 0, 'lib/client/dashboard.js 应定义 ' + name)
+    const end = src.indexOf('function ' + next + '(', start + 1)
+    assert.ok(end > start, name + ' 之后应紧跟 ' + next)
+    return src.slice(start, end)
+  }
+  const pop = sliceFn('PoolCfgPopover', 'TeamView')
+  // ① 每个开关行的 onChange 只能走 setCfg（乐观路径），不得再直接发 rpc（漏一个就回到「等往返才翻面」）
+  const handlers = [...pop.matchAll(/type: 'checkbox', checked: [^,]+, onChange: function \(e\) \{ ([^}]*) \}/g)].map(m => m[1])
+  assert.ok(handlers.length >= 3, '池配置应有 ≥3 个开关行（实测 ' + handlers.length + ' 个）')
+  const keys = []
+  for (const h of handlers) {
+    const m = h.match(/^setCfg\('([a-zA-Z]+)', e\.target\.checked\)$/)
+    assert.ok(m, '开关 onChange 必须是 setCfg(键, e.target.checked) 单调用，实测：' + h)
+    keys.push(m[1])
+  }
+  assert.deepEqual(keys.slice().sort(), ['epicSplit', 'feedbackEnabled', 'notifyDispatch', 'notifyDone'])
+  // ② 乐观序：先写 state、再 notify、最后才 rpc（顺序颠倒 = 点击仍等往返）
+  const setCfgMatch = src.match(/function setCfg\(key, next\) \{[\s\S]*?\n      \}/)
+  assert.ok(setCfgMatch, '应定义 setCfg')
+  const body = setCfgMatch[0]
+  const iState = body.indexOf('state[key] = next === true')
+  const iNotify = body.indexOf('notify()')
+  const iRpc = body.indexOf("rpc('set-board-config'")
+  assert.ok(iState >= 0 && iNotify > iState && iRpc > iNotify, '乐观序必须是 写 state → notify → rpc')
+  // ③ 失败回滚分支在位：回滚 state + notify 提示，且回滚先于报错（绝不让开关停在未落盘的值上）
+  const iCatch = body.indexOf('.catch(function (e) {')
+  assert.ok(iCatch > iRpc, 'setCfg 必须有 .catch 失败分支')
+  const catchBody = body.slice(iCatch)
+  assert.match(catchBody, /cfgRollback\(key, prev\)/)
+  assert.match(catchBody, /reportReadErr\('设置保存失败：' \+ readErrText\(e\)\)/)
+  assert.ok(catchBody.indexOf('cfgRollback(key, prev)') < catchBody.indexOf('reportReadErr('), '先回滚再报错')
+  const rollbackMatch = pop.match(/function cfgRollback\(key, prev\) \{ state\[key\] = prev; notify\(\) \}/)
+  assert.ok(rollbackMatch, '回滚函数应同时还原 state 并 notify')
+  // ④ 真执行：乐观翻面 + 成功不回滚 / 失败回滚 + 报错（抽真函数原文跑，不是断言注释）
+  function mkHarness(fail) {
+    const h = { state: { epicSplit: true, feedbackEnabled: false }, notified: 0, calls: [], errs: [] }
+    h.notify = () => { h.notified++ }
+    h.reportReadErr = (m) => { h.errs.push(m) }
+    h.rpc = (method, args) => { h.calls.push([method, args]); return fail ? Promise.reject(new Error('boom')) : Promise.resolve({ ok: true }) }
+    h.readErrText = (e) => String((e && e.message) || e || '网络异常')
+    h.setCfg = new Function('state', 'notify', 'rpc', 'reportReadErr', 'readErrText',
+      rollbackMatch[0] + '\n' + body + '\nreturn setCfg')(h.state, h.notify, h.rpc, h.reportReadErr, h.readErrText)
+    return h
+  }
+  const ok = mkHarness(false)
+  ok.setCfg('epicSplit', false)
+  assert.equal(ok.state.epicSplit, false)                                   // 点击瞬时翻面（rpc 尚未 resolve）
+  assert.equal(ok.notified, 1)
+  assert.deepEqual(ok.calls[0], ['set-board-config', { key: 'epicSplit', value: false }])
+  await Promise.resolve().then(() => {})                                    // 放行成功分支微任务
+  assert.equal(ok.state.epicSplit, false)                                   // 成功路径不回滚
+  const bad = mkHarness(true)
+  bad.setCfg('feedbackEnabled', true)
+  assert.equal(bad.state.feedbackEnabled, true)                             // 乐观置真
+  assert.equal(bad.notified, 1)
+  await Promise.resolve().then(() => {}).then(() => {})
+  assert.equal(bad.state.feedbackEnabled, false)                            // 失败回滚到旧值
+  assert.equal(bad.notified, 2)                                             // 回滚立即补 notify（开关不留假态）
+  assert.equal(bad.errs.length, 1)
+  assert.match(bad.errs[0], /^设置保存失败：boom$/)
+})
+
+test('fetchTasks 设置开关权威纠偏：hash 不变时配置变化补 notify + hash 短路结构保持（源码级）', () => {
+  const src = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
+  // ① 取值口径单点定义（缺字段/脏值=开，只有显式 false 才关），且四个开关字段确由它赋值
+  const knobSrc = src.match(/function cfgKnobOf\(src, key\) \{[^\n]*\n/)[0]
+  const changedSrc = src.match(/function cfgKnobsChanged\(a, b\) \{[^\n]*\n/)[0]
+  const cfgKnobOf = new Function(knobSrc + '\nreturn cfgKnobOf')()
+  const cfgKnobsChanged = new Function(changedSrc + '\nreturn cfgKnobsChanged')()
+  assert.equal(cfgKnobOf({}, 'notifyDispatch'), true)                            // 老 host 无字段 → 开
+  assert.equal(cfgKnobOf({ notifyDispatch: false }, 'notifyDispatch'), false)    // 只有显式 false 才关
+  const KNOBS = ['feedbackEnabled', 'notifyDispatch', 'notifyDone', 'epicSplit']
+  for (const k of KNOBS) assert.match(src, new RegExp("state\\." + k + " = cfgKnobOf\\(d, '" + k + "'\\)"))
+  // ② 真执行比较器：四个开关任一翻转都算变化（漏一个 → 该开关又要等下一次任意 notify）
+  const allOn = { feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true }
+  assert.equal(cfgKnobsChanged(allOn, Object.assign({}, allOn)), false)
+  for (const k of KNOBS) {
+    assert.equal(cfgKnobsChanged(allOn, Object.assign({}, allOn, { [k]: false })), true, k + ' 翻转必须被检测到')
+  }
+  // ③ 接线：赋值前快照（含全部开关）→ 赋值后比对 → 仅在 hash 短路（!tasksChanged）时补 notify
+  const snap = src.match(/var cfgKnobs = \{[^}]*\}/)
+  assert.ok(snap, 'fetchTasks 应在赋值前快照开关字段')
+  const iSnap = src.indexOf(snap[0])
+  for (const k of KNOBS) {
+    assert.ok(snap[0].includes(k + ': state.' + k), '快照应含 ' + k)
+    assert.ok(src.indexOf("state." + k + " = cfgKnobOf(d, '" + k + "')") > iSnap, k + ' 赋值必须在快照之后')
+  }
+  assert.match(src, /var cfgDelta = !tasksChanged && cfgKnobsChanged\(cfgKnobs, state\)/)
+  assert.match(src, /if \(cfgDelta\) notify\(\)/)
+  const iDelta = src.indexOf('var cfgDelta =')
+  const iNotify = src.indexOf('if (cfgDelta) notify()')
+  const iEsc = src.indexOf('if (tasksChanged) {\n          var newEsc')
+  assert.ok(iDelta < iNotify && iEsc > iNotify, '补 notify 必须在配置赋值之后、escalation 分支之前')
+  // ④ 既有渲染节约（tasksHash 短路）逐字保持——本次只加不删
+  assert.match(src, /var tasksChanged = !newHash \|\| newHash !== state\.tasksHash/)
+  assert.match(src, /if \(tasksChanged\) \{\s*\n\s*state\.tasksHash = newHash\s*\n\s*state\.tasks = \(d && d\.tasks\) \|\| \[\]\s*\n\s*\}/)
+  // ⑤ 产物接线：client.js 为拼装产物，真源改动必须已重建（产物与源一致由 build-client --check 兜底）
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(cli, /function cfgKnobOf\(src, key\)/)
+  assert.match(cli, /if \(cfgDelta\) notify\(\)/)
+  assert.match(cli, /function setCfg\(key, next\)/)
 })

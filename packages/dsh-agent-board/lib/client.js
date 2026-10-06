@@ -297,6 +297,13 @@ function apply(ctx) {
       }
     }
 
+    // ===== 设置开关权威纠偏（反馈：勾选几秒才同步，task-muw5uudk）=====
+    // 开关字段（学习反馈/派发回执/完成回执/史诗拆分）在 get-tasks 里**无条件**照常赋值，但取值口径是
+    // 「缺字段/脏值=开，只有显式 false 才关」，与 host core.cfg 同口径——单点定义，避免纠偏把脏值当真值。
+    function cfgKnobOf(src, key) { return !(src && src[key] === false) }
+    // 变更检测：与 notify 同类的轻量浅比较（只看这几个布尔开关；settings 无嵌套对象）。
+    function cfgKnobsChanged(a, b) { return a.feedbackEnabled !== b.feedbackEnabled || a.notifyDispatch !== b.notifyDispatch || a.notifyDone !== b.notifyDone || a.epicSplit !== b.epicSplit }
+
     function fetchTasks() {
       if (!state.sessionId) return
       var epoch = reqEpoch
@@ -311,6 +318,11 @@ function apply(ctx) {
         // 老 host 不返回 tasksHash → 恒视为变化，行为与旧版完全一致。
         var newHash = (d && d.tasksHash) || ''
         var tasksChanged = !newHash || newHash !== state.tasksHash
+        // 设置开关的权威纠偏（task-muw5uudk）：开关不走 tasksHash，hash 不变分支里照常赋值也没有 notify
+        // → 勾选框必须等下一次任意 notify 才翻面（安静板卡数秒）。这里在赋值前快照、赋值后比对，
+        // 有变化就补一次 notify：乐观更新（PoolCfgPopover）已让点击瞬时翻面，本兜底是服务端权威值纠偏
+        // （乐观值与服务端不一致时以服务端为准，失败回滚亦由此收敛）。
+        var cfgKnobs = { feedbackEnabled: state.feedbackEnabled, notifyDispatch: state.notifyDispatch, notifyDone: state.notifyDone, epicSplit: state.epicSplit }
         if (tasksChanged) {
           state.tasksHash = newHash
           state.tasks = (d && d.tasks) || []
@@ -337,12 +349,15 @@ function apply(ctx) {
         // 缺省兼容——老 host 不返回该字段时置空对象，卡片/详情层遇空一律不渲染相关元素
         state.childStats = (d && d.childStats) || {}
         // 学习飞轮 v1 能力检测：老 host 不返回该字段 → 视为开启（默认开）；只有显式 false 才关。
-        state.feedbackEnabled = !(d && d.feedbackEnabled === false)
+        state.feedbackEnabled = cfgKnobOf(d, 'feedbackEnabled')
         // 回执开关（设置区「通知」）：同口径——老 host 不返回 → 视为开，只有显式 false 才关
-        state.notifyDispatch = !(d && d.notifyDispatch === false)
-        state.notifyDone = !(d && d.notifyDone === false)
+        state.notifyDispatch = cfgKnobOf(d, 'notifyDispatch')
+        state.notifyDone = cfgKnobOf(d, 'notifyDone')
         // 史诗拆分总开关（设置区「功能」）：同上——老 host 不返回 = 开（引导照旧），只有显式 false 才关
-        state.epicSplit = !(d && d.epicSplit === false)
+        state.epicSplit = cfgKnobOf(d, 'epicSplit')
+        // 开关有变 → 补一次 notify（tasksChanged 分支已在上面 notify 过，这里只管 hash 不变时被跳过的那次）
+        var cfgDelta = !tasksChanged && cfgKnobsChanged(cfgKnobs, state)
+        if (cfgDelta) notify()
         applyIsRoot(!d || d.isRoot !== false) // 原始值只喂给防抖器，消费点一律读 isRootStable
         if (!state.isRootStable && state.open) { state.open = false; state.detailId = null } // 子代理会话（含连续 3 次 false 的真降级）：强制收起看板
         if (d && d.dispatchInfo && d.dispatchInfoAt && Date.now() - new Date(d.dispatchInfoAt).getTime() < 120000) { state.dispatchInfo = d.dispatchInfo } else { state.dispatchInfo = '' } // 瞬时通知 2min 内有效，过期强制清空（服务端写后不清曾致残留数天）
@@ -1760,6 +1775,19 @@ function apply(ctx) {
       var _a = useState(false), open = _a[0], setOpen = _a[1]
       var _p = useState(null), pos = _p[0], setPos = _p[1]
       var ref = useRef(null); var btnRef = useRef(null)
+      // 开关点击即时反馈（反馈：勾选几秒才同步，task-muw5uudk）：
+      // checked 是受控值（读 Props→state，由 3s 轮询通知才更新），此前 onChange 只发 rpc →
+      // 点下去要等 set-board-config + fetchTasks 双往返（安静板卡上 tasksHash 不变还会被渲染节约吃掉）才翻面。
+      // 口径：**先写 state + notify（点击瞬时翻面）→ 再 rpc('set-board-config') → 失败回滚 state + notify
+      // 并复用错误条 reportReadErr（沿用「读路径错误防线」：绝不让开关停在未落盘的值上）**。
+      // 成功路径的权威纠偏在 kernel.fetchTasks（配置变化检测），此处不重复 fetchTasks：3s 轮询自会带回真值。
+      function cfgRollback(key, prev) { state[key] = prev; notify() }
+      function setCfg(key, next) {
+        var prev = !!state[key] // 乐观更新前的值，失败回滚用
+        state[key] = next === true // 归一成布尔：默认开口径由服务端权威值（fetchTasks）纠偏
+        notify() // 立即翻面，不等 rpc
+        rpc('set-board-config', { key: key, value: next === true }).catch(function (e) { cfgRollback(key, prev); reportReadErr('设置保存失败：' + readErrText(e)) })
+      }
       useEffect(function () { if (!open) return; function onDown(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }; document.addEventListener('mousedown', onDown); return function () { document.removeEventListener('mousedown', onDown) } }, [open])
       function toggle() {
         // position:fixed + 视口坐标：面板容器是 overflow:hidden + maxHeight:60vh，
@@ -1788,16 +1816,16 @@ function apply(ctx) {
           // 学习飞轮 v1 总开关：关掉后不生成候选教训、prompt 不提软召回、详情页不渲染「沉淀」按钮
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '学习反馈'),
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
-            React.createElement('input', { type: 'checkbox', checked: !!props.feedbackEnabled, onChange: function (e) { rpc('set-board-config', { key: 'feedbackEnabled', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('input', { type: 'checkbox', checked: !!props.feedbackEnabled, onChange: function (e) { setCfg('feedbackEnabled', e.target.checked) } }),
             React.createElement('span', null, '候选教训（Verifier 驳回/仲裁结论自动生成候选，Worker prompt 提示先检索历史教训）')),
           // 回执开关（用户要求「回执可以做一个开关，放到设置里」）：派发/完成两类回执各自可关，缺省都开。
           // 只影响回执播报，不影响派发与状态机；歧义裁决通知不在此闸门内（见下行说明文案）。
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '通知'),
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
-            React.createElement('input', { type: 'checkbox', checked: props.notifyDispatch !== false, onChange: function (e) { rpc('set-board-config', { key: 'notifyDispatch', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('input', { type: 'checkbox', checked: props.notifyDispatch !== false, onChange: function (e) { setCfg('notifyDispatch', e.target.checked) } }),
             React.createElement('span', null, '⚡ 派发回执（任务被 Worker/Verifier 领走时播报）')),
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260, marginTop: 3 } },
-            React.createElement('input', { type: 'checkbox', checked: props.notifyDone !== false, onChange: function (e) { rpc('set-board-config', { key: 'notifyDone', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('input', { type: 'checkbox', checked: props.notifyDone !== false, onChange: function (e) { setCfg('notifyDone', e.target.checked) } }),
             React.createElement('span', null, '✅ 完成回执（任务完成或阻塞时聚合播报）')),
           React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '歧义裁决通知不受这两个开关影响（任务等人裁决必须提醒）'),
           // 史诗拆分总开关（板级 epicSplit，缺省 true）：**只关引导，不禁机制**——关掉后 Team 提示词不再
@@ -1805,7 +1833,7 @@ function apply(ctx) {
           // 子卡、史诗自动收口/hooks 状态机照常（用户/主窗口明确要拆时不受阻）。勾选态缺字段=开，与 host 同口径。
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '功能'),
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
-            React.createElement('input', { type: 'checkbox', checked: props.epicSplit !== false, onChange: function (e) { rpc('set-board-config', { key: 'epicSplit', value: e.target.checked }).then(fetchTasks).catch(function () {}) } }),
+            React.createElement('input', { type: 'checkbox', checked: props.epicSplit !== false, onChange: function (e) { setCfg('epicSplit', e.target.checked) } }),
             React.createElement('span', null, '🧩 史诗拆分：大任务引导拆为 epic + 子任务')),
           React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '关掉只停引导：显式 parentId 建子卡与史诗自动收口照常工作')) : null)
     }

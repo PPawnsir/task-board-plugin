@@ -284,6 +284,13 @@
       }
     }
 
+    // ===== 设置开关权威纠偏（反馈：勾选几秒才同步，task-muw5uudk）=====
+    // 开关字段（学习反馈/派发回执/完成回执/史诗拆分）在 get-tasks 里**无条件**照常赋值，但取值口径是
+    // 「缺字段/脏值=开，只有显式 false 才关」，与 host core.cfg 同口径——单点定义，避免纠偏把脏值当真值。
+    function cfgKnobOf(src, key) { return !(src && src[key] === false) }
+    // 变更检测：与 notify 同类的轻量浅比较（只看这几个布尔开关；settings 无嵌套对象）。
+    function cfgKnobsChanged(a, b) { return a.feedbackEnabled !== b.feedbackEnabled || a.notifyDispatch !== b.notifyDispatch || a.notifyDone !== b.notifyDone || a.epicSplit !== b.epicSplit }
+
     function fetchTasks() {
       if (!state.sessionId) return
       var epoch = reqEpoch
@@ -298,6 +305,11 @@
         // 老 host 不返回 tasksHash → 恒视为变化，行为与旧版完全一致。
         var newHash = (d && d.tasksHash) || ''
         var tasksChanged = !newHash || newHash !== state.tasksHash
+        // 设置开关的权威纠偏（task-muw5uudk）：开关不走 tasksHash，hash 不变分支里照常赋值也没有 notify
+        // → 勾选框必须等下一次任意 notify 才翻面（安静板卡数秒）。这里在赋值前快照、赋值后比对，
+        // 有变化就补一次 notify：乐观更新（PoolCfgPopover）已让点击瞬时翻面，本兜底是服务端权威值纠偏
+        // （乐观值与服务端不一致时以服务端为准，失败回滚亦由此收敛）。
+        var cfgKnobs = { feedbackEnabled: state.feedbackEnabled, notifyDispatch: state.notifyDispatch, notifyDone: state.notifyDone, epicSplit: state.epicSplit }
         if (tasksChanged) {
           state.tasksHash = newHash
           state.tasks = (d && d.tasks) || []
@@ -324,12 +336,15 @@
         // 缺省兼容——老 host 不返回该字段时置空对象，卡片/详情层遇空一律不渲染相关元素
         state.childStats = (d && d.childStats) || {}
         // 学习飞轮 v1 能力检测：老 host 不返回该字段 → 视为开启（默认开）；只有显式 false 才关。
-        state.feedbackEnabled = !(d && d.feedbackEnabled === false)
+        state.feedbackEnabled = cfgKnobOf(d, 'feedbackEnabled')
         // 回执开关（设置区「通知」）：同口径——老 host 不返回 → 视为开，只有显式 false 才关
-        state.notifyDispatch = !(d && d.notifyDispatch === false)
-        state.notifyDone = !(d && d.notifyDone === false)
+        state.notifyDispatch = cfgKnobOf(d, 'notifyDispatch')
+        state.notifyDone = cfgKnobOf(d, 'notifyDone')
         // 史诗拆分总开关（设置区「功能」）：同上——老 host 不返回 = 开（引导照旧），只有显式 false 才关
-        state.epicSplit = !(d && d.epicSplit === false)
+        state.epicSplit = cfgKnobOf(d, 'epicSplit')
+        // 开关有变 → 补一次 notify（tasksChanged 分支已在上面 notify 过，这里只管 hash 不变时被跳过的那次）
+        var cfgDelta = !tasksChanged && cfgKnobsChanged(cfgKnobs, state)
+        if (cfgDelta) notify()
         applyIsRoot(!d || d.isRoot !== false) // 原始值只喂给防抖器，消费点一律读 isRootStable
         if (!state.isRootStable && state.open) { state.open = false; state.detailId = null } // 子代理会话（含连续 3 次 false 的真降级）：强制收起看板
         if (d && d.dispatchInfo && d.dispatchInfoAt && Date.now() - new Date(d.dispatchInfoAt).getTime() < 120000) { state.dispatchInfo = d.dispatchInfo } else { state.dispatchInfo = '' } // 瞬时通知 2min 内有效，过期强制清空（服务端写后不清曾致残留数天）
