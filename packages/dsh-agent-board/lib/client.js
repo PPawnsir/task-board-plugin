@@ -1274,11 +1274,15 @@ function apply(ctx) {
                 var seq = r.role === 'verifier' ? (++vN) : (++wN)
                 var isCur = (r.role === 'worker' && task.claimedBy === r.id) || (r.role === 'verifier' && task.verifierRun === r.id)
                 var okMark = r.outcome === 'completed' ? ' ✅' : (r.outcome === 'running' ? ' ⏳' : (r.outcome ? ' ⚠' : ''))
+                // 续跑标记（卡2 落的 runs[i].resume 字段；卡3 Step3 在此显式标注）：同一条会话的第二次及以后
+                // 派发是「冷复活续跑」而不是新开 Worker，不标出来会让人把「第 2/3 次」误读成又开了一个新会话。
+                // 只读 r.resume，不猜（老留档没有该字段 → 零渲染，与改造前逐字一致）。
+                var rsMark = r.resume === true ? ' ↻' : ''
                 return React.createElement('button', {
                   key: i, onClick: function () { if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(r.id) },
-                  title: rm.tip + ' 第 ' + seq + ' 次' + (r.at ? ' · ' + ago(r.at) : '') + (r.model ? ' · ' + r.model : '') + (r.outcome ? ' · ' + r.outcome : '') + '（' + r.id + '）',
+                  title: rm.tip + ' 第 ' + seq + ' 次' + (r.resume === true ? '（↻ 冷复活续跑：沿用上一次的子会话，非新开）' : '') + (r.at ? ' · ' + ago(r.at) : '') + (r.model ? ' · ' + r.model : '') + (r.outcome ? ' · ' + r.outcome : '') + '（' + r.id + '）',
                   style: { fontSize: 10, padding: '2px 8px', border: '1px solid ' + (isCur ? rm.color : C.border), borderRadius: 3, background: isCur ? C.card : 'transparent', color: rm.color, cursor: 'pointer', fontWeight: isCur ? 600 : 400 }
-                }, '→ ' + rm.tip + ' #' + seq + (r.at ? ' · ' + ago(r.at) : '') + okMark)
+                }, '→ ' + rm.tip + ' #' + seq + (r.at ? ' · ' + ago(r.at) : '') + okMark + rsMark)
               })))
         })(),
         canIntervene ? React.createElement('div', { style: { marginTop: 8, padding: '6px 8px', border: '1px dashed ' + C.warn, borderRadius: 6 } },

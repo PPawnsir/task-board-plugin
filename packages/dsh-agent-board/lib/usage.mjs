@@ -1,5 +1,6 @@
 // dsh-agent-board — Token 消耗统计（lib/usage.mjs）
-// v4 会话日志定位 / zstd 分帧 / usage 聚合：纯函数 + node 模块，不碰 ctx 与共享状态。
+// v4 会话日志定位 / zstd 分帧 / usage 聚合（含可续跑 Worker 的 seq 水位线增量结算）：纯函数 + node 模块，
+// 不碰 ctx 与共享状态。
 // index.mjs 薄壳 re-export findRunLog/readRunUsage/aggregateUsageSummary（对外契约不变）；
 // readLogBytes/readLogFrames 新增 export 供 rpc.mjs 的 agent-activity 复用（原 index.mjs 模块内私有）。
 import { zstdDecompressSync } from 'node:zlib'
@@ -76,25 +77,38 @@ export function readLogFrames(buf, limit) {
   return out
 }
 
-// 聚合一次 run 的全部 token 消耗：{input, output, cacheRead, cacheWrite, total, model}。
-// 逐帧扫 assistant/message 的 data.usage 累加（无 usage 的事件跳过、没有 usage 事件返回 null）。
-// total 优先取日志自带的 totalTokens，缺失时才用 输入+输出+缓存读+缓存写 兜底。
-export function readRunUsage(runId, sessionsRoot) {
+// ===== 水位线（sinceSeq）：可续跑 Worker 的「同一份日志多次结算」防重复计账 =====
+// 背景（task-muw5hhsh 卡3）：一次性 run 各自一份日志文件，全量累加即正确；但 continuable 的
+// 硬超时 interrupt 留存 + 重派冷复活续跑**沿用同一个子会话 → 同一份 v4 日志**——一个会话被结算
+// 多次，整份全量累加会把上几轮的 token 反复记进看板（本机实测同一 childId 结算两次＝双倍账）。
+// 水位线取事件自带的全序字段 seq（v4 日志每条事件都带 seq，会话内单调递增——用本机真实日志逐帧核对）：
+//   结算时只认 seq > sinceSeq 的 assistant/message 增量帧，并把本份日志见过的 maxSeq 回给调用方
+//   落在 t.runs[].usageSeq 上，下一轮结算从该水位继续。本轮完全没产出（maxSeq 不前进）→ 返回 null
+//   （不是 0 值对象，调用方按「暂无数据」跳过），绝不再记一笔空账。
+// sinceSeq 缺省（undefined/非正数）＝全量累加 → one-shot 路径逐字不变（水位的「首次结算」形态）。
+export function readRunUsage(runId, sessionsRoot, sinceSeq) {
   try {
     var log = findRunLog(runId, sessionsRoot)
     if (!log) return null
-    // 整份读取：usage 必须全量累加（单次 run 日志量级 MB，结算时只读一次）。
+    // 整份读取：usage 需要全部帧（单次 run 日志量级 MB，结算时只读一次）。
     // 极端超大日志封顶 64MB——只丢最老的历史帧，好过结算路径被一次同步 IO 拖住。
+    // 注意与水位线的关系：封顶只可能丢「最老」帧（seq 小的），水位线语义不受影响。
     var buf = readLogBytes(log, 64 * 1024 * 1024)
     if (!buf) return null
     var frames = readLogFrames(buf, 0)
-    var out = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, model: '' }
+    var out = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, model: '', maxSeq: -1 }
     var hasUsage = false
+    var from = numOr0(sinceSeq)
+    // 帧序是「从新到旧」，逐帧扫即可；maxSeq 取全份日志的最大 seq（含无 usage 的事件）——
+    // 这样「本轮只有工具调用、没有新助手消息」也不会让水位线倒退（下一轮的增量判定仍然正确）。
     for (var fi = 0; fi < frames.length; fi++) {
       var evs = frames[fi]
       for (var i = 0; i < evs.length; i++) {
         var e = evs[i]; var dta = (e && e.data) || {}
+        var sq = numOr0(e && e.seq)
+        if (sq > out.maxSeq) out.maxSeq = sq
         if (e && e.type === 'request/context' && dta.model && !out.model) out.model = String(dta.model)
+        if (from > 0 && sq <= from) continue // 已结算过的历史帧（水位线之前）不再计入
         if (!e || e.type !== 'assistant/message') continue
         var u = dta.usage
         if (!u) continue

@@ -39,6 +39,7 @@ export function apply(ctx) {
                            //   id = 该次 run 的子会话 id（一次性=run.id，continuable=childId，语义统一）；
                            //   continuable Worker 无 run（持久子会话），turn 结算靠 agent/status 事件见 dispatch.mjs
       dispatchedEver: {},  // sid -> { runId: true }（回执判定：区分派发执行 vs 主窗口手动）
+      reconcileDone: {},   // sid -> true（可续跑 Worker 重启 reconcile 的 per-host 一次性标记，见 dispatch.mjs）
       badModels: {},       // 模型熔断坏名单（sid|model → true）
       escNotifyTimers: {}, // 歧义通知 25s 去抖（同任务新调度顶替旧调度）
       receiptBuf: {},      // 回执 45s/满 5 条聚合窗口

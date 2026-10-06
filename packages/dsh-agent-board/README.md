@@ -150,7 +150,7 @@ draft → pending → in-progress → verifying → resolved → archived
 
 ### 一次性派发（v74 去池化）
 
-- 每个任务 spawn 一个**一次性子代理**（Worker/Verifier），上下文全量注入 prompt，做完即销毁——无常驻池、无池化状态残留
+- 每个任务 spawn 一个**一次性子代理**（Worker/Verifier），上下文全量注入 prompt，做完即销毁——无常驻池、无池化状态残留（Worker 的可续跑形态见上一节「可续跑 Worker」，Verifier 与 hook run 恒为一次性）
 - **预研上下文注入（contextFiles/contextNotes，瘦身分离形态）**：主窗口调研时读过的文件与笔记随子代理的**首条 prompt 一次性注入**——调研笔记全文（notes，≤8000 字符）+ **文件清单**（每行「`路径:L起-L止` — 一句用途」）；**文件内容本体不进 prompt**，由子代理用 `read` 工具按行号范围按需自取（执行时盘面更新鲜；旧形态「host 读盘取正文注入」既受单文件 8KB/总包 40KB 截断，又随 runtime 快照每轮刷新重发——自治 run 实测 6×48.8K 字符≈白烧 75–100K token）；UI 侧调研门禁——full/work 且声明了 touches 却未附调研的卡片亮「⚠️ 无调研」徽章，详情页「调研注入」区列 files 清单 + notes 字数（无则明示）
   - **锚点行段与用途**：`contextFiles` 条目写法「`path:L2350-L2420` / `path:L2350`」+ 可选「` — 一句用途`」（em dash 两侧空格分隔；缺省只给路径行号）——锚点只认尾部 `:L<行号>`（兼容 Windows 盘符），清单里原样带上行号供子代理直接按行段 read；锚点写错（`:L0` / `:L5-L2`）自动剥掉，不误导子代理去读空段
   - **按需自取代替 host 预切段**：派发侧零读盘（不再切行段、不再附结构索引块）——子代理自己 `read(path, offset, limit)` 取需要的那段，清单里给出的行号就是起点；`task_preview_context` / `preview-context` 返回的也是这份瘦身清单（不是文件正文）
@@ -162,6 +162,18 @@ draft → pending → in-progress → verifying → resolved → archived
 - 驳回详情全量带回：三条驳回路径（`board_verdict` 工具 / Verifier 文本结算 / 手动 `task_verify`·`verify-task`）统一往 `t.messages` 落一条 `kind: "rejection"` 完整驳回包（summary + checks 逐条核对证据；手动路径补写 `t.verification`），经 `buildMessages` 全量注入重派 Worker prompt——新 Worker 据此返工，不再只看到 300 字截断的 history 记录
 - 手动派发：详情页「派发 / 派发验收」按钮可随时手动触发单任务派发（auto 模式补派、manual 模式主通道）
 - 会话隔离：看板按会话分桶，多会话互不干扰
+
+### 可续跑 Worker（continuable，卡1~卡3 已落地，默认开）
+
+**一句话**：Worker 从「一次性 run」变成**持久子会话**——超时不再丢现场，重派时原会话**冷复活**接着干；Verifier 与 hook run 仍是一次性。
+
+- **continuable 化**：Worker 走 `subagents.startContinuable`（rec 持 `childId`），turn 结束改由 host 事件 `agent/status` 的 `running→idle` 观测（一次性路径本就用 `run.result` 结算，未受影响）；`claimedBy` / `t.runs[].id` / 详情页会话跳转的 id 语义不变（仍是子会话 id）
+- **硬超时 interrupt 留存（不销毁）**：失败/硬超时结算时只对子会话发取消信号打断当前 turn——Activation、未认领收件箱、已发布后代全部保留，子会话 idle 后仍可被唤醒；`interrupt` 失败（会话已死/无权限）绝不阻断结算：任务照常回待办，只给该 run 落 `noResume` 标记（重派直接起新 Worker，不空唤醒）
+- **重派冷复活续跑**：命中「上次 continuable Worker 结局=超时/失败」的待办卡时，不 spawn 新会话，改 `subagents.sendMessage(活父 Agent, childId, 断点续跑指令)`——子会话带着上一轮全部上下文复活，先盘点工作树再从断点继续；`t.runs[]` 追加一条 `resume: true` 记录（详情页历史会话按钮带 **↻** 标记），续跑同样计入三连败计数；续跑不可用（`NOT_RESUMABLE` 等）→ 回落全新 Worker，并把原因写进任务消息随首条 prompt 注入
+- **续跑基线（不拿旧文本冒充交付物）**：续跑轮结算只认**基线字节之后**新写的助手文本——一个字没产出就走「空文本按失败」重排，绝不把上一轮（被中断那次）的残留文本当成本轮交付物推进验收
+- **重启 reconcile（找回活跃续跑 Worker）**：host 重启会清空内存里的活跃 run 表，但持久子会话还活着。首轮派发周期对「进行中且无活跃 run」的卡查一次 `listChildren(root)`：仍在列 → 重建 rec 观测（监听器本就在）并重挂两级超时臂、基线取当前日志字节数；不在列 → 视为会话已死，走硬超时等价物（回待办重排 + 留一行流转记录），不占 Worker 并发位
+- **usage 增量计账（按 seq 水位线）**：注意「一个持久子会话被结算多次」是新形态——整份日志全量累加会把前几轮的 token 反复记账（实测同一 childId 结算两次＝双倍）。现按 v4 日志事件自带的 `seq` 记水位线（落在 `t.runs[].usageSeq`）：每次结算只累加水位线之后的 `assistant/message` 增量，本轮没新增量就一行都不记；one-shot 路径（每 run 独立日志）行为逐字不变
+- **开关 `workerContinuable`（默认开）**：关掉即逐字回退旧的一次性路径（零 `startContinuable`/零 `sendMessage`/零 `interrupt`，结算仍走 `run.result`+`dispose`）；Verifier 与 hooks（`hook-pre`/`hook-post`）**保持一次性**，不受该开关影响
 
 ### 工作模式（三档）
 
@@ -228,11 +240,11 @@ v1.6.0 起 host 端从单体 index.mjs（1487 行）拆为薄壳 + 7 个领域�
 | 模块 | 域 | 内容 |
 |---|---|---|
 | `policy.mjs` | 策略层 | 粒度治理软闸门 + 学习飞轮候选教训（纯函数零状态） |
-| `usage.mjs` | 统计 | v4 会话日志定位 / zstd 分帧 / token usage 聚合（纯函数；有效消耗 `effectiveTokens` + `byDay` 双指标 `{t,e}` 聚合，兼容老 number 日账） |
+| `usage.mjs` | 统计 | v4 会话日志定位 / zstd 分帧 / token usage 聚合（纯函数；有效消耗 `effectiveTokens` + `byDay` 双指标 `{t,e}` 聚合，兼容老 number 日账；`sinceSeq` 水位线增量结算——同一持久子会话多次结算不重复计账） |
 | `session.mjs` | 会话 | root 解析缓存 / 会话 id 归一 / workMode 派生 / runsFor |
 | `store.mjs` | 持久化 | boardPath / rt / wt 原子落盘 / 跨重启继承 / fileLocks 串行化 / mutateLocked |
 | `notify.mjs` | 通知 | makeMsg / 歧义 25s 去抖 / 回执聚合 + 空闲门控 / 投递前过滤 |
-| `dispatch.mjs` | 派发引擎 | poolCycle / spawnOneShot / settleRun / 两级超时 / 孤儿回收 |
+| `dispatch.mjs` | 派发引擎 | poolCycle / spawnOneShot / settleRun / 两级超时 / 孤儿回收 / 可续跑 Worker（continuable + 重启 reconcile + usage 水位线） |
 | `rpc.mjs` | 接口层 | RPC 路由 + 13 个 Agent 工具注册 |
 
 （store→dispatch 的循环依赖由 `deps.poolCycle` 晚绑定解开；index.mjs 对外 re-export 契约不变。）

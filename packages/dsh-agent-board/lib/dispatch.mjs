@@ -14,6 +14,10 @@ export function createDispatch(ctx, state, deps) {
     // 清单只给「路径:L行号 — 一句用途」，文件内容由 Worker 自己用 read 工具按行号范围自取。
     var rt = deps.rt, wt = deps.wt, mutateLocked = deps.mutateLocked, kickCycle = deps.kickCycle
     var rootForSession = deps.rootForSession, withTimeout = deps.withTimeout, runsFor = deps.runsFor, feedbackOn = deps.feedbackOn
+    // 会话日志根（可选注入）：usage 增量结算（卡3）必须「真读真日志」才测得出重复计账——
+    // 生产不注入（usage.mjs 回退 os.homedir()），单测注入临时目录（否则只能开子进程改 HOME，
+    // 而同进程改 os.homedir 会污染整个测试进程）。老宿主/老测试桩无此依赖 → undefined，行为不变。
+    var sessionsRoot = (typeof deps.sessionsRoot === 'string' && deps.sessionsRoot) ? deps.sessionsRoot : undefined
     // 史诗拆分总开关读取器（epicSplit，缺省 true）：与 feedbackOn 同源（session 缓存，rt() 同步）——
     // Team 提示词组装是同步函数，只能读缓存，不能读盘。
     var epicSplitOn = deps.epicSplitOn
@@ -138,7 +142,7 @@ export function createDispatch(ctx, state, deps) {
     // 若续跑轮一个字都没产出，绝不能把上一轮的残留文本当成「本轮交付物」推进 verifying（那是假完成）。
     // 读不到日志返回 0 → 退化为「按整段日志读」（与卡1 同口径），不因日志缺失改变结算语义。
     function logSizeOf(childId) {
-      try { var log = findRunLog(childId); if (!log) return 0; return statSync(log).size || 0 } catch (_) { return 0 }
+      try { var log = findRunLog(childId, sessionsRoot); if (!log) return 0; return statSync(log).size || 0 } catch (_) { return 0 }
     }
 
     async function spawnOneShot(sid, t, role) {
@@ -420,6 +424,33 @@ export function createDispatch(ctx, state, deps) {
       return (u.input || 0) + (u.output || 0) + (u.cacheWrite || 0)
     }
 
+    // ===== usage 增量水位线（卡3 Step1）：这一轮该从哪个 seq 之后继续累加 =====
+    // 读同一 rec.id 的历史 runs 条目上落的水位线（runs[i].usageSeq = 上次结算时该会话日志的 maxSeq）。
+    // 为什么锚在 runs 条目而不是内存表：重启后内存表清零而卡上留档还在，续跑轮才能接着上次水位；
+    // 且同一 childId 的多次派发各占一条 runs（resume 轮追加新条目），水位随条目天然分段、互不串账。
+    // ⚠️ 倒序找到「同 id 的条目」还不能停：**续跑轮的新条目与旧条目同 id**（同一会话），新条目此时
+    // 还没结算过、usageSeq 未设——必须继续往前找第一条**已结算过**（usageSeq > 0）的条目，否则水位线
+    // 恒为 0 → 每轮都把整份日志重算一遍（本实现踩过的坑，实测总量双倍 25 而非 15）。
+    // 一条都没有（首次结算 / 手写裁剪过的老任务）→ 0 = 全量累加（与本次改造前逐字一致）。
+    function seekSeqOf(snap, taskId, runId) {
+      try {
+        var tasks = (snap && snap.tasks) || []
+        for (var ti = 0; ti < tasks.length; ti++) {
+          var t = tasks[ti]
+          if (!t || t.id !== taskId || !Array.isArray(t.runs)) continue
+          for (var ri = t.runs.length - 1; ri >= 0; ri--) {
+            var r = t.runs[ri]
+            if (!r || String(r.id) !== String(runId)) continue
+            var w = num0(r.usageSeq)
+            if (w > 0) return w
+          }
+        }
+      } catch (_) {}
+      return 0
+    }
+    // 水位线字段兜底成非负数字（脏值/老形态一律当 0 = 全量，宁可多记也不误丢）
+    function num0(v) { var n = Number(v); return isFinite(n) && n > 0 ? n : 0 }
+
     // 把一次 run 的 token 消耗累加到任务（t.usage）：总量/输入/输出/缓存读写 + 按模型小计 + runs 计数 + 日账。
     // 模型小计的 key：优先本次派发显式覆盖的模型（rec.model），否则用日志里记录的会话模型。
     // 日账（byDay）：本次 run 整笔记到「结算时刻的本地日」——一次 run 不跨日拆分
@@ -427,9 +458,17 @@ export function createDispatch(ctx, state, deps) {
     // 双指标形态：byDay[day] = { t: total, e: effective }（e 是有效消耗，不含缓存读）。
     // 老数据（number 形态，本轮之前落的日账）只在聚合端兼容：读侧按 { t: n, e: null } 处理，
     // e 不可知就置 null（宁可展示上标 ~ 近似，也不伪造一个「有效值」）。
+    // 增量口径（卡3 Step1）：结算前先读一次看板取该 run 的历史水位线（seekSeqOf），只把这之后的
+    // assistant/message 增量计入；累加时把本份日志的 maxSeq 一并落到该 runs 条目上（下一轮从这继续）。
+    // one-shot 路径（每 run 独立日志、永远找得到自己的条目且首次无水位）→ 行为逐字不变：全量累加一次。
     async function accumulateRunUsage(sid, rec) {
       var u = null
-      try { u = readRunUsage(String(rec.id)) } catch (_) { u = null }
+      var since = 0
+      try {
+        var snap0 = await rt(sid)
+        since = seekSeqOf(snap0, rec.taskId, rec.id)
+        u = readRunUsage(String(rec.id), sessionsRoot, since)
+      } catch (_) { u = null }
       if (!u || !u.total) return
       var eff = effectiveOf(u)
       try {
@@ -465,6 +504,9 @@ export function createDispatch(ctx, state, deps) {
             for (var ri = t.runs.length - 1; ri >= 0; ri--) {
               if (String(t.runs[ri] && t.runs[ri].id) === String(rec.id)) {
                 t.runs[ri].usage = { input: u.input || 0, output: u.output || 0, cacheRead: u.cacheRead || 0, cacheWrite: u.cacheWrite || 0, total: u.total || 0 }
+                // 水位线落卡（卡3 Step1）：本份日志已结算到 maxSeq；续跑轮再结算时只认这之后的帧。
+                // 只增不减（max 收敛）：异常情况下读到较小值也不让水位倒退（倒退＝把已结算帧再记一遍）。
+                t.runs[ri].usageSeq = Math.max(num0(t.runs[ri].usageSeq), num0(u.maxSeq))
                 break
               }
             }
@@ -632,6 +674,109 @@ export function createDispatch(ctx, state, deps) {
       kickCycle(sid) // 结算后立刻补派（pre 完成 → 子任务开跑；post 完成 → epic 进验收）
     }
 
+    // ===== 重启 reconcile（卡3 Step2）：host 重启后把活跃 continuable Worker 的观测重新挂回来 =====
+    // 问题：continuable Worker 的 rec 只活在内存（state.activeRuns）——host 重启把它清零，而子会话
+    // 本身是**持久子会话**，可能正跑得好好（或刚跑完一轮）。此时任务停在 in-progress 却没人认领：
+    // 既不会被 agent/status 结算（表里没 rec），又不会被孤儿回收（isOrphan 的 2 分钟门槛＋它确实
+    // 有 claimedBy），只能干等——重启一次就白挂一个 Worker 位。
+    // 解法（一次，per host 生命周期）：对本会话板上「in-progress 且无活跃 rec」的任务查 listChildren(root)，
+    //   · 该 childId 仍在列 → 判定存活：重建 rec 观测（agent/status 监听本来就在，登记即可续上），
+    //     基线取**当前日志字节数**（重启前那轮的产出已落盘，不该冒充重启后的新交付物），重挂两级超时臂；
+    //   · 不在列 → 会话已死：走「硬超时等价物」——失败结算的等价动作（回 pending 重排 + 留历史），
+    //     不占用 Worker 并发位，等下一轮 poolCycle 正常重派（续跑资格由卡上 runs 留档决定）。
+    // 三道门禁：①只对 role=worker + continuable + 结局停在 running 的 run（一次性 run 没有可找回的会话）；
+    // ②per host 生命周期只做一次（state.reconcileDone）——重复做会把用户手动终止的卡又挂回去；
+    // ③listChildren 不可用（老宿主/测试桩）→ 整段跳过，行为逐字不变。
+    // 已知边界（有意不做，交给既有机制）：重启**之后**才被中断的那一轮，reconcile 追不回它的结局——
+    // 硬超时臂已在重建时重挂，到点照常结算。
+    async function reconcileRoot(sid) {
+      if (!state.reconcileDone) state.reconcileDone = {} // 老宿主/测试桩没建这个容器：就地补（不清空已有标记）
+      if (state.reconcileDone[sid]) return
+      state.reconcileDone[sid] = true
+      var subagents = ctx.subagents
+      if (!subagents || typeof subagents.listChildren !== 'function') return
+      var runs = runsFor(sid)
+      var snap = null
+      try { snap = await rt(sid) } catch (_) { return }
+      // 候选：in-progress + 在跑占位已换成真实 run id + 无活跃 rec + 最后一条 worker run 是 continuable
+      // 且结局仍停在 running（已落 timeout/error 的卡由重派路径自己处理，不在此处抢跑）。
+      var cands = []
+      var list = (snap && snap.tasks) || []
+      for (var i = 0; i < list.length; i++) {
+        var t = list[i]
+        if (!t || t.status !== 'in-progress' || t.escalation) continue
+        if (runs[t.id]) continue
+        if (!t.claimedBy || t.claimedBy === 'spawn-pending') continue
+        if (resumeTarget(t) !== '') continue // 结局已落超时/失败 → 归重派续跑路径，reconcile 不掺和
+        var last = null
+        var trs = Array.isArray(t.runs) ? t.runs : []
+        for (var ri = trs.length - 1; ri >= 0; ri--) { if (trs[ri] && trs[ri].role === 'worker') { last = trs[ri]; break } }
+        if (!last || last.continuable !== true || last.outcome !== 'running') continue
+        if (String(last.id) !== String(t.claimedBy)) continue // 卡上留档与占位不一致：状态可疑，不动
+        cands.push(t)
+      }
+      if (!cands.length) return
+      // 存活判定：listChildren 列出的就是「活的子会话」。带超时保护（查询挂死也不能拖住心跳）。
+      var kids = null
+      try {
+        var q = subagents.listChildren(sid)
+        kids = (typeof withTimeout === 'function') ? await withTimeout(q, 5000, 'reconcile listChildren') : await q
+      } catch (e) {
+        console.error('[task-board] reconcile listChildren 失败（本轮跳过，卡片留在 in-progress 等人工处理）:', String(e))
+        return
+      }
+      var alive = {}
+      var kidList = Array.isArray(kids) ? kids : []
+      for (var k = 0; k < kidList.length; k++) {
+        var c = kidList[k]; if (!c) continue
+        var cid = String(c.sessionId || c.id || '')
+        if (cid) alive[cid] = true
+      }
+      var c2 = cfg(snap)
+      var found = 0, lost = 0
+      for (var ci = 0; ci < cands.length; ci++) {
+        var tc = cands[ci]
+        var childId = String(tc.claimedBy)
+        if (alive[childId]) {
+          // ① 存活：重建 rec（与 spawnOneShot 的 continuable 形态逐字同构）→ 重挂两级超时臂。
+          //    ran:false —— 重启前的 running 事件已经错过，等下一个真 running 事件到来才允许 idle 结算
+          //    （rec.ran 二次守卫的既有语义：宁可等，也不拿一个可能已在跑的会话的空文本当交付物）。
+          var rec = { id: childId, childId: childId, continuable: true, restored: true, ran: false, run: null, role: 'worker', taskId: tc.id, startedAt: Date.now(), model: '', settled: false, baselineBytes: logSizeOf(childId) }
+          runs[tc.id] = rec
+          if (!dispatchedEver[sid]) dispatchedEver[sid] = {}
+          dispatchedEver[sid][childId] = true
+          armTimeouts(sid, rec, tc, c2)
+          found++
+          // 系统消息只留一行（重启是低频事件，且这行是「为什么它还在跑」的唯一解释来源）
+          pushSysNote(sid, '任务「' + tc.title + '」的 Worker 子会话已在重启后找回（续跑观测已恢复，硬超时 ' + c2.hardTimeoutMin + ' 分钟后照常结算）', tc.id)
+        } else lost++
+      }
+      if (found || lost) console.log('[task-board] 重启 reconcile（' + sid + '）：找回活跃续跑 Worker ' + found + ' 个，' + lost + ' 个子会话已死转回 pending')
+      // ② 会话已死：硬超时等价物（失败结算的等价动作）——回 pending 重排 + 留一行 history + 落结局。
+      //    放在**锁外**统一做（一次持锁批量处理，避免逐张写盘打断派发周期）。
+      if (lost) {
+        try {
+          await mutateLocked(sid, function (d) {
+            d.tasks.forEach(function (t) {
+              if (t.status !== 'in-progress' || runs[t.id] || !t.claimedBy || t.claimedBy === 'spawn-pending') return
+              var last = null
+              var trs = Array.isArray(t.runs) ? t.runs : []
+              for (var ri = trs.length - 1; ri >= 0; ri--) { if (trs[ri] && trs[ri].role === 'worker') { last = trs[ri]; break } }
+              if (!last || last.continuable !== true || last.outcome !== 'running') return
+              if (String(last.id) !== String(t.claimedBy) || alive[String(t.claimedBy)]) return
+              var ps = t.status
+              t.status = 'pending'; t.claimedBy = null; t.claimedAt = null
+              t.lastError = 'host 重启后 Worker 子会话已不存在（reconcile 未找回），任务回收重排'
+              last.outcome = 'timeout/error'; last.endedAt = new Date().toISOString()
+              ah(t, ps, 'pending', 'system', '重启后执行会话已丢失，回收重新排队')
+              return
+            })
+            return { ok: true }
+          }, true)
+        } catch (e) { console.error('[task-board] reconcile 死会话回收失败:', String(e)) }
+      }
+    }
+
     // ===== 派发周期（15s 心跳 + 写入后 kickCycle 触发）=====
     async function poolCycle(sid) {
       // root 存活早闸门（根治 no-root 刷屏，task-muuf0o7a）：无活 root 的会话板根本不进派发循环——
@@ -645,6 +790,10 @@ export function createDispatch(ctx, state, deps) {
       var info = []
       var runs = runsFor(sid)
       var snap = await rt(sid)
+      // 重启 reconcile（卡3 Step2）：只在本 host 生命周期的首轮 cycle 做一次（内部有 reconcileDone 标记）。
+      // 位置取舍：root 闸门必须是第一件事（无活 root 的板零 IO），所以本段只能排在早退闸门与 rt 读盘之后；
+      // 而重建出来的 rec 仍在本轮被读到（活跃计数 / 池状态快照都在下面才求值），语义不受影响。
+      try { await reconcileRoot(sid) } catch (e) { console.error('[task-board] reconcile 失败:', String(e)) }
       var activeW = 0, activeV = 0
       // 角色口径：worker 计入 activeW（占 Worker 并发位）；verifier 与 hook run（hook-pre/hook-post）
       // 统一计入 activeV——hook run 不是 Worker，不该挤占 maxWorkers 并发位，但它确实是一条在跑的 run，
@@ -790,7 +939,7 @@ export function createDispatch(ctx, state, deps) {
     // 表的处置保持既有语义：逐会话原位清空（旧引用不会看到残留 rec）+ 顶层容器换新（与原实现的
     // state.activeRuns = {} 等价）。原位清空是必要的——runsFor(sid) 返回的是每会话子对象，
     // 只换顶层容器会把这些子对象连同里面的 rec 一起漏掉。
-    ctx.effect(function () { return function () { Object.keys(state.activeRuns).forEach(function (psid) { var rr = state.activeRuns[psid]; Object.keys(rr).forEach(function (k) { try { var r0 = rr[k]; if (r0 && r0.run) r0.run.dispose(); if (r0) r0.settled = true } catch (_) {} ; delete rr[k] }) }); state.activeRuns = {} } })
+    ctx.effect(function () { return function () { Object.keys(state.activeRuns).forEach(function (psid) { var rr = state.activeRuns[psid]; Object.keys(rr).forEach(function (k) { try { var r0 = rr[k]; if (r0 && r0.run) r0.run.dispose(); if (r0) r0.settled = true } catch (_) {} ; delete rr[k] }) }); state.activeRuns = {}; state.reconcileDone = {} } })
     // Host 侧调度心跳：每 15s 对所有已知会话跑 poolCycle（客户端轮询只是触发器之一，面板关闭/后台节流时照常运转）
     ;(function () { var tm = ctx.timer; if (!tm) return; var disposeTick = tm.interval(function () { var cutoff = Date.now() - 1800000; Object.keys(knownSessions).forEach(function (sid) { if (knownSessions[sid] < cutoff) delete knownSessions[sid]; else poolCycle(sid).catch(function () {}) }) }, 15000); ctx.effect(function () { return disposeTick }) })()
 

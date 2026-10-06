@@ -3697,3 +3697,245 @@ test('README 双份同步记录 epicSplit 开关口径（关引导不禁机制�
     assert.ok(pkg.includes(s), 'README 应记录 epicSplit 口径：' + s)
   }
 })
+
+// ===== 可续跑 Worker（task-muw5hhsh 卡3）：usage 增量聚合（seq 水位线）/ 重启 reconcile / 文档与 UI 收尾 =====
+// 为什么必须真跑日志+真跑 poolCycle：卡3 三条 Step 都是「同一会话被结算多次」与「重启后内存表清零」这两类
+// 只在真实路径上才成立的形态——源码级断言看不出「第二次结算到底记了多少」，必须让 settleRun 真读真日志。
+// 公共 harness：临时 HOME（findRunLog 走 os.homedir()，子进程外改 env 无效）+ 真 spawnOneShot/真事件通道/
+// 真 usage 结算（mutateLocked 直写 board 对象）。childId 固定为 'child-old'，与卡2 续跑用例同一形状。
+function frameOfSeq(events) {
+  return zlib.zstdCompressSync(Buffer.from(events.map(function (e) { return JSON.stringify(e) }).join('\n') + '\n', 'utf8'))
+}
+// 一次助手 usage 事件（seq 显式给，模拟 v4 日志的全序字段）
+function usageEvent(seq, usage) { return { type: 'assistant/message', seq: seq, data: { usage: usage } } }
+// 临时会话日志根（deps.sessionsRoot 注入，不碰 os.homedir）——布局与真实一致：<root>/<bucket>/<childId>/session.v4.jsonl.zstd
+function mkLogRoot(bucket, childId, chunks) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tbc3-'))
+  const dir = path.join(root, bucket, childId)
+  fs.mkdirSync(dir, { recursive: true })
+  const logPath = path.join(dir, 'session.v4.jsonl.zstd')
+  if (chunks && chunks.length) fs.writeFileSync(logPath, Buffer.concat(chunks))
+  return { root: root, logPath: logPath, append: function (b) { fs.appendFileSync(logPath, b) } }
+}
+function mkUsageDispatch(board, over, ctxOver) {
+  const listeners = []
+  const runs = {}
+  const ctx = Object.assign({
+    fs: {}, get: function () { return null }, timer: null,
+    // 真 cordis 的 ctx.effect 立即执行回调取 disposer（订阅当场建立）——桩里必须照做，否则事件通道测不到
+    effect: function (f) { var d = f(); return function () { if (typeof d === 'function') d() } },
+    on: function (n, f) { listeners.push(f); return function () {} },
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => ({ id: 'run-1', result: new Promise(function () {}), dispose: async function () {} }),
+      startContinuable: async () => ({ childId: 'child-old', messageId: 'msg-1' }),
+      // 卡3① 要真走「重派续跑」路径（同一 childId 被结算两次）——续跑通道必须在位，
+      // 否则第二轮会回落 fresh spawn（虽然 childId 相同、水量线仍生效，但断言的语义就不是续跑了）
+      sendMessage: async () => 'msg-2',
+      interrupt: () => {},
+    },
+  }, ctxOver || {})
+  const dispatch = createDispatch(ctx, { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: { [FULL_SID]: runs } }, Object.assign({
+    rt: async () => board, wt: async () => {}, mutateLocked: async (sid, fn) => fn(board), kickCycle: () => {},
+    rootForSession: () => ({ id: FULL_SID }),
+    withTimeout: (p) => p, runsFor: () => runs, feedbackOn: () => true, pushSysNote: () => {}, maybeNotify: () => {}, notifyTaskDone: () => {},
+  }, over || {}))
+  return { dispatch, listeners, runs }
+}
+const fireIdle = async (h, childId) => {
+  h.listeners[0]({ agent: { id: childId }, status: 'running' })
+  h.listeners[0]({ agent: { id: childId }, status: 'idle' })
+  await flush(); await flush(); await flush()
+}
+
+test('卡3①：usage 增量聚合——同一持久子会话两次结算只记增量（总量=两次增量之和，非双倍）', async () => {
+  // 第 1 轮（首派）：seq 0=模型，1=usage 10
+  const L = mkLogRoot('b1', 'child-old', [frameOfSeq([{ type: 'request/context', seq: 0, data: { model: 'deepseek-flash' } }, usageEvent(1, { inputTokens: 10, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 10 })])])
+  try {
+    const t = mkTask({ id: 'u1', title: '增量账卡', status: 'pending' })
+    const board = mkBoard([t])
+    const h = mkUsageDispatch(board, { sessionsRoot: L.root })
+    await h.dispatch.poolCycle(FULL_SID)
+    await fireIdle(h, 'child-old') // 首轮结算（本用例环境无子会话助手文本 → 走「空文本按失败」的既有降级臂）
+    // 首轮：增量=10（水位线从 0 起 → 全量），水位线落卡 = maxSeq(1)
+    assert.equal(t.usage.total, 10)
+    assert.equal(h.runs['u1'], undefined)
+    const first = t.runs[t.runs.length - 1]
+    assert.equal(first.usageSeq, 1)                       // 水位线（下一轮从这之后继续）
+    assert.equal(first.usage.total, 10)
+    // 第 2 轮：重派续跑（同一 childId）→ 追加 seq 2=usage 5，结算只认增量 5
+    L.append(frameOfSeq([usageEvent(2, { inputTokens: 3, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 5 })]))
+    await h.dispatch.poolCycle(FULL_SID)
+    await fireIdle(h, 'child-old')
+    // 断言①：总量 = 10 + 5 = 15（不是全量重复累加的 25）；水位线推进到 2
+    assert.equal(t.usage.total, 15)
+    assert.equal(t.usage.input, 13)                       // 10 + 3
+    assert.equal(t.usage.output, 2)
+    assert.equal(t.usage.runs, 2)                         // runs 计数是「结算次数」，不受水位线影响
+    const second = t.runs[t.runs.length - 1]
+    assert.equal(second.resume, true)                     // 第二轮确实是续跑（沿用同一会话）    assert.equal(second.usageSeq, 2)
+    assert.equal(second.usage.total, 5)                   // run 级留账只记本轮增量
+    // 第 3 轮：本轮零新增量 → 一行都不记（不记 0，也不重复记）
+    await h.dispatch.poolCycle(FULL_SID)
+    await fireIdle(h, 'child-old')
+    assert.equal(t.usage.total, 15)                       // 总量不动（拿不到增量就跳过累加）
+    assert.equal(t.usage.runs, 2)
+  } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
+})
+
+test('卡3④（基线）：one-shot 路径计账不变——整份日志全量累加一次，与改造前逐字一致', async () => {
+  const L = mkLogRoot('b1', 'run-1', [frameOfSeq([
+    usageEvent(1, { inputTokens: 4, outputTokens: 5, cacheReadTokens: 100, cacheWriteTokens: 0, totalTokens: 109 }),
+    usageEvent(2, { inputTokens: 6, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 8, totalTokens: 21 })
+  ])])
+  try {
+    // workerContinuable=false → 走一次性 start（run.id='run-1'）→ rec 无 continuable/无 childId
+    const t = mkTask({ id: 'o1', title: '一次性账卡', status: 'pending' })
+    const board = Object.assign(mkBoard([t]), { workerContinuable: false })
+    const h = mkUsageDispatch(board, { sessionsRoot: L.root }, {
+      subagents: {
+        list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+        start: async () => ({ id: 'run-1', result: Promise.reject(new Error('boom')), dispose: async function () {} }),
+        startContinuable: async () => { throw new Error('开关关：不该走 continuable') },
+      },
+    })
+    await h.dispatch.poolCycle(FULL_SID)
+    for (let i = 0; i < 4; i++) await flush()
+    // 全量一次：109 + 21 = 130；五分量逐项累加（缓存读单列）
+    assert.equal(t.usage.total, 130)
+    assert.equal(t.usage.input, 10)
+    assert.equal(t.usage.output, 12)
+    assert.equal(t.usage.cacheRead, 100)
+    assert.equal(t.usage.cacheWrite, 8)
+    assert.equal(t.usage.runs, 1)
+    // 水位线同样落卡（一次性 run 的日志只被结算这一次，水位线只是留痕，不改变任何口径）
+    assert.equal(t.runs[t.runs.length - 1].usageSeq, 2)
+    assert.equal(t.runs[t.runs.length - 1].continuable, undefined)
+    // 一次性 run 不会被 reconcile 抢去做续跑（continuable 标记是唯一门禁）
+    assert.equal(!!t.runs[t.runs.length - 1].continuable, false)
+  } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
+})
+
+test('卡3②③：重启 reconcile——存活的续跑 Worker 被找回重挂观测；已死的会话走硬超时等价物回 pending', async () => {
+  const queried = []
+  const sent = []
+  const spawned = []
+  const found = mkTask({
+    id: 'k1', title: '重启后仍在跑的卡', status: 'in-progress', claimedBy: 'child-alive', claimedAt: '2026-01-01T00:00:00Z',
+    runs: [{ role: 'worker', id: 'child-alive', at: '2026-01-01T00:00:00Z', model: '', outcome: 'running', hardMin: 120, continuable: true }],
+  })
+  const dead = mkTask({
+    id: 'k2', title: '重启后会话已死的卡', status: 'in-progress', claimedBy: 'child-dead', claimedAt: '2026-01-01T00:00:00Z',
+    runs: [{ role: 'worker', id: 'child-dead', at: '2026-01-01T00:00:00Z', model: '', outcome: 'running', hardMin: 120, continuable: true }],
+  })
+  // 干扰项：一次性 run（不可续跑——continuable 标记是唯一门禁）/ 结局已落 timeout-error（归重派续跑路径，reconcile 不抢）
+  // claimedAt 取「刚刚」（本用例只测 reconcile，不想顺带触发孤儿回收——那会让干扰项被回收重排，混淆观察口径）
+  const nowIso = new Date().toISOString()
+  const oneShot = mkTask({
+    id: 'k3', title: '一次性 run 卡', status: 'in-progress', claimedBy: 'child-oneshot', claimedAt: nowIso,
+    runs: [{ role: 'worker', id: 'child-oneshot', at: nowIso, model: '', outcome: 'running', hardMin: 120 }],
+  })
+  const failed = mkTask({
+    id: 'k4', title: '已落超时结局的卡', status: 'in-progress', claimedBy: 'child-failed', claimedAt: nowIso,
+    runs: [{ role: 'worker', id: 'child-failed', at: nowIso, model: '', outcome: 'timeout/error', hardMin: 120, continuable: true }],
+  })
+  const board = mkBoard([found, dead, oneShot, failed])
+  const h = mkUsageDispatch(board, { rootForSession: () => ({ id: FULL_SID }) }, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => { spawned.push('one-shot'); return { id: 'run-1', result: new Promise(function () {}), dispose: async function () {} } },
+      startContinuable: async () => { spawned.push('continuable'); return { childId: 'child-new', messageId: 'm' } },
+      // 死会话的冷复活真实失败（NOT_RESUMABLE）：reconcile 之后本轮重派会先试续跑再回落 fresh spawn
+      sendMessage: async (sender, targetId) => { sent.push(targetId); throw new Error('subagent/not-resumable') },
+      interrupt: () => {},
+      listChildren: async (sid) => { queried.push(sid); return [{ sessionId: 'child-alive', label: 'worker:k1' }] },
+    },
+  })
+  await h.dispatch.poolCycle(FULL_SID)
+  // ② 找回存活 run：rec 重建（与 spawnOneShot 的 continuable 形态同构）+ 重挂超时臂 → 任务留在进行中
+  assert.deepEqual(queried, [FULL_SID])                     // 查的是 root 会话的 children
+  const rec = h.runs['k1']
+  assert.ok(rec, '存活子会话必须被重新挂回活跃表')
+  assert.equal(rec.id, 'child-alive'); assert.equal(rec.childId, 'child-alive')
+  assert.equal(rec.continuable, true); assert.equal(rec.ran, false); assert.equal(rec.settled, false)
+  assert.equal(rec.restored, true)                          // 「重启找回」与首次 spawn 可区分
+  assert.equal(typeof rec.baselineBytes, 'number')          // 基线取当前日志字节数（重启前产出不冒充本轮交付物）
+  assert.equal(typeof rec.startedAt, 'number')
+  assert.equal(found.status, 'in-progress'); assert.equal(found.claimedBy, 'child-alive')
+  // ③ 会话已死 → 硬超时等价物：回 pending + 清占位 + 落 timeout/error 结局 + 留一行流转记录
+  assert.equal(dead.runs[0].outcome, 'timeout/error')
+  assert.ok(dead.runs[0].endedAt, '死会话的 run 结局要带 endedAt')
+  const deadNote = dead.history.filter((x) => /重启后执行会话已丢失/.test(x.note || ''))
+  assert.equal(deadNote.length, 1)
+  assert.equal(deadNote[0].to, 'pending')
+  assert.equal(dead.lastError, 'host 重启后 Worker 子会话已不存在（reconcile 未找回），任务回收重排')
+  // 死会话当轮即被重新派发：先试冷复活（失败）→ 回落全新 Worker（reconcile 只做一次，不阻塞重派）；
+  // k1（已找回）占住 Worker 并发位，故本轮 spawned 只有 k2 的替代会话
+  assert.deepEqual(sent, ['child-dead'])
+  assert.deepEqual(spawned, ['continuable'])
+  assert.equal(dead.status, 'in-progress'); assert.equal(dead.claimedBy, 'child-new')
+  // 干扰项零变化（reconcile 不越界）：一次性 run 与已落结局的卡都不进 reconcile，也不被它重置
+  assert.equal(h.runs['k3'], undefined); assert.equal(oneShot.status, 'in-progress')
+  assert.equal(oneShot.claimedBy, 'child-oneshot'); assert.equal(oneShot.runs.length, 1)
+  assert.equal(failed.status, 'in-progress'); assert.equal(failed.claimedBy, 'child-failed')
+  assert.equal(failed.runs[0].outcome, 'timeout/error'); assert.equal(h.runs['k4'], undefined)
+  assert.equal(sent.length, 1)                              // 只有死会话那一次续跑尝试（k3/k4 零 sendMessage）
+  // 只做一次（per host 生命周期）：第二轮 listChildren 不再被调用，已找回的 rec 也不被重置
+  const before = h.runs['k1']
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(queried.length, 1)
+  assert.equal(h.runs['k1'], before)
+})
+
+test('卡2/卡3 接线（源码级）：usage 水位线落卡 + reconcile 一次性 + 详情页 ↻ 续跑标注 + 文档收尾', () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const usageSrc = readFileSync(new URL('../lib/usage.mjs', import.meta.url), 'utf8')
+  const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // ① usage 增量：readRunUsage 收第三参 sinceSeq，只认水位线之后的帧，并回传全份 maxSeq
+  assert.match(usageSrc, /export function readRunUsage\(runId, sessionsRoot, sinceSeq\) \{/)
+  assert.match(usageSrc, /if \(from > 0 && sq <= from\) continue/)
+  assert.match(usageSrc, /maxSeq: -1/)
+  // ② 结算侧：水位线从卡上 runs 条目读、增量累加后写回（只增不减）
+  assert.match(dsp, /function seekSeqOf\(snap, taskId, runId\) \{/)
+  assert.match(dsp, /since = seekSeqOf\(snap0, rec\.taskId, rec\.id\)/)
+  assert.match(dsp, /u = readRunUsage\(String\(rec\.id\), sessionsRoot, since\)/)
+  // 同 id 的续跑新条目尚未结算（usageSeq 未设）→ 必须继续往前找已结算的那条，否则水位线恒 0（踩过的坑）
+  assert.match(dsp, /if \(!r \|\| String\(r\.id\) !== String\(runId\)\) continue\s*\n\s*var w = num0\(r\.usageSeq\)\s*\n\s*if \(w > 0\) return w/)
+  assert.match(dsp, /t\.runs\[ri\]\.usageSeq = Math\.max\(num0\(t\.runs\[ri\]\.usageSeq\), num0\(u\.maxSeq\)\)/)
+  // ③ reconcile：per-host 一次性标记 + listChildren 存活判定 + 重建 rec/重挂超时臂 + 死会话回 pending
+  assert.match(dsp, /async function reconcileRoot\(sid\) \{/)
+  assert.match(dsp, /if \(state\.reconcileDone\[sid\]\) return/)
+  assert.match(dsp, /typeof subagents\.listChildren !== 'function'/)
+  assert.match(dsp, /await withTimeout\(q, 5000, 'reconcile listChildren'\)/)
+  assert.match(dsp, /restored: true, ran: false/)
+  assert.match(dsp, /baselineBytes: logSizeOf\(childId\)/)
+  assert.match(dsp, /armTimeouts\(sid, rec, tc, c2\)/)
+  assert.match(dsp, /last\.outcome = 'timeout\/error'; last\.endedAt = new Date\(\)\.toISOString\(\)/)
+  assert.match(dsp, /续跑观测已恢复/)
+  // poolCycle 入口接线（在读 runs/snap 之前，重建的 rec 参与本轮活跃计数）
+  assert.match(dsp, /try \{ await reconcileRoot\(sid\) \} catch \(e\) \{ console\.error\('\[task-board\] reconcile 失败:'/)
+  // ④ 详情页 ↻ 续跑标注（读卡2 落的 runs[i].resume，不猜；老留档零渲染）
+  assert.match(cli, /var rsMark = r\.resume === true \? ' ↻' : ''/)
+  assert.match(cli, /↻ 冷复活续跑：沿用上一次的子会话，非新开/)
+  // ⑤ index.mjs 共享 state 建 reconcileDone 容器（模块间显式注入，不隐式引用）
+  const idx = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
+  assert.match(idx, /reconcileDone: \{\},\s+\/\/ sid -> true/)
+})
+
+test('README 双份同步记录可续跑 Worker 三件套（continuable / 重启 reconcile / usage 增量）', () => {
+  const pkg = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  const root = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')
+  assert.equal(pkg, root) // 两份 README 必须字节一致（npm run sync-readme 的约束；断言⑤）
+  for (const s of [
+    '### 可续跑 Worker（continuable',   // 新增章节
+    '`workerContinuable`',              // 回退开关
+    'interrupt 留存（不销毁）',           // 超时留存
+    '重派冷复活续跑',                     // 冷复活续跑
+    '重启 reconcile',                    // 重启找回
+    'usageSeq',                          // usage 增量水位线
+    '续跑基线',                          // 不拿旧文本冒充交付物
+    'Verifier 与 hooks',                 // 一次性边界
+  ]) {
+    assert.ok(pkg.includes(s), 'README 应记录可续跑 Worker 口径：' + s)
+  }
+})
