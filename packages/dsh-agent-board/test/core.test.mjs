@@ -303,6 +303,135 @@ test('parseSections: diff 概要分段解析（Worker 变更概要 → deliverab
   assert.equal(s.summary, '做了')
 })
 
+// ===== Verifier 自测指南（verifyUserGuide，task-muxyyvg0）：契约解析 / 开关门禁 / 落账 =====
+test('自测指南①：parseSections 收「## 自测指南」段 → userTest 四字段 + tier 三档', () => {
+  // ui 档：四字段齐全（编号列表 steps）
+  const s1 = core.parseSections('## 验证概要\n通过\n\n## 自测指南\ngist: 看板卡片加了徽章\ntier: ui\nsteps:\n1. 打开看板面板\n2. 看卡片标题右侧\nexpect: 应看到绿色徽章')
+  assert.ok(s1.userTest, '自测指南段必须解析出 userTest')
+  assert.equal(s1.userTest.gist, '看板卡片加了徽章')
+  assert.equal(s1.userTest.tier, 'ui')
+  assert.deepEqual(s1.userTest.steps, ['打开看板面板', '看卡片标题右侧'])
+  assert.equal(s1.userTest.expect, '应看到绿色徽章')
+  // metric 档 + 横杠列表 + 全角冒号
+  const s2 = core.parseSections('## 自测指南\ngist： Token 区多了主窗口行\ntier：metric\nsteps:\n- 打开仪表盘\n- 看 Token 区\nexpect: 出现「主窗口（本会话）」行')
+  assert.equal(s2.userTest.tier, 'metric')
+  assert.deepEqual(s2.userTest.steps, ['打开仪表盘', '看 Token 区'])
+  // internal 档：steps 可空，expect 写「验证靠测试套件」
+  const s3 = core.parseSections('## 自测指南\ngist: host 聚合口径修正\ntier: internal\nexpect: 验证靠测试套件')
+  assert.equal(s3.userTest.tier, 'internal')
+  assert.deepEqual(s3.userTest.steps, [])
+  // tier 非法/脏值 → 归 internal（最保守档，不伪造用户可感知面）
+  const s4 = core.parseSections('## 自测指南\ngist: x\ntier: 界面级\nexpect: y')
+  assert.equal(s4.userTest.tier, 'internal')
+  // 「## 自测情况」（Worker 段）不串进 userTest；「## 自测指南」不串进 selfTest（标题口径隔离）
+  const s5 = core.parseSections('## 自测情况\nnpm test pass')
+  assert.equal(s5.selfTest, 'npm test pass'); assert.equal(s5.userTest, undefined)
+  const s6 = core.parseSections('## 自测指南\ngist: g\ntier: ui\nexpect: e')
+  assert.equal(s6.selfTest, undefined); assert.ok(s6.userTest)
+  // 缺段 → 字段不挂
+  assert.equal(core.parseSections('## 验证概要\n通过').userTest, undefined)
+  // 段体四字段全空 → 不挂字段（视为没交指南）
+  assert.equal(core.parseSections('## 自测指南\n（无）').userTest, undefined)
+})
+
+test('自测指南②：normalizeUserTest 归一（非对象/空指南→null；tier 归档；长度封顶）', () => {
+  assert.equal(core.normalizeUserTest(null), null)
+  assert.equal(core.normalizeUserTest('ui'), null)
+  assert.equal(core.normalizeUserTest({}), null) // 空指南不落
+  assert.equal(core.normalizeUserTest({ gist: '   ', steps: [], expect: '' }), null)
+  const ut = core.normalizeUserTest({ gist: ' 改了 x ', steps: [' 第一步 ', '', null, '第二步'], expect: ' 看到 y ', tier: 'UI' })
+  assert.deepEqual(ut, { gist: '改了 x', steps: ['第一步', '第二步'], expect: '看到 y', tier: 'ui' })
+  assert.equal(core.normalizeUserTest({ gist: 'g', tier: 'ui（界面可操作）' }).tier, 'ui') // tier 取首词
+  assert.equal(core.normalizeUserTest({ gist: 'g', tier: 'bogus' }).tier, 'internal') // 非法归 internal
+  assert.equal(core.normalizeUserTest({ gist: 'g' }).tier, 'internal') // 缺省归 internal
+  // 封顶：gist ≤300 / expect ≤600 / steps ≤12 条每条 ≤300
+  const big = core.normalizeUserTest({ gist: 'g'.repeat(400), expect: 'e'.repeat(700), steps: Array(20).fill('s'.repeat(400)) })
+  assert.equal(big.gist.length, 300); assert.equal(big.expect.length, 600)
+  assert.equal(big.steps.length, 12); assert.equal(big.steps[0].length, 300)
+})
+
+test('自测指南③：buildVerifierPrompt 开关门禁——默认含指南段+诚实护栏；显式 false 整段消失', () => {
+  const t = mkTask({ id: 'tx', status: 'verifying' })
+  const on = core.buildVerifierPrompt(t, '')
+  assert.match(on, /## 自测指南/)                    // 指南段在 prompt 里
+  assert.match(on, /gist: <一句人话/)                // 四字段格式
+  assert.match(on, /tier: ui \| metric \| internal/) // 三档分级
+  assert.match(on, /诚实护栏/)                       // 诚实护栏写进 prompt
+  assert.match(on, /不许编造没验过的操作/)
+  assert.match(on, /验证靠测试套件/)                 // internal 档口径
+  assert.match(on, /userTest 参数/)                  // 工具通道说明
+  assert.ok(on.indexOf('结论契约') < on.indexOf('自测指南（给用户看的验收指引'), '指南段追加在 prompt 末尾（结论契约之后）')
+  const off = core.buildVerifierPrompt(t, '', false) // 开关关 → 整段不进 prompt（省 token）
+  assert.doesNotMatch(off, /自测指南/)
+  assert.doesNotMatch(off, /userTest/)
+  assert.match(off, /结论契约/) // 其余契约逐字不变
+  assert.equal(core.buildVerifierPrompt(t, ''), on) // 缺省第三参 = 开
+})
+
+test('自测指南④：文本结算落账——开关开 userTest 落 t.verification；开关关不挂字段（端到端真 settle）', async () => {
+  const GUIDE = '\n\n## 自测指南\ngist: 卡片加了徽章\ntier: ui\nsteps:\n1. 打开看板\n2. 看徽章\nexpect: 看到绿徽章'
+  async function waitVerification(t) { // 与 waitRej 同口径：轮询等 settle 链尾，防固定 sleep 抖动
+    var t0 = Date.now()
+    while (Date.now() - t0 < 2000) { if (t.verification && t.status === 'resolved') return true; await new Promise(function (r) { setTimeout(r, 5) }) }
+    return !!(t.verification && t.status === 'resolved')
+  }
+  // 开关开（缺省）：APPROVED + 指南段 → userTest 落 t.verification
+  const t1 = mkTask({ id: 'ug1', status: 'verifying' })
+  const h1 = mkVerifierSettleDispatch(mkBoard([t1]))
+  await h1.dispatch.poolCycle(FULL_SID)
+  h1.settle('APPROVED\n\n## 验证概要\n复跑通过' + GUIDE)
+  assert.equal(await waitVerification(t1), true)
+  assert.deepEqual(t1.verification.userTest, { gist: '卡片加了徽章', steps: ['打开看板', '看徽章'], expect: '看到绿徽章', tier: 'ui' })
+  // 开关关：输出即使带指南段也不挂字段（省 token 口径的落账侧门禁）
+  const t2 = mkTask({ id: 'ug2', status: 'verifying' })
+  const board2 = mkBoard([t2]); board2.verifyUserGuide = false
+  const h2 = mkVerifierSettleDispatch(board2)
+  await h2.dispatch.poolCycle(FULL_SID)
+  h2.settle('APPROVED\n\n## 验证概要\n复跑通过' + GUIDE)
+  assert.equal(await waitVerification(t2), true)
+  assert.equal(t2.verification.userTest, undefined, '开关关 → 落账不挂 userTest')
+  // 开关开但缺段 → 不挂字段
+  const t3 = mkTask({ id: 'ug3', status: 'verifying' })
+  const h3 = mkVerifierSettleDispatch(mkBoard([t3]))
+  await h3.dispatch.poolCycle(FULL_SID)
+  h3.settle('APPROVED\n\n## 验证概要\n复跑通过')
+  assert.equal(await waitVerification(t3), true)
+  assert.equal(t3.verification.userTest, undefined, '缺段 → 不挂 userTest')
+})
+
+test('自测指南⑤：board_verdict 工具通道——userTest 参数落账 + 开关门禁 + 非法 tier 归 internal', async () => {
+  const UT = { gist: '报告多了自测清单', steps: ['打开仪表盘', '点生成报告'], expect: '报告含「本版自测清单」段', tier: 'ui' }
+  const b1 = mkBoard([mkTask({ id: 'g1', status: 'verifying' })])
+  const r1 = await mkRpcHandlers(b1).__tools['board_verdict'].execute({ taskId: 'g1', verdict: 'approved', summary: '通过', userTest: UT }, {})
+  assert.equal(r1.ok, true)
+  assert.deepEqual(b1.tasks[0].verification.userTest, UT, '工具通道 userTest 原样落账（归一后）')
+  // 开关关：参数带了也不挂字段
+  const b2 = mkBoard([mkTask({ id: 'g2', status: 'verifying' })]); b2.verifyUserGuide = false
+  await mkRpcHandlers(b2).__tools['board_verdict'].execute({ taskId: 'g2', verdict: 'approved', summary: '通过', userTest: UT }, {})
+  assert.equal(b2.tasks[0].verification.userTest, undefined, '开关关 → 工具通道也不挂 userTest')
+  // 非法 tier 归 internal；空指南（全空字段）不落
+  const b3 = mkBoard([mkTask({ id: 'g3', status: 'verifying' })])
+  await mkRpcHandlers(b3).__tools['board_verdict'].execute({ taskId: 'g3', verdict: 'approved', summary: '通过', userTest: { gist: '内部重构', tier: ' bogus ', expect: '验证靠测试套件' } }, {})
+  assert.equal(b3.tasks[0].verification.userTest.tier, 'internal')
+  const b4 = mkBoard([mkTask({ id: 'g4', status: 'verifying' })])
+  await mkRpcHandlers(b4).__tools['board_verdict'].execute({ taskId: 'g4', verdict: 'approved', summary: '通过', userTest: { gist: '  ', steps: [] } }, {})
+  assert.equal(b4.tasks[0].verification.userTest, undefined, '空指南不落字段')
+})
+
+test('自测指南⑥：cfg/seed/normalizeBoard 三处默认开——老看板缺字段补 true，显式 false 才关', () => {
+  assert.equal(core.cfg({}).verifyUserGuide, true)            // 缺省开
+  assert.equal(core.cfg({ verifyUserGuide: false }).verifyUserGuide, false)
+  assert.equal(core.cfg({ verifyUserGuide: 0 }).verifyUserGuide, true) // 脏值非 false → 开（!== false 口径）
+  assert.equal(core.seed('s-x').verifyUserGuide, true)        // 新板种子自带
+  const old = { poolStatus: { workers: [], verifiers: [] }, tasks: [] } // 老看板无字段
+  core.normalizeBoard(old)
+  assert.equal(old.verifyUserGuide, true)                     // 读路径补 true
+  const off = { verifyUserGuide: false, tasks: [] }
+  core.normalizeBoard(off)
+  assert.equal(off.verifyUserGuide, false)                    // 显式 false 不被覆盖
+})
+
+
 test('parseVerdict: 行首锚定，历史提及不误判', () => {
   assert.equal(core.parseVerdict('APPROVED: 通过'), 'APPROVED')
   assert.equal(core.parseVerdict('REJECTED: 不达标'), 'REJECTED')
@@ -464,7 +593,7 @@ test('注入迁移（task-muvjs392）：清单进首条 prompt，注入区块通
   assert.doesNotMatch(dsp, /ctx\.fs|fs\.readText|sliceLines|buildFileOutline/)
   // ③ 瘦身清单本体直接拼进 worker/verifier 两态 prompt（三态其余不变：hook 仍走 buildHookPrompt）
   assert.match(dsp, /buildWorkerPrompt\(t, pack, cfg\(dsnap\)\.feedbackEnabled\)/)
-  assert.match(dsp, /buildVerifierPrompt\(t, pack\)/)
+  assert.match(dsp, /buildVerifierPrompt\(t, pack, cfg\(dsnap\)\.verifyUserGuide\)/)
   assert.match(dsp, /buildHookPrompt\(t, role === 'hook-pre' \? 'pre' : 'post', kids\)/)
   // ④ readContextPack = 组装清单（不再 await 读盘）——派发点与 rpc 预览点都直接调用
   assert.match(dsp, /function readContextPack\(t\) \{/)
@@ -3015,7 +3144,7 @@ test('可续跑 Worker 接线（源码级）：事件订阅走 ctx.effect 回收
   // ⑥ 板级开关三件套（cfg 兜底 / normalizeBoard 补缺省 / seed 初值 / set-board-config 白名单 / get-tasks 透出）
   assert.match(coreSrc, /workerContinuable: d\.workerContinuable !== false/)
   assert.match(coreSrc, /if \(typeof d\.workerContinuable !== 'boolean'\) d\.workerContinuable = true/)
-  assert.match(coreSrc, /epicSplit: true, workerContinuable: true, minWorkers: 1/)
+  assert.match(coreSrc, /epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1/)
   assert.match(rpcSrc, /else if \(args\.key === 'workerContinuable'\) d\.workerContinuable = !!args\.value/)
   assert.match(rpcSrc, /d\.workerContinuable = cfg\(d\)\.workerContinuable/)
   // ⑦ 手动终止/活动查询对 continuable rec 不炸（id 统一取 rec.id，dispose 分路）
@@ -3359,10 +3488,11 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
   // get-tasks 现算 childStats（零存储）
   assert.match(host, /d\.childStats = aggregateChildStats\(d\.tasks\)/)
   // 两模块都从 core 解构引入（接线不断）；rpc.mjs 解构表尾部随调研门禁（task-mute6zpw）、调研遵循三件套（task-mutnj3a4）、
-  // tasksHash（task-mutrtwin）、hooks 浅校验（normalizeHooks/mergeHooks，本批 hooks=agent run）扩展；
+  // tasksHash（task-mutrtwin）、hooks 浅校验（normalizeHooks/mergeHooks，本批 hooks=agent run）、
+  // 自测指南归一（normalizeUserTest，task-muxyyvg0）扩展；
   // dispatch.mjs 解构表尾部追加 hook 族（buildHookPrompt/hookOn/hookSetState/gsb）与驳回包 helper（pushRejection，task-muvg15p5）
   assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection \} = core/)
-  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection \} = core/)
+  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest \} = core/)
   // 既有「全子任务 resolved → 父 verifying」逻辑不动（checkParentAuto 仍在 verifyApply 链路；
   // 但其内部已委托共享 helper maybeAutoCloseParent——单一判定口径，core.mjs 不在 hostSrc 清单，单独读）
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
@@ -4211,7 +4341,7 @@ test('epicSplit 接线（源码级）：缓存同步 / Team 引导段门禁 / �
   // 配置层（core.mjs：cfg 兜底 / seed 初值 / normalizeBoard 老看板补齐）
   assert.match(coreSrc, /epicSplit: d\.epicSplit !== false/)
   assert.match(coreSrc, /if \(typeof d\.epicSplit !== 'boolean'\) d\.epicSplit = true/)
-  assert.match(coreSrc, /notifyDone: true, epicSplit: true, workerContinuable: true, minWorkers: 1/) // seed 缺省开（workerContinuable 随 task-muw5gnhv 插入 epicSplit 与 minWorkers 之间）
+  assert.match(coreSrc, /notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1/) // seed 缺省开（workerContinuable 随 task-muw5gnhv、verifyUserGuide 随 task-muxyyvg0 插入 epicSplit 与 minWorkers 之间）
   // 缓存链路：rt() 读盘同步 + set-board-config 当场回填（Team 提示词是同步组装，只能读缓存）
   assert.match(src, /epicSplitCache\[sid\] = nd\.epicSplit !== false/)
   assert.match(src, /function epicSplitOn\(sid\) \{ return epicSplitCache\[sid\] !== false \}/)
@@ -4662,7 +4792,7 @@ test('池配置开关乐观更新：每个开关先写 state+notify 再 rpc，�
     assert.ok(m, '开关 onChange 必须是 setCfg(键, e.target.checked) 单调用，实测：' + h)
     keys.push(m[1])
   }
-  assert.deepEqual(keys.slice().sort(), ['epicSplit', 'feedbackEnabled', 'notifyDispatch', 'notifyDone'])
+  assert.deepEqual(keys.slice().sort(), ['epicSplit', 'feedbackEnabled', 'notifyDispatch', 'notifyDone', 'verifyUserGuide'])
   // ② 乐观序：先写 state、再 notify、最后才 rpc（顺序颠倒 = 点击仍等往返）
   const setCfgMatch = src.match(/function setCfg\(key, next\) \{[\s\S]*?\n      \}/)
   assert.ok(setCfgMatch, '应定义 setCfg')
@@ -4711,17 +4841,17 @@ test('池配置开关乐观更新：每个开关先写 state+notify 再 rpc，�
 
 test('fetchTasks 设置开关权威纠偏：hash 不变时配置变化补 notify + hash 短路结构保持（源码级）', () => {
   const src = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
-  // ① 取值口径单点定义（缺字段/脏值=开，只有显式 false 才关），且四个开关字段确由它赋值
+  // ① 取值口径单点定义（缺字段/脏值=开，只有显式 false 才关），且五个开关字段确由它赋值
   const knobSrc = src.match(/function cfgKnobOf\(src, key\) \{[^\n]*\n/)[0]
   const changedSrc = src.match(/function cfgKnobsChanged\(a, b\) \{[^\n]*\n/)[0]
   const cfgKnobOf = new Function(knobSrc + '\nreturn cfgKnobOf')()
   const cfgKnobsChanged = new Function(changedSrc + '\nreturn cfgKnobsChanged')()
   assert.equal(cfgKnobOf({}, 'notifyDispatch'), true)                            // 老 host 无字段 → 开
   assert.equal(cfgKnobOf({ notifyDispatch: false }, 'notifyDispatch'), false)    // 只有显式 false 才关
-  const KNOBS = ['feedbackEnabled', 'notifyDispatch', 'notifyDone', 'epicSplit']
+  const KNOBS = ['feedbackEnabled', 'notifyDispatch', 'notifyDone', 'epicSplit', 'verifyUserGuide']
   for (const k of KNOBS) assert.match(src, new RegExp("state\\." + k + " = cfgKnobOf\\(d, '" + k + "'\\)"))
-  // ② 真执行比较器：四个开关任一翻转都算变化（漏一个 → 该开关又要等下一次任意 notify）
-  const allOn = { feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true }
+  // ② 真执行比较器：五个开关任一翻转都算变化（漏一个 → 该开关又要等下一次任意 notify）
+  const allOn = { feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, verifyUserGuide: true }
   assert.equal(cfgKnobsChanged(allOn, Object.assign({}, allOn)), false)
   for (const k of KNOBS) {
     assert.equal(cfgKnobsChanged(allOn, Object.assign({}, allOn, { [k]: false })), true, k + ' 翻转必须被检测到')

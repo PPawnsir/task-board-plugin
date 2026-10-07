@@ -166,6 +166,8 @@ draft → pending → in-progress → verifying → resolved → archived
 - 看门狗：运行超时且事件流停滞 → 标记"疑似卡死"（不自动杀，裁决权交主窗口/用户）
 - 歧义上报：Worker 遇到歧义不猜测，上报等主窗口裁决（任何模式下都通知）；裁决后新 Worker 携带裁决答案接手
 - 驳回详情全量带回：三条驳回路径（`board_verdict` 工具 / Verifier 文本结算 / 手动 `task_verify`·`verify-task`）统一往 `t.messages` 落一条 `kind: "rejection"` 完整驳回包（summary + checks 逐条核对证据；手动路径补写 `t.verification`），经 `buildMessages` 全量注入重派 Worker prompt——新 Worker 据此返工，不再只看到 300 字截断的 history 记录
+- **Verifier 自测指南（userTest）**：Verifier prompt 末尾追加「## 自测指南」段契约——四字段 `gist`（一句人话说改了什么）/ `steps[]`（用户操作步骤，每条一步）/ `expect`（预期看到什么）/ `tier`（`ui`=界面可操作 | `metric`=看指标变化 | `internal`=纯内部无用户可感知面；`internal` 时 steps 可空、expect 写「验证靠测试套件」）；**诚实护栏写死在 prompt**：只给亲自验过/从 diff 可推导的步骤，不许编没验过的操作，UI 特性给具体路径（哪个区哪个按钮），host-only 改动如实标 `internal`。双模落账 `t.verification.userTest`（工具通道 `board_verdict` 的 `userTest` 参数 / 文本通道收「## 自测指南」段；tier 非法/缺省一律归 `internal` 保守档，缺段/字段全空不挂字段）；详情页验证记录区渲染「📋 自测指南」块（gist + 编号步骤 + 预期 + tier 徽章：ui 绿 / metric 蓝 / internal 灰），报告导出聚合「## 本版自测清单」段（按验收通过时间倒序近 10 张已验收卡，`internal` 收末尾并标注「无用户可感知面」）
+- **开关 `verifyUserGuide`**（⚙️ 设置区「验收」小节——「通知」旁，默认**开**）：关掉后 Verifier prompt 不拼指南段（省 token）、验收落账不挂 `userTest`、详情页自测指南块与报告清单段整块不渲染；老看板文件没有该字段 → 读路径自动补 `true`（与升级前行为一致）
 - 手动派发：详情页「派发 / 派发验收」按钮可随时手动触发单任务派发（auto 模式补派、manual 模式主通道）
 - 会话隔离：看板按会话分桶，多会话互不干扰
 

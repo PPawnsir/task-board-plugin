@@ -131,10 +131,15 @@ export function classifyPipeline(t) {
 //   turn 结算靠 host 事件 agent/status running→idle），false 逐字回退旧的 subagents.start() 一次性路径
 //   （run.result 结算）。Verifier/hook run 一律照旧 one-shot，不看这个键（它们无续跑语义）。
 //   消费点只有派发引擎（spawn 时读一次 cfg 快照），所以不需要 feedbackEnabled/epicSplit 那样的热路径缓存。
+// Verifier 自测指南开关 verifyUserGuide（设置区「通知」小节旁「验收」小节，缺省 true）：
+//   false → ① Verifier prompt 不拼 USER_GUIDE_CONTRACT 指南段（省 token）；
+//           ② 验收落账（settleVerifier/board_verdict）不挂 t.verification.userTest；
+//           ③ client 详情页自测指南块与报告「本版自测清单」段整块不渲染。
+//   消费点同为 spawn/结算时读 cfg 快照，无需热路径缓存。
 export function cfg(d) {
   var soft = Math.max(1, Math.min(480, d.softTimeoutMin || 30))
   var hard = Math.max(soft, Math.min(1440, d.hardTimeoutMin || 120))
-  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false, workerContinuable: d.workerContinuable !== false }
+  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false, workerContinuable: d.workerContinuable !== false, verifyUserGuide: d.verifyUserGuide !== false }
 }
 
 // ===== 看板数据目录（跨重启继承用）=====
@@ -151,7 +156,7 @@ export function boardHome() { return path.join(boardDirName(), '.dsh') }
 // ownerCwd（跨重启继承）：创建该看板的会话工作区路径，继承判定全靠它——取不到就省略字段
 // （绝不落空串，否则「路径读不到的多个会话」会被误判成同一工作区）。
 export function seed(sid, ownerCwd) {
-  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, poolStatus: { workers: [], verifiers: [] }, tasks: [] }
+  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, poolStatus: { workers: [], verifiers: [] }, tasks: [] }
   if (typeof ownerCwd === 'string' && ownerCwd) d.ownerCwd = ownerCwd
   return d
 }
@@ -163,6 +168,7 @@ export function seed(sid, ownerCwd) {
 // epicSplit（史诗拆分总开关）同法：老看板没有该字段（或脏值）→ 补 true，缺省开 = 引导照旧。
 // workerContinuable（Worker 可续跑开关）同法：老看板没有该字段（或脏值）→ 补 true，
 // 即老看板读进来就按新行为（可续跑 Worker）派发；显式落 false 才是逐字回退旧一次性路径。
+// verifyUserGuide（Verifier 自测指南开关）同法：老看板没有该字段（或脏值）→ 补 true，缺省开 = 指南照常。
 export function normalizeBoard(d) {
   if (d && typeof d === 'object') {
     if (!d.poolStatus || typeof d.poolStatus !== 'object' || !Array.isArray(d.poolStatus.workers) || !Array.isArray(d.poolStatus.verifiers)) d.poolStatus = { workers: [], verifiers: [] }
@@ -171,6 +177,7 @@ export function normalizeBoard(d) {
     if (typeof d.notifyDone !== 'boolean') d.notifyDone = true
     if (typeof d.epicSplit !== 'boolean') d.epicSplit = true
     if (typeof d.workerContinuable !== 'boolean') d.workerContinuable = true
+    if (typeof d.verifyUserGuide !== 'boolean') d.verifyUserGuide = true
     if (Array.isArray(d.tasks)) {
       for (var i = 0; i < d.tasks.length; i++) {
         var t = d.tasks[i]
@@ -437,12 +444,58 @@ export function parseSections(text) {
     var title = matches[i].title
     if (/开发描述/.test(title)) out.summary = body
     else if (/改动/.test(title)) out.changes = body
+    else if (/自测指南|用户自测/.test(title)) { var ut = parseUserTest(body); if (ut) out.userTest = ut } // 须在「自测」前：自测指南 ≠ 自测情况
     else if (/自测/.test(title)) out.selfTest = body
     else if (/diff|变更概要/i.test(title)) out.diff = body
     else if (/测试概要|验证概要|审查概要/.test(title)) out.verifySummary = body
     else if (/核对项|核验项|检查项/.test(title)) out.checks = body
   }
   return out
+}
+// ===== Verifier 自测指南（verifyUserGuide，task-muxyyvg0）=====
+// userTest 四字段归一（工具通道 board_verdict 的参数 + 文本通道 parseUserTest 的出口共用）：
+//   gist ≤300 / steps ≤12 条每条 ≤300 / expect ≤600；tier 只认 ui/metric/internal 三档，
+//   非法/缺省一律归 internal（最保守档——宁可标「无用户可感知面」也不伪造可操作指引）。
+// 四字段全空（gist/steps/expect 皆空）→ 返回 null（视为没交指南，不挂字段）。
+export function normalizeUserTest(u) {
+  if (!u || typeof u !== 'object') return null
+  var tier = String(u.tier == null ? '' : u.tier).trim().toLowerCase().split(/[\s（(，,。|。.]/)[0]
+  if (['ui', 'metric', 'internal'].indexOf(tier) < 0) tier = 'internal'
+  var steps = []
+  if (Array.isArray(u.steps)) { for (var i = 0; i < u.steps.length && steps.length < 12; i++) { var s = String(u.steps[i] == null ? '' : u.steps[i]).trim().slice(0, 300); if (s) steps.push(s) } }
+  var out = { gist: String(u.gist == null ? '' : u.gist).trim().slice(0, 300), steps: steps, expect: String(u.expect == null ? '' : u.expect).trim().slice(0, 600), tier: tier }
+  if (!out.gist && !out.steps.length && !out.expect) return null
+  return out
+}
+// 「## 自测指南」段体 → userTest 四字段。字段锚：gist:/tier:/steps:/expect:
+//（兼容中文别名 概要/分级/步骤/预期 与全角冒号；锚词允许前导列表符 `- gist:`）。
+// steps: 行之后的列表行（-/*/+/1./1、/1)）逐条收集；其余续行并入当前字段文本。
+export function parseUserTest(body) {
+  if (!body) return null
+  var raw = { gist: '', steps: [], expect: '', tier: '' }
+  var field = null
+  var lines = String(body).split('\n')
+  for (var i = 0; i < lines.length; i++) {
+    var ln = lines[i]
+    var m = ln.match(/^\s*(?:[-*+]\s*)?(gist|概要|tier|分级|steps?|步骤|expect|预期)\s*[:：]\s*(.*)$/i)
+    if (m) {
+      var key = m[1].toLowerCase()
+      var val = (m[2] || '').trim()
+      if (key === 'gist' || key === '概要') { field = 'gist'; raw.gist = val }
+      else if (key === 'tier' || key === '分级') { field = 'tier'; raw.tier = val }
+      else if (key === 'step' || key === 'steps' || key === '步骤') { field = 'steps'; if (val) raw.steps.push(val) }
+      else { field = 'expect'; raw.expect = val }
+      continue
+    }
+    var sm = ln.match(/^\s*(?:[-*+]|\d+[.、)）])\s+(.+)$/)
+    if (sm && field === 'steps') { raw.steps.push(sm[1].trim()); continue }
+    var txt = ln.trim()
+    if (!txt) continue
+    if (field === 'gist') raw.gist += (raw.gist ? ' ' : '') + txt
+    else if (field === 'expect') raw.expect += (raw.expect ? '\n' : '') + txt
+    else if (field === 'steps' && raw.steps.length) raw.steps[raw.steps.length - 1] += ' ' + txt
+  }
+  return normalizeUserTest(raw)
 }
 // verifier 结论：行首锚定 APPROVED/REJECTED（输出中提到历史驳回字眼不应误判）；null = 无法判定
 export function parseVerdict(output) { var m = (output || '').trim().match(/^[ \t>*#\-\s]*(APPROVED|REJECTED)\b/im); return m ? m[1].toUpperCase() : null }
@@ -665,7 +718,17 @@ export function buildWorkerPrompt(t, pack, feedbackEnabled) {
   p += '\n\n完成契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + t.id + '，summary=开发描述/changes=改动清单/selfTest=自测情况/diffStat=变更概要）；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况 / ## diff 概要）。\n   diffStat 要求：若本次改动发生在 git 仓库内，运行 git diff --stat（含 git status --short），把输出贴进 diffStat（≤1500 字符）；关键逻辑变更可附 ≤20 行核心片段。非代码任务/无 git 仓库可省略。\n   **board_report 调用成功即任务终点：立即结束输出，不要再修改/验证任何文件**。上报后任务即刻进入验收，你继续改动会让代码在验收口径之外漂移、且阻塞 Verifier 派发（实测有 Worker 上报后又自测 16 分钟）；上报后发现新问题的，写进 selfTest 备注交由 Verifier/主窗口裁决。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate, taskId=' + t.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测。上报歧义后直接结束本轮——裁决后会有新 Worker 带着裁决答案接手。\n3. 进展汇报（较大任务）：按里程碑推进，每完成一个可验证的里程碑调用一次 board_report（kind="progress", taskId=' + t.id + ', question=一行进展摘要，≤200 字符）。只在有实际产物/结论时报；禁止定时汇报或表演式汇报。'
   return p
 }
-export function buildVerifierPrompt(t, pack) {
+// ===== Verifier 自测指南契约段（verifyUserGuide 板级开关，默认开，task-muxyyvg0）=====
+// 背景：Verifier 产出只对主窗口说话，用户无法逐张审产出——每张验收卡附一份「用户自测指南」，
+// 用户照着步骤自己验证。四字段：gist（一句人话说改了什么）/ steps[]（用户操作步骤，每条一步）/
+// expect（预期看到什么）/ tier（ui=界面可操作 | metric=看指标变化 | internal=纯内部无用户可感知面，
+// internal 时 steps 可空、expect 写「验证靠测试套件」）。
+// 诚实护栏写死在 prompt：只给亲自验过/从 diff 可推导的步骤，不许编没验过的操作；
+// UI 特性给具体路径（哪个区哪个按钮）；host-only 改动如实标 internal。
+// 双模：工具通道走 board_verdict 的 userTest 参数；文本通道追加「## 自测指南」段
+//（段体格式 parseUserTest 解析，落账 t.verification.userTest）。
+export var USER_GUIDE_CONTRACT = '\n\n自测指南（给用户看的验收指引，随结论一并提交）：\n在结论分段之后追加一段「## 自测指南」，严格按四字段格式：\ngist: <一句人话：这次改了什么，用户能感知到什么>\ntier: ui | metric | internal（三选一，诚实分级：ui=界面可操作验证；metric=看指标/数据变化验证；internal=纯内部改动，无用户可感知面）\nsteps:\n1. <用户操作第一步>\n2. <用户操作第二步>\nexpect: <预期看到什么>\n诚实护栏：steps 只写你亲自验过、或能从 diff 直接推导的步骤，不许编造没验过的操作；UI 特性给具体路径（哪个区哪个按钮）；tier=internal 时 steps 可留空，expect 写「验证靠测试套件」。\n工具通道：调用 board_verdict 时把四字段放进 userTest 参数（{gist: 一句人话, steps: [步骤,...], expect: 预期, tier: ui|metric|internal}）。'
+export function buildVerifierPrompt(t, pack, userGuide) {
   var notes = histNotes(t)
   var msgs = buildMessages(t)
   var p = '你是一个一次性任务审核 Verifier。审查下面这个任务的完成质量，给出结论后本会话即销毁。\n\ntaskId: ' + t.id + '\n任务: ' + t.title + '\n描述: ' + (t.description || '').slice(0, 500)
@@ -680,6 +743,9 @@ export function buildVerifierPrompt(t, pack) {
   // 供主窗口分诊「立单缺料 vs Worker 执行问题」，缺料占高了就该把建卡调研门禁拧紧。
   p += '\n驳回归因：若 Worker 的产出明显因缺少调研上下文而跑偏/绕路，驳回时请在驳回理由里注明「立单缺调研」（归因会计入驳回热点统计）。'
   p += '\n\n结论契约（双模，工具优先）：\n1. 优先调用 board_verdict 工具（taskId=' + t.id + ', verdict=approved/rejected, summary=测试概要, checks=逐条核对证据含行号）。\n2. 工具不可用则首行 APPROVED: <结论> 或 REJECTED: <结论>，然后 ## 测试概要 / ## 核对项 分段。'
+  // 自测指南段（verifyUserGuide 开关门禁，缺省开）：整段追加在 prompt 末尾；关掉 = 逐字无此段（省 token），
+  // 落账侧（settleVerifier/board_verdict）同开关门禁——关时即使输出带了段也不挂 userTest 字段。
+  if (userGuide !== false) p += USER_GUIDE_CONTRACT
   return p
 }
 

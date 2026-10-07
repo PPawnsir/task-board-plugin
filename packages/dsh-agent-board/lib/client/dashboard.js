@@ -217,6 +217,29 @@
       if (groups.blocked.length) { lines.push('## 阻塞'); groups.blocked.forEach(function (t) { lines.push('- ' + t.title + (t.escalation ? '（待裁决）' : '')) }); lines.push('') }
       var doneAll = state.archived.length ? state.archived : state.tasks.filter(function (t) { return t.status === 'resolved' }); var done = doneAll.filter(function (t) { return !(rg.from || rg.to) || tsInRange(taskLastTs(t), rg.from, rg.to) })
       if (done.length) { lines.push('## 已完成（含归档，近 ' + Math.min(done.length, 20) + ' 条）'); done.slice(0, 20).forEach(function (t) { lines.push('- ' + t.title + (t.verification ? '｜验收: ' + t.verification.verdict : '') + (t.deliverable && t.deliverable.summary ? '｜' + t.deliverable.summary.slice(0, 80) : '')) }); lines.push('') }
+      // ===== 本版自测清单（verifyUserGuide 开关门禁，task-muxyyvg0）=====
+      // 已验收卡的 userTest 聚合：按验收通过时间（resolvedAt，兜底 verification.at）倒序取近 10 张，
+      // tier=internal 的收末尾并标注「无用户可感知面」——用户照着清单逐张自测；开关关掉整段不出现。
+      if (state.verifyUserGuide !== false) {
+        var ugList = done.filter(function (t) { return t.verification && t.verification.userTest })
+        ugList.sort(function (a, b) { return String(b.resolvedAt || b.verification.at || '').localeCompare(String(a.resolvedAt || a.verification.at || '')) })
+        var ugTop = ugList.slice(0, 10)
+        var ugAct = ugTop.filter(function (t) { return t.verification.userTest.tier !== 'internal' })
+        var ugInternal = ugTop.filter(function (t) { return t.verification.userTest.tier === 'internal' })
+        var ugOrdered = ugAct.concat(ugInternal)
+        if (ugOrdered.length) {
+          lines.push('## 本版自测清单（验收通过时间倒序 · 近 ' + ugOrdered.length + ' 张）')
+          ugOrdered.forEach(function (t) {
+            var ut = t.verification.userTest
+            var tierTag = ut.tier === 'ui' ? 'UI 可操作' : (ut.tier === 'metric' ? '看指标' : '纯内部 · 无用户可感知面')
+            lines.push('### ' + t.title + '（' + tierTag + '）')
+            if (ut.gist) lines.push('- 改动：' + ut.gist)
+            if (ut.steps && ut.steps.length) { lines.push('- 自测步骤：'); ut.steps.forEach(function (s, i) { lines.push('  ' + (i + 1) + '. ' + s) }) }
+            if (ut.expect) lines.push('- 预期：' + ut.expect)
+            lines.push('')
+          })
+        }
+      }
       return lines.join('\n')
     }
 
@@ -844,6 +867,13 @@
             React.createElement('input', { type: 'checkbox', checked: props.notifyDone !== false, onChange: function (e) { setCfg('notifyDone', e.target.checked) } }),
             React.createElement('span', null, '✅ 完成回执（任务完成或阻塞时聚合播报）')),
           React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '歧义裁决通知不受这两个开关影响（任务等人裁决必须提醒）'),
+          // 自测指南开关（verifyUserGuide，缺省 true，「通知」小节旁的「验收」小节）：关掉后
+          // ① Verifier prompt 不再要求「## 自测指南」段（省 token）；② 验收落账不挂 userTest；
+          // ③ 详情页自测指南块与报告「本版自测清单」段整块不渲染。老看板缺字段=开。
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '验收'),
+          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
+            React.createElement('input', { type: 'checkbox', checked: props.verifyUserGuide !== false, onChange: function (e) { setCfg('verifyUserGuide', e.target.checked) } }),
+            React.createElement('span', null, '📋 自测指南（验收结论附用户自测步骤，详情页与报告展示）')),
           // 史诗拆分总开关（板级 epicSplit，缺省 true）：**只关引导，不禁机制**——关掉后 Team 提示词不再
           // 注入「大任务必须拆分」第 6 条、create-task 响应不再附 suggestSplit 软提示；显式传 parentId 建
           // 子卡、史诗自动收口/hooks 状态机照常（用户/主窗口明确要拆时不受阻）。勾选态缺字段=开，与 host 同口径。

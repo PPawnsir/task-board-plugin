@@ -201,7 +201,7 @@ export function createDispatch(ctx, state, deps) {
         var kids = []
         try { var hsnap = await rt(sid); kids = gsb(t.id, (hsnap && hsnap.tasks) || []) } catch (_) {}
         promptText = buildHookPrompt(t, role === 'hook-pre' ? 'pre' : 'post', kids)
-      } else promptText = role === 'worker' ? buildWorkerPrompt(t, pack, cfg(dsnap).feedbackEnabled) : buildVerifierPrompt(t, pack)
+      } else promptText = role === 'worker' ? buildWorkerPrompt(t, pack, cfg(dsnap).feedbackEnabled) : buildVerifierPrompt(t, pack, cfg(dsnap).verifyUserGuide)
       var req = { label: role + ':' + t.id, prompt: [{ type: 'text', text: promptText }], parent: parent, signal: makeSignal() }
       if (modelOverride) {
         // list-models 返回的 id 是 "provider/model" 复合格式（如 "cmss/zhanlu/glm-5.2"），
@@ -810,6 +810,9 @@ export function createDispatch(ctx, state, deps) {
         var vsecs = parseSections(trimmed)
         delete t.stuckSince; delete t.verifyRetries; delete t.lastError // 成功给出结论：卡死标记/重试计数/最近失败原因一并清除
         t.verification = { verdict: approved ? 'approved' : 'rejected', summary: vsecs.verifySummary || trimmed.slice(0, 600), checks: vsecs.checks || '', at: new Date().toISOString(), by: String(rec.id) }
+        // 自测指南落账（verifyUserGuide 开关门禁，task-muxyyvg0）：开关开且解析出「## 自测指南」段才挂
+        // userTest；缺段/开关关 → 字段不挂（client 详情块与报告「本版自测清单」段整块不渲染）
+        if (cfg(d).verifyUserGuide !== false && vsecs.userTest) t.verification.userTest = vsecs.userTest
         verifyApply(d, t, String(rec.id), approved ? 'approved' : 'rejected', trimmed.slice(0, 200))
         if (!approved) {
           t.rejectCount = (t.rejectCount || 0) + 1

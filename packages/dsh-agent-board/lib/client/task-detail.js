@@ -352,7 +352,20 @@
         task.verification ? React.createElement('div', { style: { marginBottom: 8, padding: '6px 8px', border: '1px solid ' + (task.verification.verdict === 'approved' ? C.ok : C.err), borderRadius: 6, background: C.card } },
           React.createElement('div', { style: { fontSize: 11, fontWeight: 700, color: task.verification.verdict === 'approved' ? C.ok : C.err, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic(task.verification.verdict === 'approved' ? 'clipboard-check' : 'clipboard-x', 12), (task.verification.verdict === 'approved' ? '验收通过' : '验收驳回') + ' · ' + (task.verification.by || '') + ' · ' + ago(task.verification.at)),
           React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 4, whiteSpace: 'pre-wrap' } }, task.verification.summary || '(无测试概要)'),
-          task.verification.checks ? React.createElement('div', { style: { marginTop: 4 } }, React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '核对项'), React.createElement('div', { style: { fontSize: 10, color: C.text2, whiteSpace: 'pre-wrap', maxHeight: 120, overflowY: 'auto' } }, task.verification.checks)) : null) : null,
+          task.verification.checks ? React.createElement('div', { style: { marginTop: 4 } }, React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '核对项'), React.createElement('div', { style: { fontSize: 10, color: C.text2, whiteSpace: 'pre-wrap', maxHeight: 120, overflowY: 'auto' } }, task.verification.checks)) : null,
+          // ===== 自测指南块（task-muxyyvg0）：双门禁——板级开关 verifyUserGuide 关 / 未挂 userTest 字段，
+          // 任一整块不渲染。tier 徽章三档配色：ui 绿（界面可操作）/ metric 蓝（看指标变化）/ internal 灰（纯内部）。
+          task.verification.userTest && state.verifyUserGuide !== false ? (function () {
+            var ut = task.verification.userTest
+            var tierMeta = ut.tier === 'ui' ? { c: C.ok, label: 'UI 可操作' } : (ut.tier === 'metric' ? { c: C.brand, label: '看指标' } : { c: C.text2, label: '纯内部' })
+            return React.createElement('div', { style: { marginTop: 6, padding: '5px 8px', background: C.nested, borderRadius: 4 } },
+              React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 3, display: 'flex', alignItems: 'center', gap: 5 } },
+                '📋 自测指南',
+                React.createElement('span', { style: { fontSize: 9, padding: '0 5px', borderRadius: 3, background: tierMeta.c, color: C_INV, fontWeight: 700 }, title: 'tier=' + (ut.tier || 'internal') + '（ui=界面可操作 / metric=看指标变化 / internal=纯内部无用户可感知面）' }, tierMeta.label)),
+              ut.gist ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 3 } }, ut.gist) : null,
+              ut.steps && ut.steps.length ? React.createElement('div', { style: { fontSize: 10, color: C.text, marginBottom: 3 } }, ut.steps.map(function (s, i) { return React.createElement('div', { key: i, style: { marginBottom: 1 } }, (i + 1) + '. ' + s) })) : null,
+              ut.expect ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '预期：' + ut.expect) : null)
+          })() : null) : null,
         React.createElement(MsgThread, { messages: task.messages, taskId: task.id }),
         Array.isArray(task.history) && task.history.length > 0 ? React.createElement('div', { style: { marginBottom: 8 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 3 } }, '流转轨迹'), React.createElement('div', { style: { fontSize: 10, color: C.text2, padding: '4px 6px', background: C.nested, borderRadius: 4 } }, task.history.map(function (h, i) { return React.createElement('div', { key: i, style: { marginBottom: 2 } }, React.createElement('span', { style: { color: C.brand } }, statusLabels[h.to] || h.to), ' · ' + ago(h.timestamp) + ' · ', React.createElement(ActorLink, { id: h.actor }), h.note ? ' · ' + h.note : '') }))) : null,
         React.createElement('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6 } },

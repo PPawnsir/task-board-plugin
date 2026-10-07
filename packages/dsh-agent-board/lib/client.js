@@ -232,7 +232,7 @@ function apply(ctx) {
 
     var COLUMNS = ['draft', 'pending', 'in-progress', 'verifying', 'resolved', 'blocked']
     var reqEpoch = 0 // 会话切换纪元：切会话时自增，旧会话在途响应按纪元丢弃
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', mpRole: '', mpSize: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, verifyUserGuide: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', mpRole: '', mpSize: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
 
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
@@ -298,11 +298,11 @@ function apply(ctx) {
     }
 
     // ===== 设置开关权威纠偏（反馈：勾选几秒才同步，task-muw5uudk）=====
-    // 开关字段（学习反馈/派发回执/完成回执/史诗拆分）在 get-tasks 里**无条件**照常赋值，但取值口径是
+    // 开关字段（学习反馈/派发回执/完成回执/史诗拆分/自测指南）在 get-tasks 里**无条件**照常赋值，但取值口径是
     // 「缺字段/脏值=开，只有显式 false 才关」，与 host core.cfg 同口径——单点定义，避免纠偏把脏值当真值。
     function cfgKnobOf(src, key) { return !(src && src[key] === false) }
     // 变更检测：与 notify 同类的轻量浅比较（只看这几个布尔开关；settings 无嵌套对象）。
-    function cfgKnobsChanged(a, b) { return a.feedbackEnabled !== b.feedbackEnabled || a.notifyDispatch !== b.notifyDispatch || a.notifyDone !== b.notifyDone || a.epicSplit !== b.epicSplit }
+    function cfgKnobsChanged(a, b) { return a.feedbackEnabled !== b.feedbackEnabled || a.notifyDispatch !== b.notifyDispatch || a.notifyDone !== b.notifyDone || a.epicSplit !== b.epicSplit || a.verifyUserGuide !== b.verifyUserGuide }
 
     function fetchTasks() {
       if (!state.sessionId) return
@@ -333,7 +333,7 @@ function apply(ctx) {
         // → 勾选框必须等下一次任意 notify 才翻面（安静板卡数秒）。这里在赋值前快照、赋值后比对，
         // 有变化就补一次 notify：乐观更新（PoolCfgPopover）已让点击瞬时翻面，本兜底是服务端权威值纠偏
         // （乐观值与服务端不一致时以服务端为准，失败回滚亦由此收敛）。
-        var cfgKnobs = { feedbackEnabled: state.feedbackEnabled, notifyDispatch: state.notifyDispatch, notifyDone: state.notifyDone, epicSplit: state.epicSplit }
+        var cfgKnobs = { feedbackEnabled: state.feedbackEnabled, notifyDispatch: state.notifyDispatch, notifyDone: state.notifyDone, epicSplit: state.epicSplit, verifyUserGuide: state.verifyUserGuide }
         if (tasksChanged) {
           state.tasksHash = newHash
           state.tasks = (d && d.tasks) || []
@@ -377,6 +377,8 @@ function apply(ctx) {
         state.notifyDone = cfgKnobOf(d, 'notifyDone')
         // 史诗拆分总开关（设置区「功能」）：同上——老 host 不返回 = 开（引导照旧），只有显式 false 才关
         state.epicSplit = cfgKnobOf(d, 'epicSplit')
+        // 自测指南开关（设置区「验收」）：同上——缺字段=开（详情块/报告清单段照常），只有显式 false 才关
+        state.verifyUserGuide = cfgKnobOf(d, 'verifyUserGuide')
         // 开关有变 / Token 区聚合有变 → 补一次 notify（tasksChanged 分支已在上面 notify 过，
         // 这里只管 hash 不变时被跳过的那两次：开关乐观更新纠偏 + 统计范围切换后的新聚合）
         var cfgDelta = !tasksChanged && cfgKnobsChanged(cfgKnobs, state)
@@ -571,7 +573,8 @@ function apply(ctx) {
       var _fbo = useState(state.feedbackEnabled), fbEnabled = _fbo[0], setFbEnabled = _fbo[1]
       var _ndo = useState(state.notifyDispatch), ndOn = _ndo[0], setNdOn = _ndo[1]; var _nno = useState(state.notifyDone), nnOn = _nno[0], setNnOn = _nno[1]
       var _eso = useState(state.epicSplit), esOn = _eso[0], setEsOn = _eso[1] // 史诗拆分总开关勾选态（设置区「功能」）
-      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setNdOn(state.notifyDispatch); setNnOn(state.notifyDone); setEsOn(state.epicSplit); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
+      var _vug = useState(state.verifyUserGuide), vugOn = _vug[0], setVugOn = _vug[1] // 自测指南开关勾选态（设置区「验收」）
+      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setNdOn(state.notifyDispatch); setNnOn(state.notifyDone); setEsOn(state.epicSplit); setVugOn(state.verifyUserGuide); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!open) return null
       if (!state.isRootStable) return null // 子代理会话不渲染看板面板（读 isRootStable：瞬态 false 不闪，见 isRoot 蝶变防抖）
       var active = tasks.filter(function (t) { return t.status !== 'archived' }); var archived = tasks.filter(function (t) { return t.status === 'archived' })
@@ -597,7 +600,7 @@ function apply(ctx) {
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', borderBottom: '1px solid ' + C.border, flexShrink: 0, flexWrap: 'wrap', gap: 4 } },
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, React.createElement('span', { style: { fontWeight: 600, fontSize: 13, color: C.text, display: 'inline-flex', alignItems: 'center', gap: 5 } }, ic('clipboard-list', 15), '智能看板'), React.createElement(ViewTab, null), React.createElement(PoolStatus, null)),
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' } },
-            React.createElement(PoolCfgPopover, { minW: minW, maxW: maxW, minV: minV, maxV: maxV, workerModel: workerModel, verifierModel: verifierModel, softT: softT, hardT: hardT, feedbackEnabled: fbEnabled, notifyDispatch: ndOn, notifyDone: nnOn, epicSplit: esOn }),
+            React.createElement(PoolCfgPopover, { minW: minW, maxW: maxW, minV: minV, maxV: maxV, workerModel: workerModel, verifierModel: verifierModel, softT: softT, hardT: hardT, feedbackEnabled: fbEnabled, notifyDispatch: ndOn, notifyDone: nnOn, epicSplit: esOn, verifyUserGuide: vugOn }),
             dispatchInfo ? React.createElement('span', { style: { fontSize: 9, color: C.brand, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: dispatchInfo }, dispatchInfo) : null,
             React.createElement('button', { onClick: function () { state.createOpen = true; notify() }, title: '新建任务（可存为草稿）', style: { fontSize: 11, padding: '3px 8px', border: '1px solid ' + C.border, borderRadius: 6, cursor: 'pointer', background: 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('plus', 11), '新建任务'),
             createFlash ? React.createElement('span', { style: { fontSize: 10, color: C.ok } }, createFlash) : null,
@@ -1282,7 +1285,20 @@ function apply(ctx) {
         task.verification ? React.createElement('div', { style: { marginBottom: 8, padding: '6px 8px', border: '1px solid ' + (task.verification.verdict === 'approved' ? C.ok : C.err), borderRadius: 6, background: C.card } },
           React.createElement('div', { style: { fontSize: 11, fontWeight: 700, color: task.verification.verdict === 'approved' ? C.ok : C.err, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic(task.verification.verdict === 'approved' ? 'clipboard-check' : 'clipboard-x', 12), (task.verification.verdict === 'approved' ? '验收通过' : '验收驳回') + ' · ' + (task.verification.by || '') + ' · ' + ago(task.verification.at)),
           React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 4, whiteSpace: 'pre-wrap' } }, task.verification.summary || '(无测试概要)'),
-          task.verification.checks ? React.createElement('div', { style: { marginTop: 4 } }, React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '核对项'), React.createElement('div', { style: { fontSize: 10, color: C.text2, whiteSpace: 'pre-wrap', maxHeight: 120, overflowY: 'auto' } }, task.verification.checks)) : null) : null,
+          task.verification.checks ? React.createElement('div', { style: { marginTop: 4 } }, React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '核对项'), React.createElement('div', { style: { fontSize: 10, color: C.text2, whiteSpace: 'pre-wrap', maxHeight: 120, overflowY: 'auto' } }, task.verification.checks)) : null,
+          // ===== 自测指南块（task-muxyyvg0）：双门禁——板级开关 verifyUserGuide 关 / 未挂 userTest 字段，
+          // 任一整块不渲染。tier 徽章三档配色：ui 绿（界面可操作）/ metric 蓝（看指标变化）/ internal 灰（纯内部）。
+          task.verification.userTest && state.verifyUserGuide !== false ? (function () {
+            var ut = task.verification.userTest
+            var tierMeta = ut.tier === 'ui' ? { c: C.ok, label: 'UI 可操作' } : (ut.tier === 'metric' ? { c: C.brand, label: '看指标' } : { c: C.text2, label: '纯内部' })
+            return React.createElement('div', { style: { marginTop: 6, padding: '5px 8px', background: C.nested, borderRadius: 4 } },
+              React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 3, display: 'flex', alignItems: 'center', gap: 5 } },
+                '📋 自测指南',
+                React.createElement('span', { style: { fontSize: 9, padding: '0 5px', borderRadius: 3, background: tierMeta.c, color: C_INV, fontWeight: 700 }, title: 'tier=' + (ut.tier || 'internal') + '（ui=界面可操作 / metric=看指标变化 / internal=纯内部无用户可感知面）' }, tierMeta.label)),
+              ut.gist ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 3 } }, ut.gist) : null,
+              ut.steps && ut.steps.length ? React.createElement('div', { style: { fontSize: 10, color: C.text, marginBottom: 3 } }, ut.steps.map(function (s, i) { return React.createElement('div', { key: i, style: { marginBottom: 1 } }, (i + 1) + '. ' + s) })) : null,
+              ut.expect ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '预期：' + ut.expect) : null)
+          })() : null) : null,
         React.createElement(MsgThread, { messages: task.messages, taskId: task.id }),
         Array.isArray(task.history) && task.history.length > 0 ? React.createElement('div', { style: { marginBottom: 8 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 3 } }, '流转轨迹'), React.createElement('div', { style: { fontSize: 10, color: C.text2, padding: '4px 6px', background: C.nested, borderRadius: 4 } }, task.history.map(function (h, i) { return React.createElement('div', { key: i, style: { marginBottom: 2 } }, React.createElement('span', { style: { color: C.brand } }, statusLabels[h.to] || h.to), ' · ' + ago(h.timestamp) + ' · ', React.createElement(ActorLink, { id: h.actor }), h.note ? ' · ' + h.note : '') }))) : null,
         React.createElement('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6 } },
@@ -1549,6 +1565,29 @@ function apply(ctx) {
       if (groups.blocked.length) { lines.push('## 阻塞'); groups.blocked.forEach(function (t) { lines.push('- ' + t.title + (t.escalation ? '（待裁决）' : '')) }); lines.push('') }
       var doneAll = state.archived.length ? state.archived : state.tasks.filter(function (t) { return t.status === 'resolved' }); var done = doneAll.filter(function (t) { return !(rg.from || rg.to) || tsInRange(taskLastTs(t), rg.from, rg.to) })
       if (done.length) { lines.push('## 已完成（含归档，近 ' + Math.min(done.length, 20) + ' 条）'); done.slice(0, 20).forEach(function (t) { lines.push('- ' + t.title + (t.verification ? '｜验收: ' + t.verification.verdict : '') + (t.deliverable && t.deliverable.summary ? '｜' + t.deliverable.summary.slice(0, 80) : '')) }); lines.push('') }
+      // ===== 本版自测清单（verifyUserGuide 开关门禁，task-muxyyvg0）=====
+      // 已验收卡的 userTest 聚合：按验收通过时间（resolvedAt，兜底 verification.at）倒序取近 10 张，
+      // tier=internal 的收末尾并标注「无用户可感知面」——用户照着清单逐张自测；开关关掉整段不出现。
+      if (state.verifyUserGuide !== false) {
+        var ugList = done.filter(function (t) { return t.verification && t.verification.userTest })
+        ugList.sort(function (a, b) { return String(b.resolvedAt || b.verification.at || '').localeCompare(String(a.resolvedAt || a.verification.at || '')) })
+        var ugTop = ugList.slice(0, 10)
+        var ugAct = ugTop.filter(function (t) { return t.verification.userTest.tier !== 'internal' })
+        var ugInternal = ugTop.filter(function (t) { return t.verification.userTest.tier === 'internal' })
+        var ugOrdered = ugAct.concat(ugInternal)
+        if (ugOrdered.length) {
+          lines.push('## 本版自测清单（验收通过时间倒序 · 近 ' + ugOrdered.length + ' 张）')
+          ugOrdered.forEach(function (t) {
+            var ut = t.verification.userTest
+            var tierTag = ut.tier === 'ui' ? 'UI 可操作' : (ut.tier === 'metric' ? '看指标' : '纯内部 · 无用户可感知面')
+            lines.push('### ' + t.title + '（' + tierTag + '）')
+            if (ut.gist) lines.push('- 改动：' + ut.gist)
+            if (ut.steps && ut.steps.length) { lines.push('- 自测步骤：'); ut.steps.forEach(function (s, i) { lines.push('  ' + (i + 1) + '. ' + s) }) }
+            if (ut.expect) lines.push('- 预期：' + ut.expect)
+            lines.push('')
+          })
+        }
+      }
       return lines.join('\n')
     }
 
@@ -2176,6 +2215,13 @@ function apply(ctx) {
             React.createElement('input', { type: 'checkbox', checked: props.notifyDone !== false, onChange: function (e) { setCfg('notifyDone', e.target.checked) } }),
             React.createElement('span', null, '✅ 完成回执（任务完成或阻塞时聚合播报）')),
           React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '歧义裁决通知不受这两个开关影响（任务等人裁决必须提醒）'),
+          // 自测指南开关（verifyUserGuide，缺省 true，「通知」小节旁的「验收」小节）：关掉后
+          // ① Verifier prompt 不再要求「## 自测指南」段（省 token）；② 验收落账不挂 userTest；
+          // ③ 详情页自测指南块与报告「本版自测清单」段整块不渲染。老看板缺字段=开。
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '验收'),
+          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
+            React.createElement('input', { type: 'checkbox', checked: props.verifyUserGuide !== false, onChange: function (e) { setCfg('verifyUserGuide', e.target.checked) } }),
+            React.createElement('span', null, '📋 自测指南（验收结论附用户自测步骤，详情页与报告展示）')),
           // 史诗拆分总开关（板级 epicSplit，缺省 true）：**只关引导，不禁机制**——关掉后 Team 提示词不再
           // 注入「大任务必须拆分」第 6 条、create-task 响应不再附 suggestSplit 软提示；显式传 parentId 建
           // 子卡、史诗自动收口/hooks 状态机照常（用户/主窗口明确要拆时不受阻）。勾选态缺字段=开，与 host 同口径。
