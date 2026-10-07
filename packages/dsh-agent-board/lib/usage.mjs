@@ -631,3 +631,279 @@ export function attributeRejection(t, rejectedAt) {
     drifted: !best
   }
 }
+
+// ===== 记分卡聚合底座（task-muxhtgh9 卡2）：scoreboard = 模型×角色×规模段七指标桶 + 全局质量趋势 rollup =====
+// 设计稿 v3（笔记 n-muwsq9yztrpa）。数据源与卡1相同：任务级 t.runs[] 留账 + t.messages 驳回包
+// （kind='rejection'，三条驳回来源统一落点，pushRejection 已按 at/文本头判重）+ 落定时刻
+// （approved 验收 = t.verifiedAt；direct/work 档直落 resolved = t.resolvedAt）。纯函数零 IO：
+// 不碰 fs/不读时钟，日期只解析已有字符串（与卡1 helper 同一纪律）。
+//
+// 两层结构（增量缓存的关键）：
+//   提取层 buildScoreRecs(tasks)：扫全部任务的 runs/驳回消息，产出归一化记录 —— 唯一的重活
+//     （逐 run 归一 + 驳回归因 + 日落点解析 + 任务级规模段都在这层）。
+//   装配层 assembleScoreboard(recs, range)：七指标桶 + 趋势 rollup + 范围裁剪，每次调用现算，
+//     输入只是归一化记录（轻量数组 pass）——范围切换不触发重提取。
+// 增量缓存：runs 只增不改 —— 缓存槽（调用方持有，与 mainWindow 尾读缓存并列在 state）形态
+//   { taskCount, stamp, recs }，键 = (任务数, 最新落定时刻)。stamp 在「最新 run at/endedAt」上扩了
+//   verifiedAt / resolvedAt / 驳回消息 at / t.usage.updatedAt：驳回与验收只改 messages/status 不改 runs，
+//   usage 落账（accumulateRunUsage）只写 usage 分量与 usage.updatedAt 不回填 endedAt——不看这些会出陈账
+//   （驳回率/一次通过率/缓存命中率永远停在首次缓存值）。探针 scoreProbe 只做 Date.parse 取最大值
+//   （不解析日 key、不归因、不分配记录），比提取层便宜一个量级；命中即整份复用，提取层零重算。
+// 样本量护栏：桶内 runs < SCOREBOARD_MIN_SAMPLE（5）标 insufficient:true（卡3 客户端据此灰显不排名）。
+export var SCOREBOARD_MIN_SAMPLE = 5
+
+// 探针：不分配记录地扫出 (任务数, 最新落定时刻) 缓存键。Date.parse 缺失/脏值 → NaN → 不参与 max。
+function scoreProbeMax(stamp, v) { var n = Date.parse(v); return (isFinite(n) && n > stamp) ? n : stamp }
+function scoreProbe(tasks) {
+  var stamp = 0
+  for (var i = 0; i < tasks.length; i++) {
+    var t = tasks[i]
+    if (!t || typeof t !== 'object') continue
+    stamp = scoreProbeMax(stamp, t.verifiedAt)
+    stamp = scoreProbeMax(stamp, t.resolvedAt)
+    if (t.usage && typeof t.usage === 'object') stamp = scoreProbeMax(stamp, t.usage.updatedAt)
+    var trs = Array.isArray(t.runs) ? t.runs : []
+    for (var ri = 0; ri < trs.length; ri++) {
+      var r = trs[ri]
+      if (!r) continue
+      stamp = scoreProbeMax(stamp, r.at)
+      stamp = scoreProbeMax(stamp, r.endedAt)
+    }
+    var ms = Array.isArray(t.messages) ? t.messages : []
+    for (var mi = 0; mi < ms.length; mi++) {
+      if (ms[mi] && ms[mi].kind === 'rejection') stamp = scoreProbeMax(stamp, ms[mi].at)
+    }
+  }
+  return { count: tasks.length, stamp: stamp }
+}
+
+// 提取层：全量扫出归一化记录（缓存未命中才跑）。
+//   runRec：{ taskId, model, role, size, day, durMs, eff, inp, cr, outcome, resume }
+//     —— 只收已落定 run（outcome 存在且非 'running'；在飞/手动终止残留还没结算，不进任何指标，与卡1体检同口径）。
+//     eff/inp/cr 为 null = 该 run 无 usage 留账（老 run/未结算）：进 runs 计数但不进 token/缓存口径（不伪造 0）。
+//   taskRec：{ id, resolved, resolvedDay, cardDurMs, rejectCount }
+//     —— 规模段按任务有效 token（taskEffectiveTokens 口径，卡1 sizeBucketOf 同一界线）；null=规模不可知，
+//     run 仍进趋势但不进桶（不硬塞小桶拉低口径）。
+//   rejRec：{ taskId, runId, model, size, rDay }——驳回事件按卡1 attributeRejection 归到「驳回前最近 worker run」；
+//     runId='' = 无 worker run 可归（direct 档/老卡无 runs），装配层如实计 rejUnattributed，不硬塞桶。
+function buildScoreRecs(tasks) {
+  var runRecs = [], taskRecs = [], rejRecs = []
+  var stamp = 0
+  for (var i = 0; i < tasks.length; i++) {
+    var t = tasks[i]
+    if (!t || typeof t !== 'object') continue
+    var size = sizeBucketOf(taskEffectiveTokens(t.usage).tok)
+    // 落定时刻：approved 验收 = verifiedAt（verifyApply）；direct/work 档直落 resolved = resolvedAt（resolveApply）
+    var rsAt = t.verifiedAt || t.resolvedAt || ''
+    var rsMs = Date.parse(rsAt)
+    var resolved = t.status === 'resolved'
+    var resolvedDay = (resolved && isFinite(rsMs)) ? dayKeyOf(rsAt) : ''
+    stamp = scoreProbeMax(stamp, rsAt)
+    var cMs = Date.parse(t.createdAt)
+    // 卡时长 = createdAt → 落定时刻；缺任一端/倒挂 → null（不参与分布桶，不伪造）
+    var cardDurMs = (resolved && isFinite(cMs) && isFinite(rsMs) && rsMs >= cMs) ? (rsMs - cMs) : null
+    var rejCnt = numOr0(t.rejectCount)
+    var tid = String(t.id || '')
+    taskRecs.push({ id: tid, resolved: resolved, resolvedDay: resolvedDay, cardDurMs: cardDurMs, rejectCount: rejCnt })
+    if (t.usage && typeof t.usage === 'object') stamp = scoreProbeMax(stamp, t.usage.updatedAt)
+    var trs = Array.isArray(t.runs) ? t.runs : []
+    for (var ri = 0; ri < trs.length; ri++) {
+      var r = trs[ri]
+      if (!r || typeof r !== 'object') continue
+      var oc = String(r.outcome || '')
+      if (!oc || oc === 'running') continue // 在飞/手动终止残留：不算缺字段，是还没结算
+      stamp = scoreProbeMax(stamp, r.at)
+      stamp = scoreProbeMax(stamp, r.endedAt)
+      var aMs = Date.parse(r.at), eMs = Date.parse(r.endedAt)
+      var ru = runUsageOf(r) // 五分量或 null（老 run/未结算）
+      runRecs.push({
+        taskId: tid,
+        model: String(r.model || ''),
+        role: runRoleOf(r),
+        size: size,
+        day: dayKeyOf(r.at),
+        durMs: (isFinite(aMs) && isFinite(eMs) && eMs >= aMs) ? (eMs - aMs) : null,
+        eff: ru ? effectiveTokens(ru) : null,
+        inp: ru ? ru.input : null,
+        cr: ru ? ru.cacheRead : null,
+        outcome: oc,
+        resume: r.resume === true
+      })
+    }
+    // 驳回事件：三条来源统一落 t.messages kind='rejection'（判重已在写入侧），读取只认这一个落点
+    var ms = Array.isArray(t.messages) ? t.messages : []
+    for (var mi = 0; mi < ms.length; mi++) {
+      var m = ms[mi]
+      if (!m || m.kind !== 'rejection' || !m.at) continue
+      stamp = scoreProbeMax(stamp, m.at)
+      var attr = attributeRejection(t, m.at) // null = 无 worker run 可归（direct 档/老卡无 runs 留账）
+      var rDay = ''
+      if (attr) {
+        for (var ri2 = 0; ri2 < trs.length; ri2++) {
+          if (trs[ri2] && String(trs[ri2].id) === attr.runId) { rDay = dayKeyOf(trs[ri2].at); break }
+        }
+      }
+      rejRecs.push({ taskId: tid, runId: attr ? attr.runId : '', model: attr ? attr.model : '', size: size, rDay: rDay })
+    }
+  }
+  return { stamp: stamp, runRecs: runRecs, taskRecs: taskRecs, rejRecs: rejRecs }
+}
+
+// 耗时分布：最近秩口径 p90 = sorted[ceil(0.9n)-1]；中位数偶数 n 取两中值均值。空数组 → 两个 null。
+function medP90(durs) {
+  if (!durs.length) return { med: null, p90: null }
+  durs.sort(function (a, b) { return a - b })
+  var n = durs.length
+  var med = (n % 2) ? durs[(n - 1) / 2] : (durs[n / 2 - 1] + durs[n / 2]) / 2
+  return { med: med, p90: durs[Math.min(n - 1, Math.ceil(n * 0.9) - 1)] }
+}
+
+// 装配层：归一化记录 → scoreboard。范围裁剪在这层现算（run 日落点 dayInRange 两端闭区间，
+// 与 usageSummary 同一 range 口径）；缓存命中与否不影响裁剪正确性（裁剪不依赖提取结果以外的状态）。
+function assembleScoreboard(recs, range) {
+  var hasRange = rangeOn(range)
+  var bmap = {}   // bucketKey(model|role|size) -> 聚合器
+  var bTasks = {} // bucketKey -> { taskId: true }（桶内任务级指标的分母来源）
+  var meta = { tasks: recs.taskRecs.length, runsSettled: recs.runRecs.length, bucketed: 0, roleOther: 0, noModel: 0, noSize: 0, rejUnattributed: 0 }
+  var tr = { firstPassByDay: {}, durationBuckets: { lt10m: 0, m10to30: 0, m30to60: 0, gt60m: 0 }, timeoutByDay: {}, resume: { runs: 0, completed: 0, rate: null } }
+  // ===== 任务级趋势：一次通过率 byDay（resolved 任务按落定日）+ 卡时长分布四桶 =====
+  var tById = {}
+  for (var ti = 0; ti < recs.taskRecs.length; ti++) {
+    var trc = recs.taskRecs[ti]
+    tById[trc.id] = trc
+    if (!trc.resolved) continue
+    if (hasRange && !dayInRange(trc.resolvedDay, range)) continue // resolvedDay ''（老数据）范围下剔除：宁可漏不错
+    if (trc.resolvedDay) {
+      var fc = tr.firstPassByDay[trc.resolvedDay] || { resolved: 0, firstPass: 0 }
+      fc.resolved++
+      if (!trc.rejectCount) fc.firstPass++
+      tr.firstPassByDay[trc.resolvedDay] = fc
+    }
+    if (trc.cardDurMs !== null) {
+      // <10m / 10-30m / 30-60m（含 60m 端点，与规模段「含端归中」同哲学）/ >60m
+      if (trc.cardDurMs < 600000) tr.durationBuckets.lt10m++
+      else if (trc.cardDurMs < 1800000) tr.durationBuckets.m10to30++
+      else if (trc.cardDurMs <= 3600000) tr.durationBuckets.m30to60++
+      else tr.durationBuckets.gt60m++
+    }
+  }
+  // ===== run 级：趋势（全角色全模型，「全部模型」汇总只看日落点）+ 桶（worker/verifier × 有模型 × 规模可知）=====
+  for (var qi = 0; qi < recs.runRecs.length; qi++) {
+    var q = recs.runRecs[qi]
+    var inR = !hasRange || dayInRange(q.day, range) // day ''（无 at 老 run）范围下剔除
+    if (inR) {
+      // 超时率走势 byDay：落定值实测是 'timeout/error'（dispatch.settleRun 失败臂 + 幽灵回收），
+      // 字面 'timeout' 兼容预留。日落点取 run.at（与范围裁剪同一口径）。
+      if (q.day) {
+        var tc = tr.timeoutByDay[q.day] || { runs: 0, timeout: 0 }
+        tc.runs++
+        if (q.outcome === 'timeout/error' || q.outcome === 'timeout') tc.timeout++
+        tr.timeoutByDay[q.day] = tc
+      }
+      // 续跑成功率：resume 稀疏旗标（仅续跑记录置 true）的 run 里，最终 completed 的占比
+      if (q.resume) { tr.resume.runs++; if (q.outcome === 'completed') tr.resume.completed++ }
+    } else {
+      // 范围外 run 不进趋势也不进桶（meta 计数保持范围口径：裁剪后还剩多少进了桶）
+      if (hasRange) continue
+    }
+    if (q.role === 'other') { meta.roleOther++; continue } // hook/缺省角色不进 worker/verifier 对比桶（卡1口径）
+    if (!q.model) { meta.noModel++; continue }             // 老 run 缺模型名：如实计数，不硬塞「(未知)」桶
+    if (!q.size) { meta.noSize++; continue }               // 任务未结算出有效消耗：规模不可知，不进桶
+    var key = q.model + '|' + q.role + '|' + q.size
+    var b = bmap[key]
+    if (!b) {
+      b = { key: key, model: q.model, role: q.role, size: q.size, runs: 0, effSum: 0, effCount: 0, durs: [], rejected: 0, resolved: 0, firstPass: 0, timeouts: 0, resumes: 0, inpSum: 0, crSum: 0 }
+      bmap[key] = b; bTasks[key] = {}
+    }
+    b.runs++
+    meta.bucketed++
+    if (q.eff !== null) { b.effSum += q.eff; b.effCount++ }
+    if (q.durMs !== null) b.durs.push(q.durMs)
+    if (q.outcome === 'timeout/error' || q.outcome === 'timeout') b.timeouts++
+    if (q.resume) b.resumes++
+    if (q.inp !== null || q.cr !== null) { b.inpSum += q.inp || 0; b.crSum += q.cr || 0 }
+    bTasks[key][q.taskId] = true
+  }
+  // ===== 驳回率：归因到桶（卡1 attributeRejection 已在提取层跑完，这里只按桶累加）=====
+  for (var ji = 0; ji < recs.rejRecs.length; ji++) {
+    var j = recs.rejRecs[ji]
+    // 无 run 可归 / 归因 run 缺模型 / 任务规模不可知 → 如实计 rejUnattributed，不塞进任何桶
+    if (!j.runId || !j.model || !j.size) { meta.rejUnattributed++; continue }
+    // 与被驳回 run 的桶归属同一裁剪口径：run 被范围裁掉，其驳回也随之裁掉（聚合体不自相矛盾）
+    if (hasRange && !dayInRange(j.rDay, range)) continue
+    var jb = bmap[j.model + '|worker|' + j.size]
+    if (jb) jb.rejected++
+    else meta.rejUnattributed++ // 归因 run 自身没进桶的边缘（记录被裁/缺字段）：不凭空造桶
+  }
+  // ===== 一次通过率（任务级指标）：桶内 resolved 任务中 rejectCount=0 的占比 =====
+  // 任务按「它有哪些 run 落在这个桶」归属（一张卡多个模型的 run 会各进各桶）；范围下按 resolvedDay 裁剪
+  //（落定日不在范围内 → 不计入分子分母）。
+  for (var bk in bmap) {
+    if (!Object.prototype.hasOwnProperty.call(bmap, bk)) continue
+    var bb = bmap[bk]
+    var tset = bTasks[bk]
+    for (var tId in tset) {
+      if (!Object.prototype.hasOwnProperty.call(tset, tId)) continue
+      var tk = tById[tId]
+      if (!tk || !tk.resolved) continue
+      if (hasRange && !dayInRange(tk.resolvedDay, range)) continue
+      bb.resolved++
+      if (!tk.rejectCount) bb.firstPass++
+    }
+  }
+  // ===== 七指标定稿 =====
+  var out = []
+  for (var fk in bmap) {
+    if (!Object.prototype.hasOwnProperty.call(bmap, fk)) continue
+    var f = bmap[fk]
+    var mp = medP90(f.durs)
+    out.push({
+      model: f.model, role: f.role, size: f.size, runs: f.runs,
+      // ① 有效 token：均值 + 总额（有效口径 = 输入+输出+缓存写，与 effectiveTokens 单点同源）
+      effSum: f.effSum, effAvg: f.effCount ? Math.round(f.effSum / f.effCount) : null,
+      // ② 耗时：endedAt - at，中位数 + P90（ms）；无合法时刻的 run 不进分布
+      durMedianMs: mp.med, durP90Ms: mp.p90,
+      // ③ 驳回率 = 归因到本桶 run 的驳回次数 / 桶内 runs
+      rejected: f.rejected, rejectRate: f.runs ? f.rejected / f.runs : 0,
+      // ④ 一次通过率 = 桶内 resolved 且 rejectCount=0 / 桶内 resolved（无 resolved 任务 → null，不假装 0）
+      resolved: f.resolved, firstPass: f.firstPass, firstPassRate: f.resolved ? f.firstPass / f.resolved : null,
+      // ⑤ 超时率 = outcome 超时落定 / 桶内 runs
+      timeouts: f.timeouts, timeoutRate: f.runs ? f.timeouts / f.runs : 0,
+      // ⑥ 续跑率 = resume:true 的 run / 桶内 runs
+      resumes: f.resumes, resumeRate: f.runs ? f.resumes / f.runs : 0,
+      // ⑦ 缓存命中率 = cacheRead / max(input+cacheRead, 1)。
+      //   ⚠️ provider 口径差异钉：本看板数据源（v4 日志 usage）实测 input 与 cacheRead 分列（kimi/anthropic
+      //   口径）；若某 provider 把缓存读并进 input，分母被双计、命中率失真——跨 provider 对比先核各家口径。
+      //   无 usage 样本（inpSum+crSum=0）→ null（不假装 0）。
+      cacheHitRate: (f.inpSum + f.crSum) > 0 ? f.crSum / (f.inpSum + f.crSum) : null,
+      // 样本量护栏：runs < 5 标 insufficient（客户端据此灰显不排名）
+      insufficient: f.runs < SCOREBOARD_MIN_SAMPLE
+    })
+  }
+  // 稳定排序：有效总额降序（主对比维度），并列按 key 字典序（轮询间输出不抖动）
+  out.sort(function (a, b2) {
+    var dd = b2.effSum - a.effSum
+    if (dd !== 0) return dd
+    return a.model + '|' + a.role + '|' + a.size < b2.model + '|' + b2.role + '|' + b2.size ? -1 : 1
+  })
+  tr.resume.rate = tr.resume.runs ? tr.resume.completed / tr.resume.runs : null
+  return { buckets: out, trends: tr, meta: meta }
+}
+
+// 记分卡聚合入口（get-tasks 内组装到 usageSummary.scoreboard）。
+// cacheStore 缺省/非对象 → 不缓存每次全量提取（测试/老宿主兜底，与 readMainWindowUsage 同约定）。
+// 命中（taskCount 与 stamp 双双相同）→ 提取层零重算，只做装配层范围裁剪现算。
+export function buildScoreboard(tasks, range, cacheStore) {
+  var list = Array.isArray(tasks) ? tasks : []
+  var store = (cacheStore && typeof cacheStore === 'object') ? cacheStore : null
+  var recs = null
+  if (store && store.recs) {
+    var pb = scoreProbe(list)
+    if (store.taskCount === pb.count && store.stamp === pb.stamp) recs = store.recs
+  }
+  if (!recs) {
+    recs = buildScoreRecs(list)
+    if (store) { store.taskCount = list.length; store.stamp = recs.stamp; store.recs = recs }
+  }
+  return assembleScoreboard(recs, range)
+}

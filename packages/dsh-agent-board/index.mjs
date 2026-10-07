@@ -15,7 +15,7 @@
 //
 // 兼容 re-export：对外导出契约不变（单测与历史引用直接 import 自本文件）。
 export { TASK_SIZE_CONTRACT, SUGGEST_SPLIT_TEXT, TEAM_SPLIT_RULE, suggestSplitOf, withSplitHint, splitRuleOf } from './lib/policy.mjs'
-export { findRunLog, readRunUsage, aggregateUsageSummary, effectiveTokens, taskEffectiveTokens, readMainWindowUsage, sizeBucketOf, runRoleOf, auditRunEntry, auditRunsCompleteness, attributeRejection, SIZE_BUCKET_SMALL_MAX, SIZE_BUCKET_MEDIUM_MAX } from './lib/usage.mjs'
+export { findRunLog, readRunUsage, aggregateUsageSummary, effectiveTokens, taskEffectiveTokens, readMainWindowUsage, sizeBucketOf, runRoleOf, auditRunEntry, auditRunsCompleteness, attributeRejection, buildScoreboard, SCOREBOARD_MIN_SAMPLE, SIZE_BUCKET_SMALL_MAX, SIZE_BUCKET_MEDIUM_MAX } from './lib/usage.mjs'
 import { createSession } from './lib/session.mjs'
 import { createStore } from './lib/store.mjs'
 import { createNotify } from './lib/notify.mjs'
@@ -47,6 +47,9 @@ export function apply(ctx) {
       sysNotesBuf: {},     // 系统级异常通知队列（随回执冲刷）
       mainWindowUsageCache: {}, // 主窗口消耗增量尾读缓存（task-muwsol23）：sid → { size, mtimeMs, 聚合五分量+byDay }，
                                 //   文件不变零读 / 变大只读增量 / 变小全量重读一次；纯内存不落盘，重启自然全量一次
+      scoreboardCache: {},      // 记分卡聚合缓存（task-muxhtgh9 卡2）：sid → { taskCount, stamp, recs }，
+                                //   runs 只增不改——键=(任务数, 最新落定时刻) 命中则提取层零重算，范围裁剪在装配层现算；
+                                //   纯内存不落盘，重启自然全量一次（与 mainWindowUsageCache 同生命周期纪律）
       poolHealth: {},      // 运行时健康自检（task-muxhrkbg）内存心跳：sid → { bornAt, poolLastOkAt, dispatchOk,
                            //   lastDispatchAt, settleLastOkAt, reapNote }——dispatch.mjs 在 poolCycle 成功轮 /
                            //   settleRunRecord 成功结算 / 幽灵回收 >0 / spawn 成功四处打点，rpc get-tasks 现算

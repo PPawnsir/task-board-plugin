@@ -8,7 +8,7 @@
 import * as core from './core.mjs'
 import path from 'node:path'
 import fsNode from 'node:fs'
-import { findRunLog, readLogBytes, readLogFrames, aggregateUsageSummary, readMainWindowUsage } from './usage.mjs'
+import { findRunLog, readLogBytes, readLogFrames, aggregateUsageSummary, readMainWindowUsage, buildScoreboard } from './usage.mjs'
 import { TASK_SIZE_CONTRACT, withSplitHint, pushRejectLesson, pushArbitrationLesson } from './policy.mjs'
 import { makeMsg } from './notify.mjs'
 import { computeHealthHints, computeRuntimeHealthHints } from './health.mjs'
@@ -77,6 +77,8 @@ export function createRpc(ctx, state, deps) {
     var epicSplitCache = state.epicSplitCache
     // 主窗口消耗增量尾读缓存（task-muwsol23）：本体在 index.mjs state 构建；测试桩 state 缺字段时就地补
     if (!state.mainWindowUsageCache) state.mainWindowUsageCache = {}
+    // 记分卡聚合缓存（task-muxhtgh9 卡2）：与 mainWindow 尾读缓存并列；sid → { taskCount, stamp, recs }
+    if (!state.scoreboardCache) state.scoreboardCache = {}
     // 运行时健康自检心跳表（task-muxhrkbg）：本体在 index.mjs state 构建；测试桩缺字段时就地补
     if (!state.poolHealth) state.poolHealth = {}
     // RPC handlers 表必须在最前面初始化：后面的 handle(...) 调用依赖它（var 只提升声明不提升赋值）
@@ -158,6 +160,11 @@ export function createRpc(ctx, state, deps) {
       // 模型分布 / Top8 / 累计生效——run 级数据只在 host，所以过滤必须在 host 做（客户端只拿聚合，没法自己裁）。
       // 缺省/空范围 = 现状逐字不变（aggregateUsageSummary 内部判定，空串不算范围）。
       d.usageSummary = aggregateUsageSummary(d.tasks, args && args.range)
+      // ===== 记分卡聚合底座（task-muxhtgh9 卡2）：usageSummary.scoreboard =====
+      // 模型×角色×规模段七指标桶 + 全局质量趋势 rollup；与 usageSummary 同一 range 口径（run 日落点裁剪）。
+      // 增量缓存 state.scoreboardCache[sid]：键=(taskCount, 最新落定时刻)，命中则提取层零重算，
+      // 范围裁剪在装配层现算（缓存的是未裁剪归一化记录，不随范围漂移）。
+      d.usageSummary.scoreboard = buildScoreboard(d.tasks, args && args.range, state.scoreboardCache[sid] || (state.scoreboardCache[sid] = {}))
       // ===== 主窗口（本会话对话）消耗单列（task-muwsol23）=====
       // 数据源 = 本看板所属主会话自己的 v4 日志，readMainWindowUsage 增量尾读聚合
       // （缓存 state.mainWindowUsageCache，键=会话 id：文件不变零读、变大只读增量、变小/轮换全量重读一次）。
