@@ -1601,6 +1601,79 @@ test('buildVerifierPrompt: 含「立单缺调研」驳回归因条款', () => {
   assert.match(p, /驳回热点统计/)
 })
 
+// ===== Verifier 验收员加餐（task-muy3gm03）：固定 persona + 文件纪律 + toolFilter 收窄 =====
+test('Verifier 加餐①：VERIFIER_PERSONA 常量——验收员四要点 + 无 {{ 连写括号（严格插值护栏）', () => {
+  const ps = core.VERIFIER_PERSONA
+  assert.equal(typeof ps, 'string')
+  assert.match(ps, /独立验收员/)       // 人设定位
+  assert.match(ps, /独立判断/)         // ① 独立判断
+  assert.match(ps, /不轻信/)           // ① 不轻信 Worker 汇报
+  assert.match(ps, /实证为准/)         // ② 以验收脚本实证为准
+  assert.match(ps, /诚实分级/)         // ③ 诚实分级（自测指南三档）
+  assert.match(ps, /双读者/)           // ④ 结论给主窗口与用户双读者
+  // 宿主对 persona 做严格 {{…}} 插值（同 deployment persona 模板语义）——文本不得含连写 {
+  assert.ok(!/\{\{/.test(ps), 'persona 文本不得含 {{（严格插值会抛异常）')
+})
+
+test('Verifier 加餐②：文件纪律条款在 verifier prompt；worker prompt 不含（parity）', () => {
+  const t = mkTask({ id: 'tx', status: 'verifying' })
+  const pv = core.buildVerifierPrompt(t, '')
+  assert.match(pv, /文件纪律/)                       // 条款标题
+  assert.match(pv, /可以写必要的临时\/测试文件/)      // 允许写临时/测试文件
+  assert.match(pv, /_scratch/)                       // 临时文件落点
+  assert.match(pv, /验收结束后自行清理/)              // 验收结束清理
+  assert.match(pv, /禁止改动工程代码与文档/)          // 工程代码/文档只读
+  assert.match(pv, /touches 审计兜底/)               // 事后兜底威慑写明
+  // 条款在结论契约之前（纪律先行）
+  assert.ok(pv.indexOf('文件纪律') < pv.indexOf('结论契约'), '文件纪律段先于结论契约')
+  // worker prompt 逐字 parity：不含任何文件纪律/加餐条款
+  const pw = core.buildWorkerPrompt(mkTask({ id: 'tx', status: 'pending' }), '')
+  assert.doesNotMatch(pw, /文件纪律/)
+  assert.doesNotMatch(pw, /touches 审计/)
+})
+
+test('Verifier 加餐③：toolFilter 保守收窄——只 deny 联网检索，无 allow 白名单（注释锁定保守理由）', () => {
+  // 白名单断言：收窄为 deny 形态，只砍 web_fetch/web_search（验收不需联网）
+  assert.deepEqual(core.VERIFIER_TOOL_FILTER, { deny: ['web_fetch', 'web_search'] })
+  assert.equal(core.VERIFIER_TOOL_FILTER.allow, undefined, '不设 allow 白名单（拿不准的宁可不收窄）')
+  // 注释存在性断言：core.mjs 写明保守理由（其余工具保留的逐类口径）
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  assert.match(coreSrc, /toolFilter 收窄评估结论（保守口径）/)
+  assert.match(coreSrc, /拿不准的宁可不收窄/)
+})
+
+test('Verifier 加餐④：真派发接线——verifier spawn 挂 persona/toolFilter，worker spawn 逐字 parity', async () => {
+  // 真跑 poolCycle：一张 verifying 卡（派 verifier）+ 一张 pending 卡（派 worker，continuable 路径）
+  const tv = mkTask({ id: 'v1', status: 'verifying' })
+  const tw = mkTask({ id: 'w1', status: 'pending' })
+  const h = mkHookDispatch(mkBoard([tv, tw]))
+  await h.dispatch.poolCycle(FULL_SID)
+  const v = h.spawned.find((s) => s.label === 'verifier:v1')
+  assert.ok(v, 'verifier 按真实派发路径 spawn（一次性 start）')
+  assert.equal(v.persona, core.VERIFIER_PERSONA, 'verifier spawn 挂固定验收员 persona')
+  assert.deepEqual(v.toolFilter, { deny: ['web_fetch', 'web_search'] }, 'verifier spawn 挂收窄 toolFilter')
+  const w = h.spawnedContinuable.find((s) => s.label === 'worker:w1')
+  assert.ok(w, 'worker 按真实派发路径 spawn（continuable）')
+  assert.equal(w.persona, undefined, 'worker spawn 不挂 persona（逐字 parity）')
+  assert.equal(w.toolFilter, undefined, 'worker spawn 不挂 toolFilter（逐字 parity）')
+  // hook run 也不挂（hook 只吃 buildHookPrompt 薄框架，不加验收员人设）
+  assert.ok(h.spawned.every((s) => s.label.indexOf('hook') !== 0 || s.persona === undefined), 'hook spawn 不挂加餐')
+})
+
+test('Verifier 加餐⑤：源码级锁定——加餐只挂 verifier 分支 + 失败回退剥外挂参数', () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  // ① 挂载点只有一处，且被 role === 'verifier' 守门（worker/hook 不可能挂上）
+  assert.match(dsp, /if \(role === 'verifier'\) \{ req\.persona = VERIFIER_PERSONA; req\.toolFilter = VERIFIER_TOOL_FILTER \}/)
+  assert.equal((dsp.match(/req\.persona = VERIFIER_PERSONA/g) || []).length, 1)
+  assert.equal((dsp.match(/req\.toolFilter = VERIFIER_TOOL_FILTER/g) || []).length, 1)
+  // ② 常量从 core 解构导入（单一事实源）
+  assert.match(dsp, /VERIFIER_PERSONA, VERIFIER_TOOL_FILTER/)
+  // ③ 回退兜底：spawn 失败剥光外挂参数（persona/toolFilter/agentOptions）裸请求重试
+  assert.match(dsp, /delete req\.agentOptions; delete req\.persona; delete req\.toolFilter/)
+  // ④ 注释写明 continuable 面不支持 persona 的实证结论（只挂一次性面的理由）
+  assert.match(dsp, /continuable 面（ContinuableCreateRequest 仅 sessionId\/parent\/signal）/)
+})
+
 test('调研遵循接线：双通道 attachContextSuggestions / 驳回 hint 双挂 / Verifier 归因条款（源码级断言）', () => {
   const src = hostSrc()
   assert.equal((src.match(/attachContextSuggestions\(/g) || []).length, 2) // task_create 工具 + create-task RPC
@@ -2790,11 +2863,11 @@ function mkHookDispatch(board, over) {
       list: () => ['mock'],
       getProvider: () => ({ inheritsParentContext: false }),
       start: async (name, req) => {
-        spawned.push({ name, label: req.label, text: req.prompt[0].text, parent: req.parent })
+        spawned.push({ name, label: req.label, text: req.prompt[0].text, parent: req.parent, persona: req.persona, toolFilter: req.toolFilter })
         return { id: 'run-' + spawned.length, result: new Promise(function () {}), dispose: async function () {} }
       },
       startContinuable: async (spec) => {
-        spawnedContinuable.push({ name: spec.provider, label: spec.label, text: spec.request.prompt[0].text, parent: spec.request.parent })
+        spawnedContinuable.push({ name: spec.provider, label: spec.label, text: spec.request.prompt[0].text, parent: spec.request.parent, persona: spec.request.persona, toolFilter: spec.request.toolFilter })
         return { childId: 'child-' + spawnedContinuable.length, messageId: 'msg-' + spawnedContinuable.length }
       },
     },
@@ -3490,8 +3563,9 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
   // 两模块都从 core 解构引入（接线不断）；rpc.mjs 解构表尾部随调研门禁（task-mute6zpw）、调研遵循三件套（task-mutnj3a4）、
   // tasksHash（task-mutrtwin）、hooks 浅校验（normalizeHooks/mergeHooks，本批 hooks=agent run）、
   // 自测指南归一（normalizeUserTest，task-muxyyvg0）扩展；
-  // dispatch.mjs 解构表尾部追加 hook 族（buildHookPrompt/hookOn/hookSetState/gsb）与驳回包 helper（pushRejection，task-muvg15p5）
-  assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection \} = core/)
+  // dispatch.mjs 解构表尾部追加 hook 族（buildHookPrompt/hookOn/hookSetState/gsb）与驳回包 helper（pushRejection，task-muvg15p5）、
+  // Verifier 验收员加餐常量（VERIFIER_PERSONA/VERIFIER_TOOL_FILTER，task-muy3gm03）
+  assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER \} = core/)
   assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest \} = core/)
   // 既有「全子任务 resolved → 父 verifying」逻辑不动（checkParentAuto 仍在 verifyApply 链路；
   // 但其内部已委托共享 helper maybeAutoCloseParent——单一判定口径，core.mjs 不在 hostSrc 清单，单独读）

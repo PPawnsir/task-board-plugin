@@ -7,7 +7,7 @@ import { statSync } from 'node:fs'
 import * as core from './core.mjs'
 import { readRunUsage, findRunLog, readLogBytes, readLogFrames } from './usage.mjs'
 import { splitRuleOf, pushRejectLesson } from './policy.mjs'
-const { ah, cfg, claimApply, resolveApply, verifyApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection } = core
+const { ah, cfg, claimApply, resolveApply, verifyApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER } = core
 
 export function createDispatch(ctx, state, deps) {
     // 宿主 fs 句柄与「会话工作区解析根」随预研注入瘦身退役（task-muvjs392）：派发侧不再读盘——
@@ -203,6 +203,15 @@ export function createDispatch(ctx, state, deps) {
         promptText = buildHookPrompt(t, role === 'hook-pre' ? 'pre' : 'post', kids)
       } else promptText = role === 'worker' ? buildWorkerPrompt(t, pack, cfg(dsnap).feedbackEnabled) : buildVerifierPrompt(t, pack, cfg(dsnap).verifyUserGuide)
       var req = { label: role + ':' + t.id, prompt: [{ type: 'text', text: promptText }], parent: parent, signal: makeSignal() }
+      // ===== Verifier 验收员加餐（task-muy3gm03）：persona + toolFilter 只挂 verifier =====
+      // ① persona = 固定验收员人设（scoped deployment:persona-prefix 影子段，只覆盖该子代理）；
+      // ② toolFilter = 保守收窄（deny web_fetch/web_search：验收以本地实证为准不需联网，其余工具
+      //    一律保留——评估口径见 core.mjs VERIFIER_TOOL_FILTER 头注释）。
+      // 两条 spawn 路径覆盖口径：continuable 面（ContinuableCreateRequest 仅 sessionId/parent/signal）
+      // 不支持 persona/toolFilter——但 verifier 恒走一次性 start()（useContinuable 只对 worker 开），
+      // 故挂在这里即覆盖全部 verifier spawn（含手动「派发验收」与自动派发两条入口，共用 spawnOneShot）。
+      // worker 请求不挂任何加餐（spawn 参数逐字 parity，单测锁定）。
+      if (role === 'verifier') { req.persona = VERIFIER_PERSONA; req.toolFilter = VERIFIER_TOOL_FILTER }
       if (modelOverride) {
         // list-models 返回的 id 是 "provider/model" 复合格式（如 "cmss/zhanlu/glm-5.2"），
         // 但 AgentOptions 的 provider 和 model 是分开的——整串塞进 model 会报 UNKNOWN_MODEL
@@ -230,9 +239,12 @@ export function createDispatch(ctx, state, deps) {
           run = await subagents.start(providerName, req)
         }
       } catch (e) {
-        if (modelOverride) {
-          console.error('[task-board] model override failed, fallback to parent model:', String(e))
-          delete req.agentOptions
+        // 外挂参数回退（既有模型覆盖通道，task-muy3gm03 起并入 verifier 加餐 persona/toolFilter）：
+        // provider 不支持某能力 / toolFilter 命中未知名时服务面 fail-loud 拒收（绝不静默忽略）——
+        // 剥光外挂参数用裸请求再试一次（文件纪律条款在 prompt 里，加餐剥掉纪律不丢），仍失败才放弃本轮。
+        if (modelOverride || req.persona !== undefined || req.toolFilter !== undefined) {
+          console.error('[task-board] spawn extras failed (model/persona/toolFilter), fallback to bare request:', String(e))
+          delete req.agentOptions; delete req.persona; delete req.toolFilter
           try {
             if (useContinuable) {
               var cs2 = await subagents.startContinuable({ provider: providerName, label: req.label, request: req, signal: req.signal })

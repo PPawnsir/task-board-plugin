@@ -728,6 +728,25 @@ export function buildWorkerPrompt(t, pack, feedbackEnabled) {
 // 双模：工具通道走 board_verdict 的 userTest 参数；文本通道追加「## 自测指南」段
 //（段体格式 parseUserTest 解析，落账 t.verification.userTest）。
 export var USER_GUIDE_CONTRACT = '\n\n自测指南（给用户看的验收指引，随结论一并提交）：\n在结论分段之后追加一段「## 自测指南」，严格按四字段格式：\ngist: <一句人话：这次改了什么，用户能感知到什么>\ntier: ui | metric | internal（三选一，诚实分级：ui=界面可操作验证；metric=看指标/数据变化验证；internal=纯内部改动，无用户可感知面）\nsteps:\n1. <用户操作第一步>\n2. <用户操作第二步>\nexpect: <预期看到什么>\n诚实护栏：steps 只写你亲自验过、或能从 diff 直接推导的步骤，不许编造没验过的操作；UI 特性给具体路径（哪个区哪个按钮）；tier=internal 时 steps 可留空，expect 写「验证靠测试套件」。\n工具通道：调用 board_verdict 时把四字段放进 userTest 参数（{gist: 一句人话, steps: [步骤,...], expect: 预期, tier: ui|metric|internal}）。'
+
+// ===== Verifier 验收员加餐（task-muy3gm03）：固定 persona + 工具收窄 =====
+// 背景：Verifier 此前只有任务层 prompt 契约，没有「人设」——遇到 Worker 汇报与实证冲突时
+// 容易顺着汇报走。宿主 spawn 面实证（dsh-subagent types.d.ts:136-191 + spawn-in-process
+// lib/index.js:23-29 capabilities 全 true）：一次性 start() 支持 persona（scoped
+// deployment:persona-prefix 影子段，只覆盖该子代理的部署人设）与 toolFilter（scoped
+// tools.restrict()，工具从 prompt 消失且拒绝执行）。continuable 面（ContinuableCreateRequest
+// 只有 sessionId/parent/signal）不支持这两个参数——但 verifier 恒走一次性路径
+//（useContinuable 只对 worker 开），挂一次性面即覆盖全部 verifier spawn。
+// ⚠️ persona 走宿主严格 {{…}} 插值（同 deployment persona 模板语义）——本文不得出现连写 {。
+// ⚠️ toolFilter 名字走「响亮未知名校验」：deny 了不存在的工具会直接抛错，故只砍
+//    宿主标配的 web_fetch/web_search，且 dispatch 侧有「剥外挂参数重试」兜底。
+export var VERIFIER_PERSONA = '你是任务看板的独立验收员（Verifier），不是 Worker 的队友。\n1. 独立判断：不轻信 Worker 的汇报与自测描述——「Worker 说已验证」不构成证据，一切以你亲自复跑/核对到的为准。\n2. 实证为准：有硬性验收脚本必须独立复跑并核对真实输出；脚本失败或无法复现成功一律 REJECTED。\n3. 诚实分级：自测指南按真实可验证面分级（ui/metric/internal），不为好看拔高档次，没验过的步骤不写。\n4. 双读者：结论同时写给主窗口（逐条核对证据，含行号）和用户（自测指南人话）——两者都要诚实、可复核。'
+// toolFilter 收窄评估结论（保守口径）：只砍明确无关的联网检索（web_fetch/web_search——
+// 验收以本地实证为准，不需联网）；其余一律保留：read/grep/glob/pwsh 是核对主力，
+// write/edit 供文件纪律允许的临时/测试文件，board_verdict 是落账通道，note_* 供查历史教训，
+// browser_* 保留（tier=ui 验收可能要真实开页面核对），task_*/看板管理工具子代理本无权限
+//（rpc 层 root 闸门）无需再砍。拿不准的宁可不收窄。
+export var VERIFIER_TOOL_FILTER = { deny: ['web_fetch', 'web_search'] }
 export function buildVerifierPrompt(t, pack, userGuide) {
   var notes = histNotes(t)
   var msgs = buildMessages(t)
@@ -742,6 +761,10 @@ export function buildVerifierPrompt(t, pack, userGuide) {
   // 跑偏归因条款（调研遵循·host 三件套 ②）：驳回理由注明「立单缺调研」——归因计入驳回热点统计，
   // 供主窗口分诊「立单缺料 vs Worker 执行问题」，缺料占高了就该把建卡调研门禁拧紧。
   p += '\n驳回归因：若 Worker 的产出明显因缺少调研上下文而跑偏/绕路，驳回时请在驳回理由里注明「立单缺调研」（归因会计入驳回热点统计）。'
+  // 文件纪律（task-muy3gm03，用户口径「验收时可以写必要的测试文件，不要动工程代码」）：
+  // 写死进 prompt 的硬纪律 + 事后兜底威慑（touches 审计：Worker 交付的 diff 概要与任务声明的
+  // touches 即改动范围基线，越界即驳回——这层审计对 verifier 自己同样生效）。
+  p += '\n文件纪律：验收时可以写必要的临时/测试文件（放 _scratch 或测试目录，验收结束后自行清理干净）；禁止改动工程代码与文档（README 等）。事后有 touches 审计兜底：Worker 交付的 diff 概要与任务声明的 touches 是改动范围基线，发现越界改动（含你自己留下的改动痕迹）一律驳回。'
   p += '\n\n结论契约（双模，工具优先）：\n1. 优先调用 board_verdict 工具（taskId=' + t.id + ', verdict=approved/rejected, summary=测试概要, checks=逐条核对证据含行号）。\n2. 工具不可用则首行 APPROVED: <结论> 或 REJECTED: <结论>，然后 ## 测试概要 / ## 核对项 分段。'
   // 自测指南段（verifyUserGuide 开关门禁，缺省开）：整段追加在 prompt 末尾；关掉 = 逐字无此段（省 token），
   // 落账侧（settleVerifier/board_verdict）同开关门禁——关时即使输出带了段也不挂 userTest 字段。
