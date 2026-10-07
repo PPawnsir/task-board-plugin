@@ -11,7 +11,7 @@ import fsNode from 'node:fs'
 import { findRunLog, readLogBytes, readLogFrames, aggregateUsageSummary, readMainWindowUsage } from './usage.mjs'
 import { TASK_SIZE_CONTRACT, withSplitHint, pushRejectLesson, pushArbitrationLesson } from './policy.mjs'
 import { makeMsg } from './notify.mjs'
-import { computeHealthHints } from './health.mjs'
+import { computeHealthHints, computeRuntimeHealthHints } from './health.mjs'
 import { isFullSessionId } from './session.mjs' // 幻影板防线口径（纯函数，与 policy.mjs 直引同例）
 const { ah, isb, gsb, gpt, vt, validateDeps, classifyPipeline, cfg, claimCheck, claimApply, resolveApply, verifyApply, archiveApply, maybeAutoCloseParent, PRIO_RANK, touchesConflict, holdsFiles, boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection } = core
 
@@ -77,6 +77,8 @@ export function createRpc(ctx, state, deps) {
     var epicSplitCache = state.epicSplitCache
     // 主窗口消耗增量尾读缓存（task-muwsol23）：本体在 index.mjs state 构建；测试桩 state 缺字段时就地补
     if (!state.mainWindowUsageCache) state.mainWindowUsageCache = {}
+    // 运行时健康自检心跳表（task-muxhrkbg）：本体在 index.mjs state 构建；测试桩缺字段时就地补
+    if (!state.poolHealth) state.poolHealth = {}
     // RPC handlers 表必须在最前面初始化：后面的 handle(...) 调用依赖它（var 只提升声明不提升赋值）
     var handlers = state.handlers
     function handle(method, fn) { handlers[method] = fn }
@@ -166,7 +168,19 @@ export function createRpc(ctx, state, deps) {
       var __mw = readMainWindowUsage(sid, sessionsRoot, args && args.range, state.mainWindowUsageCache)
       if (__mw) d.usageSummary.mainWindow = __mw
       // 架构自省 L1：healthHints 现算（纯函数零存储零 IO，近 50 卡窗口），客户端「架构健康」区超阈值才显示
-      d.healthHints = computeHealthHints(d.tasks)
+      // 运行时健康自检（task-muxhrkbg）：dispatch.mjs 在 poolCycle 成功轮 / settleRunRecord 成功结算 /
+      // 幽灵回收 >0 三处记内存心跳（state.poolHealth[sid]，不落盘），这里现算运行时 hint 拼在静态信号
+      // **前面**（进行中的运行事故优先于架构建议）。capW 与 poolCycleBody 同口径：auto 模式且 root 存活
+      // 才有派发义务（manual / 死会话 capW=0 → ①不判；alive=false → ②也不判——死会话不是冻结）。
+      var __ph = state.poolHealth[sid] || (state.poolHealth[sid] = { bornAt: Date.now() })
+      var __alive = !!rootForSession(sid)
+      var __aw = 0
+      var __rr = runsFor(sid)
+      Object.keys(__rr).forEach(function (k) { var r0 = __rr[k]; if (r0 && r0.role === 'worker') __aw++ })
+      var __capW = (__alive && (d.boardMode || 'auto') === 'auto') ? Math.max(0, cfg(d).maxWorkers - __aw) : 0
+      var __rh = computeRuntimeHealthHints(d, __ph, { capW: __capW, now: Date.now(), alive: __alive })
+      if (__rh.consumeReapNote) delete __ph.reapNote // 幽灵回收记录一次性：读一次即灭（过期未读也清，不留残渣）
+      d.healthHints = __rh.hints.concat(computeHealthHints(d.tasks))
       // 史诗父卡语义层：childStats 现算（零存储）——{ <parentId>: { total, settled, resolved, active, activeTitle } }，
       // 父卡列位置/进度展示的数据源；total 含已归档子任务，settled=resolved|cancelled|archived（resolved 为
       // 兼容别名同值），因此归档子卡不会让进度分母缩水（task-muupgfot）；只有无任何子任务的父卡才不出键

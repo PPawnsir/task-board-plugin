@@ -32,6 +32,17 @@ export function createDispatch(ctx, state, deps) {
     var knownSessions = state.knownSessions
     var teamModeCache = state.teamModeCache
 
+    // ===== 运行时健康自检（task-muxhrkbg）心跳打点 =====
+    // 本模块是三处心跳的唯一写入方：poolCycle 成功轮 / settleRunRecord 成功结算 / 幽灵回收 >0 / spawn 成功。
+    // 读侧在 rpc get-tasks（health.computeRuntimeHealthHints 现算 hint）；纯内存不落盘。
+    // state 缺字段时就地补（测试桩/老宿主兼容，与 rpc.mjs mainWindowUsageCache 同例）。
+    function poolHealthFor(sid) {
+      if (!state.poolHealth) state.poolHealth = {}
+      var ph = state.poolHealth[sid]
+      if (!ph) { ph = state.poolHealth[sid] = { bornAt: Date.now() } }
+      return ph
+    }
+
     function makeSignal() { try { return new AbortController().signal } catch (_) { return { aborted: false, addEventListener: function () {}, removeEventListener: function () {} } } }
 
     // ===== 状态流转（已抽取到 lib/core.mjs）=====
@@ -402,6 +413,9 @@ export function createDispatch(ctx, state, deps) {
       try { await accumulateRunUsage(sid, rec) } catch (e) { console.error('[task-board] usage 收尾失败 (task ' + rec.taskId + '):', String(e)) }
       // ③ 摘除两级超时臂：软臂不再刷假告警，硬臂不再对已结算的闲置会话补一枪 interrupt。
       try { if (typeof rec.disarm === 'function') rec.disarm() } catch (_) {}
+      // ② settle 通道心跳（运行时健康自检）：三件套各自幂等且各自 catch 永不抛，
+      // 走到这里即「一次成功结算活动」——rpc 侧据此判定「结算通道 >30min 无活动」黄条。
+      poolHealthFor(sid).settleLastOkAt = Date.now()
     }
 
     async function settleRun(sid, rec, res, err) {
@@ -1039,7 +1053,13 @@ export function createDispatch(ctx, state, deps) {
       var runs = runsFor(sid)
       var snap = await rt(sid)
       // 本轮主体整段进 try：任一环节抛异常都只作废本轮（console 留痕），下一轮心跳 / kickCycle 照常进来。
-      try { return await poolCycleBody(sid, info, runs, snap) }
+      // ① 派发循环心跳（运行时健康自检）：主体正常返回（含空闲快进早退）才算「成功跑完一轮」刷新时间戳；
+      // 异常被隔离时不刷新——连续 >5min 不刷新 + 有可派卡 + 有空位 = rpc 侧亮「派发循环疑似冻结」红条。
+      try {
+        var cycleRet = await poolCycleBody(sid, info, runs, snap)
+        poolHealthFor(sid).poolLastOkAt = Date.now()
+        return cycleRet
+      }
       catch (e) { console.error('[task-board] poolCycle 本轮异常（已隔离，下一轮照常）([' + sid + ']):', String(e)); return undefined }
     }
     // 本轮主体：reconcile → 幽灵占位回收 → 活跃度/上限闸门 → 持锁（回收+claim+池快照）→ 锁外 spawn。
@@ -1053,7 +1073,12 @@ export function createDispatch(ctx, state, deps) {
       // 故有回收时重读一次快照——否则下面空闲快进的 wt(snap) 会拿旧快照把收尾结果覆盖回去。
       var reapedN = 0
       try { reapedN = await reapGhostRecs(sid, snap) } catch (e) { console.error('[task-board] 幽灵占位回收失败（本轮跳过，派发照常）:', String(e)) }
-      if (reapedN > 0) { try { snap = await rt(sid) } catch (_) {} }
+      if (reapedN > 0) {
+        try { snap = await rt(sid) } catch (_) {}
+        // ③ 幽灵回收可视化（运行时健康自检）：本轮回收 >0 留一条一次性记录（90s 保鲜），
+        // rpc get-tasks 读到即在「架构健康」区亮一条 info 并消费——幽灵回收从此在 GUI 可见。
+        poolHealthFor(sid).reapNote = { n: reapedN, at: Date.now() }
+      }
       var activeW = 0, activeV = 0
       // 角色口径：worker 计入 activeW（占 Worker 并发位）；verifier 与 hook run（hook-pre/hook-post）
       // 统一计入 activeV——hook run 不是 Worker，不该挤占 maxWorkers 并发位，但它确实是一条在跑的 run，
@@ -1232,6 +1257,8 @@ export function createDispatch(ctx, state, deps) {
           }
           if (!rec) rec = await spawnOneShot(sid, sp.t, sp.role)
           if (rec) {
+            // 成功派发计数（运行时健康自检）：续跑命中与 fresh spawn 都算一次成功派发
+            var __ph = poolHealthFor(sid); __ph.dispatchOk = (__ph.dispatchOk || 0) + 1; __ph.lastDispatchAt = Date.now()
             // claim 占位换成真实 run id；verifier/hook-post run 单独记（claimedBy 保留 worker 的，供详情页跳转会话）
             await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (t) { if (sp.role === 'worker' && t.claimedBy === 'spawn-pending') t.claimedBy = String(rec.id); if ((sp.role === 'verifier' || sp.role === 'hook-post') && t.verifierRun === 'spawn-pending') { t.verifierRun = String(rec.id); t.verifierRunAt = new Date().toISOString() }; if (sp.role === 'hook-pre' && t.hooks && t.hooks.pre) t.hooks.pre.runId = String(rec.id) }; return t }, true)
             // 派发即回执：spawn 真成功后才入队（占位阶段失败不通知）；经 deps 注入，未注入静默跳过（老 host 兼容）

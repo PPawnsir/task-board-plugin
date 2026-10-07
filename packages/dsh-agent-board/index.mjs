@@ -47,6 +47,11 @@ export function apply(ctx) {
       sysNotesBuf: {},     // 系统级异常通知队列（随回执冲刷）
       mainWindowUsageCache: {}, // 主窗口消耗增量尾读缓存（task-muwsol23）：sid → { size, mtimeMs, 聚合五分量+byDay }，
                                 //   文件不变零读 / 变大只读增量 / 变小全量重读一次；纯内存不落盘，重启自然全量一次
+      poolHealth: {},      // 运行时健康自检（task-muxhrkbg）内存心跳：sid → { bornAt, poolLastOkAt, dispatchOk,
+                           //   lastDispatchAt, settleLastOkAt, reapNote }——dispatch.mjs 在 poolCycle 成功轮 /
+                           //   settleRunRecord 成功结算 / 幽灵回收 >0 / spawn 成功四处打点，rpc get-tasks 现算
+                           //   运行时 hint（health.computeRuntimeHealthHints）。纯内存不落盘：重启后 bornAt 起算，
+                           //   心跳阈值的宽限期随之重置（心跳的意义是「host 活着时在不在转」，跨重启无继承价值）
     }
     // ===== 模块接线（依赖顺序：session → store → notify → dispatch → rpc）=====
     var session = createSession(ctx, state)

@@ -2210,7 +2210,7 @@ test('学习飞轮接线：两处触发点 + push-lesson 开关拦截 + prompt/�
 test('架构健康接线：get-tasks 返回 healthHints + 仪表盘 HealthHints 区缺省兼容渲染', () => {
   const host = hostSrc()
   const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.match(host, /d\.healthHints = computeHealthHints\(d\.tasks\)/)   // host 每次请求现算返回（零存储）
+  assert.match(host, /d\.healthHints = __rh\.hints\.concat\(computeHealthHints\(d\.tasks\)\)/) // host 每次请求现算返回（零存储）；运行时 hint（task-muxhrkbg）拼在静态信号前面
   assert.match(cli, /function HealthHints\(\)/)                          // 仪表盘提示区组件
   assert.match(cli, /React\.createElement\(HealthHints\)/)               // 挂进 Dashboard（统计卡行下方、Token 消耗区上方）
   assert.match(cli, /Array\.isArray\(d\.healthHints\)/)                  // 缺省兼容：老 host 无字段/非数组 → 按空处理
@@ -4930,9 +4930,11 @@ test('池冻结根修⑤（接线，源码级）：幽灵回收在活跃度计�
   const iCount = dsp.indexOf('if (rc0.role === \'worker\') activeW++')
   assert.ok(iReap > 0 && iCount > iReap, '幽灵回收必须先于活跃度计数')
   // ② 回收后重读快照（否则空闲快进的 wt(snap) 会把收尾结果覆盖回旧状态）
-  assert.match(dsp, /if \(reapedN > 0\) \{ try \{ snap = await rt\(sid\) \} catch \(_\) \{\} \}/)
+  //   （task-muxhrkbg 在同一块内追加了 reapNote 打点，块体由单行扩成多行——语义不变，断言随之放宽到块形状）
+  assert.match(dsp, /if \(reapedN > 0\) \{\s*try \{ snap = await rt\(sid\) \} catch \(_\) \{\}/)
   // ③ 本轮主体包 try（整轮异常隔离），且刻意不设再入 latch
-  assert.match(dsp, /try \{ return await poolCycleBody\(sid, info, runs, snap\) \}/)
+  //   （task-muxhrkbg 在 try 块内追加 poolLastOkAt 心跳打点：主体正常返回才刷新——异常隔离语义由下面的 catch 断言继续锁死）
+  assert.match(dsp, /try \{\s*var cycleRet = await poolCycleBody\(sid, info, runs, snap\)\s*poolHealthFor\(sid\)\.poolLastOkAt = Date\.now\(\)\s*return cycleRet\s*\}/)
   assert.match(dsp, /catch \(e\) \{ console\.error\('\[task-board\] poolCycle 本轮异常（已隔离，下一轮照常）/)
   assert.match(dsp, /刻意\*\*不设\*\*再入守卫/)
   // ④ 持锁段按阶段隔离（五段各自 try/catch，回调照样返回 d → 该写的池状态一定写下去）

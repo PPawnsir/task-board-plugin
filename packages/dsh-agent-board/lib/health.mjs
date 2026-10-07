@@ -4,7 +4,7 @@
 // 窗口化（近 50 张卡）而非累计：架构优化落地后老数据自动滑出窗口不再报警——
 // 健康区同时是「拆分是否有效」的客观验收证据。
 // 信号源不做裁判：只产提示文案，决策永远是人。
-import { normTouch } from './core.mjs'
+import { normTouch, pickDispatch } from './core.mjs'
 
 // ===== 阈值常量（全部置顶，可按实际使用手感调整；只影响之后的计算，不追溯老数据）=====
 var WINDOW_SIZE = 50       // 统计窗口：按 createdAt 取最近 N 张卡（含归档）
@@ -160,4 +160,71 @@ export function computeHealthHints(tasks) {
     hints.push({ level: 'info', text: '任务执行时长 p90 已达 ' + toMin(p90) + '——超长任务占比升高，考虑拆分粒度或检查架构热点' })
   }
   return hints.slice(0, MAX_HINTS)
+}
+
+// ===== 运行时健康自检（task-muxhrkbg，proposal n-muwlpbr3wkhc）=====
+// 与上面的静态架构信号（L1）正交：这里看「运行时心跳」——派发循环是否在转、结算通道是否活着、
+// 幽灵回收是否发生过。事故背景：2026-10-06 continuable 上线事故——settle 链异常导致 poolCycle
+// 冻结 ~45 分钟无人知（发现靠 e2e 翻车 + 用户肉眼）；L1 只有静态信号（孤儿/僵尸卡），没有运行时监护。
+// 数据源 = dispatch.mjs 写入的内存心跳 state.poolHealth[sid]（{ bornAt, poolLastOkAt, settleLastOkAt,
+// reapNote }），本函数仍是纯函数：不读盘、不删数据——reapNote 的一次性消费由调用方按返回的
+// consumeReapNote 旗执行（rpc get-tasks 摘除），测试因此可以纯断言返回值。
+// 客户端零改动：hint 通道是纯文本数组直渲（level 仅 warn/info 两档配色），①的「红条」用 warn 级 +
+// 文案 🔴 前缀表达（真要独立红色档需 client 加 level——本卡范围外，留给主窗口裁决）。
+var POOL_STALE_MS = 5 * 60000    // ① 派发循环心跳：上次成功轮距今超 5min（且有活可派、有空位）→ 冻结疑似
+var SETTLE_STALE_MS = 30 * 60000 // ② 结算通道静默：有在跑卡但超 30min 无任何成功结算 → 黄级提示
+var REAP_NOTE_TTL_MS = 90000     // ③ 幽灵回收一次性记录的保鲜期（与 dispatchInfo 90s TTL 同口径）
+
+// HH:mm 本地时分（hint 文案里的「上次成功 HH:mm」）
+function hhmm(ms) { var d = new Date(ms); var h = d.getHours(), m = d.getMinutes(); return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m }
+
+// board = get-tasks 的看板对象（只用 .tasks）；rt = state.poolHealth[sid] 心跳记录（undefined → 无法判定，全不亮）；
+// opts = { capW: 当前 Worker 空位数（manual 模式 / 无活 root 时调用方传 0）, now: 毫秒（测试可 mock）,
+//          alive: root 是否存活（false 时 ①② 都不判——死会话本就不该派发/结算，不是冻结) }。
+// 「可派发」判定复用 core.pickDispatch 全闸门口径（依赖/frozen/歧义/manual/direct/pre-hook/touches 锁）：
+// capW=1 探针有 pendings 产出 = 存在「无任何阻塞原因可派发」的卡；全被锁/被依赖挡 → 不误报。
+// 返回 { hints: [{level, text}], consumeReapNote: 读到 reapNote（无论是否过期）即为 true }。
+export function computeRuntimeHealthHints(board, rt, opts) {
+  var out = { hints: [], consumeReapNote: false }
+  if (!board || !Array.isArray(board.tasks)) return out
+  if (!rt || typeof rt !== 'object') return out
+  var now = (opts && typeof opts.now === 'number') ? opts.now : Date.now()
+  var capW = (opts && typeof opts.capW === 'number') ? opts.capW : 0
+  var alive = !opts || opts.alive !== false
+  var bornAt = typeof rt.bornAt === 'number' ? rt.bornAt : now
+  var tasks = board.tasks
+
+  if (alive) {
+    // --- ① 派发循环心跳：有可派卡 + 池有空位 + 上次成功轮 >5min ---
+    // poolLastOkAt 缺失时退到 bornAt（首次见到本板的时刻）：host 重启后心跳全断也能在 5min 宽限后亮条，
+    // 而正常路径首轮 cycle（≤15s）会立刻刷新它，不会误报。
+    var poolRef = typeof rt.poolLastOkAt === 'number' ? rt.poolLastOkAt : bornAt
+    if (capW > 0 && now - poolRef > POOL_STALE_MS) {
+      var probe = pickDispatch({ tasks: tasks }, 1, 0, null)
+      if (probe.pendings.length > 0) {
+        var staleMin = Math.floor((now - poolRef) / 60000)
+        out.hints.push({ level: 'warn', text: '🔴 派发循环疑似冻结（上次成功 ' + hhmm(poolRef) + '，已 ' + staleMin + ' 分钟无派发）——有可派发任务且池有空位，请查看 host 控制台 [task-board] 日志或重载看板插件' })
+      }
+    }
+    // --- ② settle 通道存活：有 in-progress 卡 + >30min 无任何成功结算（黄级）---
+    // settleLastOkAt 同样缺省退 bornAt（重启后 30min 宽限，不拿「无记录」当「已静默」）。
+    var hasInProgress = tasks.some(function (t) { return t && t.status === 'in-progress' })
+    if (hasInProgress) {
+      var settleRef = typeof rt.settleLastOkAt === 'number' ? rt.settleLastOkAt : bornAt
+      if (now - settleRef > SETTLE_STALE_MS) {
+        out.hints.push({ level: 'warn', text: '结算通道长时间无活动（上次成功结算 ' + hhmm(settleRef) + '，已 ' + Math.floor((now - settleRef) / 60000) + ' 分钟）——有任务在执行中但超过 30 分钟无任何 run 结算，settle 链路可能异常' })
+      }
+    }
+  }
+
+  // --- ③ 幽灵回收可视化：本轮回收 >0 留一条一次性 info（读到即消费；过期未读静默丢弃不亮条）---
+  // 展示序放在最后：它只是历史事件留痕，①② 是进行中的事故。
+  var rn = rt.reapNote
+  if (rn && typeof rn.n === 'number' && rn.n > 0 && typeof rn.at === 'number') {
+    out.consumeReapNote = true
+    if (now - rn.at <= REAP_NOTE_TTL_MS) {
+      out.hints.push({ level: 'info', text: '本轮回收 ' + rn.n + ' 个幽灵活跃表项（' + hhmm(rn.at) + '）——失效表项已自动摘除，若反复出现请排查 settle 链路（host 日志 [task-board]）' })
+    }
+  }
+  return out
 }
