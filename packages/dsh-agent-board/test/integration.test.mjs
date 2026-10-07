@@ -1,5 +1,7 @@
-// dsh-agent-board — 集成套件前半（task-muxpgc6u 无头基建卡2）：全链路 / 驳回重派 / dependsOn 接续 / touches 排他
-// 四场景全部跑在「真实 index.mjs apply(mockCtx)」上（卡1 harness），不改生产代码；
+// dsh-agent-board — 集成套件（无头基建卡2 前半 + 卡3 后半）：
+//   前半（a-d）：全链路 / 驳回重派 / dependsOn 接续 / touches 排他
+//   后半（e-i，task-muxpgq5b）：仲裁冻结时钟推进 / 回执聚合过滤 / 歧义去抖 / progress / 孤儿回收
+// 九场景全部跑在「真实 index.mjs apply(mockCtx)」上（卡1 harness），不改生产代码；
 // 每用例独立 mockCtx + 独立临时 HOME，互不污染（HOME env 是进程级，顶层用例默认串行，严禁并行）。
 //
 // 结算双通道各半（任务要求）：
@@ -11,8 +13,11 @@
 // session.v4.jsonl.zstd 写真 zstd 帧（与 usage 单测同形），事件结算即可读到本轮交付文本。
 //
 // 时钟纪律：看板时间戳仍走真实墙钟（Date.now 不动），kickCycle 的 50ms 去抖走虚拟时钟——
-// 每个写操作后 advance(50) 触发一轮 poolCycle；15s 心跳 / 25s 歧义去抖 / 45s 回执聚合 /
-// 30min 软超时 / 120min 硬超时在本套件推进幅度（单场景 ≤300ms 虚拟）内永不触发。
+// 每个写操作后 advance(50) 触发一轮 poolCycle。前半（a-d）单场景推进 ≤300ms 虚拟，所有长窗口
+// 均不触发；后半（e-i）开始主动跨窗断言：25s 歧义去抖（g）、45s 回执聚合（f）、15s 心跳轮
+// （e 的幽灵回收 / i 的孤儿扫描）。30min 软超时 / 120min 硬超时仍远超推进幅度（单场景 ≤45s
+// 虚拟），永不触发。注意 isOrphan 的 2min 门槛锚的是真实墙钟（Date.now），场景 i 用 patchBoard
+// 把 claimedAt 按真实时间倒推 3 分钟来构造孤儿——虚拟时钟只负责把 poolCycle 推到扫描窗口。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -276,4 +281,226 @@ test('集成d·touches 排他：同路径 B 被挡+waitingForTouches 标注→A 
     assert.equal(tb.runs[0].outcome, 'completed')
     assert.equal(env.runs.length, 0, 'work 档无 verifier')
   } finally { restoreHome(); await env.cleanup() }
+})
+
+// ===== 场景 e：仲裁 hold 冻结 → 虚拟时钟推进 40s 不派发 → unfreeze → 派发（时钟推进主线）=====
+// 本卡核心用例：hold 裁决后冻结卡必须在「去抖轮 + 两轮 15s 心跳」的 poolCycle 里全程被
+// pickDispatch 跳过（!t.frozen 闸）；unfreeze 后 mutateLocked 默认 kickCycle（50ms 去抖）立即补派。
+// 附带两个时钟真推进的硬证据：① 首轮 Worker 的失联 rec 被 poolCycle 幽灵回收关账 incomplete
+// （卡面 pending ≠ in-progress → recIsLive=false）；② 25s 歧义去抖到点但 escalation 已被裁决
+// 清除 → 投递前重查跳过（过期回声不投）。解冻后派发走续跑冷复活（首轮 continuable + incomplete
+// 有续跑资格）→ sendMessage 唤醒原子会话，裁决答案随 messages 原文注入续跑指令。
+test('集成e·仲裁冻结：hold 冻结→推进 40s 全程不派发→unfreeze→解冻即派（冷复活续跑）', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-e1', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 1 }, 'worker spawn 发生')
+    var child = env.continuables[0]
+    await env.waitFor(function () { var x = env.task('task-e1'); return x && x.status === 'in-progress' && x.claimedBy === child.childId ? x : null }, '落卡 in-progress')
+    // Worker 上报歧义 → escalation 落卡（25s 歧义去抖通知同步挂起，去抖本体断言在场景 g）
+    var esc = await env.tools.get('board_report').execute({ taskId: 'task-e1', kind: 'escalate', question: '方案 A 与方案 B 如何取舍？' })
+    assert.equal(esc.ok, true)
+    assert.equal(esc.escalated, true)
+    // 主窗口裁决 action=hold：in-progress 回 pending + frozen 三字段落卡 + 裁决消息入 messages
+    //（hold 走 skipKick——冻结任务本就不该派发，省一次无意义 poolCycle）
+    var arb = await env.tools.get('task_arbitrate').execute({ taskId: 'task-e1', answer: '按方案 A 做', action: 'hold' })
+    assert.equal(arb.ok, true)
+    assert.equal(arb.action, 'hold')
+    assert.equal(arb.frozen, true)
+    var t = env.task('task-e1')
+    assert.equal(t.status, 'pending', 'hold 裁决把 in-progress 打回 pending')
+    assert.equal(t.frozen, true, 'frozen 落卡')
+    assert.ok(t.frozenAt && t.frozenBy, 'frozenAt/frozenBy 留痕')
+    assert.equal(t.claimedBy, null, '认领位清空待补上下文')
+    assert.ok(!t.escalation, '裁决后 escalation 已清')
+    var arbMsg = (t.messages || []).filter(function (m) { return m.kind === 'arbitration' })
+    assert.equal(arbMsg.length, 1, '裁决答案落一条 kind=arbitration 消息')
+    assert.equal(arbMsg[0].text, '按方案 A 做')
+    assert.equal(arbMsg[0].action, 'hold')
+    // ===== 虚拟时钟推进 40s（跨去抖轮 + 15s/30s 两轮心跳 + 25s 歧义去抖点）：冻结卡全程不派发 =====
+    await env.clock.advance(40000)
+    // 硬证据①：时钟推进下 poolCycle 真实跑过——首轮 run 已被幽灵回收关账 incomplete
+    t = await env.waitFor(function () { var x = env.task('task-e1'); return x && x.runs && x.runs[0] && x.runs[0].outcome === 'incomplete' ? x : null }, 'poolCycle 幽灵回收关账首轮 run（时钟真推进的证明）')
+    assert.equal(t.status, 'pending', '40s 推进后冻结卡仍 pending')
+    assert.equal(t.frozen, true, '冻结贯穿多轮 poolCycle')
+    assert.equal(env.continuables.length, 1, '冻结窗口内零新 spawn（pickDispatch 跳过 frozen）')
+    assert.equal(env.sendMessages.length, 0, '冻结窗口内零续跑投递')
+    // 硬证据②：25s 歧义去抖到点，但 escalation 已被裁决清掉 → deliverEscalation 投递前重查跳过
+    assert.equal(env.sent.length, 0, '歧义通知过期不投（投递前重查看板）')
+    // ===== unfreeze 解冻 → 默认 kickCycle（50ms 去抖）→ 立即补派 =====
+    var unf = await env.tools.get('task_update').execute({ taskId: 'task-e1', unfreeze: true })
+    assert.equal(unf.ok, true)
+    assert.ok(!env.task('task-e1').frozen, '解冻后 frozen 清除')
+    await env.clock.advance(50)
+    // 首轮 run 结局 incomplete + continuable → 有续跑资格 → sendMessage 冷复活原子会话（不新建）
+    await env.waitFor(function () { return env.sendMessages.length >= 1 }, '解冻后派发发生（续跑冷复活）')
+    assert.equal(env.continuables.length, 1, '续跑不新建子会话')
+    assert.equal(env.sendMessages[0].childId, child.childId, '冷复活目标是首轮 Worker 子会话')
+    var resumeText = env.sendMessages[0].content[0].text
+    assert.ok(resumeText.indexOf('断点续跑') >= 0, '续跑指令落薄框架文案')
+    assert.ok(resumeText.indexOf('按方案 A 做') >= 0, '裁决答案随 messages 原文注入续跑指令')
+    t = await env.waitFor(function () { var x = env.task('task-e1'); return x && x.status === 'in-progress' && x.claimedBy === child.childId ? x : null }, '解冻后落卡 in-progress（认领位=原子会话）')
+    assert.equal(t.runs.length, 2, '首派 + 续跑各留一条 run')
+    assert.equal(t.runs[1].resume, true, '第二条是续跑记录')
+    assert.equal(t.runs[1].outcome, 'running')
+    assert.deepEqual(transitions(t), ['created→pending', 'pending→in-progress', 'in-progress→in-progress', 'in-progress→in-progress', 'in-progress→pending', 'pending→pending', 'pending→pending', 'pending→in-progress'], '冻结/解冻全流转序列（上报歧义+裁决+回pending+冻结+解冻+重派）')
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 f：回执 45s 聚合 + 投递前过滤（移植 _scratch/verify-flush-filter.mjs 的已验证场景）=====
+// 两张 work 档卡同窗口完成：f1 在投递前被人归档（已知悉）→ 回执吞掉；f2 resolved 保留。
+// 窗口未到点零投递（聚合闸）；到点 flush 投递前重读看板：f1 的「已派发+完成」两条都被过滤
+// （archived 丢弃 / 非 in-progress 离场），f2 的派发回执同样离场过滤——四条入队只投一条摘要。
+test('集成f·回执聚合过滤：45s 窗口聚合为一条，已归档任务回执被吞，存活任务保留', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-f1', { pipeline: 'work' })
+    await createTask(env, 'task-f2', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 2 }, '两卡同轮派发')
+    // 派发即回执 ×2 已入 45s 聚合队列——窗口未到点，主窗口零打扰
+    assert.equal(env.sent.length, 0, '聚合窗口未到点不投递')
+    // 两张卡先后 board_report 完成（work 档直落 resolved，完成回执入同一聚合队列）
+    var rep1 = await env.tools.get('board_report').execute({ taskId: 'task-f1', kind: 'complete', summary: 'f1 交付', changes: '改了 f1', selfTest: 'npm test 全绿', diffStat: '' })
+    assert.equal(rep1.ok, true)
+    assert.equal(rep1.task.status, 'resolved')
+    var rep2 = await env.tools.get('board_report').execute({ taskId: 'task-f2', kind: 'complete', summary: 'f2 交付', changes: '改了 f2', selfTest: 'npm test 全绿', diffStat: '' })
+    assert.equal(rep2.ok, true)
+    assert.equal(env.sent.length, 0, '窗口到点前完成回执同样压着不投')
+    // 投递前人去归档了 f1（已知悉）→ 它的回执该被吞
+    var arc = await env.rpc('archive-task', { sessionId: env.sid, taskId: 'task-f1' })
+    assert.equal(arc.ok, true, 'resolved 可归档')
+    assert.equal(env.task('task-f1').status, 'archived')
+    // ===== 45s 聚合窗口到点 → flushReceipts 投递前重读看板过滤 =====
+    await env.clock.advance(45000)
+    await env.waitFor(function () { return env.sent.length >= 1 }, '聚合窗口到点投递')
+    assert.equal(env.sent.length, 1, '四条回执（派发×2+完成×2）聚合为一条摘要')
+    var text = env.sent[0].content[0].text
+    assert.equal(env.sent[0].source.form, 'recall', '回执是 recall 形态（背景回执，非指令）')
+    assert.ok(text.indexOf('回执摘要（1 条）') >= 0, '计数用过滤后存活条数')
+    assert.ok(text.indexOf('(task-f2)') >= 0, 'f2 完成回执保留')
+    assert.ok(text.indexOf('(task-f1)') < 0, '已归档的 f1 回执被吞')
+    assert.ok(text.indexOf('已派发') < 0, 'f1 归档 / f2 resolved 都非 in-progress → 派发回执全部离场过滤')
+    assert.ok(text.indexOf('f2 交付') >= 0, '保留项带 summary')
+    assert.equal(env.task('task-f2').status, 'resolved')
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 g：歧义通知 25s 去抖——连报两次只投最新一条 =====
+// 同一任务 25s 窗口内两次上报歧义：第一次调度被第二次顶替（escNotifyTimers 身份不匹配静默丢弃），
+// 到点只投一条且内容是最新疑问（deliverEscalation 投递时才读 escalation.question）。
+test('集成g·歧义去抖：25s 窗口内连报两次，只投最新一条', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-g1', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 1 }, 'worker spawn 发生')
+    await env.waitFor(function () { var x = env.task('task-g1'); return x && x.status === 'in-progress' ? x : null }, '落卡 in-progress')
+    // 第一次上报（去抖调度 T1 挂起）
+    var esc1 = await env.tools.get('board_report').execute({ taskId: 'task-g1', kind: 'escalate', question: '第一问：旧疑问（应被顶替）' })
+    assert.equal(esc1.ok, true)
+    // 同一虚拟时刻第二次上报（T1 被 T2 顶替；escalation.question 覆盖为最新）
+    var esc2 = await env.tools.get('board_report').execute({ taskId: 'task-g1', kind: 'escalate', question: '第二问：最新疑问（应投递）' })
+    assert.equal(esc2.ok, true)
+    assert.equal(env.sent.length, 0, '去抖窗口未到点零投递')
+    // 推进 25s：T1 到点身份不匹配丢弃；T2 到点投递最新疑问
+    await env.clock.advance(25000)
+    await env.waitFor(function () { return env.sent.length >= 1 }, '去抖到点投递')
+    assert.equal(env.sent.length, 1, '连报两次只投一条（旧调度被顶替丢弃）')
+    var msg = env.sent[0]
+    var text = msg.content[0].text
+    assert.ok(text.indexOf('Worker 上报歧义') >= 0, '歧义裁决通知投递')
+    assert.ok(text.indexOf('第二问：最新疑问') >= 0, '投递的是最新疑问')
+    assert.ok(text.indexOf('第一问') < 0, '旧疑问不出现')
+    assert.equal(msg.source.form, 'notice', '歧义通知是 notice 形态（带一行 summary）')
+    // 通知路径不碰卡面状态：仍 in-progress + escalation 待裁决
+    var t = env.task('task-g1')
+    assert.equal(t.status, 'in-progress')
+    assert.ok(t.escalation, 'escalation 仍在等裁决')
+    assert.equal(t.escalation.question, '第二问：最新疑问（应投递）', '卡面留的是最新疑问')
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 h：progress 上报落 lastProgress（覆盖式，静默不通知）=====
+// 里程碑通道定位：长任务「还在正确路上」的轻量证明——覆盖式落 lastProgress、messages 留审计轨，
+// 不写 ah 历史（防刷屏）、不进回执聚合、不通知主窗口、不触发 run 关账。
+test('集成h·progress 上报：lastProgress 覆盖式落卡，不进历史/不通知/不结算', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-h1', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 1 }, 'worker spawn 发生')
+    var t = await env.waitFor(function () { var x = env.task('task-h1'); return x && x.status === 'in-progress' ? x : null }, '落卡 in-progress')
+    // 第一条里程碑进展
+    var p1 = await env.tools.get('board_report').execute({ taskId: 'task-h1', kind: 'progress', question: '里程碑一：骨架已落地' })
+    assert.equal(p1.ok, true)
+    assert.equal(p1.progress.text, '里程碑一：骨架已落地')
+    assert.ok(p1.progress.at)
+    // 第二条覆盖第一条
+    var p2 = await env.tools.get('board_report').execute({ taskId: 'task-h1', kind: 'progress', question: '里程碑二：断言全绿' })
+    assert.equal(p2.ok, true)
+    t = env.task('task-h1')
+    assert.equal(t.lastProgress.text, '里程碑二：断言全绿', 'lastProgress 覆盖式只留最新')
+    assert.ok(t.lastProgress.at)
+    var pmsgs = (t.messages || []).filter(function (m) { return m.kind === 'progress' })
+    assert.equal(pmsgs.length, 2, '两条进展都落 messages 审计轨')
+    assert.equal(pmsgs[1].text, '里程碑二：断言全绿')
+    assert.equal(t.status, 'in-progress', 'progress 不推进状态')
+    assert.deepEqual(transitions(t), ['created→pending', 'pending→in-progress'], 'progress 不写 ah 历史（防刷屏）')
+    assert.equal(t.runs[0].outcome, 'running', 'progress 不触发 run 关账')
+    assert.equal(env.sent.length, 0, 'progress 静默——不通知主窗口、不进回执聚合')
+    // 空白摘要拒绝
+    var p3 = await env.tools.get('board_report').execute({ taskId: 'task-h1', kind: 'progress', question: '   ' })
+    assert.equal(p3.ok, false, '空白进展摘要被拒')
+    // 去抖轮过后状态依旧（progress 写盘带的 kickCycle 不扰池）
+    await env.clock.advance(50)
+    t = env.task('task-h1')
+    assert.equal(t.status, 'in-progress')
+    assert.equal(t.lastProgress.text, '里程碑二：断言全绿')
+    assert.equal(env.continuables.length, 1, 'progress 全程不惹派发')
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 i：孤儿回收——isOrphan 路径经 poolCycle（推进时钟等孤儿扫描窗口）=====
+// patchBoard 构造「in-progress + claimedBy=已死子会话 + 无活跃 rec + claimedAt 超 2min」的孤儿卡。
+// 两个构造细节：① isOrphan 的 2min 门槛锚真实墙钟（poolCycle 里 now=Date.now()），claimedAt 按真实
+// 时间倒推 3 分钟；② runs 留空——让首轮 reconcile 不掺和（它只认「末条 worker run continuable 且
+// outcome=running」的卡），回收必须走 isOrphan 路径。assignMode=manual 钉住同轮重派：pickDispatch
+// 跳过本卡，断言稳定在「回 pending」本身。
+test('集成i·孤儿回收：in-progress 无活跃 rec 的卡推进时钟后回 pending', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-i1', { pipeline: 'work' })
+    // 构造孤儿卡：执行 run 已死（无活跃 rec、无 runs 留档）、认领于 3 分钟前（真实墙钟倒推）
+    env.patchBoard(function (d) {
+      var t = d.tasks.find(function (x) { return x.id === 'task-i1' })
+      t.status = 'in-progress'
+      t.claimedBy = 'child-ghost-9'
+      t.claimedAt = new Date(Date.now() - 180000).toISOString()
+      t.assignMode = 'manual' // 防回收后同轮自动重派——本场景断言的是「回收回 pending」本身
+    })
+    var t = env.task('task-i1')
+    assert.equal(t.status, 'in-progress', '构造生效：孤儿卡停在 in-progress')
+    // 推进时钟过孤儿扫描窗口：建卡 kickCycle 的 50ms 去抖轮即扫到；再跨一轮 15s 心跳兜底
+    await env.clock.advance(15000)
+    t = await env.waitFor(function () { var x = env.task('task-i1'); return x && x.status === 'pending' ? x : null }, '孤儿回收回 pending')
+    assert.equal(t.claimedBy, null, '认领位清空')
+    assert.equal(t.claimedAt, null, 'claimedAt 清空')
+    var trs = transitions(t)
+    assert.equal(trs[trs.length - 1], 'in-progress→pending', '回收流转方向')
+    var lastHist = t.history[t.history.length - 1]
+    assert.equal(lastHist.actor, 'system')
+    assert.equal(lastHist.note, '执行 run 已结束/丢失，回收重新排队', 'isOrphan 回收的历史注记（区别于 reconcile 的「重启后执行会话已丢失」）')
+    // 回收轮 dispatchInfo 留痕 + manual 钉住无重派
+    assert.ok((env.board().dispatchInfo || '').indexOf('reclaim task-i1') >= 0, 'dispatchInfo 留 reclaim 痕迹')
+    assert.equal(env.continuables.length, 0, 'manual 钉住：回收后同轮不重派')
+    assert.equal(env.sendMessages.length, 0)
+    assert.equal(env.sent.length, 0, '孤儿回收的系统通知攒在 sysNotesBuf 等回执冲刷，不单独投递')
+  } finally { await env.cleanup() }
 })
