@@ -1821,6 +1821,127 @@ function apply(ctx) {
         React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：每行 = 模型 × 角色 × 规模段桶（规模按任务有效 token：小 <1M / 中 1~10M / 大 >10M）；率类分母为桶内 runs，一次通过率分母为桶内 resolved 任务；runs<5 行灰显 = 样本不足仅供参考；随统计范围裁剪（与 Token 区同一 range）'))
     }
 
+    // ===== 质量趋势区（记分卡卡4，task-muxhtgil）：一次通过率趋势 / 卡时长分布 / 超时率走势 / 续跑成功率 =====
+    // 数据源：state.usageSummary.scoreboard.trends——卡2 host 聚合底座（assembleScoreboard）的全局 rollup，
+    //   与模型表现区同通道（get-tasks 响应透传）、同一 range 口径（host 已按 run/落定日裁剪，client 只渲染，
+    //   组件体内零 rpc/fetchTasks 不重拉）。
+    // 四块（P1 质量 KPI 并入的全局视图）：
+    //   ① 一次通过率趋势：近 14 天柱形（firstPassByDay：resolved 任务按落定日，当日零驳回占比），今日柱高亮 + 块头标今日值；
+    //   ② 卡时长分布：四桶横条（durationBuckets：<10m / 10-30m / 30-60m / >60m，创建→落定墙钟，60m 端点归 30-60m 桶）；
+    //   ③ 超时率走势：近 14 天迷你柱行（timeoutByDay：当日超时落定 run / 当日 runs）；
+    //   ④ 续跑成功率：resume 续跑 run 的 completed 占比（卡2出参为范围总量口径、无 byDay——迷你行显率 + 成功/次数，不伪造逐日）。
+    // 空态灰显：trends 缺字段（老 host）/ 四块皆无数据 → 整区一句灰字（锚 id 照挂）；单块无数据 → 块内灰字「暂无…」。
+    // 范围联动：trends 各字段已被 host 按统计范围裁剪，区头带「范围内: …」徽章（与 Token / 模型表现区同源 activeRange）；
+    //   近 14 天为固定窗口（设计口径：标今日值），范围落在窗口外时对应日柱为空，caption 写明。
+    var QT_DUR_BUCKETS = [
+      { k: 'lt10m', label: '<10m', tip: '卡时长 <10 分钟' },
+      { k: 'm10to30', label: '10-30m', tip: '卡时长 10~30 分钟' },
+      { k: 'm30to60', label: '30-60m', tip: '卡时长 30~60 分钟（含 60m 端点）' },
+      { k: 'gt60m', label: '>60m', tip: '卡时长 >60 分钟' }
+    ]
+    // 近 14 天柱形通用画法（① 通过率 / ③ 超时率共用）：cells = [{ k, rate(null=当日无样本), tip }]
+    //   今日柱 brand 高亮 + 率值顶标；无样本日画 3px 灰基线（title 写明无样本，不假装 0%）。
+    function qtDayBars(cells, color, todayKey) {
+      return React.createElement('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 3, height: 46 } },
+        cells.map(function (c) {
+          var isToday = c.k === todayKey
+          var h = c.rate === null ? 3 : Math.max(4, Math.round(c.rate * 34))
+          var kp = c.k.split('-')
+          var dLabel = Number(kp[1]) + '/' + Number(kp[2])
+          return React.createElement('div', { key: c.k, style: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', gap: 1 }, title: c.tip },
+            c.rate !== null ? React.createElement('span', { style: { fontSize: 8, color: isToday ? C.brand : C.text2 } }, mpPct(c.rate)) : null,
+            React.createElement('div', { style: { width: '100%', maxWidth: 22, height: h + 'px', borderRadius: 2, background: c.rate === null ? C.nested : (isToday ? C.brand : color), border: '1px solid ' + (isToday ? C.brand : (c.rate === null ? C.border : color)) } }),
+            React.createElement('span', { style: { fontSize: 8, color: isToday ? C.brand : C.text2 } }, dLabel))
+        }))
+    }
+    function QualityTrends(props) {
+      var sb = props.sb
+      var tr = (sb && sb.trends && typeof sb.trends === 'object') ? sb.trends : null
+      var box = { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 }
+      // 范围激活标记与 Token / 模型表现区同源：trends 由 host 按同一 range 裁剪，范围内数据必须亮明身份
+      var tg = activeRange()
+      var tgOn = !!(tg.from || tg.to)
+      var head = React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('check-circle', 11), '质量趋势',
+        tgOn ? React.createElement('span', { style: { fontSize: 9, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '本区趋势数据已按统计范围过滤（与 Token 区同一 range 口径）：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
+      var fpByDay = (tr && tr.firstPassByDay && typeof tr.firstPassByDay === 'object') ? tr.firstPassByDay : {}
+      var durB = (tr && tr.durationBuckets && typeof tr.durationBuckets === 'object') ? tr.durationBuckets : null
+      var toByDay = (tr && tr.timeoutByDay && typeof tr.timeoutByDay === 'object') ? tr.timeoutByDay : {}
+      var rsm = (tr && tr.resume && typeof tr.resume === 'object') ? tr.resume : null
+      // 整区空态判定：四块皆无数据（率类按日单元求和 / 时长按四桶求和 / 续跑按 runs）
+      var fpSum = 0; for (var fk in fpByDay) { if (Object.prototype.hasOwnProperty.call(fpByDay, fk)) fpSum += (fpByDay[fk] && fpByDay[fk].resolved) || 0 }
+      var toSum = 0; for (var tk2 in toByDay) { if (Object.prototype.hasOwnProperty.call(toByDay, tk2)) toSum += (toByDay[tk2] && toByDay[tk2].runs) || 0 }
+      var durSum = 0
+      if (durB) QT_DUR_BUCKETS.forEach(function (b) { durSum += Number(durB[b.k]) || 0 })
+      var rsmRuns = (rsm && rsm.runs) || 0
+      if (!tr || (fpSum + toSum + durSum + rsmRuns) === 0) {
+        return React.createElement('div', { id: 'tskb-quality-trends', style: box }, head,
+          React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无足够 run 数据（还没有可统计的已落定 Worker/Verifier run / resolved 任务）'))
+      }
+      var days14 = lastNDays(14)
+      var todayKey = localDayKey()
+      // 块头：左块名 + 右侧今日/汇总值（fontWeight 400 小字）
+      function blockHead(label, rightEl) {
+        return React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'flex', alignItems: 'baseline', gap: 6 } }, label,
+          rightEl ? React.createElement('span', { style: { marginLeft: 'auto', fontWeight: 400, fontSize: 9 } }, rightEl) : null)
+      }
+      // ===== ① 一次通过率趋势（近 14 天）：当日率 = 落定 resolved 任务中零驳回（rejectCount=0）占比 =====
+      var fpCells = days14.map(function (k) {
+        var c = fpByDay[k]
+        var resolved = (c && c.resolved) || 0
+        var firstPass = (c && c.firstPass) || 0
+        return { k: k, rate: resolved ? firstPass / resolved : null, tip: k + '：' + (resolved ? ('一次通过率 ' + mpPct(firstPass / resolved) + '（零驳回 ' + firstPass + ' / 落定 ' + resolved + '）') : '无 resolved 任务落定') }
+      })
+      var fpHas = false; fpCells.forEach(function (c) { if (c.rate !== null) fpHas = true })
+      var fpToday = fpCells[fpCells.length - 1]
+      var block1 = React.createElement('div', { style: { flex: '1 1 260px', minWidth: 230 } },
+        blockHead('一次通过率（近 14 天）', React.createElement('span', null, '今日 ', React.createElement('span', { style: { color: fpToday.rate !== null ? C.brand : C.text2, fontWeight: 600 } }, fpToday.rate !== null ? mpPct(fpToday.rate) : '—'))),
+        fpHas ? qtDayBars(fpCells, C.ok, todayKey)
+          : React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '近 14 天窗口内暂无 resolved 任务落定'))
+      // ===== ② 卡时长分布（四桶横条）：创建 → 落定（verifiedAt||resolvedAt）墙钟，含排队/执行/验收全程 =====
+      var durMax = 1
+      if (durB) QT_DUR_BUCKETS.forEach(function (b) { var v = Number(durB[b.k]) || 0; if (v > durMax) durMax = v })
+      var block2 = React.createElement('div', { style: { flex: '1 1 180px', minWidth: 170 } },
+        blockHead('卡时长分布', durSum > 0 ? React.createElement('span', null, React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, String(durSum)), ' 张落定卡') : null),
+        durSum === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无时长样本')
+        : React.createElement('div', null, QT_DUR_BUCKETS.map(function (b) {
+            var v = Number(durB[b.k]) || 0
+            var pct = v > 0 ? Math.max(2, Math.round(v / durMax * 100)) : 0
+            return React.createElement('div', { key: b.k, style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }, title: b.tip + '：' + v + ' 张（创建→落定墙钟，含排队 / 执行 / 验收全程）' },
+              React.createElement('span', { style: { width: 44, fontSize: 10, color: C.text2, textAlign: 'right', flexShrink: 0 } }, b.label),
+              React.createElement('div', { style: { flex: 1, height: 8, background: C.nested, borderRadius: 4, overflow: 'hidden' } },
+                React.createElement('div', { style: { height: '100%', width: pct + '%', background: C.brand, borderRadius: 4, transition: 'width .3s' } })),
+              React.createElement('span', { style: { width: 24, fontSize: 10, color: C.text2, flexShrink: 0 } }, String(v)))
+          })))
+      // ===== ③ 超时率走势（近 14 天迷你柱行）：当日率 = 超时落定（timeout/error）run / 当日 runs =====
+      var toCells = days14.map(function (k) {
+        var c = toByDay[k]
+        var runs = (c && c.runs) || 0
+        var timeouts = (c && c.timeout) || 0
+        return { k: k, rate: runs ? timeouts / runs : null, tip: k + '：' + (runs ? ('超时率 ' + mpPct(timeouts / runs) + '（超时 ' + timeouts + ' / run ' + runs + '）') : '无 run 落定') }
+      })
+      var toHas = false; toCells.forEach(function (c) { if (c.rate !== null) toHas = true })
+      var toToday = toCells[toCells.length - 1]
+      var block3 = React.createElement('div', { style: { flex: '1 1 260px', minWidth: 230 } },
+        blockHead('超时率走势（近 14 天）', React.createElement('span', null, '今日 ', React.createElement('span', { style: { color: toToday.rate !== null ? C.warn : C.text2, fontWeight: 600 } }, toToday.rate !== null ? mpPct(toToday.rate) : '—'))),
+        toHas ? qtDayBars(toCells, C.warn, todayKey)
+          : React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '近 14 天窗口内暂无 run 落定'))
+      // ===== ④ 续跑成功率（范围总量口径，卡2出参无 byDay）：resume:true 续跑记录中 completed 占比 =====
+      var rsmRate = (rsm && typeof rsm.rate === 'number' && isFinite(rsm.rate)) ? rsm.rate : null
+      var block4 = React.createElement('div', { style: { flex: '1 1 180px', minWidth: 170 } },
+        blockHead('续跑成功率', rsmRuns > 0 ? React.createElement('span', null, React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, String((rsm && rsm.completed) || 0) + '/' + rsmRuns), ' 续跑成功') : null),
+        rsmRuns === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无续跑记录')
+        : React.createElement('div', { title: '续跑成功率 = resume:true 续跑记录中 outcome=completed 的占比（范围总量口径，host 出参无逐日）；续跑 = 前次 run 超时/失败后续跑' },
+            React.createElement('div', { style: { fontSize: 16, fontWeight: 700, color: rsmRate !== null ? C.ok : C.text2 } }, rsmRate !== null ? mpPct(rsmRate) : '—'),
+            React.createElement('div', { style: { height: 6, background: C.nested, borderRadius: 3, overflow: 'hidden', marginTop: 4 } },
+              React.createElement('div', { style: { height: '100%', width: (rsmRate !== null ? Math.round(rsmRate * 100) : 0) + '%', background: C.ok, borderRadius: 3, transition: 'width .3s' } }))))
+      return React.createElement('div', { id: 'tskb-quality-trends', style: box },
+        head,
+        React.createElement('div', { style: { display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 8 } }, block1, block2),
+        React.createElement('div', { style: { display: 'flex', gap: 16, flexWrap: 'wrap' } }, block3, block4),
+        // 口径 caption：一句讲清统计本体（看板派发 run / 任务落定）+ 驳回定义 + 固定窗口与范围的关系
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 8, lineHeight: 1.5 } }, '口径：仅看板派发的 Worker/Verifier run 与任务落定记录（按本地日落点，随统计范围裁剪）；一次通过率 = 当日落定 resolved 任务中零驳回占比（驳回 = 验收 verdict rejected，归因驳回前最近 worker run）；超时 = run 落定 timeout/error；续跑成功率 = resume 续跑记录中 completed 占比（范围总量口径，无逐日）；卡时长 = 创建 → 落定墙钟（含排队 / 验收）。通过率与超时率为近 14 天固定窗口——范围落在窗口外时对应日柱为空'))
+    }
+
     // ===== 架构健康提示区（架构自省 L1 · 数据源：state.healthHints）=====
     // healthHints 由 host lib/health.mjs 的 computeHealthHints(tasks) 每次请求现算（纯函数零存储零 IO）：
     //   [{ level: 'warn'|'info', text }]。kernel fetchTasks 已将其与 tasks 同源透传进 state.healthHints，
@@ -1852,6 +1973,8 @@ function apply(ctx) {
         React.createElement(TokenUsage, { usage: state.usageSummary }),
         // 模型表现区（卡3）：Token 区正下方；scoreboard 随 usageSummary 同通道透传（老 host 缺字段 → null → 空态）
         React.createElement(ModelPerf, { sb: (state.usageSummary && state.usageSummary.scoreboard) || null }),
+        // 质量趋势区（卡4）：模型表现区正下方；同一 scoreboard 出参的 trends 全局 rollup（老 host 缺字段 → null → 空态灰显）
+        React.createElement(QualityTrends, { sb: (state.usageSummary && state.usageSummary.scoreboard) || null }),
         React.createElement('div', { style: { display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' } },
           React.createElement('div', { style: { flex: '1 1 0', minWidth: 200, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '按状态分布'), statusOrder.map(function (s) { return React.createElement(BarRow, { key: s, label: statusLabels[s] || s, count: stats.byStatus[s] || 0, total: stats.total, color: statusColors[s] || C.brand }) })),
           React.createElement('div', { style: { flex: '1 1 0', minWidth: 200, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '按优先级分布'), prioOrder.map(function (p) { return React.createElement(BarRow, { key: p, label: prioLabel[p] || p, count: stats.byPriority[p] || 0, total: stats.total, color: prioColor[p] || C.brand }) }))),
