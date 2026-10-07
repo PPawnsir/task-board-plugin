@@ -232,7 +232,7 @@ function apply(ctx) {
 
     var COLUMNS = ['draft', 'pending', 'in-progress', 'verifying', 'resolved', 'blocked']
     var reqEpoch = 0 // 会话切换纪元：切会话时自增，旧会话在途响应按纪元丢弃
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', mpRole: '', mpSize: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
 
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
@@ -1730,7 +1730,95 @@ function apply(ctx) {
         // 是自身固定口径（今日=本地今天、近 7 天=最近 7 个本地日）——不随范围变，必须在文案里讲清，
         // 否则「选了范围数字没变」看起来像 bug。模型分布/Top8/累计才是范围生效的三处。
         React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：累计与 Top 8 仅看板派发的 Worker/Verifier run 消耗；主窗口行=本会话对话消耗，与看板派发口径并列不混入（单列一行 + 模型分布尾部一条，不进累计 / Top 8）；主数字（模型分布 / Top 8）与「今日」「近 7 天」均为有效消耗口径（输入+输出+缓存写，不含缓存读），含缓存读的合计在悬浮 title 里单列对照'),
-        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2, lineHeight: 1.5 } }, '统计范围作用于按模型分布 / 任务消耗 Top 8 / 累计三分量（按 run 的本地日落点过滤）；今日与「近 7 天」为固定口径，不随范围变化。'))
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2, lineHeight: 1.5 } }, '统计范围作用于按模型分布 / 任务消耗 Top 8 / 累计三分量（按 run 的本地日落点过滤）；今日与「近 7 天」为固定口径，不随范围变化。'),
+        // 「→ 模型表现」滚动锚链接（task-muxhtgi2 卡3）：一键滚到下方模型×场景七指标表
+        // （与详情页 goArbitration 同一 scrollIntoView 原语；目标区空态也挂锚 id，链接始终可达）
+        React.createElement('div', { style: { fontSize: 9, marginTop: 4 } },
+          React.createElement('span', { onClick: function () { var el = document.getElementById('tskb-model-perf'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start' }) }, style: { color: C.brand, cursor: 'pointer' }, title: '滚动到下方「模型表现」区：模型 × 场景（角色 × 规模段）七指标对比表' }, '→ 模型表现')))
+    }
+
+    // ===== 模型表现区（记分卡卡3，task-muxhtgi2）：七指标表格 × 场景筛选器（本地过滤不重拉）=====
+    // 数据源：state.usageSummary.scoreboard——卡2 host 聚合底座（buildScoreboard）挂进 get-tasks 响应，
+    //   与 Token 区同通道透传、同一 range 口径（范围切换重拉后随 notify 同步刷新，本区零自持请求）。
+    //   每桶 = 模型 × 角色（worker/verifier）× 规模段（small/medium/large，按任务有效 token 分桶）。
+    // 本区三件事全部本地现算：
+    //   ① 场景筛选器：角色（全部/worker/verifier）+ 规模段（全部/小/中/大）——scoreboard 已在响应里，
+    //     筛选只是 buckets 数组 pass，绝不重拉（组件内无 rpc/fetchTasks）；
+    //   ② 七指标表格：每 模型×场景桶 一行，七列——有效均值/耗时中位/驳回率/一次通过率/超时率/续跑率/
+    //     缓存命中率；表头列名带 title 口径说明（与卡2 host 注释同源）；
+    //   ③ 样本护栏：insufficient（runs<5）行整行灰显 + title 前缀「样本 <5，仅供参考」——
+    //     仅供参考，不参与任何「最优」视觉强调（本区 v1 不做任何高亮排名，从源头规避）。
+    // 空态：scoreboard 缺字段 / buckets 空 → 「暂无足够 run 数据」（锚 id 照挂，Token 区链接始终可达）；
+    //   筛选后空 → 「当前筛选无匹配桶」。
+    // 锚点：区根 id='tskb-model-perf'，Token 区 caption 的「→ 模型表现」链接 scrollIntoView 过来。
+    var MP_SIZE_LABEL = { small: '小', medium: '中', large: '大' }
+    // 率类/耗时格式化：null = 无样本（不假装 0，与 host 同哲学）
+    function mpPct(r) { return (r === null || r === undefined || !isFinite(r)) ? '—' : Math.round(r * 100) + '%' }
+    function mpDur(ms) { if (ms === null || ms === undefined || !isFinite(ms)) return '—'; var m = Math.round(ms / 60000); if (m < 1) return '<1m'; if (m < 60) return m + 'm'; return (m / 60).toFixed(1) + 'h' }
+    // 七列定义：label + title 口径说明 + 取值格式化（口径一句话版与 README 仪表盘段同步维护）
+    var MP_COLS = [
+      { k: 'effAvg', label: '有效均值', title: '有效 token 均值 = 桶内 run 有效消耗（输入+输出+缓存写，不含缓存读）的均值；无 usage 留账的 run 不进均值（不伪造 0）', fmt: function (b) { return b.effAvg === null ? '—' : fmtTokens(b.effAvg) } },
+      { k: 'durMedianMs', label: '耗时中位', title: 'run 耗时（endedAt - at）中位数；P90 见行 title；无合法时刻的 run 不进分布', fmt: function (b) { return mpDur(b.durMedianMs) } },
+      { k: 'rejectRate', label: '驳回率', title: '驳回率 = 归因到本桶 run 的验收驳回次数 / 桶内 runs（归因 = 驳回前最近 worker run）', fmt: function (b) { return mpPct(b.rejectRate) } },
+      { k: 'firstPassRate', label: '一次通过率', title: '一次通过率 = 桶内 resolved 任务中 rejectCount=0（零驳回）的占比；桶内无 resolved 任务 → —', fmt: function (b) { return mpPct(b.firstPassRate) } },
+      { k: 'timeoutRate', label: '超时率', title: '超时率 = outcome 超时落定（timeout/error）的 run / 桶内 runs', fmt: function (b) { return mpPct(b.timeoutRate) } },
+      { k: 'resumeRate', label: '续跑率', title: '续跑率 = resume:true 续跑记录 / 桶内 runs', fmt: function (b) { return mpPct(b.resumeRate) } },
+      { k: 'cacheHitRate', label: '缓存命中率', title: '缓存命中率 = cacheRead / (input + cacheRead)；⚠️ 跨 provider 口径可能不一（input 是否含缓存读各家不同），对比前先核口径；无 usage 样本 → —', fmt: function (b) { return mpPct(b.cacheHitRate) } }
+    ]
+    function ModelPerf(props) {
+      var _R = React; var useState = _R.useState
+      var _a = useState(state.mpRole || ''), roleF = _a[0], setRoleF = _a[1]
+      var _b = useState(state.mpSize || ''), sizeF = _b[0], setSizeF = _b[1]
+      function pickRole(v) { state.mpRole = v; setRoleF(v) }
+      function pickSize(v) { state.mpSize = v; setSizeF(v) }
+      var box = { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 }
+      // 范围激活标记与 Token 区同源：scoreboard 由 host 按同一 range 裁剪，范围内数据必须亮明身份
+      var tg = activeRange()
+      var tgOn = !!(tg.from || tg.to)
+      var head = React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('bot', 11), '模型表现',
+        tgOn ? React.createElement('span', { style: { fontSize: 9, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '本区桶数据已按统计范围过滤（与 Token 区同一 range 口径）：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
+      var sb = props.sb
+      var buckets = (sb && Array.isArray(sb.buckets)) ? sb.buckets : []
+      // 空态：无 scoreboard（老 host）/ 无入桶 run → 一句话空态（锚 id 照挂，Token 区链接始终可达）
+      if (!buckets.length) return React.createElement('div', { id: 'tskb-model-perf', style: box }, head, React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无足够 run 数据（还没有可入桶的已落定 Worker/Verifier run 留账）'))
+      // 本地筛选：角色 × 规模段，纯数组 pass 不重拉
+      var shown = buckets.filter(function (b) { return (!roleF || b.role === roleF) && (!sizeF || b.size === sizeF) })
+      function chip(cur, setter, v, label) {
+        var on = cur === v
+        return React.createElement('button', { onClick: function () { setter(v) }, style: { fontSize: 10, padding: '1px 8px', border: '1px solid ' + (on ? C.brand : C.border2), borderRadius: 10, background: on ? C.nested : C.card, color: on ? C.brand : C.text2, cursor: 'pointer' } }, label)
+      }
+      var thL = { fontSize: 9, color: C.text2, fontWeight: 600, textAlign: 'left', padding: '2px 4px', borderBottom: '1px solid ' + C.border, whiteSpace: 'nowrap' }
+      var thR = { fontSize: 9, color: C.text2, fontWeight: 600, textAlign: 'right', padding: '2px 4px', borderBottom: '1px solid ' + C.border, whiteSpace: 'nowrap', cursor: 'help' }
+      var tdL = { fontSize: 10, color: C.text, textAlign: 'left', padding: '3px 4px', borderBottom: '1px solid ' + C.nested, whiteSpace: 'nowrap' }
+      var tdR = { fontSize: 10, color: C.text, textAlign: 'right', padding: '3px 4px', borderBottom: '1px solid ' + C.nested, whiteSpace: 'nowrap' }
+      var insufN = shown.filter(function (b) { return b.insufficient }).length
+      return React.createElement('div', { id: 'tskb-model-perf', style: box },
+        head,
+        // 场景筛选器（本地）：角色 + 规模段两组 chip；右侧计数「显示/总数 · 样本不足 N」
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', marginBottom: 6 } },
+          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '角色'),
+          chip(roleF, pickRole, '', '全部'), chip(roleF, pickRole, 'worker', 'worker'), chip(roleF, pickRole, 'verifier', 'verifier'),
+          React.createElement('span', { style: { fontSize: 10, color: C.text2, marginLeft: 6 } }, '规模段'),
+          chip(sizeF, pickSize, '', '全部'), chip(sizeF, pickSize, 'small', '小'), chip(sizeF, pickSize, 'medium', '中'), chip(sizeF, pickSize, 'large', '大'),
+          React.createElement('span', { style: { fontSize: 9, color: C.text2, marginLeft: 'auto' } }, shown.length + '/' + buckets.length + ' 桶' + (insufN ? ' · ' + insufN + ' 桶样本不足' : ''))),
+        shown.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2, padding: '4px 0' } }, '当前筛选无匹配桶（试试放宽角色/规模段）')
+        : React.createElement('div', { style: { overflowX: 'auto' } },
+          React.createElement('table', { style: { width: '100%', borderCollapse: 'collapse' } },
+            React.createElement('thead', null, React.createElement('tr', null,
+              React.createElement('th', { style: thL }, '模型'),
+              React.createElement('th', { style: thL }, '场景'),
+              React.createElement('th', { style: thR, title: '桶内已落定 run 数；<5 为样本不足，整行灰显仅供参考' }, '样本'),
+              MP_COLS.map(function (c) { return React.createElement('th', { key: c.k, style: thR, title: c.title }, c.label) }))),
+            React.createElement('tbody', null, shown.map(function (b) {
+              // 样本护栏：insufficient 行整行灰显 + title 前缀「样本 <5，仅供参考」，不进任何最优强调
+              var tip = (b.insufficient ? '样本 <5，仅供参考——' : '') + b.model + ' × ' + b.role + ' × ' + (MP_SIZE_LABEL[b.size] || b.size) + '：runs=' + b.runs + '；有效总额 ' + fmtTokens(b.effSum) + ' tok；耗时 P90 ' + mpDur(b.durP90Ms) + '（七指标口径见表头 title）'
+              return React.createElement('tr', { key: b.model + '|' + b.role + '|' + b.size, title: tip, style: { opacity: b.insufficient ? 0.45 : 1 } },
+                React.createElement('td', { style: tdL }, b.model),
+                React.createElement('td', { style: tdL }, b.role + '·' + (MP_SIZE_LABEL[b.size] || b.size)),
+                React.createElement('td', { style: tdR }, String(b.runs)),
+                MP_COLS.map(function (c) { return React.createElement('td', { key: c.k, style: tdR }, c.fmt(b)) }))
+            })))),
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：每行 = 模型 × 角色 × 规模段桶（规模按任务有效 token：小 <1M / 中 1~10M / 大 >10M）；率类分母为桶内 runs，一次通过率分母为桶内 resolved 任务；runs<5 行灰显 = 样本不足仅供参考；随统计范围裁剪（与 Token 区同一 range）'))
     }
 
     // ===== 架构健康提示区（架构自省 L1 · 数据源：state.healthHints）=====
@@ -1762,6 +1850,8 @@ function apply(ctx) {
         React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' } }, React.createElement(StatCard, { label: '总任务', value: stats.total, color: C.text }), React.createElement(StatCard, { label: '待办', value: stats.byStatus['pending'] || 0, color: C.text2 }), React.createElement(StatCard, { label: '进行中', value: stats.byStatus['in-progress'] || 0, color: C.brand }), React.createElement(StatCard, { label: '验证中', value: stats.byStatus['verifying'] || 0, color: C.warn }), React.createElement(StatCard, { label: '已完成', value: stats.byStatus['resolved'] || 0, color: C.ok }), React.createElement(StatCard, { label: '已归档', value: stats.byStatus['archived'] || 0, color: C.text2 })),
         React.createElement(HealthHints),
         React.createElement(TokenUsage, { usage: state.usageSummary }),
+        // 模型表现区（卡3）：Token 区正下方；scoreboard 随 usageSummary 同通道透传（老 host 缺字段 → null → 空态）
+        React.createElement(ModelPerf, { sb: (state.usageSummary && state.usageSummary.scoreboard) || null }),
         React.createElement('div', { style: { display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' } },
           React.createElement('div', { style: { flex: '1 1 0', minWidth: 200, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '按状态分布'), statusOrder.map(function (s) { return React.createElement(BarRow, { key: s, label: statusLabels[s] || s, count: stats.byStatus[s] || 0, total: stats.total, color: statusColors[s] || C.brand }) })),
           React.createElement('div', { style: { flex: '1 1 0', minWidth: 200, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '按优先级分布'), prioOrder.map(function (p) { return React.createElement(BarRow, { key: p, label: prioLabel[p] || p, count: stats.byPriority[p] || 0, total: stats.total, color: prioColor[p] || C.brand }) }))),
