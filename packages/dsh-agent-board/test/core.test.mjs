@@ -1787,7 +1787,7 @@ test('Token 区统计范围接线：get-tasks 接 range 透传 + fetchTasks 带�
   assert.match(cli, /今日与「近 7 天」为固定口径，不随范围变化/)
 })
 
-// ===== Token 区三连修（task-muwq9u04）：范围过滤数据源 / 选范围即渲染 / 主数字口径统一 =====
+// ===== Token 区三连修（task-muwq9u04）：范围过滤数据源 / 选范围即渲染 / 主数字口径（task-muxnqunk 已翻转为总量主显）=====
 test('Token 区①：范围过滤读**任务级 t.runs[]**（run 级留账真实位置），不再误读 usage.runs 计数（源码级断言）', () => {
   const usageSrc = readFileSync(new URL('../lib/usage.mjs', import.meta.url), 'utf8')
   // 数据源必须取自 t.runs（数组，条目带 at/model/usage）；t.usage.runs 只是「结算次数」计数（number）
@@ -1815,24 +1815,25 @@ test('Token 区②：usageSummary 变化纳入 notify 触发（选范围即渲�
   assert.equal(/state\.usageSummary !== prevUsage/.test(cli), false)
 })
 
-test('Token 区③：Top8 与模型分布主数字取有效消耗（合计进 title），caption 写明口径统一（源码级断言）', () => {
+test('Token 区③：Top8 与模型分布主数字取总量（有效进 title），caption 写明口径翻转（源码级断言）', () => {
   const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  // 模型分布：主数字取 host 的 byModelEff（有效分摊），缺字段退化合计并标 ~
-  assert.match(cli, /var ee = \(u\.byModelEff && typeof u\.byModelEff\[m\] === 'number'\) \? u\.byModelEff\[m\] : null/)
-  assert.match(cli, /eff: \(ee === null \? tt : ee\), approx: ee === null/)
-  assert.match(cli, /value: m\.eff, max: maxM/)
-  assert.match(cli, /含缓存读合计 ' \+ String\(m\.total\) \+ ' tokens'/)
-  // Top8：主数字取 topTasks[].effective（老卡无分量才退化合计）
+  // 口径翻转（task-muxnqunk，用户 2026-10-07 裁决「算总的吧」，推翻 task-muwq9u04 有效主显）：
+  // 主数字一律总量（含缓存读），有效消耗退悬浮 title
+  // 模型分布：主数字取 host 的 byModel（总量），byModelEff（有效分摊）退 title（缺字段标「有效不可知」）
+  assert.match(cli, /var tt = u\.byModel\[m\] \|\| 0/)
+  assert.match(cli, /value: m\.total, max: maxM/)
+  assert.match(cli, /：总量 ' \+ String\(m\.total\) \+ ' tokens（含缓存读）/)
+  // Top8：主数字取 topTasks[].total，effective 退 title
   assert.match(cli, /var ee = \(typeof x\.effective === 'number'\) \? x\.effective : null/)
-  assert.match(cli, /eff: \(ee === null \? x\.total : ee\)/)
-  assert.match(cli, /value: x\.eff, max: maxT/)
-  assert.match(cli, /含缓存读合计 ' \+ String\(x\.total\)/)
-  // 排序按显示口径（有效）降序：条形长度与行序一致
-  assert.match(cli, /\}\)\.sort\(function \(a, b\) \{ return b\.eff - a\.eff \}\)/)
-  // 标题与 caption 写明口径统一（主数字均为有效消耗）
-  assert.match(cli, /'按模型分布（有效消耗）'/)
-  assert.match(cli, /'任务消耗 Top 8（有效消耗）'/)
-  assert.match(cli, /主数字（模型分布 \/ Top 8）与「今日」「近 7 天」均为有效消耗口径/)
+  assert.match(cli, /value: x\.total, max: maxT/)
+  assert.match(cli, /（总量 ' \+ String\(x\.total\) \+ ' tokens（含缓存读）/)
+  // 排序按显示口径（总量）降序：条形长度与行序一致
+  assert.match(cli, /\}\)\.sort\(function \(a, b\) \{ return b\.total - a\.total \}\)/)
+  // 标题与 caption 写明口径翻转（主数字均为总量，有效见悬浮）
+  assert.match(cli, /'按模型分布（总量）'/)
+  assert.match(cli, /'任务消耗 Top 8（总量）'/)
+  assert.match(cli, /主数字（今日 \/ 近 7 天 \/ 模型分布 \/ Top 8 \/ 主窗口行）均为总量口径（含缓存读）/)
+  assert.match(cli, /有效消耗（input\+output\+cacheWrite，不含缓存读）见悬浮 title/)
 })
 
 test('Token 区③：byModelEff 与累计有效自洽（模型有效分摊不出「模型合计 > 累计有效」的矛盾）', () => {
@@ -1846,11 +1847,12 @@ test('Token 区③：byModelEff 与累计有效自洽（模型有效分摊不出
   assert.equal(s.byModel['m-1'], 930)
 })
 
-test('README 双份同步记录 Token 口径（有效消耗 / 近 7 天 / 缓存读单列 / 派发口径边界）', () => {
+test('README 双份同步记录 Token 口径（总量主显 / 近 7 天 / 有效退悬浮 / 派发口径边界）', () => {
   const pkg = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
   const root = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')
   assert.equal(pkg, root) // 两份 README 必须字节一致（npm run sync-readme 的约束）
-  for (const s of ['今日有效消耗', '近 7 天', '有效消耗 = 输入 + 输出 + 缓存写（不含缓存读）', '不含主窗口对话', 'run 级留账', '统计范围', '主数字口径统一', 't.runs[]']) {
+  // 口径翻转（task-muxnqunk）：主数字均为总量口径（含缓存读），有效消耗退悬浮
+  for (const s of ['今日总量', '近 7 天', '有效消耗 = 输入 + 输出 + 缓存写（不含缓存读）', '不含主窗口对话', 'run 级留账', '统计范围', '主数字均为总量口径', 't.runs[]']) {
     assert.ok(pkg.includes(s), 'README 应记录口径：' + s)
   }
 })
@@ -1918,7 +1920,7 @@ test('Token 消耗接线：settleRun 结算累加 + 按模型小计 + get-tasks 
   assert.match(cli, /'⛁ ' \+ fmtTokens\(t\.usage\.total\)/)                     // 进行中/已完成卡片显示本任务累计
 })
 
-test('Token 日账接线：dispatch 记 byDay 双指标（本地日）+ 仪表盘有效消耗口径（源码级断言）', () => {
+test('Token 日账接线：dispatch 记 byDay 双指标（本地日）+ 仪表盘总量口径（源码级断言）', () => {
   const host = hostSrc()
   const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   assert.match(host, /cell\.t = \(Number\(cell\.t\) \|\| 0\) \+ u\.total/) // 结算时记一笔日账总量
@@ -1934,26 +1936,24 @@ test('Token 日账接线：dispatch 记 byDay 双指标（本地日）+ 仪表�
   assert.equal(/toISOString/.test(dkBody[0]), false) // UTC 会让晚间消耗落到次日
   assert.match(host, /if \(!t\.usage\.byDay\) t\.usage\.byDay = \{\}/)            // 老任务就地补日账（不改老字段形态）
   assert.match(host, /lc\.t \+= u\.total; lc\.e = null; s\.byDay\[lk\] = lc/)     // 存量兜底归 updatedAt 本地日（只有总量，e 不可知）
-  // 仪表盘：大数字=今日有效消耗 + 「含缓存读共 X」小字 + 累计三分量 + 近 7 天有效值 + 口径 caption
+  // 仪表盘：大数字=今日总量（含缓存读）+「其中有效 X」小字 + 累计三分量 + 近 7 天总量柱 + 口径 caption
+  // （口径翻转 task-muxnqunk：主显总量，有效退悬浮/次要位；旧口径灰柱规则退役——见翻转测试负断言）
   assert.match(cli, /function lastNDays\(n\)/)
   assert.match(cli, /var todayCell = dayOf\(byDay\[todayKey\]\)/)                 // 今日缺省退化（无日账不误报）
-  assert.match(cli, /'tokens（今日有效'/)                                          // 大数字口径 = 有效消耗
-  assert.match(cli, /'含缓存读共 '/)                                              // 有效 vs 总量的差额单列
+  assert.match(cli, /'tokens（今日总量，含缓存读）'/)                               // 大数字口径 = 总量（含缓存读）
+  assert.match(cli, /'其中有效 '/)                                                // 有效消耗退居次要小字（对照总量）
   assert.match(cli, /'累计（本看板） 有效 '/)                                      // 累计三分量：有效
   assert.match(cli, /' · 缓存读 '/)                                              // 累计三分量：缓存读
   assert.match(cli, /' · 合计 '/)                                                // 累计三分量：合计
-  assert.match(cli, /'近 7 天（有效消耗）'/)
-  assert.match(cli, /k\.slice\(5\) \+ '：有效 ' \+ String\(v\)/)                  // 条形 title：MM-DD：有效 N tok
-  assert.match(cli, /含缓存读共 ' \+ String\(c\.t\) \+ ' tok'/)                    // 条形 title 补总量对照
+  assert.match(cli, /'近 7 天（总量，含缓存读）'/)
+  assert.match(cli, /k\.slice\(5\) \+ '：总量 ' \+ String\(v\)/)                  // 条形 title：MM-DD：总量 N tok
+  assert.match(cli, /' \/ 有效 ' \+ String\(c\.e\) \+ ' tok'/)                     // 条形 title 补有效对照
   assert.match(cli, /口径：累计与 Top 8 仅看板派发的 Worker\/Verifier run 消耗/)       // 口径边界明示（累计/Top8 仅 run 口径）
   assert.match(cli, /主窗口行=本会话对话消耗，与看板派发口径并列不混入/)                 // 主窗口行并列不混入（task-muwsol23 起单列展示）
-  assert.match(cli, /主数字（模型分布 \/ Top 8）与「今日」「近 7 天」均为有效消耗口径/)   // 主数字口径统一（task-muwq9u04）
-  assert.match(cli, /其中缓存读 ' \+ String\(x\.cacheRead \|\| 0\)/)                  // Top8 title 补 缓存读 拆分（合计/有效进 title）
-  assert.match(cli, /background: legacy \? C\.border : \(isToday \? C\.brand : C\.nested\)/) // 旧口径日灰柱、今天高亮 brand、其余浅底
+  assert.match(cli, /主数字（今日 \/ 近 7 天 \/ 模型分布 \/ Top 8 \/ 主窗口行）均为总量口径（含缓存读）/) // 主数字口径翻转（task-muxnqunk）
+  assert.match(cli, /其中缓存读 ' \+ String\(x\.cacheRead \|\| 0\)/)                  // Top8 title 补 缓存读 拆分（有效进 title）
+  assert.match(cli, /background: isToday \? C\.brand : C\.nested/)                 // 今天高亮 brand、其余浅底（灰柱规则已退役）
   assert.match(cli, /hasDayData \? React\.createElement/)                         // 7 天全空不渲染该区
-  // e 不可知的旧口径日：不拿总量冒充有效——今日「—」/ 柱形矮灰柱 + tooltip 标明（task-muwsnyqv ③，
-  // 旧「标 ~ 近似」分支已除，见三连修测试的反向断言）
-  assert.match(cli, /旧口径数据（仅总量/)
 })
 
 // ===== Token 口径三连修（task-muwsnyqv）：byDay 闭区间 / byDayFull 固定口径 / 旧口径不冒充 =====
@@ -2014,26 +2014,33 @@ test('Token 三连修②：byDayFull 未过滤全量与 byDay 并存（今日/�
   assert.match(cli, /var byDay = \(u\.byDayFull && typeof u\.byDayFull === 'object'\) \? u\.byDayFull : \(\(u\.byDay && typeof u\.byDay === 'object'\) \? u\.byDay : \{\}\)/)
 })
 
-test('Token 三连修③：e=null 旧口径日不拿 t 冒充有效（今日「—」/ 灰柱 + tooltip，源码级断言）', () => {
+// ===== Token 口径翻转（task-muxnqunk，用户 2026-10-07 裁决「算总的吧」）：总量主显 / 有效退悬浮 / 灰柱退役 =====
+// 推翻 task-muwq9u04 的「有效消耗主显」：主数字一律总量 t（含缓存读），有效消耗 e 退居 title/次要位；
+// task-muwsnyqv ③ 的旧口径灰柱规则顺势退役（t 恒有值，e===null 的日子现在就是正常柱）。
+// 不动的：模型表现区与质量趋势区保持有效口径（效率指标语义），报告导出分列口径不动。
+test('Token 口径翻转：总量主显（含缓存读）+ 有效退 title + 旧口径灰柱规则退役（源码级断言）', () => {
   const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  // 柱形：e===null 的日子走 legacy 灰柱分支，柱高不再吃 t 兜底
-  assert.match(cli, /var legacy = c\.e === null && c\.t > 0/)
-  assert.match(cli, /var v = legacy \? 0 : \(c\.e \|\| 0\)/)
-  assert.match(cli, /'：旧口径数据（仅总量 '/)                               // 柱形 tooltip 标旧口径
-  assert.match(cli, /灰柱 = 旧口径数据（仅总量）/)                            // 有近 7 天旧口径日时表头图例
-  // maxDay 只按有效值归一（t 不参与，含缓存读的巨柱压不平其他天）
-  assert.match(cli, /if \(dc\.e !== null && dc\.e > maxDay\) maxDay = dc\.e/)
-  // 今日大数字：旧口径日显示「—」+ title 说明，不再 ~t 冒充
-  assert.match(cli, /var todayLegacy = todayCell\.e === null && todayCell\.t > 0/)
-  assert.match(cli, /todayLegacy \? '—' : fmtTokens\(todayEff\)/)
-  assert.match(cli, /今日有效消耗不可知：该日账为旧口径数据（仅总量/)
-  // 反向断言：旧的 t 兜底冒充分支已除（柱形与今日两处都不再有 e===null → 用 t 的路径）
-  assert.equal(/c\.e === null \? c\.t : c\.e/.test(cli), false)
-  assert.equal(/todayApprox \? todayCell\.t : todayCell\.e/.test(cli), false)
+  // 近 7 天柱形：按总量归一与画柱（t 恒有值，e===null 的旧口径日就是正常柱）
+  assert.match(cli, /if \(dc\.t > maxDay\) maxDay = dc\.t/)                   // maxDay 按总量归一
+  assert.match(cli, /var v = c\.t \|\| 0/)                                    // 柱高取总量
+  assert.match(cli, /background: isToday \? C\.brand : C\.nested/)            // 今天高亮 brand，其余浅底（无灰柱分支）
+  // 今日大数字：显总量 todayCell.t（byDayFull 口径不变），有效退 title / 次要小字
+  assert.match(cli, /fmtTokens\(todayCell\.t\)/)
+  assert.match(cli, /'tokens（今日总量，含缓存读）'/)
+  // caption 新文案：主数字均为总量口径（含缓存读）；有效消耗见悬浮
+  assert.match(cli, /主数字（今日 \/ 近 7 天 \/ 模型分布 \/ Top 8 \/ 主窗口行）均为总量口径（含缓存读）/)
+  assert.match(cli, /有效消耗（input\+output\+cacheWrite，不含缓存读）见悬浮 title/)
+  // 负断言：旧口径灰柱规则（task-muwsnyqv ③）顺势退役——legacy 分支 / 灰柱图例 / 今日「—」防护全删
+  assert.equal(/var legacy = /.test(cli), false)
+  assert.equal(/var todayLegacy/.test(cli), false)
+  assert.equal(/hasLegacy/.test(cli), false)
+  assert.equal(/灰柱 = 旧口径数据/.test(cli), false)
+  assert.equal(/旧口径数据（仅总量/.test(cli), false)
+  assert.equal(/今日有效消耗不可知/.test(cli), false)
   assert.equal(/（近似：老日账只有总量）/.test(cli), false)
-  // README 双份记录老数据处理口径
+  // README 双份记录口径翻转
   const pkg = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
-  assert.ok(pkg.includes('旧口径'), 'README 应记录旧口径日（e=null）不拿总量冒充有效的处理')
+  assert.ok(pkg.includes('主数字均为总量口径'), 'README 应记录 Token 区口径翻转（总量主显）')
 })
 
 // ===== 调研 ROI 行 token 有效口径（task-muupnnq5）=====

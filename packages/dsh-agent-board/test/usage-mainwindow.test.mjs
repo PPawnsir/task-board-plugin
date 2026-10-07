@@ -207,14 +207,16 @@ test('主窗口⑥：接线（源码级）——get-tasks 挂载 / 增量尾读�
   assert.match(usage, /st\.size > acc\.size/)                          // 变大 → 增量臂
   assert.match(usage, /readLogBytes\(log, st\.size - acc\.size\)/)     // 只读新增字节段
   assert.match(usage, /if \(k === offs\.length - 1\) break/)           // 尾部半帧不结算
-  // client：缺字段静默降级 + 累计行下方单列行
+  // client：缺字段静默降级 + 累计行下方单列行（口径翻转 task-muxnqunk：今日/累计显总量，
+  // 有效进悬浮 title，缓存读不再单列——已含在 total 里）
   assert.match(cli, /u\.mainWindow && typeof u\.mainWindow === 'object'/)
-  assert.match(cli, /'主窗口（本会话）：今日有效 '/)
+  assert.match(cli, /'主窗口（本会话）：今日 '/)
   assert.match(cli, /' · 累计 '/)
-  assert.match(cli, /'（缓存读 '/)
-  // client：模型分布尾部追加「主窗口（对话）」（0 不渲染，固定尾部不参与排序）
+  assert.match(cli, /fmtTokens\(mw\.total\)/)
+  assert.equal(cli.includes('（缓存读 '), false) // 缓存读不再单列（旧「（缓存读 Z）」段已退役）
+  // client：模型分布尾部追加「主窗口（对话）」（总量主显；0 不渲染，固定尾部不参与排序）
   assert.match(cli, /label: '主窗口（对话）'/)
-  assert.match(cli, /mw && mw\.effective > 0/)
+  assert.match(cli, /mw && mw\.total > 0/)
   // caption：并列不混入的口径说明
   assert.match(cli, /主窗口行=本会话对话消耗，与看板派发口径并列不混入/)
 })
