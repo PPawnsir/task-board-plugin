@@ -231,7 +231,8 @@ Team 托管档独有（调度员体验）：
 │   ├── lib/client/               #   client 端模块源（按用户感知域拆分，见下节）
 │   ├── lib/client.js             #   client 端产物（⚠️ GENERATED：scripts/build-client.cjs 拼装，勿直接编辑）
 │   ├── scripts/build-client.cjs  #   零依赖组装器（模块源 → 产物；--check 校验产物新鲜度）
-│   ├── test/core.test.mjs        #   单元测试（node --test，84 例）
+│   ├── test/                     #   无头集成套件（node --test；*.test.mjs 为测试本体，
+│   │   └── helpers/mock-ctx.mjs  #     helpers/ 是假宿主基建，不被当测试跑）
 │   ├── package.json              #   dsh.bundle.patch + dsh.client 元数据
 │   └── cordis.patch.yml          #   bundle 挂载行
 └── docs/
@@ -279,9 +280,22 @@ dsh web 的 client 运行时不具备模块解析能力（entry 被整体读成�
 > v68 起拆除了"动态源码 → 静态包"的转换层（build-pkg.cjs）：插件已稳定，
 > 双形态维护的复杂度大于收益，包内文件即唯一源码，改完重启 dsh 即生效。
 >
-> v74 起去池化（一次性派发）+ 纯逻辑抽到 `lib/core.mjs`，跑
-> `node --test packages/dsh-agent-board/test/` 即可验证状态机/依赖/派发决策，
-> 不用重启 dsh 人肉回归。
+> v74 起去池化（一次性派发）+ 纯逻辑抽到 `lib/core.mjs`，在包目录跑
+> `npm test`（node --test，无头集成全套件）即可验证状态机/依赖/派发决策，
+> 不用重启 dsh 人肉回归——跑法与口径详见 [docs/DEVTESTING.md](docs/DEVTESTING.md)。
+
+## 开发与测试
+
+- **一条命令**：`cd packages/dsh-agent-board && npm test`——`pretest` 自动先拼装前端产物
+  （`build-client`），再跑 `node --test test/**/*.test.mjs`：纯逻辑单测 + 无头宿主集成全套件
+  （当前 355 例，~6s），无需 dsh 环境。
+- **helpers 约定**：`test/helpers/mock-ctx.mjs` 是无头基建（假 cordis ctx / 临时 HOME / 虚拟时钟 /
+  剧本化 subagents），不是测试；靠 `*.test.mjs` 文件名约定排除，不会被误跑。
+- **CI 零改动继承**：`.github/workflows/test.yml` 在 push/PR 时跑语法检查 + `npm test`，
+  套件随脚本自动生效；`prepublishOnly` 门禁同款。
+- **插件改动生效口径**：host 端代码（`index.mjs` / `lib/*.mjs`）不可热重载（宿主模块表按 URL 缓存），
+  改了必须重启 dsh；管理接口 disable→enable 只能重组组合层（路由/工具卸下再挂上），拉不到新代码。
+  实测证据与探针脚本（`scripts/reload-probe.cjs`）见 [docs/DEVTESTING.md](docs/DEVTESTING.md)。
 
 ## 文档
 
@@ -289,6 +303,7 @@ dsh web 的 client 运行时不具备模块解析能力（entry 被整体读成�
 - [docs/PACKAGING.md](docs/PACKAGING.md) — 正式安装（Bundle 打包）注意事项
 - [docs/icon-style-guide.md](docs/icon-style-guide.md) — 图标规范
 - [docs/REGRESSION-v59.md](docs/REGRESSION-v59.md) — 回归测试说明
+- [docs/DEVTESTING.md](docs/DEVTESTING.md) — 开发与测试：无头套件跑法 / CI 继承 / 热重载口径
 
 ## 发布新版本（维护者）
 
@@ -313,7 +328,7 @@ git push --follow-tags     # tag 推送触发流水线
 - **README 单一来源**：本文件（根 README）即唯一来源；发版前在 `packages/dsh-agent-board` 跑一次 `npm run sync-readme` 同步进包（npm 页面展示的是包内 README）
 - 需在仓库 **Settings → Secrets and variables → Actions** 配置 `NPM_TOKEN`
   （npm granular access token：bypass 2FA + direct publish）
-- 日常 push / PR 有 `test.yml` 跑语法检查 + 60 例单测
+- 日常 push / PR 有 `test.yml` 跑语法检查 + 无头集成全套件（`npm test`）
 - 本地手动发布仍然可用：`npm publish --registry=https://registry.npmjs.org`（本机默认源是镜像时必须显式指定）
 
 ## License
