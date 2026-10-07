@@ -743,7 +743,9 @@ function buildScoreRecs(tasks) {
           if (trs[ri2] && String(trs[ri2].id) === attr.runId) { rDay = dayKeyOf(trs[ri2].at); break }
         }
       }
-      rejRecs.push({ taskId: tid, runId: attr ? attr.runId : '', model: attr ? attr.model : '', size: size, rDay: rDay })
+      // text/mDay（卡5 驳回聚类）：驳回原文与驳回消息自身日落点随 rejRec 带出——
+      // messages 只增不改（pushRejection 判重后只 push，无编辑路径），缓存键已含驳回 at，无陈账风险。
+      rejRecs.push({ taskId: tid, runId: attr ? attr.runId : '', model: attr ? attr.model : '', size: size, rDay: rDay, mDay: dayKeyOf(m.at), text: String(m.text || '') })
     }
   }
   return { stamp: stamp, runRecs: runRecs, taskRecs: taskRecs, rejRecs: rejRecs }
@@ -887,7 +889,17 @@ function assembleScoreboard(recs, range) {
     return a.model + '|' + a.role + '|' + a.size < b2.model + '|' + b2.role + '|' + b2.size ? -1 : 1
   })
   tr.resume.rate = tr.resume.runs ? tr.resume.completed / tr.resume.runs : null
-  return { buckets: out, trends: tr, meta: meta }
+  // ===== 驳回聚类（卡5①，task-muxhu1zv）：规则法 Top3 + 约定建议文本 =====
+  // 裁剪口径：按驳回消息**自身**日落点 mDay（与驳回率桶的归因 run 日落点 rDay 相互独立）——
+  // direct 档 / 无 worker run 可归的驳回同样是学习飞轮样本，不能因归因失败从聚类里消失；
+  // mDay=''（无 at 老数据）在范围下剔除（宁可漏不错，与全局 range 哲学一致）。
+  var rejTexts = []
+  for (var ci = 0; ci < recs.rejRecs.length; ci++) {
+    var rcj = recs.rejRecs[ci]
+    if (hasRange && !dayInRange(rcj.mDay, range)) continue
+    rejTexts.push(rcj.text)
+  }
+  return { buckets: out, trends: tr, meta: meta, rejectionClusters: clusterRejections(rejTexts) }
 }
 
 // 记分卡聚合入口（get-tasks 内组装到 usageSummary.scoreboard）。
@@ -906,4 +918,133 @@ export function buildScoreboard(tasks, range, cacheStore) {
     if (store) { store.taskCount = list.length; store.stamp = recs.stamp; store.recs = recs }
   }
   return assembleScoreboard(recs, range)
+}
+
+// ===== 驳回聚类 Top3（卡5①，task-muxhu1zv）：规则法，不上 embedding =====
+// 驳回文本结构高度模板化（rejectionText 产物：「验收驳回 · <summary>\n\n核对项：\n<checks>」），
+// 规则表按主窗口验收驳回的真实高频原因归纳（本机看板驳回库为空时的种子表，随真实样本增补）：
+// 每条驳回只归入**第一个命中**的类目（规则表顺序 = 优先级），占比分母 = 驳回总数（Σpct ≤ 100%）；
+// 全部未命中进 'other' 兜底桶（如实计数参与排名，建议文案只能给通用模板——人工归纳后再补规则）。
+// 纯函数零 IO；texts 为驳回原文数组（装配层已按范围裁剪），空数组 → total:0 top:[]，绝不抛错。
+export var REJECTION_CLUSTER_RULES = [
+  { id: 'acceptance-skipped', label: '验收脚本未实跑', re: /验收脚本|未实跑|未跑|没跑|真实输出|逐字粘贴|自测没过|自测不/, advice: '在派发约定/Worker prompt 补一条：上报前必须逐字粘贴验收脚本真实输出（未通过不得上报完成）' },
+  { id: 'readme-stale', label: 'README 未同步', re: /README|文档未|文档不|未同步/, advice: '在派发约定补一条：行为/口径/界面变化必须同步 README 双份并逐字一致（npm run sync-readme）' },
+  { id: 'scope-creep', label: '范围越界', re: /范围越界|越界|范围外|改了别|额外改动|顺带改|顺手改/, advice: '在派发约定补一条：只改任务 touches 声明范围内的文件；范围外发现的问题另建卡，不顺带改' },
+  { id: 'assertion-missing', label: '断言缺失', re: /断言/, advice: '在派发约定补一条：任务断言必须逐条配单测锁定——断言无测试视为未完成' },
+  { id: 'artifact-stale', label: '产物未重组装', re: /重组装|重新组装|产物未|build-client|组装产物|未重建|未重新构建/, advice: '在派发约定补一条：改完组装源（lib/client/* 等）必须重组装产物（npm run build-client）再上报' },
+]
+var REJ_CLUSTER_OTHER = { id: 'other', label: '其他（未匹配规则）', advice: '人工归纳该类驳回的共性后，在派发约定/Worker prompt 补一条对应规则' }
+var REJ_SAMPLE_MAX = 3   // 每类代表原文最多保留条数
+var REJ_SAMPLE_CLIP = 80 // 代表原文截断长度（客户端放 title 悬浮）
+
+// texts → { total, top: [{ id, label, count, pct, samples, suggestion }], otherCount, restCount }
+//   top 最多 3 条（count 降序，并列按规则表顺序、other 恒排最后）；
+//   pct = Math.round(count/total*100)（整数百分比）；samples = 该类前 3 条原文各截 80 字；
+//   suggestion = 「驳回 TopN『label』占 pct%——建议<类目 advice>」（结构化约定建议文本，卡5②）。
+export function clusterRejections(texts) {
+  var out = { total: 0, top: [], otherCount: 0, restCount: 0 }
+  var list = Array.isArray(texts) ? texts : []
+  var acc = [] // 与规则表同序的累加器 + 末尾 other
+  var ri
+  for (ri = 0; ri <= REJECTION_CLUSTER_RULES.length; ri++) {
+    var rule = ri < REJECTION_CLUSTER_RULES.length ? REJECTION_CLUSTER_RULES[ri] : REJ_CLUSTER_OTHER
+    acc.push({ id: rule.id, label: rule.label, advice: rule.advice, count: 0, samples: [] })
+  }
+  for (var i = 0; i < list.length; i++) {
+    var text = String(list[i] == null ? '' : list[i])
+    if (!text.trim()) continue // 空文本不算一条驳回样本（防御脏数据，不稀释占比）
+    out.total++
+    var hit = acc.length - 1 // 缺省 other
+    for (ri = 0; ri < REJECTION_CLUSTER_RULES.length; ri++) {
+      if (REJECTION_CLUSTER_RULES[ri].re.test(text)) { hit = ri; break } // 首命中即归类（顺序=优先级）
+    }
+    var a = acc[hit]
+    a.count++
+    if (a.samples.length < REJ_SAMPLE_MAX) a.samples.push(text.slice(0, REJ_SAMPLE_CLIP))
+  }
+  // count>0 的类目参与排名：count 降序，并列按 acc 下标（规则表顺序，other 天然最后）
+  var ranked = acc.filter(function (x) { return x.count > 0 }).sort(function (x, y) {
+    if (y.count !== x.count) return y.count - x.count
+    return acc.indexOf(x) - acc.indexOf(y)
+  })
+  for (var k = 0; k < ranked.length; k++) {
+    var r = ranked[k]
+    if (r.id === 'other') out.otherCount = r.count
+    if (k < 3) {
+      var pct = Math.round(r.count / out.total * 100)
+      out.top.push({
+        id: r.id, label: r.label, count: r.count, pct: pct, samples: r.samples,
+        suggestion: '驳回 Top' + (k + 1) + '『' + r.label + '』占 ' + pct + '%——建议' + r.advice,
+      })
+    }
+  }
+  out.restCount = ranked.length > 3 ? ranked.length - 3 : 0 // Top3 之外还有几类（客户端 caption 提示用）
+  return out
+}
+
+// ===== 按表现荐模型 hint（卡5③，task-muxhu1zv）：healthHints 通道的规则 =====
+// 判定（全部满足才亮，任一不达标静默返回 null——无足够数据不亮）：
+//   桶范围：role='worker' 且规模段 ∈ {small, medium}（中小卡桶；verifier 与大卡不参与——荐的是默认
+//     workerModel，大卡样本少且成本结构不同质）。同模型的中小桶合并成模型级样本再判。
+//   ① 样本量：模型合并 runs >= MODEL_HINT_MIN_RUNS（10）——恰好 10 合格，9 不亮；
+//   ② 一次通过率：合并 firstPass/resolved >= MODEL_HINT_MIN_PASS（0.9）——恰好 90% 合格，89% 不亮；
+//      resolved=0（桶内无落定任务）→ 通过率不可知，不判（不假装 0%）；
+//   ③ 有效均值显著更低：候选 = 合格模型中 effAvg（ΣeffSum/ΣeffCount）最低者，且对**其他每个**合格
+//      模型的 effAvg 都严格低 >MODEL_HINT_EFF_GAP（30%，取最小差距判定——最保守口径；恰好 30% 不亮）；
+//      合格模型 <2 个 → 无对比对象，「显著低于其他」无从谈起 → null。
+// 返回 healthHints 条目形态 { level: 'warn', text }（黄条），由 rpc get-tasks 拼进 d.healthHints。
+export var MODEL_HINT_MIN_RUNS = 10
+export var MODEL_HINT_MIN_PASS = 0.9
+export var MODEL_HINT_EFF_GAP = 0.3
+
+// token 数量简写（hint 文案用）：>=1M → X.XM，>=1K → X.XK，否则取整原数
+function fmtTokShort(n) {
+  if (!isFinite(n) || n < 0) return '0'
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K'
+  return String(Math.round(n))
+}
+
+export function modelPerfHint(sb) {
+  if (!sb || !Array.isArray(sb.buckets)) return null
+  // 按模型合并 worker × 中小卡桶（单桶样本常不足 10，合并后模型级样本才是判定基准）
+  var mm = {}
+  for (var i = 0; i < sb.buckets.length; i++) {
+    var b = sb.buckets[i]
+    if (!b || b.role !== 'worker') continue
+    if (b.size !== 'small' && b.size !== 'medium') continue
+    var a = mm[b.model] || (mm[b.model] = { model: b.model, runs: 0, resolved: 0, firstPass: 0, effSum: 0, effCount: 0 })
+    a.runs += numOr0(b.runs)
+    a.resolved += numOr0(b.resolved)
+    a.firstPass += numOr0(b.firstPass)
+    a.effSum += numOr0(b.effSum)
+    a.effCount += numOr0(b.effCount)
+  }
+  var cands = []
+  for (var mk in mm) {
+    if (!Object.prototype.hasOwnProperty.call(mm, mk)) continue
+    var v = mm[mk]
+    if (v.runs < MODEL_HINT_MIN_RUNS) continue   // ① 样本量
+    if (!v.resolved) continue                     // ② 通过率不可知（无落定任务）不判
+    var pass = v.firstPass / v.resolved
+    if (pass < MODEL_HINT_MIN_PASS) continue      // ② 通过率 <90%（恰好 90% 合格）
+    if (!v.effCount) continue                     // ③ 有效均值不可知（无 usage 留账）不判
+    cands.push({ model: v.model, runs: v.runs, pass: pass, effAvg: v.effSum / v.effCount })
+  }
+  if (cands.length < 2) return null // 无对比对象（单模型独秀不构成「显著低于其他」）
+  cands.sort(function (x, y) { return (x.effAvg - y.effAvg) || (x.model < y.model ? -1 : 1) }) // 有效均值升序（并列按模型名，确定性）
+  var best = cands[0]
+  // 对其他每个合格模型都严格低 >30%：最小差距 > 30% 才成立（恰好 30% 不亮）
+  var minGap = Infinity
+  for (var gi = 1; gi < cands.length; gi++) {
+    var oAvg = cands[gi].effAvg
+    var gap = oAvg > 0 ? (oAvg - best.effAvg) / oAvg : 0 // 对方均值为 0：无法定义「低 30%」，按 0 处理（必不亮）
+    if (gap < minGap) minGap = gap
+  }
+  if (!(minGap > MODEL_HINT_EFF_GAP)) return null
+  return {
+    level: 'warn',
+    text: '模型 ' + best.model + ' 在中小卡表现最优（通过率 ' + Math.round(best.pass * 100) + '% · 有效均值 ' + fmtTokShort(best.effAvg) +
+      '，较其他合格模型低 ' + Math.round(minGap * 100) + '%），建议设为默认 workerModel',
+  }
 }

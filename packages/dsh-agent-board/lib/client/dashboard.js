@@ -610,6 +610,54 @@
         React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 8, lineHeight: 1.5 } }, '口径：仅看板派发的 Worker/Verifier run 与任务落定记录（按本地日落点，随统计范围裁剪）；一次通过率 = 当日落定 resolved 任务中零驳回占比（驳回 = 验收 verdict rejected，归因驳回前最近 worker run）；超时 = run 落定 timeout/error；续跑成功率 = resume 续跑记录中 completed 占比（范围总量口径，无逐日）；卡时长 = 创建 → 落定墙钟（含排队 / 验收）。通过率与超时率为近 14 天固定窗口——范围落在窗口外时对应日柱为空'))
     }
 
+    // ===== 驳回聚类区（记分卡卡5，task-muxhu1zv）：驳回原因 Top3 +「建议沉淀为约定」文本（一键复制）=====
+    // 数据源：state.usageSummary.scoreboard.rejectionClusters——host 规则法聚类（关键词模板，首命中归类；
+    //   按驳回消息自身日落点随统计范围裁剪），与卡3/卡4 同通道透传，本区只渲染零 rpc（不重拉）。
+    //   每行 = TopN 类目 + 占比（count/total）+ 结构化建议文本 + 「复制」按钮（建议文本进剪贴板，
+    //   沉淀动作人工——v1 只输出文本，不代调 notes 插件）；代表原文（截断 80 字 ×≤3 条）放行 title 悬浮。
+    // 缺省兼容：老 host 无 rejectionClusters 字段 → 返回 null 整块不渲染（与 HealthHints 同哲学）；
+    //   有字段但 total=0 → 区头 + 一句空态「暂无驳回记录」。
+    function RejectionClusters(props) {
+      var _R = React; var useState = _R.useState
+      var _c = useState(''), copiedId = _c[0], setCopiedId = _c[1]
+      var sb = props.sb
+      var rc = sb && sb.rejectionClusters
+      if (!rc || typeof rc !== 'object') return null // 老 host 缺字段：整块不渲染（零残留）
+      var box = { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 }
+      var tg = activeRange()
+      var tgOn = !!(tg.from || tg.to)
+      var head = React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('flask-conical', 11), '驳回聚类',
+        tgOn ? React.createElement('span', { style: { fontSize: 9, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '本区已按统计范围过滤（按驳回消息本地日落点，与 Token 区同一 range）：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
+      var top = Array.isArray(rc.top) ? rc.top : []
+      if (!rc.total || !top.length) {
+        return React.createElement('div', { id: 'tskb-rejection-clusters', style: box }, head,
+          React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无驳回记录（验收驳回后会按关键词模板聚类出 Top3 类目与约定建议）'))
+      }
+      // 复制建议文本：clipboard API 不可用/被拒时静默降级（按钮不变样，下轮再试）
+      function copySugg(c) {
+        var text = String(c.suggestion || '')
+        if (!text) return
+        try {
+          navigator.clipboard.writeText(text).then(function () {
+            setCopiedId(c.id); setTimeout(function () { setCopiedId('') }, 2000)
+          }, function () {})
+        } catch (_) {}
+      }
+      return React.createElement('div', { id: 'tskb-rejection-clusters', style: box },
+        head,
+        top.map(function (c, i) {
+          var tip = (c.samples && c.samples.length) ? '代表原文：\n' + c.samples.map(function (s) { return '· ' + s }).join('\n') : '（无代表原文）'
+          return React.createElement('div', { key: c.id, title: tip, style: { marginBottom: 6, paddingBottom: 6, borderBottom: i < top.length - 1 ? '1px solid ' + C.nested : 'none' } },
+            React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 } },
+              React.createElement('span', { style: { color: C.warn, fontWeight: 700 } }, 'Top' + (i + 1)),
+              React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, c.label),
+              React.createElement('span', { style: { color: C.text2, fontSize: 10 } }, c.pct + '%（' + c.count + '/' + rc.total + '）'),
+              React.createElement('button', { onClick: function () { copySugg(c) }, title: '复制「建议沉淀为约定」文本（粘贴到派发约定/Worker prompt，沉淀动作人工）', style: { marginLeft: 'auto', fontSize: 9, padding: '1px 8px', border: '1px solid ' + C.border2, borderRadius: 9, background: C.card, color: copiedId === c.id ? C.ok : C.text2, cursor: 'pointer' } }, copiedId === c.id ? '✅ 已复制' : '📋 复制约定建议')),
+            React.createElement('div', { style: { fontSize: 9, color: C.text2, lineHeight: 1.5, marginTop: 2 } }, String(c.suggestion || '')))
+        }),
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 4, lineHeight: 1.5 } }, '口径：规则法关键词模板聚类（首命中归类，不上 embedding）；占比分母 = ' + (tgOn ? '范围内' : '') + '驳回总数（' + rc.total + ' 条）' + (rc.restCount ? '；另有 ' + rc.restCount + ' 类未进 Top3' : '') + '；建议文本一键复制后人工沉淀为约定'))
+    }
+
     // ===== 架构健康提示区（架构自省 L1 · 数据源：state.healthHints）=====
     // healthHints 由 host lib/health.mjs 的 computeHealthHints(tasks) 每次请求现算（纯函数零存储零 IO）：
     //   [{ level: 'warn'|'info', text }]。kernel fetchTasks 已将其与 tasks 同源透传进 state.healthHints，
@@ -643,6 +691,8 @@
         React.createElement(ModelPerf, { sb: (state.usageSummary && state.usageSummary.scoreboard) || null }),
         // 质量趋势区（卡4）：模型表现区正下方；同一 scoreboard 出参的 trends 全局 rollup（老 host 缺字段 → null → 空态灰显）
         React.createElement(QualityTrends, { sb: (state.usageSummary && state.usageSummary.scoreboard) || null }),
+        // 驳回聚类区（卡5）：质量趋势区正下方；scoreboard.rejectionClusters（老 host 缺字段 → 组件返回 null 整块不渲染）
+        React.createElement(RejectionClusters, { sb: (state.usageSummary && state.usageSummary.scoreboard) || null }),
         React.createElement('div', { style: { display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' } },
           React.createElement('div', { style: { flex: '1 1 0', minWidth: 200, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '按状态分布'), statusOrder.map(function (s) { return React.createElement(BarRow, { key: s, label: statusLabels[s] || s, count: stats.byStatus[s] || 0, total: stats.total, color: statusColors[s] || C.brand }) })),
           React.createElement('div', { style: { flex: '1 1 0', minWidth: 200, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '按优先级分布'), prioOrder.map(function (p) { return React.createElement(BarRow, { key: p, label: prioLabel[p] || p, count: stats.byPriority[p] || 0, total: stats.total, color: prioColor[p] || C.brand }) }))),
