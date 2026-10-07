@@ -516,3 +516,118 @@ export function readMainWindowUsage(sessionId, sessionsRoot, range, cacheStore) 
     return null
   }
 }
+
+// ===== 记分卡数据底座（task-muxhshfu 卡1）：run 完备性体检 / 驳回归因 / 场景分桶 =====
+// 三个 helper 全部纯函数零 IO（不碰 fs/不读时钟——日期只用 Date 解析已有字符串），供卡2聚合底座直接组合。
+// 数据源是任务级 t.runs[] 留账（写路径见 dispatch.mjs recordRunHistory/closeRunHistory/accumulateRunUsage）：
+//   新形态条目 { role, id, at, model, outcome, endedAt, usage:{五分量}, usageSeq, usageRecorded, continuable?, resume? }
+//   老形态条目可能缺 model/endedAt/usage——聚合端退化口径在此收口（标缺失，绝不伪造）。
+
+// 规模段边界常量（v1 写死）：按任务有效 token（effectiveTokens 口径：输入+输出+缓存写，不含缓存读）分桶——
+// 小 <1M / 中 1M~10M / 大 >10M。边界归属：恰好 1M 归中、恰好 10M 归中（「<1M」「>10M」都是严格不等号）。
+export var SIZE_BUCKET_SMALL_MAX = 1000000
+export var SIZE_BUCKET_MEDIUM_MAX = 10000000
+// 有效 token → 规模段（'small' | 'medium' | 'large'）。
+// 非法/非正输入 → null：任务还没结算出有效消耗时「规模不可知」，调用方跳过该样本，不硬塞进小桶拉低口径。
+export function sizeBucketOf(effTok) {
+  var n = Number(effTok)
+  if (!isFinite(n) || n <= 0) return null
+  if (n < SIZE_BUCKET_SMALL_MAX) return 'small'
+  if (n <= SIZE_BUCKET_MEDIUM_MAX) return 'medium'
+  return 'large'
+}
+
+// 角色归一（场景桶的另一维）：run.role 原始值 → 'worker' | 'verifier' | 'other'。
+// hook-pre/hook-post/缺省/未知一律 'other'——不计入 worker/verifier 对比桶，也不假装成 worker
+//（老卡 runs[] 缺 role 时同理：宁可丢进 other，不污染两个主桶的驳回率/耗时口径）。
+export function runRoleOf(r) {
+  var role = r && r.role
+  if (role === 'worker') return 'worker'
+  if (role === 'verifier') return 'verifier'
+  return 'other'
+}
+
+// run 条目完备性体检（卡1①）：continuable 时代一条「已落定」的 run 应齐 model/at/endedAt/outcome/usage
+// 五组分（usage 以 total>0 为一次有效结算，与 runUsageOf 同口径；分量缺省视为 0，老形态只有 total 不判缺）。
+//   · outcome==='running'（在飞/手动终止残留）：只核 at——model 要等结算时回填、endedAt/usage 结算才落，
+//     它不是「缺字段」而是「还没结算」（手动终止刻意不关账，留 running = 不留续跑资格）；
+//   · resume 是稀疏旗标（仅续跑记录置 true）：缺省即 false，永不计入 missing；
+//   · 已落定 run 的 model 为 '' = 缺口：结算路径现已回填日志模型名（dispatch.accumulateRunUsage 补落账），
+//     存量老数据仍会被这里如实量出——这正是体检要暴露的退化面。
+// 返回 { status: 'complete' | 'running' | 'incomplete', missing: [字段名...] }（missing 仅 incomplete 时非空）。
+export function auditRunEntry(r) {
+  if (!r || typeof r !== 'object') return { status: 'incomplete', missing: ['entry'] }
+  var missing = []
+  if (!r.at || isNaN(new Date(r.at).getTime())) missing.push('at')
+  var oc = String(r.outcome || '')
+  if (!oc) { missing.push('outcome'); return { status: 'incomplete', missing: missing } }
+  if (oc === 'running') return { status: missing.length ? 'incomplete' : 'running', missing: missing }
+  if (!r.model) missing.push('model')
+  if (!r.endedAt || isNaN(new Date(r.endedAt).getTime())) missing.push('endedAt')
+  var u = r.usage
+  if (!u || typeof u !== 'object' || numOr0(u.total) <= 0) missing.push('usage')
+  return { status: missing.length ? 'incomplete' : 'complete', missing: missing }
+}
+// 板级体检汇总：逐 run 过 auditRunEntry，聚合出完备/在飞/缺字段三档计数 + 逐字段缺口分布。
+// 纯体检不修改任何数据（补字段走写路径回填，不在这里改存量）。runs 明细供排查定位（taskId/runId/缺哪些）。
+export function auditRunsCompleteness(tasks) {
+  var s = { total: 0, complete: 0, running: 0, incomplete: 0, byField: { model: 0, at: 0, endedAt: 0, outcome: 0, usage: 0, entry: 0 }, runs: [] }
+  var list = Array.isArray(tasks) ? tasks : []
+  for (var i = 0; i < list.length; i++) {
+    var t = list[i]
+    var trs = (t && Array.isArray(t.runs)) ? t.runs : []
+    for (var ri = 0; ri < trs.length; ri++) {
+      var r = trs[ri]
+      var a = auditRunEntry(r)
+      s.total++
+      if (a.status === 'complete') s.complete++
+      else if (a.status === 'running') s.running++
+      else s.incomplete++
+      for (var mi = 0; mi < a.missing.length; mi++) {
+        var f = a.missing[mi]
+        if (s.byField[f] === undefined) s.byField[f] = 0
+        s.byField[f]++
+      }
+      s.runs.push({ taskId: String(t && t.id || ''), runId: String(r && r.id || ''), role: runRoleOf(r), status: a.status, missing: a.missing })
+    }
+  }
+  return s
+}
+
+// ===== 驳回归因（卡1②）：rejected 落定时刻 ↔ 该任务最近的 worker run =====
+// 三条驳回来源在这里统一收口——它们都把驳回时刻落在 t.verification.at / messages(kind='rejection').at：
+//   ① verifier 文本通道（settleVerifier：verification.by = verifier 自己的 run id）
+//   ② board_verdict 工具通道（by = verifier 会话 actor）
+//   ③ 主窗口 task_verify / 看板 verify-task（by = 主窗口 actor；direct 档任务没有 worker run → 归因 null）
+// 归因目标恒为「被驳回的那次劳动」= 驳回时刻前最近一条 role='worker' 的 run——
+// ⚠️ 不能直接取「时刻前最近一条 run」：verifier 自己的 run 也在 runs[] 里且时刻更晚，会自我归因。
+// 跨天漂移：run.at 与驳回时刻不同本地日 → crossDay=true（老卡跨天驳回归因可能漂，聚合端标 ~ 不追求完美）。
+// 返回 null = 无 worker run 可归（direct 档 / 老卡无 runs 留账）；
+// 否则 { runId, model, at, crossDay, drifted }：
+//   drifted=true 表示所有 worker run 的 at 都晚于驳回时刻（时钟回拨/老数据 at 脏）——
+//   退化为「最新 worker run」兜底，聚合端同样按近似口径处理。
+export function attributeRejection(t, rejectedAt) {
+  if (!t || !Array.isArray(t.runs)) return null
+  var rAt = Date.parse(rejectedAt) // 无效时刻 → NaN → 只认兜底臂
+  var best = null   // at <= rejectedAt 的最近 worker run（倒序首个命中）
+  var latest = null // 无视时刻的最新 worker run（兜底）
+  for (var i = t.runs.length - 1; i >= 0; i--) {
+    var r = t.runs[i]
+    if (!r || r.role !== 'worker') continue
+    if (!latest) latest = r
+    var at = Date.parse(r.at)
+    if (!isFinite(at)) continue // at 脏的 run 不参与时刻比较，但仍是最新兜底候选
+    if (!isFinite(rAt) || at <= rAt) { best = r; break }
+  }
+  var run = best || latest
+  if (!run) return null
+  var dkRun = dayKeyOf(run.at)
+  var dkRej = dayKeyOf(rejectedAt)
+  return {
+    runId: String(run.id || ''),
+    model: String(run.model || ''),
+    at: String(run.at || ''),
+    crossDay: !!(dkRun && dkRej && dkRun !== dkRej),
+    drifted: !best
+  }
+}

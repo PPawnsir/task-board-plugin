@@ -653,6 +653,11 @@ export function createDispatch(ctx, state, deps) {
                 // 只增不减（max 收敛）：异常情况下读到较小值也不让水位倒退（倒退＝把已结算帧再记一遍）。
                 t.runs[ri].usageSeq = Math.max(num0(t.runs[ri].usageSeq), num0(u.maxSeq))
                 t.runs[ri].usageRecorded = true
+                // 模型补落账（task-muxhshfu 记分卡卡1①）：派发未显式覆盖模型时条目 model=''，
+                // 而日志 request/context 里记着真实模型（u.model，与任务级 u.models 小计同源）——
+                // 结算时顺手回填，记分卡卡2 的「模型×场景」聚合就不必再走按任务级占比摊派的近似路径。
+                // 只填空不覆盖：派发显式覆盖的模型名优先（aggregateUsageSummary 模型 key 同一优先序）。
+                if (!t.runs[ri].model && u.model) t.runs[ri].model = String(u.model)
                 break
               }
             }

@@ -15,7 +15,7 @@
 //
 // 兼容 re-export：对外导出契约不变（单测与历史引用直接 import 自本文件）。
 export { TASK_SIZE_CONTRACT, SUGGEST_SPLIT_TEXT, TEAM_SPLIT_RULE, suggestSplitOf, withSplitHint, splitRuleOf } from './lib/policy.mjs'
-export { findRunLog, readRunUsage, aggregateUsageSummary, effectiveTokens, taskEffectiveTokens, readMainWindowUsage } from './lib/usage.mjs'
+export { findRunLog, readRunUsage, aggregateUsageSummary, effectiveTokens, taskEffectiveTokens, readMainWindowUsage, sizeBucketOf, runRoleOf, auditRunEntry, auditRunsCompleteness, attributeRejection, SIZE_BUCKET_SMALL_MAX, SIZE_BUCKET_MEDIUM_MAX } from './lib/usage.mjs'
 import { createSession } from './lib/session.mjs'
 import { createStore } from './lib/store.mjs'
 import { createNotify } from './lib/notify.mjs'
