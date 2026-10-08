@@ -192,11 +192,11 @@ test('卡5⑤b：接线（源码级）——rpc healthHints 拼 modelPerfHint / 
   const dash = readFileSync(new URL('../lib/client/dashboard.js', import.meta.url), 'utf8')
   const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   // host：modelPerfHint 从 usage.mjs import；scoreboard 就位后现算；拼在 computeHealthHints 结果尾部
-  assert.match(rpc, /import \{ findRunLog, readLogBytes, readLogFrames, aggregateUsageSummary, readMainWindowUsage, buildScoreboard, modelPerfHint \} from '\.\/usage\.mjs'/)
+  assert.match(rpc, /import \{ findRunLog, readLogBytes, readLogFrames, aggregateUsageSummary, readMainWindowUsage, buildScoreboard, modelPerfHint, qualityChangeHints \} from '\.\/usage\.mjs'/)
   const iSb = rpc.indexOf('d.usageSummary.scoreboard = buildScoreboard(d.tasks, args && args.range')
   const iMph = rpc.indexOf('var __mph = modelPerfHint(d.usageSummary.scoreboard)')
   assert.ok(iSb >= 0 && iMph > iSb, 'modelPerfHint 必须在 scoreboard 挂载之后现算')
-  assert.match(rpc, /d\.healthHints = __rh\.hints\.concat\(computeHealthHints\(d\.tasks\)\)\.concat\(__mph \? \[__mph\] : \[\]\)/)
+  assert.match(rpc, /d\.healthHints = __rh\.hints\.concat\(computeHealthHints\(d\.tasks\)\)\.concat\(__qch\)\.concat\(__mph \? \[__mph\] : \[\]\)/)
   // usage.mjs：聚类规则表 / 聚类函数 / hint 阈值常量导出
   assert.match(usage, /export var REJECTION_CLUSTER_RULES = \[/)
   assert.match(usage, /export function clusterRejections\(texts\)/)

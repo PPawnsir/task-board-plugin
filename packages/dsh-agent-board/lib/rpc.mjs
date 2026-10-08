@@ -8,7 +8,7 @@
 import * as core from './core.mjs'
 import path from 'node:path'
 import fsNode from 'node:fs'
-import { findRunLog, readLogBytes, readLogFrames, aggregateUsageSummary, readMainWindowUsage, buildScoreboard, modelPerfHint } from './usage.mjs'
+import { findRunLog, readLogBytes, readLogFrames, aggregateUsageSummary, readMainWindowUsage, buildScoreboard, modelPerfHint, qualityChangeHints } from './usage.mjs'
 import { TASK_SIZE_CONTRACT, withSplitHint, pushRejectLesson, pushArbitrationLesson } from './policy.mjs'
 import { makeMsg } from './notify.mjs'
 import { computeHealthHints, computeRuntimeHealthHints } from './health.mjs'
@@ -193,7 +193,10 @@ export function createRpc(ctx, state, deps) {
       // 合并后 runs≥10 且一次通过率≥90% 且有效均值较其他合格模型严格低 >30% → 黄条建议设默认 workerModel；
       // 无足够数据返回 null 不亮）。拼在尾部——运行时事故 > 架构信号 > 模型建议（建议性 hint 最不紧急）。
       var __mph = modelPerfHint(d.usageSummary.scoreboard)
-      d.healthHints = __rh.hints.concat(computeHealthHints(d.tasks)).concat(__mph ? [__mph] : [])
+      // 质量异动告警（异常驱动审视②）：scoreboard.trends 环比（一次通过率跌 / 超时率涨 / 驳回率涨），
+      // 拼在静态架构信号之后、荐模型建议之前——质量事故 > 架构建议 > 模型建议（最不紧急垫底）。
+      var __qch = qualityChangeHints(d.usageSummary.scoreboard)
+      d.healthHints = __rh.hints.concat(computeHealthHints(d.tasks)).concat(__qch).concat(__mph ? [__mph] : [])
       // 史诗父卡语义层：childStats 现算（零存储）——{ <parentId>: { total, settled, resolved, active, activeTitle } }，
       // 父卡列位置/进度展示的数据源；total 含已归档子任务，settled=resolved|cancelled|archived（resolved 为
       // 兼容别名同值），因此归档子卡不会让进度分母缩水（task-muupgfot）；只有无任何子任务的父卡才不出键

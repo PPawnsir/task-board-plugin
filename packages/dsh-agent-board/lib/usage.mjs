@@ -767,7 +767,7 @@ function assembleScoreboard(recs, range) {
   var bmap = {}   // bucketKey(model|role|size) -> 聚合器
   var bTasks = {} // bucketKey -> { taskId: true }（桶内任务级指标的分母来源）
   var meta = { tasks: recs.taskRecs.length, runsSettled: recs.runRecs.length, bucketed: 0, roleOther: 0, noModel: 0, noSize: 0, rejUnattributed: 0 }
-  var tr = { firstPassByDay: {}, durationBuckets: { lt10m: 0, m10to30: 0, m30to60: 0, gt60m: 0 }, timeoutByDay: {}, resume: { runs: 0, completed: 0, rate: null } }
+  var tr = { firstPassByDay: {}, durationBuckets: { lt10m: 0, m10to30: 0, m30to60: 0, gt60m: 0 }, timeoutByDay: {}, rejectByDay: {}, resume: { runs: 0, completed: 0, rate: null } }
   // ===== 任务级趋势：一次通过率 byDay（resolved 任务按落定日）+ 卡时长分布四桶 =====
   var tById = {}
   for (var ti = 0; ti < recs.taskRecs.length; ti++) {
@@ -897,6 +897,9 @@ function assembleScoreboard(recs, range) {
   for (var ci = 0; ci < recs.rejRecs.length; ci++) {
     var rcj = recs.rejRecs[ci]
     if (hasRange && !dayInRange(rcj.mDay, range)) continue
+    // 驳回率 byDay（质量异动告警③ 的数据源，异常驱动审视②）：按驳回消息自身本地日落点逐日计数——
+    // 与 rejectionClusters 同一 mDay 口径（direct 档 / 无 worker run 可归的驳回同样是样本，不因归因失败消失）。
+    if (rcj.mDay) { var rbd = tr.rejectByDay[rcj.mDay] || (tr.rejectByDay[rcj.mDay] = { rejects: 0 }); rbd.rejects++ }
     rejTexts.push(rcj.text)
   }
   return { buckets: out, trends: tr, meta: meta, rejectionClusters: clusterRejections(rejTexts) }
@@ -1047,4 +1050,77 @@ export function modelPerfHint(sb) {
     text: '模型 ' + best.model + ' 在中小卡表现最优（通过率 ' + Math.round(best.pass * 100) + '% · 有效均值 ' + fmtTokShort(best.effAvg) +
       '，较其他合格模型低 ' + Math.round(minGap * 100) + '%），建议设为默认 workerModel',
   }
+}
+
+// ===== 质量异动告警（异常驱动审视②，proposal n-muxyyvgonpoo）：scoreboard.trends 数据驱动的环比告警 =====
+// 三条同构规则（阈值常量置顶）：近 7 天 vs 再前 7 天，两侧样本各 ≥ QUALITY_MIN_SAMPLE 才判（防小样本误报）。
+//   ① 一次通过率（firstPassByDay：firstPass/resolved）**跌** > QUALITY_CHANGE_PP 个百分点 → 建议抽查近期验收；
+//   ② 超时率（timeoutByDay：timeout/runs）**涨** > QUALITY_CHANGE_PP 个百分点 → 建议排查派发/超时链路；
+//   ③ 驳回率（rejectByDay：rejects / timeoutByDay 同日的 runs）**涨** > QUALITY_CHANGE_PP 个百分点 → 建议审查驳回原因。
+// 数据全部来自 scoreboard.trends（卡2 已建，本卡只做判定 + hint，不重建数据）。
+// 纯函数零 IO：日期只解析已有字符串做窗口切分；now 缺省 Date.now()（测试可注入钉死窗口，与卡2 零时钟纪律一致——
+// 环比的「近 7 天」必须相对某个「今天」，这是本函数的唯一时钟依赖，故显式参数化）。
+export var QUALITY_CHANGE_PP = 10   // 环比变化阈值（百分点）：恰好 10pp 不亮、严格 >10pp 才亮
+export var QUALITY_MIN_SAMPLE = 5   // 两侧样本护栏：任一侧样本 <5 不判（防小样本噪声）
+export var QUALITY_WINDOW_DAYS = 7  // 环比窗口：近 7 天 vs 再前 7 天
+
+// 近 count 天的本地日 key（旧→新，最后一个是今天）：与 localDayKey 同一本地 getters 口径
+function qualityRecentDays(nowMs, count) {
+  var out = []
+  var d = new Date(nowMs)
+  for (var i = count - 1; i >= 0; i--) out.push(localDayKey(new Date(d.getFullYear(), d.getMonth(), d.getDate() - i)))
+  return out
+}
+// 把 byDay 在指定日 key 集合上的指定数值字段累加；byDay 缺失/脏 → 全 0（绝不抛错）
+function qualitySumCells(byDay, keys, fields) {
+  var out = {}
+  for (var f = 0; f < fields.length; f++) out[fields[f]] = 0
+  if (!byDay || typeof byDay !== 'object') return out
+  for (var i = 0; i < keys.length; i++) {
+    var c = byDay[keys[i]]
+    if (!c || typeof c !== 'object') continue
+    for (var f2 = 0; f2 < fields.length; f2++) out[fields[f2]] += numOr0(c[fields[f2]])
+  }
+  return out
+}
+// 环比百分点差（a - b，四舍五入到 0.1pp）：恰好 10pp 不亮 / 10.1pp 亮——0.1pp 精度 + 严格 > 阈值，浮点安全
+function qualityPpDelta(a, b) { return Math.round((a - b) * 1000) / 10 }
+
+export function qualityChangeHints(sb, now) {
+  var tr = sb && sb.trends && typeof sb.trends === 'object' ? sb.trends : null
+  if (!tr) return []
+  var hints = []
+  var nowMs = (typeof now === 'number' && isFinite(now)) ? now : Date.now()
+  // 近 14 天窗口切两半：近 7 天（含今天）vs 再前 7 天
+  var days = qualityRecentDays(nowMs, QUALITY_WINDOW_DAYS * 2)
+  var near = days.slice(-QUALITY_WINDOW_DAYS)
+  var prior = days.slice(0, QUALITY_WINDOW_DAYS)
+  // --- ① 一次通过率跌 ---
+  var fpN = qualitySumCells(tr.firstPassByDay, near, ['resolved', 'firstPass'])
+  var fpP = qualitySumCells(tr.firstPassByDay, prior, ['resolved', 'firstPass'])
+  if (fpN.resolved >= QUALITY_MIN_SAMPLE && fpP.resolved >= QUALITY_MIN_SAMPLE) {
+    var fpNR = fpN.firstPass / fpN.resolved, fpPR = fpP.firstPass / fpP.resolved
+    if (qualityPpDelta(fpPR, fpNR) > QUALITY_CHANGE_PP) {
+      hints.push({ level: 'warn', text: '质量异动：一次通过率本周 ' + Math.round(fpNR * 100) + '%（上周 ' + Math.round(fpPR * 100) + '%），建议抽查近期验收' })
+    }
+  }
+  // --- ② 超时率涨（分母 = 当日落定 runs）---
+  var toN = qualitySumCells(tr.timeoutByDay, near, ['runs', 'timeout'])
+  var toP = qualitySumCells(tr.timeoutByDay, prior, ['runs', 'timeout'])
+  if (toN.runs >= QUALITY_MIN_SAMPLE && toP.runs >= QUALITY_MIN_SAMPLE) {
+    var toNR = toN.timeout / toN.runs, toPR = toP.timeout / toP.runs
+    if (qualityPpDelta(toNR, toPR) > QUALITY_CHANGE_PP) {
+      hints.push({ level: 'warn', text: '质量异动：超时率本周 ' + Math.round(toNR * 100) + '%（上周 ' + Math.round(toPR * 100) + '%），建议排查派发/超时链路' })
+    }
+  }
+  // --- ③ 驳回率涨（分子 = rejectByDay 的 rejects，分母 = timeoutByDay 同日的 runs）---
+  var rjN = qualitySumCells(tr.rejectByDay, near, ['rejects'])
+  var rjP = qualitySumCells(tr.rejectByDay, prior, ['rejects'])
+  if (toN.runs >= QUALITY_MIN_SAMPLE && toP.runs >= QUALITY_MIN_SAMPLE) {
+    var rjNR = rjN.rejects / toN.runs, rjPR = rjP.rejects / toP.runs
+    if (qualityPpDelta(rjNR, rjPR) > QUALITY_CHANGE_PP) {
+      hints.push({ level: 'warn', text: '质量异动：驳回率本周 ' + Math.round(rjNR * 100) + '%（上周 ' + Math.round(rjPR * 100) + '%），建议审查近期驳回原因' })
+    }
+  }
+  return hints
 }

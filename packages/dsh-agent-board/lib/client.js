@@ -1563,8 +1563,59 @@ function apply(ctx) {
         })) : null)
     }
 
+    // ===== 每日批次摘要（近 24h，异常驱动审视③）：报告导出「批次一页纸」段的数据源 =====
+    // 纯聚合现有字段（不新建状态、不重拉）：完成/驳回/token/超时按 run 与消息的 at 滚 24h 窗口现算，
+    // 幽灵回收读当前 healthHints 里的一次性 info（「本轮回收 N 个幽灵活跃表项」，无则 0）；
+    // 一句话质量趋势按近 24h 落定的 resolved 任务一次通过率（rejectCount=0 占比）。
+    // 范围无关：报告顶部的批次摘要永远反映「最近 24h」实况，不受「统计范围」筛选影响。
+    function batchDigest() {
+      var now = Date.now(), since = now - 86400000
+      var all = (Array.isArray(state.tasks) ? state.tasks : []).concat(Array.isArray(state.archived) ? state.archived : [])
+      var resolved = 0, rejected = 0, tokTot = 0, tokEff = 0, timeouts = 0, trendResolved = 0, trendFirstPass = 0
+      function in24(iso) { var d = Date.parse(iso); return isFinite(d) && d >= since && d <= now }
+      function pos(v) { var n = Number(v); return isFinite(n) && n > 0 ? n : 0 }
+      all.forEach(function (t) {
+        if (!t) return
+        var doneAt = t.resolvedAt || t.verifiedAt || ''
+        if (doneAt && in24(doneAt)) {
+          resolved++
+          if (t.status === 'resolved') { trendResolved++; if (!(t.rejectCount > 0)) trendFirstPass++ }
+        }
+        if (Array.isArray(t.messages)) t.messages.forEach(function (m) { if (m && m.kind === 'rejection' && m.at && in24(m.at)) rejected++ })
+        if (Array.isArray(t.runs)) t.runs.forEach(function (r) {
+          if (!r || !r.at || !in24(r.at)) return
+          var u = (r.usage && typeof r.usage === 'object') ? r.usage : {}
+          var inp = pos(u.input), outp = pos(u.output), cr = pos(u.cacheRead), cw = pos(u.cacheWrite)
+          var tot = pos(u.total) || (inp + outp + cr + cw)
+          tokTot += tot; tokEff += inp + outp + cw
+          if (r.outcome === 'timeout/error' || r.outcome === 'timeout') timeouts++
+        })
+      })
+      var ghosts = 0
+      var hints = Array.isArray(state.healthHints) ? state.healthHints : []
+      hints.forEach(function (h) { var m = h && h.text ? String(h.text).match(/本轮回收 (\d+) 个幽灵活跃表项/) : null; if (m) ghosts += pos(m[1]) })
+      var trend = trendResolved > 0 ? ('一次通过率 ' + Math.round(trendFirstPass / trendResolved * 100) + '%（近 24h 完成 ' + trendResolved + ' 张中 ' + trendFirstPass + ' 张零驳回）') : '近 24h 无完成记录，暂无质量趋势'
+      var has = resolved > 0 || rejected > 0 || tokTot > 0 || timeouts > 0 || ghosts > 0 || trendResolved > 0
+      return { has: has, resolved: resolved, rejected: rejected, tokTot: tokTot, tokEff: tokEff, timeouts: timeouts, ghosts: ghosts, trend: trend }
+    }
+
     function buildReport() {
       var lines = ['# 任务看板报告', '', '生成时间: ' + new Date().toLocaleString(), '工作模式: ' + (workModeNames[state.workMode || (state.teamMode ? 'team' : (state.boardMode === 'auto' ? 'auto' : 'list'))] || '自动派发'), '', '统计范围: ' + rangeLabel()]
+      // ===== 每日批次摘要（异常驱动审视③）：报告顶部一页纸，近 24h 五字段 + 一句话质量趋势 =====
+      var dg = batchDigest()
+      if (dg.has) {
+        lines.push('## 批次摘要（近 24 小时）')
+        lines.push('- 完成：' + dg.resolved + ' 张')
+        lines.push('- 驳回：' + dg.rejected + ' 次')
+        lines.push('- Token：约 ' + fmtTokens(dg.tokTot) + (dg.tokEff > 0 ? '（其中有效 ' + fmtTokens(dg.tokEff) + '）' : ''))
+        lines.push('- 异常事件：超时 ' + dg.timeouts + ' 次 · 幽灵回收 ' + dg.ghosts + ' 次')
+        lines.push('- 质量趋势：' + dg.trend)
+        lines.push('')
+      } else {
+        lines.push('## 批次摘要（近 24 小时）')
+        lines.push('近 24 小时无活动记录（无完成 / 驳回 / 消耗 / 异常事件）')
+        lines.push('')
+      }
       var groups = { inProgress: [], verifying: [], pending: [], blocked: [], resolved: [] }
       var rg = activeRange()
       state.tasks.forEach(function (t) {
