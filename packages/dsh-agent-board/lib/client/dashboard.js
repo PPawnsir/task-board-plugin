@@ -465,7 +465,7 @@
         // 范围说明（task-muwc7hjd）：用户常把 RangeFilter 当成「整页过滤」，但今日大数字与近 7 天柱子
         // 是自身固定口径（今日=本地今天、近 7 天=最近 7 个本地日）——不随范围变，必须在文案里讲清，
         // 否则「选了范围数字没变」看起来像 bug。模型分布/Top8/累计才是范围生效的三处。
-        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：累计与 Top 8 仅看板派发的 Worker/Verifier run 消耗；主窗口行=本会话对话消耗，与看板派发口径并列不混入（单列一行 + 模型分布尾部一条，不进累计 / Top 8）；主数字（今日 / 近 7 天 / 模型分布 / Top 8 / 主窗口行）均为总量口径（含缓存读）；有效消耗（input+output+cacheWrite，不含缓存读）见悬浮 title'),
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：累计与 Top 8 仅看板派发的 Worker/Verifier run（= 一次执行）消耗；主窗口行=本会话对话消耗，与看板派发口径并列不混入（单列一行 + 模型分布尾部一条，不进累计 / Top 8）；主数字（今日 / 近 7 天 / 模型分布 / Top 8 / 主窗口行）均为总量口径（含缓存读）；有效消耗（input+output+cacheWrite，不含缓存读）见悬浮 title'),
         React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2, lineHeight: 1.5 } }, '统计范围作用于按模型分布 / 任务消耗 Top 8 / 累计三分量（按 run 的本地日落点过滤）；今日与「近 7 天」为固定口径，不随范围变化。'),
         // 「→ 模型表现」滚动锚链接（task-muxhtgi2 卡3）：一键滚到下方模型×场景七指标表
         // （与详情页 goArbitration 同一 scrollIntoView 原语；目标区空态也挂锚 id，链接始终可达）
@@ -616,8 +616,8 @@
       var days14 = lastNDays(14)
       var todayKey = localDayKey()
       // 块头：左块名 + 右侧今日/汇总值（fontWeight 400 小字）
-      function blockHead(label, rightEl) {
-        return React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'flex', alignItems: 'baseline', gap: 6 } }, label,
+      function blockHead(label, rightEl, tip) {
+        return React.createElement('div', { title: tip, style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'flex', alignItems: 'baseline', gap: 6 } }, label,
           rightEl ? React.createElement('span', { style: { marginLeft: 'auto', fontWeight: 400, fontSize: 9 } }, rightEl) : null)
       }
       // ===== ① 一次通过率趋势（近 14 天）：当日率 = 落定 resolved 任务中零驳回（rejectCount=0）占比 =====
@@ -630,14 +630,14 @@
       var fpHas = false; fpCells.forEach(function (c) { if (c.rate !== null) fpHas = true })
       var fpToday = fpCells[fpCells.length - 1]
       var block1 = React.createElement('div', { style: { flex: '1 1 260px', minWidth: 230 } },
-        blockHead('一次通过率（近 14 天）', React.createElement('span', null, '今日 ', React.createElement('span', { style: { color: fpToday.rate !== null ? C.brand : C.text2, fontWeight: 600 } }, fpToday.rate !== null ? mpPct(fpToday.rate) : '—'))),
+        blockHead('一次通过率（近 14 天）', React.createElement('span', null, '今日 ', React.createElement('span', { style: { color: fpToday.rate !== null ? C.brand : C.text2, fontWeight: 600 } }, fpToday.rate !== null ? mpPct(fpToday.rate) : '—')), '一次通过率 = 当天落定「已完成」任务里零驳回（rejectCount=0）的占比；驳回 = Verifier 验收判 reject'),
         fpHas ? qtDayBars(fpCells, C.ok, todayKey)
           : React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '近 14 天窗口内暂无 resolved 任务落定'))
       // ===== ② 卡时长分布（四桶横条）：创建 → 落定（verifiedAt||resolvedAt）墙钟，含排队/执行/验收全程 =====
       var durMax = 1
       if (durB) QT_DUR_BUCKETS.forEach(function (b) { var v = Number(durB[b.k]) || 0; if (v > durMax) durMax = v })
       var block2 = React.createElement('div', { style: { flex: '1 1 180px', minWidth: 170 } },
-        blockHead('卡时长分布', durSum > 0 ? React.createElement('span', null, React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, String(durSum)), ' 张落定卡') : null),
+        blockHead('卡时长分布', durSum > 0 ? React.createElement('span', null, React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, String(durSum)), ' 张落定卡') : null, '卡时长 = 创建 → 落定的墙钟（含排队/执行/验收全程）'),
         durSum === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无时长样本')
         : React.createElement('div', null, QT_DUR_BUCKETS.map(function (b) {
             var v = Number(durB[b.k]) || 0
@@ -658,13 +658,13 @@
       var toHas = false; toCells.forEach(function (c) { if (c.rate !== null) toHas = true })
       var toToday = toCells[toCells.length - 1]
       var block3 = React.createElement('div', { style: { flex: '1 1 260px', minWidth: 230 } },
-        blockHead('超时率走势（近 14 天）', React.createElement('span', null, '今日 ', React.createElement('span', { style: { color: toToday.rate !== null ? C.warn : C.text2, fontWeight: 600 } }, toToday.rate !== null ? mpPct(toToday.rate) : '—'))),
+        blockHead('超时率走势（近 14 天）', React.createElement('span', null, '今日 ', React.createElement('span', { style: { color: toToday.rate !== null ? C.warn : C.text2, fontWeight: 600 } }, toToday.rate !== null ? mpPct(toToday.rate) : '—')), '超时率 = 超时落定（timeout/error）的 run 占当天 run 的比例'),
         toHas ? qtDayBars(toCells, C.warn, todayKey)
           : React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '近 14 天窗口内暂无 run 落定'))
       // ===== ④ 续跑成功率（范围总量口径，卡2出参无 byDay）：resume:true 续跑记录中 completed 占比 =====
       var rsmRate = (rsm && typeof rsm.rate === 'number' && isFinite(rsm.rate)) ? rsm.rate : null
       var block4 = React.createElement('div', { style: { flex: '1 1 180px', minWidth: 170 } },
-        blockHead('续跑成功率', rsmRuns > 0 ? React.createElement('span', null, React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, String((rsm && rsm.completed) || 0) + '/' + rsmRuns), ' 续跑成功') : null),
+        blockHead('续跑成功率', rsmRuns > 0 ? React.createElement('span', null, React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, String((rsm && rsm.completed) || 0) + '/' + rsmRuns), ' 续跑成功') : null, '续跑成功率 = resume 续跑记录中 outcome=completed 的占比；续跑 = 前次超时/失败后继续跑'),
         rsmRuns === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无续跑记录')
         : React.createElement('div', { title: '续跑成功率 = resume:true 续跑记录中 outcome=completed 的占比（范围总量口径，host 出参无逐日）；续跑 = 前次 run 超时/失败后续跑' },
             React.createElement('div', { style: { fontSize: 16, fontWeight: 700, color: rsmRate !== null ? C.ok : C.text2 } }, rsmRate !== null ? mpPct(rsmRate) : '—'),
@@ -738,6 +738,8 @@
       var infoColor = 'var(--dsw-alias-state-business-primary)'
       return React.createElement('div', { style: { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 } },
         React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('activity', 11), '架构健康'),
+        // 术语白话（巡检 n-muyg5m7o5r00）：settle/touches/p90 等黑话第一屏无解，补一行术语说明
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginBottom: 5, lineHeight: 1.5 } }, '运行时自检告警，多为自动恢复的瞬时异常。术语：settle = 任务结算通道；touches = 任务声明的改动文件（文件锁）；p90 = 执行时长第 90 百分位'),
         hints.map(function (h, i) {
           var warn = h.level === 'warn'
           var col = warn ? C.warn : infoColor
@@ -778,12 +780,12 @@
       function pick(m) { if (m === cur) return; rpc('set-work-mode', { mode: m }).then(fetchTasks).catch(function () {}) }
       // 档位文案：名称 + 一句说明（说明常驻显示在按钮内，选中态高亮不可用 title 才看得到）
       var opts = [
-        { k: 'list', name: '清单模式', desc: '看板当 TODO 列表', icon: 'clipboard-list' },
-        { k: 'auto', name: '自动派发', desc: '即建即派给 Worker', icon: 'zap' },
-        { k: 'team', name: 'Team 托管', desc: '草稿起步，主窗口裁决', icon: 'users' }
+        { k: 'list', name: '清单模式', desc: '只读清单，不自动派发', icon: 'clipboard-list' },
+        { k: 'auto', name: '自动派发', desc: '建卡即派给后台子代理', icon: 'zap' },
+        { k: 'team', name: 'Team 托管', desc: '草稿起步，你裁决全流程', icon: 'users' }
       ]
       var btnBase = { border: 'none', cursor: 'pointer', fontWeight: 500, textAlign: 'center', display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 1, padding: '3px 9px', transition: 'all .15s', lineHeight: 1.25 }
-      return React.createElement('div', { title: '工作模式（清单 / 自动派发 / Team 托管）——歧义裁决、Verifier 验收、touches 排他在三档下全部生效', style: { display: 'inline-flex', borderRadius: 8, border: '1px solid ' + C.border, overflow: 'hidden', background: C.card } }, opts.map(function (o) {
+      return React.createElement('div', { title: '工作模式（清单 / 自动派发 / Team 托管）——歧义裁决、Verifier 验收、文件锁（touches）排他在三档下全部生效', style: { display: 'inline-flex', borderRadius: 8, border: '1px solid ' + C.border, overflow: 'hidden', background: C.card } }, opts.map(function (o) {
         var on = cur === o.k
         return React.createElement('button', {
           key: o.k, onClick: function () { pick(o.k) }, title: o.name + '：' + o.desc,
@@ -826,9 +828,9 @@
       var vActive = (ps.verifiers || []).filter(function (v) { return v.busy }).length
       var vTotal = (ps.verifiers || []).length
       return React.createElement('span', { style: { fontSize: 9, color: C.text2, display: 'inline-flex', gap: 4, alignItems: 'center' } },
-        // 池水位 title 标注（反馈 n-mut9rzoq3flu）：裸数字新用户看不懂，⚡=Worker 在跑/上限，✓=Verifier 在跑/上限
-        React.createElement('span', { title: 'Worker 在跑/上限', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('zap', 10), wActive + '/' + wTotal),
-        React.createElement('span', { title: 'Verifier 在跑/上限', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('check', 10), vActive + '/' + vTotal))
+        // 池水位标注（反馈 n-mut9rzoq3flu / n-muyg4wl9208c）：裸数字第一屏无解，补可见文字标签 + title
+        React.createElement('span', { title: '活跃 Worker 数/上限（⚡ = 在跑）', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('zap', 10), 'Worker ' + wActive + '/' + wTotal),
+        React.createElement('span', { title: '活跃 Verifier 数/上限（✓ = 在跑）', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('check', 10), 'Verifier ' + vActive + '/' + vTotal))
     }
 
     // #11 头部减负：池配置收纳进 ⚙️ 弹出层（含 #17 verifier 异构模型设置）
@@ -838,7 +840,7 @@
       var _b = useState(false), dirty = _b[0], setDirty = _b[1]
       var _m = useState(null), models = _m[0], setModels = _m[1]
       var cfgKey = props.cfgKey || 'verifierModel'
-      var label = props.label || 'V模型'
+      var label = props.label || 'Verifier 模型'
       // 下拉列出当前网关可用模型（host list-models RPC）；枚举失败降级为文本输入
       useEffect(function () {
         var cancelled = false
@@ -891,13 +893,13 @@
         open && pos ? React.createElement('div', { style: { position: 'fixed', top: pos.top + 'px', right: pos.right + 'px', padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: 'calc(100vh - ' + (pos.top + 12) + 'px)', overflowY: 'auto' } },
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 5 } }, '并发上限（一次性派发，用完即销毁）'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
-            React.createElement(PoolCfg, { label: 'W并发', cfgKey: 'maxWorkers', value: props.maxW }),
-            React.createElement(PoolCfg, { label: 'V并发', cfgKey: 'maxVerifiers', value: props.maxV })),
+            React.createElement(PoolCfg, { label: 'Worker 并发', cfgKey: 'maxWorkers', value: props.maxW }),
+            React.createElement(PoolCfg, { label: 'Verifier 并发', cfgKey: 'maxVerifiers', value: props.maxV })),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
-            React.createElement(ModelCfg, { label: 'W模型', cfgKey: 'workerModel', value: props.workerModel }),
+            React.createElement(ModelCfg, { label: 'Worker 模型', cfgKey: 'workerModel', value: props.workerModel }),
             React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Worker 执行模型）')),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-            React.createElement(ModelCfg, { label: 'V模型', cfgKey: 'verifierModel', value: props.verifierModel }),
+            React.createElement(ModelCfg, { label: 'Verifier 模型', cfgKey: 'verifierModel', value: props.verifierModel }),
             React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Verifier 异构审查）')),
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '两级超时（软超时只提醒主窗口，由你决定继续等待或终止）'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
@@ -948,7 +950,7 @@
             React.createElement('span', { style: { marginLeft: 'auto', fontSize: 9, padding: '1px 6px', borderRadius: 3, background: C.brand, color: C_INV } }, '忙碌')),
           m.model ? React.createElement('div', { style: { fontSize: 9, color: C.warn, marginBottom: 3 }, title: '异构模型审查' }, '🧬 ' + m.model) : null,
           curTask ? React.createElement('div', { onClick: function () { state.detailId = curTask.id; state.view = 'board'; notify() }, style: { fontSize: 10, color: C.brand, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: curTask.title }, '→ ' + curTask.title) : React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '→ ' + m.taskId),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3 }, title: '一次性子代理会话' }, '会话 ' + String(m.runId || '').slice(0, 8) + '…（用完即销毁）'))
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3 }, title: '一次性子代理会话：' + (m.runId || '') }, '会话 ' + String(m.runId || '').slice(0, 8) + '…（用完即销毁）'))
       }
       var ws = ps.workers || [], vs = ps.verifiers || []
       var _R2 = React; var _st = _R2.useState(''), editMsg = _st[0], setEditMsg = _st[1]

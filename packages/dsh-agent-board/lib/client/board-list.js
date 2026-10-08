@@ -168,8 +168,8 @@
             (Array.isArray(t.waitingForTouches) && t.waitingForTouches.length) ? React.createElement('span', { title: '等文件锁释放：' + t.waitingForTouches.join('、') + '（touches 冲突，详情页可 force 越权派发）', style: { color: C.warn, fontWeight: 600 } }, '🔒 等文件释放') : null,
             React.createElement('span', { title: pm.label, style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: C.nested, border: '1px solid ' + C.border } }, pm.short),
             (t.retryCount || 0) + (t.rejectCount || 0) > 0 ? React.createElement('span', { title: '重试 ' + (t.retryCount || 0) + ' 次 / 驳回 ' + (t.rejectCount || 0) + ' 次', style: { color: C.warn, fontWeight: 600 } }, '⟳' + ((t.retryCount || 0) + (t.rejectCount || 0))) : null,
-            t.status === 'in-progress' && t.claimedBy ? React.createElement('span', null, '⚡ ' + shortId(t.claimedBy)) : null,
-            t.assignee ? React.createElement('span', null, '👤→' + shortId(t.assignee)) : null,
+            t.status === 'in-progress' && t.claimedBy ? React.createElement('span', { title: '执行该任务的子代理会话：' + t.claimedBy }, '⚡ ' + String(t.claimedBy).slice(0, 8) + '…') : null,
+            t.assignee ? React.createElement('span', { title: '指派给：' + t.assignee }, '👤→' + String(t.assignee).slice(0, 8) + '…') : null,
             durB ? React.createElement('span', { title: durB.tip }, durB.txt) : null,
             // 删除入口（仅草稿/待办/阻塞，多选模式下隐藏以免误触）：hover 才由透明转红，平时不抢视觉
             delOk ? React.createElement('span', {
@@ -279,7 +279,7 @@
       }
       var inp = { width: '100%', boxSizing: 'border-box', fontSize: 11, padding: '4px 6px', border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text, fontFamily: 'inherit' }
       var lblStyle = { fontSize: 10, color: C.text2, marginBottom: 3 }
-      function field(label, node) { return React.createElement('div', { style: { marginBottom: 8 } }, React.createElement('div', { style: lblStyle }, label), node) }
+      function field(label, node, hint) { return React.createElement('div', { style: { marginBottom: 8 } }, React.createElement('div', { style: lblStyle }, label), node, hint ? React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2, lineHeight: 1.4 } }, hint) : null) }
       var btnGhost = { fontSize: 11, padding: '4px 12px', border: '1px solid ' + C.border, borderRadius: 5, background: 'transparent', color: C.text2, cursor: 'pointer' }
       var btnPrimary = { fontSize: 11, padding: '4px 14px', border: 'none', borderRadius: 5, background: C.brand, color: C_INV, fontWeight: 600, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1 }
       // 视口级 overlay（修裁切，反馈 n-mut9rzl4mxe4）：fixed 全屏遮罩脱离看板抽屉（maxHeight 60vh + overflow hidden）
@@ -299,8 +299,8 @@
             React.createElement('div', { style: { flex: '1 1 0', minWidth: 0 } }, field('管线', React.createElement('select', { value: pipe, onChange: function (e) { setPipe(e.target.value) }, style: inp },
               React.createElement('option', { value: 'full' }, '全流程（执行+验证）'),
               React.createElement('option', { value: 'work' }, '免验证（只做不验）'),
-              React.createElement('option', { value: 'direct' }, '主窗口处理'))))),
-          field('touches（文件/glob，逗号或换行分隔，可空）', React.createElement('input', { value: touchesRaw, onChange: function (e) { setTouchesRaw(e.target.value) }, placeholder: 'src/a.mjs, src/**', style: inp })),
+              React.createElement('option', { value: 'direct' }, '主窗口处理')), '管线 = 任务走哪种流程：全流程 = Worker 做 + Verifier 验；免验证 = 只做不验；主窗口处理 = 你在对话里直接办'))),
+          field('touches（文件/glob，逗号或换行分隔，可空）', React.createElement('input', { value: touchesRaw, onChange: function (e) { setTouchesRaw(e.target.value) }, placeholder: 'src/a.mjs, src/**', style: inp }), 'touches = 本卡要改动的文件（glob 匹配）；声明后并行任务间防互踩（文件锁）'),
           field('依赖（全部完成后才派发，可空）', cands.length === 0
             ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '当前无草稿/待办任务可选')
             : React.createElement('div', { style: { maxHeight: 96, overflowY: 'auto', border: '1px solid ' + C.border, borderRadius: 4, padding: '4px 6px', background: C.card } }, cands.map(function (x) {
@@ -308,7 +308,7 @@
                 React.createElement('input', { type: 'checkbox', checked: !!depSel[x.id], onChange: function () { toggleDep(x.id) } }),
                 React.createElement('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, (statusLabels[x.status] || x.status) + ' · ' + (x.title || x.id)))
             }))),
-          field('验收脚本（命令，可空）', React.createElement('input', { value: acc, onChange: function (e) { setAcc(e.target.value) }, placeholder: '如 node --test test/x.test.js', style: Object.assign({}, inp, { fontFamily: 'monospace' }) })),
+          field('验收脚本（命令，可空）', React.createElement('input', { value: acc, onChange: function (e) { setAcc(e.target.value) }, placeholder: '如 node --test test/x.test.js', style: Object.assign({}, inp, { fontFamily: 'monospace' }) }), '验收脚本 = 硬性验收命令：Worker 必须真实运行，Verifier 独立复跑'),
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: C.text, cursor: 'pointer', marginBottom: 6, flexWrap: 'wrap' } },
             React.createElement('input', { type: 'checkbox', checked: asDraft, onChange: function (e) { setAsDraft(e.target.checked) } }),
             '存为草稿',
@@ -320,5 +320,5 @@
             err ? React.createElement('div', { style: { fontSize: 11, color: C.err, marginBottom: 6 } }, err) : null,
             React.createElement('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 6 } },
               React.createElement('button', { onClick: close, style: btnGhost }, '取消'),
-              React.createElement('button', { onClick: submit, disabled: busy, title: asDraft ? '创建为草稿（不派发）' : '创建并立即进入派发池', style: btnPrimary }, busy ? '创建中…' : (asDraft ? '存为草稿' : '创建并派发'))))))
+              React.createElement('button', { onClick: submit, disabled: busy, title: asDraft ? '创建为草稿（不派发）' : '创建并立即交给 Worker 执行', style: btnPrimary }, busy ? '创建中…' : (asDraft ? '存为草稿' : '创建并交给 Worker'))))))
     }

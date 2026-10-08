@@ -2171,7 +2171,7 @@ test('Token 日账接线：dispatch 记 byDay 双指标（本地日）+ 仪表�
   assert.match(cli, /'近 7 天（总量，含缓存读）'/)
   assert.match(cli, /k\.slice\(5\) \+ '：总量 ' \+ String\(v\)/)                  // 条形 title：MM-DD：总量 N tok
   assert.match(cli, /' \/ 有效 ' \+ String\(c\.e\) \+ ' tok'/)                     // 条形 title 补有效对照
-  assert.match(cli, /口径：累计与 Top 8 仅看板派发的 Worker\/Verifier run 消耗/)       // 口径边界明示（累计/Top8 仅 run 口径）
+  assert.match(cli, /口径：累计与 Top 8 仅看板派发的 Worker\/Verifier run（= 一次执行）消耗/)       // 口径边界明示（累计/Top8 仅 run 口径）
   assert.match(cli, /主窗口行=本会话对话消耗，与看板派发口径并列不混入/)                 // 主窗口行并列不混入（task-muwsol23 起单列展示）
   assert.match(cli, /主数字（今日 \/ 近 7 天 \/ 模型分布 \/ Top 8 \/ 主窗口行）均为总量口径（含缓存读）/) // 主数字口径翻转（task-muxnqunk）
   assert.match(cli, /其中缓存读 ' \+ String\(x\.cacheRead \|\| 0\)/)                  // Top8 title 补 缓存读 拆分（有效进 title）
