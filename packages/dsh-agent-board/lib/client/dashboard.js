@@ -824,9 +824,9 @@
       var ps = state.poolStatus
       if (!ps) return null
       var wActive = (ps.workers || []).filter(function (w) { return w.busy }).length
-      var wTotal = (ps.workers || []).length
+      var wTotal = state.maxWorkers // 分母=并发上限而非当前池实例数，空闲也显示 0/上限
       var vActive = (ps.verifiers || []).filter(function (v) { return v.busy }).length
-      var vTotal = (ps.verifiers || []).length
+      var vTotal = state.maxVerifiers
       return React.createElement('span', { style: { fontSize: 9, color: C.text2, display: 'inline-flex', gap: 4, alignItems: 'center' } },
         // 池水位标注（反馈 n-mut9rzoq3flu / n-muyg4wl9208c）：裸数字第一屏无解，补可见文字标签 + title
         React.createElement('span', { title: '活跃 Worker 数/上限（⚡ = 在跑）', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('zap', 10), 'Worker ' + wActive + '/' + wTotal),
