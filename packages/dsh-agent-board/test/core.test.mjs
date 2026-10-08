@@ -5584,3 +5584,49 @@ test('巡检③：batch-op archive 跳过附 reasons（id → 原因）且 clien
   assert.match(built, /it\.title \+ '：' \+ it\.reason/)
   assert.match(built, /'跳过原因'/)
 })
+
+// ===== 巡检三连②（详情编辑 / 表单标签 / 恢复预警）：优先级+标签可编辑 / 标签进 create 载荷 / 恢复 confirm 门禁 =====
+test('巡检三连②-①：详情页优先级四档下拉 + 标签编辑走 update-task（含 tags 通道落卡 trim/去空）', async () => {
+  const src = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  // 优先级静态 chip → 四档下拉（value 读 task.priority，onChange 落 update-task priority 通道）
+  assert.match(src, /value: task\.priority \|\| 'medium', onChange: function \(e\) \{ rpc\('update-task', \{ taskId: task\.id, priority: e\.target\.value \}\)\.then\(fetchTasks\)/)
+  assert.match(src, /\['critical', 'high', 'medium', 'low'\]\.map/)
+  // 标签编辑：TagsEditor 逗号分隔 input + update-task tags 通道
+  assert.match(src, /function TagsEditor\(props\)/)
+  assert.match(src, /rpc\('update-task', \{ taskId: task\.id, tags: tags \}\)/)
+  // 行为级：update-task RPC tags 通道落卡 + trim/去空（详情页标签编辑的落点）
+  const board = mkBoard([mkTask({ id: 't1', tags: [] })])
+  const h = mkRpcHandlers(board)
+  const r = await h['update-task']({ taskId: 't1', tags: ['bug', '  epic  ', '', '待验收'] })
+  assert.equal(r.ok, true)
+  assert.deepEqual(board.tasks[0].tags, ['bug', 'epic', '待验收'])
+  // 组装产物同步
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /function TagsEditor\(props\)/)
+  assert.match(built, /value: task\.priority \|\| 'medium', onChange: function \(e\) \{ rpc\('update-task', \{ taskId: task\.id, priority: e\.target\.value \}\)\.then\(fetchTasks\)/)
+})
+
+test('巡检三连②-②：新建表单「标签」字段进 create-task 载荷（逗号分隔 trim+去空）', () => {
+  const src = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+  // 标签输入字段 + 逗号分隔解析（trim + 去空）
+  assert.match(src, /var tags = tagsRaw\.split\(/)
+  assert.match(src, /'标签（逗号分隔，可空）'/)
+  // create-task 载荷带 tags 字段（与 touches/dependsOn 同级）
+  assert.match(src, /tags: tags, dependsOn: deps/)
+  // 组装产物同步
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /tags: tags, dependsOn: deps/)
+})
+
+test('巡检三连②-③：归档「恢复待办」confirm 门禁（list 不弹 / auto+team 弹）+ title 预警', () => {
+  const src = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+  // 工作模式派生（与 fetchTasks 同口径）；list 不弹，auto/team 走 confirm 门禁
+  assert.match(src, /var wm = state\.workMode \|\| \(state\.teamMode \? 'team' : \(state\.boardMode === 'auto' \? 'auto' : 'list'\)\)/)
+  assert.match(src, /if \(wm !== 'list'\)/)
+  assert.match(src, /window\.confirm\('恢复待办后将按当前工作模式立即重新派发，消耗一轮 Worker\+Verifier token。继续/)
+  // 按钮 title 预警（非 list 模式），list 模式仅「恢复为待办」
+  assert.match(src, /title: wm === 'list' \? '恢复为待办' : '恢复为待办（将按当前工作模式立即重新派发，消耗一轮 Worker\+Verifier token）'/)
+  // 组装产物同步
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /window\.confirm\('恢复待办后将按当前工作模式立即重新派发，消耗一轮 Worker\+Verifier token。继续/)
+})

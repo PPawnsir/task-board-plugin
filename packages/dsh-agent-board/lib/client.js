@@ -840,7 +840,14 @@ function apply(ctx) {
         function archTs(t) { return t.archivedAt || t.resolvedAt || t.createdAt || '' }
         return (archTs(b) || '').localeCompare(archTs(a) || '')
       })
-      function restore(id) { rpc('update-task', { taskId: id, resetToPending: true }).then(function () { fetchTasks() }).catch(function () {}) }
+      // 工作模式（与 fetchTasks 同口径）：list=清单模式（恢复不重派）不弹；auto/team 恢复即重派 → confirm 门禁
+      var wm = state.workMode || (state.teamMode ? 'team' : (state.boardMode === 'auto' ? 'auto' : 'list'))
+      function restore(id) {
+        if (wm !== 'list') {
+          if (!window.confirm('恢复待办后将按当前工作模式立即重新派发，消耗一轮 Worker+Verifier token。继续？')) return
+        }
+        rpc('update-task', { taskId: id, resetToPending: true }).then(function () { fetchTasks() }).catch(function () {})
+      }
       return React.createElement('div', null,
         React.createElement('input', { value: q, onChange: function (e) { setQ(e.target.value); state.archQ = e.target.value }, placeholder: '检索标题 / ID / 标签…', style: { width: '100%', padding: '5px 8px', fontSize: 11, border: '1px solid ' + C.border2, borderRadius: 5, background: C.card, color: C.text, marginBottom: 8 } }),
         React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, '共 ' + archived.length + ' 条归档（全量，与仪表盘「已归档」同口径）'),
@@ -855,7 +862,7 @@ function apply(ctx) {
               React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, t.archivedAt ? ago(t.archivedAt) : '')),
             t.verification && t.verification.summary ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '📝 ' + t.verification.summary) : null,
             React.createElement('div', { style: { display: 'flex', gap: 5, marginTop: 4, flexWrap: 'wrap' } },
-              React.createElement('button', { onClick: function () { restore(t.id) }, title: '恢复为待办', style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '↩ 恢复待办'),
+              React.createElement('button', { onClick: function () { restore(t.id) }, title: wm === 'list' ? '恢复为待办' : '恢复为待办（将按当前工作模式立即重新派发，消耗一轮 Worker+Verifier token）', style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '↩ 恢复待办'),
               (function () {
                 var runs = historyRuns(t)
                 if (!runs.length) return React.createElement('span', { style: { fontSize: 9, color: C.text2, opacity: 0.6, padding: '2px 0' } }, '无历史会话')
@@ -885,6 +892,7 @@ function apply(ctx) {
       var _tc = useState(''), touchesRaw = _tc[0], setTouchesRaw = _tc[1]
       var _dp = useState({}), depSel = _dp[0], setDepSel = _dp[1]
       var _ac = useState(''), acc = _ac[0], setAcc = _ac[1]
+      var _tg = useState(''), tagsRaw = _tg[0], setTagsRaw = _tg[1]
       var _dr = useState(wm === 'team'), asDraft = _dr[0], setAsDraft = _dr[1]
       var _bs = useState(false), busy = _bs[0], setBusy = _bs[1]
       var _er = useState(''), err = _er[0], setErr = _er[1]
@@ -899,9 +907,10 @@ function apply(ctx) {
         var t = title.trim()
         if (!t) { setErr('⚠️ 请先填写标题'); return }
         var touches = touchesRaw.split(/[\n,，;；]/).map(function (s) { return s.trim() }).filter(function (s) { return s.length > 0 })
+        var tags = tagsRaw.split(/[,，]/).map(function (s) { return s.trim() }).filter(function (s) { return s.length > 0 })
         var deps = cands.filter(function (x) { return depSel[x.id] }).map(function (x) { return x.id })
         setBusy(true); setErr(''); setOkMsg(''); setWarn('')
-        rpc('create-task', { title: t, description: desc, priority: prio, pipeline: pipe, touches: touches, dependsOn: deps, acceptance: acc.trim(), draft: asDraft }).then(function (r) {
+        rpc('create-task', { title: t, description: desc, priority: prio, pipeline: pipe, touches: touches, tags: tags, dependsOn: deps, acceptance: acc.trim(), draft: asDraft }).then(function (r) {
           setBusy(false)
           if (r && r.ok === false) { setErr('⚠️ ' + (r.error || '创建失败')); return }
           fetchTasks()
@@ -937,6 +946,7 @@ function apply(ctx) {
               React.createElement('option', { value: 'full' }, '全流程（执行+验证）'),
               React.createElement('option', { value: 'work' }, '免验证（只做不验）'),
               React.createElement('option', { value: 'direct' }, '主窗口处理')), '管线 = 任务走哪种流程：全流程 = Worker 做 + Verifier 验；免验证 = 只做不验；主窗口处理 = 你在对话里直接办'))),
+          field('标签（逗号分隔，可空）', React.createElement('input', { value: tagsRaw, onChange: function (e) { setTagsRaw(e.target.value) }, placeholder: '如 bug, epic, 待验收', style: inp }), '标签 = 用于筛选的逗号分隔关键字（自动 trim + 去空）'),
           field('touches（文件/glob，逗号或换行分隔，可空）', React.createElement('input', { value: touchesRaw, onChange: function (e) { setTouchesRaw(e.target.value) }, placeholder: 'src/a.mjs, src/**', style: inp }), 'touches = 本卡要改动的文件（glob 匹配）；声明后并行任务间防互踩（文件锁）'),
           field('依赖（全部完成后才派发，可空）', cands.length === 0
             ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '当前无草稿/待办任务可选')
@@ -1229,6 +1239,22 @@ function apply(ctx) {
         q4)
     }
 
+    // 标签编辑（巡检三连①）：逗号分隔 input，提交走 update-task 的 tags 通道（trim + 去空）
+    function TagsEditor(props) {
+      var task = props.task
+      var _R = React; var useState = _R.useState
+      var _s = useState((task.tags || []).join(', ')), draft = _s[0], setDraft = _s[1]
+      function commit() {
+        var tags = draft.split(/[,，]/).map(function (s) { return s.trim() }).filter(function (s) { return s.length > 0 })
+        rpc('update-task', { taskId: task.id, tags: tags }).then(function () { fetchTasks() }).catch(function () {})
+      }
+      return React.createElement('div', { style: { marginBottom: 8, padding: '6px 8px', border: '1px solid ' + C.border, borderRadius: 6, background: C.card } },
+        React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '🏷 标签（逗号分隔）'),
+        React.createElement('div', { style: { display: 'flex', gap: 4 } },
+          React.createElement('input', { value: draft, onChange: function (e) { setDraft(e.target.value) }, onKeyDown: function (e) { if (e.key === 'Enter') commit() }, placeholder: '如 bug, epic, 待验收', style: { flex: 1, minWidth: 0, fontSize: 11, padding: '4px 8px', border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text, fontFamily: 'inherit', boxSizing: 'border-box' } }),
+          React.createElement('button', { onClick: commit, title: '保存标签（逗号分隔，自动 trim + 去空）', style: { fontSize: 10, padding: '3px 10px', border: 'none', borderRadius: 4, background: C.brand, color: C_INV, cursor: 'pointer', flexShrink: 0 } }, '保存')))
+    }
+
     function DetailView() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect; var task = getTask(state.detailId)
       var _a = useState(task ? task.title : ''), editTitle = _a[0], setEditTitle = _a[1]; var _b = useState(task ? task.description || '' : ''), editDesc = _b[0], setEditDesc = _b[1]; var _c = useState(false), saving = _c[0], setSaving = _c[1]; var _d = useState(state.boardMode), mode = _d[0], setMode = _d[1]
@@ -1288,7 +1314,8 @@ function apply(ctx) {
       return React.createElement('div', { style: { padding: '4px 2px' } },
         React.createElement('div', { onClick: function () { state.detailId = null; notify() }, style: { fontSize: 11, color: C.brand, cursor: 'pointer', marginBottom: 8 } }, '← 返回看板'),
         React.createElement(ReviewSummary, { task: task }),
-        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 } }, React.createElement('span', { style: { fontSize: 10, padding: '1px 6px', borderRadius: 3, background: 'color-mix(in srgb, ' + (prioColor[task.priority] || prioColor.low) + ' 20%, transparent)', color: (prioColor[task.priority] || prioColor.low) } }, prioLabel[task.priority] || '中'), React.createElement('span', { style: { fontSize: 11, padding: '1px 8px', borderRadius: 3, background: C.nested, color: C.text } }, statusLabels[task.status] || task.status), React.createElement('select', { value: task.pipeline || 'full', onChange: function (e) { rpc('update-task', { taskId: task.id, pipeline: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '管线档位', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'full' }, '全流程（执行+验证）'), React.createElement('option', { value: 'work' }, '免验证（只做不验）'), React.createElement('option', { value: 'direct' }, '主窗口处理')), task.pipelineAuto ? React.createElement('span', { style: { fontSize: 9, color: C.text2 }, title: '由规则自动分类，可手动覆盖' }, 'auto') : null, isManual ? React.createElement('span', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('user', 10), '手动派发') : null),
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 } }, React.createElement('select', { value: task.priority || 'medium', onChange: function (e) { rpc('update-task', { taskId: task.id, priority: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '优先级（四档：紧急/高/中/低）', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: (prioColor[task.priority] || prioColor.low), fontWeight: 600 } }, ['critical', 'high', 'medium', 'low'].map(function (p) { return React.createElement('option', { key: p, value: p }, prioLabel[p] + '（' + p + '）') })), React.createElement('span', { style: { fontSize: 11, padding: '1px 8px', borderRadius: 3, background: C.nested, color: C.text } }, statusLabels[task.status] || task.status), React.createElement('select', { value: task.pipeline || 'full', onChange: function (e) { rpc('update-task', { taskId: task.id, pipeline: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '管线档位', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'full' }, '全流程（执行+验证）'), React.createElement('option', { value: 'work' }, '免验证（只做不验）'), React.createElement('option', { value: 'direct' }, '主窗口处理')), task.pipelineAuto ? React.createElement('span', { style: { fontSize: 9, color: C.text2 }, title: '由规则自动分类，可手动覆盖' }, 'auto') : null, isManual ? React.createElement('span', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('user', 10), '手动派发') : null),
+        React.createElement(TagsEditor, { key: task.id, task: task }),
         // 流转到按钮组（键盘可达的状态迁移入口，替代拖拽；无合法迁移的状态（draft/resolved 等）整块不渲染）
         flowBtns.length > 0 ? React.createElement('div', { role: 'group', 'aria-label': '状态流转', style: { display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginBottom: 8, padding: '5px 8px', border: '1px solid ' + C.border, borderRadius: 6, background: C.card } },
           React.createElement('span', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '⇄ 流转到：'),
