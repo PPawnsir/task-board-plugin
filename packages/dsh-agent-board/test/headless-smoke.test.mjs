@@ -207,3 +207,28 @@ test('冒烟链路：apply(mockCtx) → 建卡 → 时钟推进 → continuable 
     assert.equal(t2.runs[1].resume, true, '第二条标 resume:true')
   } finally { await env.cleanup() }
 })
+
+// ===== isRoot 持久语义（banner 入口瞬态/持久消失修复，task-muzys43o）=====
+// 根因：host get-tasks 的 isRoot 旧实现读活跃 roots() 集——roots() 只含活体会话，
+// 休眠根会话（有板有卡但无活 agent）恒 false → banner「智能看板」按钮分钟级消失；
+// 且生成开始/结束 agents 树重建有瞬态窗口假 false。修法：isRoot 改读持久 parentSession
+// （根会话=无父），休眠根也算 root；子代理会话（parentSession 指向父）仍 false。
+test('isRoot 持久语义：休眠根会话仍 root（parentSession 缺省），子代理会话仍 false', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    // 造一块「有板有卡」的根会话板（证明休眠前确有板卡）
+    var created = await env.rpc('create-task', { sessionId: env.sid, id: 't-isroot-1', title: '休眠根会话卡', pipeline: 'work' })
+    assert.equal(created.ok, true)
+    // 模拟休眠：活跃 roots 清空（无活 agent），但持久表仍记 parentSession 缺省（根）
+    env.setRoots([])
+    var r = await env.rpc('get-tasks', { sessionId: env.sid })
+    assert.equal(r.isRoot, true, '① 休眠根会话 isRoot=true（持久 parentSession 缺省，不依赖活跃 roots 集）')
+    assert.equal(r.tasks.length, 1, '休眠不丢板卡（rt 读盘仍在）')
+    // ② 子代理会话：持久表记 parentSession → false（保护语义不变）
+    var childSid = 'session-child-aaaa-bbbb'
+    env.persistedHeaders[childSid] = { id: childSid, parentSession: env.sid }
+    var rc = await env.rpc('get-tasks', { sessionId: childSid })
+    assert.equal(rc.isRoot, false, '② 子代理会话 isRoot=false（parentSession 指向父）')
+  } finally { await env.cleanup() }
+})

@@ -4345,13 +4345,15 @@ test('isRoot 蝶变防抖（源码级）：计数器 + 连续 3 次阈值 + ever
   assert.equal((cli.match(/applyIsRoot\(/g) || []).length, 2) // 定义 1 + 轮询调用 1
 })
 
-test('isRoot 蝶变防抖：host 侧注释指回客户端防抖，且 host 行为未改（仍现算 isRoot）', () => {
+test('isRoot 持久语义：host 侧改读 parentSession（根=无父），防抖仍指回客户端', () => {
   const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
-  // 指针注释：说明瞬态假 false + 防抖落在客户端 kernel.js applyIsRoot
-  assert.match(rpcSrc, /host 不改行为（保持"现算真相"），防抖在客户端：kernel\.js applyIsRoot/)
+  // isRoot 持久判定入口：根会话=无父，不再读活跃 roots() 集
+  assert.match(rpcSrc, /async function isRootPersistent\(sid\)/)
+  assert.match(rpcSrc, /snap\.header\) return !snap\.header\.parentSession/)
+  assert.match(rpcSrc, /d\.isRoot = await isRootPersistent\(sid\)/)
+  // 指针注释：防抖仍在客户端 kernel.js applyIsRoot，曾确认 true 需连续 3 次 false 才收
+  assert.match(rpcSrc, /防抖仍在客户端：kernel\.js applyIsRoot/)
   assert.match(rpcSrc, /曾确认 true 的会话需连续 3 次/)
-  // 行为未改：isRoot 仍按 agents.roots() 现算（不缓存、不防抖、不落盘）
-  assert.match(rpcSrc, /var __roots = __ag\.roots\(\)[\s\S]{0,200}d\.isRoot = __rids\.indexOf\(sid\) >= 0/)
 })
 
 // ===== 史诗 hooks UI（task-muuw56yf）：卡片相位徽章 + 详情页 hooks 编辑区 =====

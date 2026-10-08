@@ -9,7 +9,8 @@
 //   · subagents.start(provider, req)            → 一次性 run（result promise 由测试驱动落定/拒绝）
 //   · subagents.startContinuable({...})         → { childId, messageId }（持久子会话，turn 结算走 emitStatus）
 //   · subagents.sendMessage / interrupt / listChildren → 记录器 + 可剧本化
-//   · agents.currentInitiator()/roots()/list()/isOwnedBy() → 按测试剧本返回（缺省单 root，actor=root）
+//   · agents.currentInitiator()/roots()/list()/get()/isOwnedBy() → 按测试剧本返回（缺省单 root，actor=root；env.setRoots 可清空模拟休眠）
+//   · ctx.get('sessionPersistence')             → 持久会话表 stat(id)（env.persistedHeaders 可写 parentSession 模拟子会话/根会话）
 //   · tools.register / webServer.register       → 捕获工具表与 RPC 路由（env.rpc 走真 readBody/handler 路径）
 //   · ctx.get('systemPrompt'|'llm')             → 记录器（注册了什么段/查了什么模型都留痕）
 //   · ctx.effect / ctx.on('agent/status')       → 真实执行 + disposer 收口 / 事件捕获与重放
@@ -48,6 +49,8 @@ import { Readable } from 'node:stream'
  * @property {Object} spSections     systemPrompt 注册段记录器
  * @property {Object} llm            llm 记录器（listProviders/listModels 调用留痕）
  * @property {string} actor          currentInitiator 返回值（缺省=root sid；测试可改写模拟子代理身份）
+ * @property {(list:Object[])=>void} setRoots  改写活跃 root 集（传 [] 模拟休眠根会话/重建窗口）
+ * @property {Object} persistedHeaders  持久会话表 sid → { id, parentSession }（写 parentSession 模拟子会话；缺省根会话 parentSession=undefined）
  * @property {()=>Object} board      读当前看板文件 JSON（不存在返回 null）
  * @property {(id:string)=>Object|undefined} task  看板里按 id 取任务
  * @property {(fn:Function, label?:string, timeoutMs?:number)=>Promise<any>} waitFor  真实时间轮询直到条件为真（默认 5s 上限）
@@ -188,10 +191,14 @@ export function createMockCtx(opts) {
     // whenIdle 刻意不实现：flushReceipts 走「无空闲门控 → 立即投递」分支（45s 窗口到点即投，可断言）
   }
   var env // 前向引用（currentInitiator 读 env.actor）
+  var rootsList = [root] // 活跃 root 集（测试可 env.setRoots([]) 清空模拟「休眠根会话」）
+  var persistedHeaders = {} // 持久会话表 sid → SessionHeader（测试可写 parentSession 模拟子会话/根会话）
+  persistedHeaders[sid] = { id: sid, parentSession: undefined }
   var agents = {
     currentInitiator: function () { return { id: env.actor } },
-    roots: function () { return [root] },
-    list: function () { return [root] },
+    roots: function () { return rootsList },
+    list: function () { return rootsList.slice() },
+    get: function (id) { for (var i = 0; i < rootsList.length; i++) { if (String(rootsList[i].id) === String(id)) return rootsList[i] } return undefined },
     isOwnedBy: function () { return false },
   }
 
@@ -228,6 +235,11 @@ export function createMockCtx(opts) {
           listModels: async function (p) { llmCalls.listModels.push(p); return [] },
         }
       }
+      if (name === 'sessionPersistence') {
+        return {
+          stat: async function (id) { var h = persistedHeaders[id]; return h ? { header: h } : undefined },
+        }
+      }
       return undefined
     },
     effect: function (fn) {
@@ -260,6 +272,8 @@ export function createMockCtx(opts) {
     spSections: spSections,
     llm: llmCalls,
     actor: sid,
+    setRoots: function (list) { rootsList = list || [] }, // 清空/改写活跃 root 集（模拟休眠/重建窗口）
+    persistedHeaders: persistedHeaders, // 持久会话表（sid → { id, parentSession }）；写 parentSession 模拟子会话
 
     // 以真 RPC 语义调用捕获的 webServer 路由（POST /dsh-agent-board → readBody → handlers[method]）
     rpc: async function (method, args) {
