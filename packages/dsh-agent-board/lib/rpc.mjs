@@ -689,7 +689,7 @@ export function createRpc(ctx, state, deps) {
             console.error('[task-board] batch delete: ' + id + ' «' + String(t.title || '').slice(0, 60) + '» (status=' + t.status + ') by ' + actor)
             done++
           } else if (args.op === 'archive') {
-            if (t.status !== 'resolved' && t.status !== 'cancelled') { skipped.push(id); return }
+            if (t.status !== 'resolved' && t.status !== 'cancelled') { skip(id, 'cannot archive'); return }
             var ps = t.status; t.status = 'archived'; t.archivedAt = new Date().toISOString(); ah(t, ps, 'archived', actor, 'batch archive'); done++
             archived.push(t)
           } else if (args.op === 'set-priority') {
@@ -705,7 +705,7 @@ export function createRpc(ctx, state, deps) {
         // 刻意不级联归档子卡：批量语义只动显式选中的 id（与单卡 archiveApply 的级联不同，保持老行为）。
         var parentsClosed = 0
         for (var ai = 0; ai < archived.length; ai++) { if (maybeAutoCloseParent(d, archived[ai])) parentsClosed++ }
-        // reasons 只在 delete op 下有内容（其他 op 的跳过原因沿用"未命中门禁"的老行为），
+        // reasons 在 delete（deleteGate 门禁原因）与 archive（cannot archive）op 下有内容；
         // 老客户端只读 skipped.length，多一个可选字段无感。
         var out = { ok: true, done: done, skipped: skipped, reasons: reasons }
         if (parentsClosed) out.parentsClosed = parentsClosed

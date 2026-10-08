@@ -5390,3 +5390,57 @@ test('高优干预④（源码级）：continuable 投递点 = host-protocol 符
   // 回退链顺序：host 投递在 sendMessage 之前（能保留插件 source 的通道优先）
   assert.ok(rpcSrc.indexOf('await host.call(subagents, parent, childId') < rpcSrc.indexOf('await subagents.sendMessage(parent, childId'), 'host 投递必须先于 sendMessage 回退')
 })
+
+// ===== 巡检三连修（巡检实证三条）：草稿发布预警 / 优先级 chip 单一状态源 / 批量归档跳过原因 =====
+test('巡检①：草稿态「保存并重置」改「保存并发布」+ 发布预警 title（源码级 + 文案存在性）', () => {
+  const src = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  // 草稿态按钮文案切换（含「发布」字样），非草稿仍「保存并重置」——单一 createElement 内条件三元
+  assert.match(src, /task\.status === 'draft' \? ' 保存并发布' : ' 保存并重置'/)
+  // 草稿态 title 发布预警文案存在（发布后可能被立即派发）
+  assert.match(src, /'发布后按当前工作模式可能被立即派发'/)
+  // 组装产物同步（pretest 已跑 build-client）
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /保存并发布/)
+  assert.match(built, /发布后按当前工作模式可能被立即派发/)
+})
+
+test('巡检②：优先级 chip 高亮与「清除」显隐统一读全局 state.filterPrio（消灭本地 fp 副本）', () => {
+  const src = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+  // chip 高亮读全局 state.filterPrio（单一事实源）
+  assert.match(src, /var on = state\.filterPrio\.indexOf\(p\) >= 0/)
+  // 「清除」显隐也读全局 state.filterPrio
+  assert.match(src, /var hasFilter = q\.trim\(\) \|\| state\.filterPrio\.length > 0 \|\| ft/)
+  // 消灭本地副本：不得再出现 fp 副本初始化 / setFp 同步
+  assert.doesNotMatch(src, /useState\(state\.filterPrio\)/)
+  assert.doesNotMatch(src, /setFp/)
+  // 组装产物同步
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /var on = state\.filterPrio\.indexOf\(p\) >= 0/)
+  assert.doesNotMatch(built, /setFp/)
+})
+
+test('巡检③：batch-op archive 跳过附 reasons（id → 原因）且 client 渲成「标题：原因」列表', async () => {
+  // host 行为：非 resolved/cancelled 卡跳过时记录 'cannot archive' 原因（不再只 skip 无因）
+  const a = mkTask({ id: 'tf-a', status: 'resolved' })
+  const b = mkTask({ id: 'tf-b', status: 'in-progress' })
+  const c = mkTask({ id: 'tf-c', status: 'pending' })
+  const board = mkBoard([a, b, c])
+  const h = mkRpcHandlers(board)
+  const r = await h['batch-op']({ op: 'archive', ids: ['tf-a', 'tf-b', 'tf-c'] })
+  assert.equal(r.ok, true)
+  assert.equal(r.done, 1)
+  assert.deepEqual(r.skipped, ['tf-b', 'tf-c'])
+  assert.equal(r.reasons['tf-b'], 'cannot archive')
+  assert.equal(r.reasons['tf-c'], 'cannot archive')
+  assert.equal(a.status, 'archived')
+  assert.equal(b.status, 'in-progress')
+  // client 渲染：reasonRows 把 reasons 对象转「标题：原因」列表（逐条，不再只显示「跳过 N」无原因）
+  const src = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+  assert.match(src, /function reasonRows\(r\) \{ var m = \(r && r\.reasons\) \|\| \{\}; return Object\.keys\(m\)\.map/)
+  assert.match(src, /it\.title \+ '：' \+ it\.reason/)
+  assert.match(src, /'跳过原因'/)
+  // 组装产物同步
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /it\.title \+ '：' \+ it\.reason/)
+  assert.match(built, /'跳过原因'/)
+})

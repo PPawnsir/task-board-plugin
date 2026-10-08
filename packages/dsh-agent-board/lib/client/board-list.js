@@ -7,13 +7,14 @@
     // #14 批量操作条（#16 带一步撤销：快照操作前的 priority/status；delete 是真删，明确不支持撤销）
     function BatchBar() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
-      var _a = useState(0), cnt = _a[0], setCnt = _a[1]; var _b = useState(false), on = _b[0], setOn = _b[1]; var _c = useState(''), msg = _c[0], setMsg = _c[1]; var _d = useState(null), undo = _d[0], setUndo = _d[1]
+      var _a = useState(0), cnt = _a[0], setCnt = _a[1]; var _b = useState(false), on = _b[0], setOn = _b[1]; var _c = useState(''), msg = _c[0], setMsg = _c[1]; var _d = useState(null), undo = _d[0], setUndo = _d[1]; var _e = useState([]), reasons = _e[0], setReasons = _e[1]
       useEffect(function () { function update() { setCnt(Object.keys(state.selected).length); setOn(state.selectMode); setUndo(state.undoSnapshot) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!on) return null
       var ids = Object.keys(state.selected)
       function snapshot(op) { return { op: op, at: Date.now(), items: ids.map(function (id) { var t = getTask(id); return t ? { id: id, priority: t.priority, status: t.status } : null }).filter(Boolean) } }
-      // 跳过原因只回显第一条（如"任务正在执行中，请先…"），避免把整屏门禁文案塞进批量条
-      function firstReason(r) { var m = (r && r.reasons) || {}; var ks = Object.keys(m); return ks.length ? String(m[ks[0]]) : '' }
+      // 跳过原因逐条渲染：host batch-op 返回 reasons 对象（id → 原因），转成「标题：原因」列表
+      // （巡检 n-muyj5p755l3c：批量归档跳过此前只显示「跳过 N」无原因）
+      function reasonRows(r) { var m = (r && r.reasons) || {}; return Object.keys(m).map(function (id) { var t = getTask(id); return { title: t ? t.title : shortId(id), reason: String(m[id]) } }) }
       function run(op, value) {
         // 只有可撤销的 op 才需要快照（delete 是真删，快照里的 status/priority 复活不回整张卡）
         var snap = op === 'delete' ? null : snapshot(op)
@@ -22,8 +23,8 @@
           state.selected = {}
           // 删除无 undo：done>0 也不留撤销快照（否则「↩️ 撤销」点了恢复不了，纯粹误导）；其他 op 维持一步撤销
           state.undoSnapshot = (r && r.done > 0 && op !== 'delete') ? snap : null
-          var reason = (op === 'delete' && r && r.reasons) ? firstReason(r) : ''
-          setMsg('✅ 已处理 ' + (r && r.done || 0) + ' 个' + (r && r.skipped && r.skipped.length ? '，跳过 ' + r.skipped.length + (reason ? '（' + reason + '）' : '') : ''))
+          setReasons(reasonRows(r))
+          setMsg('✅ 已处理 ' + (r && r.done || 0) + ' 个' + (r && r.skipped && r.skipped.length ? '，跳过 ' + r.skipped.length + ' 个' : ''))
           fetchTasks()
         }).catch(function (e) { setMsg('⚠️ ' + String(e)) })
       }
@@ -35,7 +36,7 @@
       }
       function doUndo() { if (!undo) return; rpc('batch-undo', { snapshot: undo }).then(function (r) { setMsg('↩️ 已撤销 ' + (r && r.done || 0) + ' 个'); state.undoSnapshot = null; fetchTasks() }).catch(function (e) { setMsg('⚠️ ' + String(e)) }) }
       var btn = { fontSize: 10, padding: '3px 10px', borderRadius: 4, border: 'none', cursor: 'pointer', fontWeight: 600 }
-      return React.createElement('div', { style: { position: 'sticky', bottom: 0, display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', marginTop: 8, background: C.nested, border: '1px solid ' + C.border, borderRadius: 6 } },
+      return React.createElement('div', { style: { position: 'sticky', bottom: 0, display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', marginTop: 8, background: C.nested, border: '1px solid ' + C.border, borderRadius: 6, flexWrap: 'wrap' } },
         React.createElement('span', { style: { fontSize: 11, color: C.text, fontWeight: 600 } }, '已选 ' + cnt + ' 项'),
         React.createElement('button', { onClick: function () { run('archive') }, disabled: cnt === 0, style: Object.assign({}, btn, { background: C.text2, color: C_INV, display: 'inline-flex', alignItems: 'center', gap: 3 }) }, ic('archive', 11), '批量归档'),
         ['critical', 'high', 'medium', 'low'].map(function (p) { return React.createElement('button', { key: p, onClick: function () { run('set-priority', p) }, disabled: cnt === 0, style: Object.assign({}, btn, { background: prioColor[p], color: C_INV }) }, prioLabel[p]) }),
@@ -43,21 +44,26 @@
         React.createElement('button', { onClick: batchDelete, disabled: cnt === 0, title: '删除选中任务（不可恢复；执行中/验证中的需先终止，已落定请用归档）', style: Object.assign({}, btn, { background: C.err, color: C_INV, display: 'inline-flex', alignItems: 'center', gap: 3 }) }, ic('trash-2', 11), '批量删除'),
         undo ? React.createElement('button', { onClick: doUndo, title: '撤销最近一次批量操作（删除不可撤销）', style: Object.assign({}, btn, { background: C.brand, color: C_INV }) }, '↩️ 撤销') : null,
         msg ? React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, msg) : null,
-        React.createElement('button', { onClick: function () { state.selected = {}; notify() }, style: { marginLeft: 'auto', fontSize: 10, padding: '3px 8px', border: 'none', background: 'transparent', color: C.text2, cursor: 'pointer' } }, '清除选择'))
+        React.createElement('button', { onClick: function () { state.selected = {}; notify() }, style: { marginLeft: 'auto', fontSize: 10, padding: '3px 8px', border: 'none', background: 'transparent', color: C.text2, cursor: 'pointer' } }, '清除选择'),
+        reasons.length > 0 ? React.createElement('div', { style: { flexBasis: '100%', marginTop: 4, padding: '4px 6px', background: C.card, border: '1px solid ' + C.border, borderRadius: 4, maxHeight: 96, overflowY: 'auto' } },
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 2 } }, '跳过原因'),
+          reasons.map(function (it, i) { return React.createElement('div', { key: i, style: { fontSize: 10, color: C.text2, marginBottom: 1, wordBreak: 'break-word' } }, it.title + '：' + it.reason) })) : null)
     }
 
     function FilterBar() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
-      var _a = useState(state.filterQ), q = _a[0], setQ = _a[1]; var _b = useState(state.filterPrio), fp = _b[0], setFp = _b[1]; var _c = useState(state.filterTag), ft = _c[0], setFt = _c[1]
-      useEffect(function () { function update() { setQ(state.filterQ); setFp(state.filterPrio); setFt(state.filterTag) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
+      // 优先级筛选单一事实源：chip 高亮与「清除」显隐统一读全局 state.filterPrio（消灭本地 fp 副本），
+      // 曾因本地态与全局 filterPrio 不同帧更新出现「清除按钮消失但高亮残留」的矛盾画面（巡检 n-muyimk1hpdxv）
+      var _a = useState(state.filterQ), q = _a[0], setQ = _a[1]; var _c = useState(state.filterTag), ft = _c[0], setFt = _c[1]
+      useEffect(function () { function update() { setQ(state.filterQ); setFt(state.filterTag) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       function setQ2(v) { state.filterQ = v; notify() }
       function togglePrio(p) { var i = state.filterPrio.indexOf(p); if (i >= 0) state.filterPrio.splice(i, 1); else state.filterPrio.push(p); notify() }
       function clearAll() { state.filterQ = ''; state.filterPrio = []; state.filterTag = ''; notify() }
-      var hasFilter = q.trim() || fp.length > 0 || ft
+      var hasFilter = q.trim() || state.filterPrio.length > 0 || ft
       var chipBase = { fontSize: 10, padding: '2px 8px', borderRadius: 10, border: '1px solid ' + C.border, cursor: 'pointer', background: 'transparent', color: C.text2, transition: 'all .15s' }
       return React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' } },
         React.createElement('input', { value: q, onChange: function (e) { setQ2(e.target.value) }, placeholder: '🔍 搜索标题/描述/ID…', style: { flex: '0 1 200px', fontSize: 11, padding: '3px 8px', border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text } }),
-        ['critical', 'high', 'medium', 'low'].map(function (p) { var on = fp.indexOf(p) >= 0; return React.createElement('button', { key: p, onClick: function () { togglePrio(p) }, style: Object.assign({}, chipBase, on ? { background: prioColor[p], color: C_INV, borderColor: prioColor[p] } : {}) }, prioLabel[p]) }),
+        ['critical', 'high', 'medium', 'low'].map(function (p) { var on = state.filterPrio.indexOf(p) >= 0; return React.createElement('button', { key: p, onClick: function () { togglePrio(p) }, style: Object.assign({}, chipBase, on ? { background: prioColor[p], color: C_INV, borderColor: prioColor[p] } : {}) }, prioLabel[p]) }),
         allTags().length > 0 ? React.createElement('select', { value: ft, onChange: function (e) { state.filterTag = e.target.value; notify() }, style: { fontSize: 10, padding: '2px 4px', border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text } }, React.createElement('option', { value: '' }, '🏷 全部标签'), allTags().map(function (g) { return React.createElement('option', { key: g, value: g }, g) })) : null,
         hasFilter ? React.createElement('button', { onClick: clearAll, style: { fontSize: 10, padding: '2px 8px', borderRadius: 10, border: 'none', background: C.nested, color: C.text2, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('x', 9), '清除') : null)
     }
