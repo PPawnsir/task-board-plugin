@@ -229,7 +229,7 @@
       blocked: { title: '阻塞：卡住待处理（等依赖/等主窗口裁决）', empty: '暂无阻塞——任务卡住待裁决时会出现在这里' }
     }
     var reqEpoch = 0 // 会话切换纪元：切会话时自增，旧会话在途响应按纪元丢弃
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, verifyUserGuide: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', mpRole: '', mpSize: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, verifyUserGuide: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', filterReview: false, selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', mpRole: '', mpSize: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
 
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
@@ -504,12 +504,17 @@
     function onColDragLeave(st) { if (state.dragOver === st) { state.dragOver = null; notify() } }
     function onColDrop(e, st) { e.preventDefault(); try { var data = JSON.parse(e.dataTransfer.getData('text/plain')); state.dragOver = null; state.dragTask = null; transition(data.id, data.status, st); notify() } catch (_) {} }
 
-    // #13 筛选：文本（标题/描述/ID）+ 优先级多选 + 标签
+    // ===== 风险队列「待你过目」客户端单一事实源（异常驱动审视①）=====
+    // 命中=host 现算的 reviewHint.score>0；待过目=命中 + 未阅（reviewedAt 空）+ 终态（resolved/archived）。
+    // 徽章 / chip 过滤 / digest 计数三处同用这一个谓词，避免口径分叉。
+    function reviewPending(t) { return !!(t && t.reviewHint && t.reviewHint.score > 0 && !t.reviewedAt && (t.status === 'resolved' || t.status === 'archived')) }
+    // #13 筛选：文本（标题/描述/ID）+ 优先级多选 + 标签 + 待过目队列
     function passFilter(t) {
       var q = state.filterQ.trim().toLowerCase()
       if (q && (t.title + ' ' + (t.description || '') + ' ' + t.id).toLowerCase().indexOf(q) < 0) return false
       if (state.filterPrio.length > 0 && state.filterPrio.indexOf(t.priority || 'medium') < 0) return false
       if (state.filterTag && (t.tags || []).indexOf(state.filterTag) < 0) return false
+      if (state.filterReview && !reviewPending(t)) return false
       return true
     }
     function allTags() { var s = {}; state.tasks.forEach(function (t) { (t.tags || []).forEach(function (g) { s[g] = 1 }) }); return Object.keys(s) }
@@ -575,7 +580,7 @@
       if (!open) return null
       if (!state.isRootStable) return null // 子代理会话不渲染看板面板（读 isRootStable：瞬态 false 不闪，见 isRoot 蝶变防抖）
       var active = tasks.filter(function (t) { return t.status !== 'archived' }); var archived = tasks.filter(function (t) { return t.status === 'archived' })
-      var hasFilter = state.filterQ.trim() || state.filterPrio.length > 0 || state.filterTag
+      var hasFilter = state.filterQ.trim() || state.filterPrio.length > 0 || state.filterTag || state.filterReview
       if (hasFilter) { active = active.filter(passFilter); archived = archived.filter(passFilter) }
       var content
       if (view === 'dashboard') { content = React.createElement(Dashboard) }

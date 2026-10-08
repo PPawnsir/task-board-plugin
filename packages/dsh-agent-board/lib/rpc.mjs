@@ -224,6 +224,15 @@ export function createRpc(ctx, state, deps) {
       // 父卡列位置/进度展示的数据源；total 含已归档子任务，settled=resolved|cancelled|archived（resolved 为
       // 兼容别名同值），因此归档子卡不会让进度分母缩水（task-muupgfot）；只有无任何子任务的父卡才不出键
       d.childStats = aggregateChildStats(d.tasks)
+      // ===== 风险队列「待你过目」：reviewHint 现算不落库（异常驱动审视①，task-muzikj1y）=====
+      // 四硬信号 + 两软信号（软信号仅质量异动告警激活期间计入，读 __qch 非空）现算后挂到每张卡，
+      // get-tasks 透出；唯一新落库字段=reviewedAt（mark-reviewed RPC 落）。挂在 tasksHash 之前——
+      // reviewHint + reviewedAt 都驱动列表渲染，须进 hash 序列化口径（否则已阅/软信号联动不重渲染）。
+      var __rhints = core.computeReviewHints(d.tasks, { qualityAlertActive: __qch.length > 0 })
+      for (var __ri = 0; __ri < (d.tasks || []).length; __ri++) {
+        var __rkt = d.tasks[__ri]
+        if (__rkt && __rhints[__rkt.id]) __rkt.reviewHint = __rhints[__rkt.id]
+      }
       // 渲染变更检测（反馈 n-mut9rzs2mkhg）：tasks 关键字段的稳定 hash（纯函数，口径见 core.tasksHash），
       // 客户端 3s 轮询 hash 相同则跳过 state.tasks 赋值 + notify——传输仍全量，省的是渲染
       d.tasksHash = tasksHash(d.tasks)
@@ -310,6 +319,11 @@ export function createRpc(ctx, state, deps) {
     handle('resolve-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'in-progress') return { ok: false, error: 'not in-progress' }; return resolveApply(d, t, actor, args.status, args.resolution, args.resolution || args.status) }) })
     handle('verify-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (t.status !== 'verifying') return { ok: false, error: 'not verifying' }; delete t.escalation; delete t.verifyRetries; var r = verifyApply(d, t, actor, args.verdict, args.comment); if (args.verdict === 'rejected') { t.verification = { verdict: 'rejected', summary: args.comment || '', checks: '', at: new Date().toISOString(), by: actor }; pushRejection(t, args.comment, '', t.verification.at, actor); pushRejectLesson(d, t, args.comment); r.hint = REJECT_REDISPATCH_HINT } return r }) })
     handle('archive-task', async function (args) { var sid = rpcSessionId(args); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; var __ae = archiveErr(sid, t); if (__ae) return { ok: false, error: __ae }; return archiveApply(d, t, actor, 'manual archive') }) })
+    // ===== 已阅落账（异常驱动审视①③）：打开详情页即幂等落 reviewedAt（唯一新落库字段）=====
+    // 幂等只写一次：已有 reviewedAt 就原样返回、绝不重写（时间戳不漂移、history 不刷屏）；
+    // 后续重复打开详情页零副作用。reviewedAt 进 tasksHash 序列化口径 → 落账后下一轮 get-tasks hash 变化，
+    // 客户端列表徽章/chip 即时消失（配合 kernel.fetchTasks 的 hash 短路渲染节约）。
+    handle('mark-reviewed', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; if (!t.reviewedAt) t.reviewedAt = new Date().toISOString(); return { ok: true, taskId: t.id, reviewedAt: t.reviewedAt } }) })
     // ===== 任务删除通道（真删，无 undo）=====
     // 背景：archive-task 只收 resolved/cancelled，草稿/误建卡片此前没有任何下线通道（只能永远挂着）。
     // 状态门禁（delete-task 与 batch-op delete 共用本函数，保证两条入口语义完全一致）：

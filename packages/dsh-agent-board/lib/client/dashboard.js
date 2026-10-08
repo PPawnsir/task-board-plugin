@@ -210,7 +210,7 @@
     function batchDigest() {
       var now = Date.now(), since = now - 86400000
       var all = (Array.isArray(state.tasks) ? state.tasks : []).concat(Array.isArray(state.archived) ? state.archived : [])
-      var resolved = 0, rejected = 0, tokTot = 0, tokEff = 0, timeouts = 0, trendResolved = 0, trendFirstPass = 0
+      var resolved = 0, rejected = 0, tokTot = 0, tokEff = 0, timeouts = 0, trendResolved = 0, trendFirstPass = 0, reviewPending = 0
       function in24(iso) { var d = Date.parse(iso); return isFinite(d) && d >= since && d <= now }
       function pos(v) { var n = Number(v); return isFinite(n) && n > 0 ? n : 0 }
       all.forEach(function (t) {
@@ -229,13 +229,15 @@
           tokTot += tot; tokEff += inp + outp + cw
           if (r.outcome === 'timeout/error' || r.outcome === 'timeout') timeouts++
         })
+        // ===== 未过目计数（异常驱动审视①⑤）：命中风险信号且未阅的已完成/归档卡 =====
+        if (reviewPending(t)) reviewPending++
       })
       var ghosts = 0
       var hints = Array.isArray(state.healthHints) ? state.healthHints : []
       hints.forEach(function (h) { var m = h && h.text ? String(h.text).match(/本轮回收 (\d+) 个幽灵活跃表项/) : null; if (m) ghosts += pos(m[1]) })
       var trend = trendResolved > 0 ? ('一次通过率 ' + Math.round(trendFirstPass / trendResolved * 100) + '%（近 24h 完成 ' + trendResolved + ' 张中 ' + trendFirstPass + ' 张零驳回）') : '近 24h 无完成记录，暂无质量趋势'
       var has = resolved > 0 || rejected > 0 || tokTot > 0 || timeouts > 0 || ghosts > 0 || trendResolved > 0
-      return { has: has, resolved: resolved, rejected: rejected, tokTot: tokTot, tokEff: tokEff, timeouts: timeouts, ghosts: ghosts, trend: trend }
+      return { has: has, resolved: resolved, rejected: rejected, tokTot: tokTot, tokEff: tokEff, timeouts: timeouts, ghosts: ghosts, trend: trend, reviewPending: reviewPending }
     }
 
     function buildReport() {
@@ -249,10 +251,12 @@
         lines.push('- Token：约 ' + fmtTokens(dg.tokTot) + (dg.tokEff > 0 ? '（其中有效 ' + fmtTokens(dg.tokEff) + '）' : ''))
         lines.push('- 异常事件：超时 ' + dg.timeouts + ' 次 · 幽灵回收 ' + dg.ghosts + ' 次')
         lines.push('- 质量趋势：' + dg.trend)
+        lines.push('- 未过目：' + dg.reviewPending + ' 张')
         lines.push('')
       } else {
         lines.push('## 批次摘要（近 24 小时）')
         lines.push('近 24 小时无活动记录（无完成 / 驳回 / 消耗 / 异常事件）')
+        lines.push('- 未过目：' + dg.reviewPending + ' 张')
         lines.push('')
       }
       var groups = { inProgress: [], verifying: [], pending: [], blocked: [], resolved: [] }

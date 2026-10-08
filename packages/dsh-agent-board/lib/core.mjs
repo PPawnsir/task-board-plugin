@@ -1104,11 +1104,90 @@ export function tasksHash(tasks) {
       Array.isArray(t.tags) ? t.tags.join(',') : '',
       t.claimedBy, t.claimedAt, t.resolvedAt, t.verifiedAt, t.archivedAt,
       t.lastError, t.lastProgress && t.lastProgress.text,
-      t.frozen ? '1' : '', t.stuckSince, t.escalation && t.escalation.question
+      t.frozen ? '1' : '', t.stuckSince, t.escalation && t.escalation.question,
+      t.reviewedAt,
+      t.reviewHint ? String(t.reviewHint.score) + ':' + (Array.isArray(t.reviewHint.reasons) ? t.reviewHint.reasons.join('|') : '') : ''
     ].join('\u0001'))
   }
   var s = parts.join('\u0002')
   var h = 5381
   for (var j = 0; j < s.length; j++) h = (((h << 5) + h) ^ s.charCodeAt(j)) >>> 0
   return h.toString(36)
+}
+
+// ===== 风险队列「待你过目」：reviewHint 现算（异常驱动审视①，task-muzikj1y）=====
+// 纯函数零 IO 零落库：唯一会落库的新字段是 reviewedAt（rpc.mjs mark-reviewed 落），
+// reviewHint 每轮 get-tasks 现算（四硬信号恒计入 + 两软信号仅质量异动告警激活期间计入）。
+// 信号口径：
+//   硬① 被驳回过：rejectCount>0 或 verification.verdict='rejected' 或 messages 有 rejection 包 或 runs 含 rejected 结局
+//   硬② 上报过歧义：messages 有 arbitration 裁决包
+//   硬③ touches 碰核心文件：任一条 touches 的 basename ∈ {dispatch.mjs, rpc.mjs, core.mjs}
+//   硬④ full 无 acceptance：pipeline=full 且无硬性验收脚本
+//   软⑤ diff>300 行：deliverable.diff（git diff --stat）解析出的总增删行数 >300（仅告警态）
+//   软⑥ 续跑≥2 次：runs 中 resume:true 条目数 ≥2（仅告警态）
+export var REVIEW_CORE_FILES = ['dispatch.mjs', 'rpc.mjs', 'core.mjs']
+export var REVIEW_DIFF_LINES = 300
+export var REVIEW_RESUME_MIN = 2
+function reviewBaseName(p) { var s = String(p == null ? '' : p); var i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\')); return i >= 0 ? s.slice(i + 1) : s }
+function reviewTouchesCore(touches) {
+  var list = Array.isArray(touches) ? touches : []
+  for (var i = 0; i < list.length; i++) { if (REVIEW_CORE_FILES.indexOf(reviewBaseName(list[i])) >= 0) return true }
+  return false
+}
+function reviewWasRejected(t) {
+  if (!t) return false
+  if ((t.rejectCount || 0) > 0) return true
+  if (t.verification && t.verification.verdict === 'rejected') return true
+  if (Array.isArray(t.messages)) { for (var i = 0; i < t.messages.length; i++) { var m = t.messages[i]; if (m && m.kind === 'rejection') return true } }
+  if (Array.isArray(t.runs)) { for (var j = 0; j < t.runs.length; j++) { var r = t.runs[j]; if (r && r.outcome === 'rejected') return true } }
+  return false
+}
+function reviewHasArbitration(t) {
+  if (!t || !Array.isArray(t.messages)) return false
+  for (var i = 0; i < t.messages.length; i++) { var m = t.messages[i]; if (m && m.kind === 'arbitration') return true }
+  return false
+}
+// diffStat 解析：优先读汇总行「N files changed, X insertions(+), Y deletions(-)」的增删合计；
+// 无汇总行回退按每文件「 | N 」改动数累加（git diff --stat 每行路径 + 改动数）。解析不出返回 0（不计软信号）。
+function reviewDiffLines(t) {
+  var text = t && t.deliverable && t.deliverable.diff ? String(t.deliverable.diff) : ''
+  if (!text) return 0
+  var mIns = text.match(/(\d+)\s+insertions?\(\+\)/)
+  var mDel = text.match(/(\d+)\s+deletions?\(-\)/)
+  var ins = mIns ? (parseInt(mIns[1], 10) || 0) : 0
+  var del = mDel ? (parseInt(mDel[1], 10) || 0) : 0
+  if (ins || del) return ins + del
+  var total = 0
+  var re = /\|\s*(\d+)\s/g
+  var mm
+  while ((mm = re.exec(text)) !== null) total += parseInt(mm[1], 10) || 0
+  return total
+}
+function reviewResumeCount(t) {
+  if (!t || !Array.isArray(t.runs)) return 0
+  var n = 0
+  for (var i = 0; i < t.runs.length; i++) { var r = t.runs[i]; if (r && r.resume === true) n++ }
+  return n
+}
+// 返回 { [taskId]: { score, reasons[] } }（含 score=0 的空 reasons 条目，调用方按需透出）。
+// opts.qualityAlertActive = 质量异动告警黄条激活态（读 qualityChangeHints 输出非空），软信号仅此时计入。
+export function computeReviewHints(tasks, opts) {
+  var list = Array.isArray(tasks) ? tasks : []
+  var alertActive = !!(opts && opts.qualityAlertActive)
+  var out = {}
+  for (var i = 0; i < list.length; i++) {
+    var t = list[i]
+    if (!t || !t.id) continue
+    var reasons = []
+    if (reviewWasRejected(t)) reasons.push('曾被 Verifier 驳回（验收判 reject）')
+    if (reviewHasArbitration(t)) reasons.push('执行中上报过歧义（待主窗口裁决）')
+    if (reviewTouchesCore(t.touches)) reasons.push('touches 触碰核心文件（dispatch/rpc/core）')
+    if ((t.pipeline || 'full') === 'full' && !(t.acceptance && String(t.acceptance).trim())) reasons.push('全流程任务缺硬性验收脚本（acceptance）')
+    if (alertActive) {
+      if (reviewDiffLines(t) > REVIEW_DIFF_LINES) reasons.push('改动规模大（diff 超 ' + REVIEW_DIFF_LINES + ' 行）')
+      if (reviewResumeCount(t) >= REVIEW_RESUME_MIN) reasons.push('续跑 ≥' + REVIEW_RESUME_MIN + ' 次（冷复活重试偏多）')
+    }
+    out[t.id] = { score: reasons.length, reasons: reasons }
+  }
+  return out
 }

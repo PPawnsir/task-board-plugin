@@ -242,7 +242,7 @@ function apply(ctx) {
       blocked: { title: '阻塞：卡住待处理（等依赖/等主窗口裁决）', empty: '暂无阻塞——任务卡住待裁决时会出现在这里' }
     }
     var reqEpoch = 0 // 会话切换纪元：切会话时自增，旧会话在途响应按纪元丢弃
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, verifyUserGuide: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', mpRole: '', mpSize: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, verifyUserGuide: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', filterReview: false, selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', mpRole: '', mpSize: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
 
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
@@ -517,12 +517,17 @@ function apply(ctx) {
     function onColDragLeave(st) { if (state.dragOver === st) { state.dragOver = null; notify() } }
     function onColDrop(e, st) { e.preventDefault(); try { var data = JSON.parse(e.dataTransfer.getData('text/plain')); state.dragOver = null; state.dragTask = null; transition(data.id, data.status, st); notify() } catch (_) {} }
 
-    // #13 筛选：文本（标题/描述/ID）+ 优先级多选 + 标签
+    // ===== 风险队列「待你过目」客户端单一事实源（异常驱动审视①）=====
+    // 命中=host 现算的 reviewHint.score>0；待过目=命中 + 未阅（reviewedAt 空）+ 终态（resolved/archived）。
+    // 徽章 / chip 过滤 / digest 计数三处同用这一个谓词，避免口径分叉。
+    function reviewPending(t) { return !!(t && t.reviewHint && t.reviewHint.score > 0 && !t.reviewedAt && (t.status === 'resolved' || t.status === 'archived')) }
+    // #13 筛选：文本（标题/描述/ID）+ 优先级多选 + 标签 + 待过目队列
     function passFilter(t) {
       var q = state.filterQ.trim().toLowerCase()
       if (q && (t.title + ' ' + (t.description || '') + ' ' + t.id).toLowerCase().indexOf(q) < 0) return false
       if (state.filterPrio.length > 0 && state.filterPrio.indexOf(t.priority || 'medium') < 0) return false
       if (state.filterTag && (t.tags || []).indexOf(state.filterTag) < 0) return false
+      if (state.filterReview && !reviewPending(t)) return false
       return true
     }
     function allTags() { var s = {}; state.tasks.forEach(function (t) { (t.tags || []).forEach(function (g) { s[g] = 1 }) }); return Object.keys(s) }
@@ -588,7 +593,7 @@ function apply(ctx) {
       if (!open) return null
       if (!state.isRootStable) return null // 子代理会话不渲染看板面板（读 isRootStable：瞬态 false 不闪，见 isRoot 蝶变防抖）
       var active = tasks.filter(function (t) { return t.status !== 'archived' }); var archived = tasks.filter(function (t) { return t.status === 'archived' })
-      var hasFilter = state.filterQ.trim() || state.filterPrio.length > 0 || state.filterTag
+      var hasFilter = state.filterQ.trim() || state.filterPrio.length > 0 || state.filterTag || state.filterReview
       if (hasFilter) { active = active.filter(passFilter); archived = archived.filter(passFilter) }
       var content
       if (view === 'dashboard') { content = React.createElement(Dashboard) }
@@ -687,12 +692,14 @@ function apply(ctx) {
       useEffect(function () { function update() { setQ(state.filterQ); setFt(state.filterTag) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       function setQ2(v) { state.filterQ = v; notify() }
       function togglePrio(p) { var i = state.filterPrio.indexOf(p); if (i >= 0) state.filterPrio.splice(i, 1); else state.filterPrio.push(p); notify() }
-      function clearAll() { state.filterQ = ''; state.filterPrio = []; state.filterTag = ''; notify() }
-      var hasFilter = q.trim() || state.filterPrio.length > 0 || ft
+      function toggleReview() { state.filterReview = !state.filterReview; notify() }
+      function clearAll() { state.filterQ = ''; state.filterPrio = []; state.filterTag = ''; state.filterReview = false; notify() }
+      var hasFilter = q.trim() || state.filterPrio.length > 0 || ft || state.filterReview
       var chipBase = { fontSize: 10, padding: '2px 8px', borderRadius: 10, border: '1px solid ' + C.border, cursor: 'pointer', background: 'transparent', color: C.text2, transition: 'all .15s' }
       return React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' } },
         React.createElement('input', { value: q, onChange: function (e) { setQ2(e.target.value) }, placeholder: '🔍 搜索标题/描述/ID…', style: { flex: '0 1 200px', fontSize: 11, padding: '3px 8px', border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text } }),
         ['critical', 'high', 'medium', 'low'].map(function (p) { var on = state.filterPrio.indexOf(p) >= 0; return React.createElement('button', { key: p, onClick: function () { togglePrio(p) }, style: Object.assign({}, chipBase, on ? { background: prioColor[p], color: C_INV, borderColor: prioColor[p] } : {}) }, prioLabel[p]) }),
+        React.createElement('button', { key: 'review', onClick: toggleReview, title: '只看命中风险信号且未阅的已完成/归档卡（已阅卡不计）', style: Object.assign({}, chipBase, state.filterReview ? { background: C.warn, color: C_INV, borderColor: C.warn } : {}) }, '👁 待你过目'),
         allTags().length > 0 ? React.createElement('select', { value: ft, onChange: function (e) { state.filterTag = e.target.value; notify() }, style: { fontSize: 10, padding: '2px 4px', border: '1px solid ' + C.border, borderRadius: 4, background: C.card, color: C.text } }, React.createElement('option', { value: '' }, '🏷 全部标签'), allTags().map(function (g) { return React.createElement('option', { key: g, value: g }, g) })) : null,
         hasFilter ? React.createElement('button', { onClick: clearAll, style: { fontSize: 10, padding: '2px 8px', borderRadius: 10, border: 'none', background: C.nested, color: C.text2, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('x', 9), '清除') : null)
     }
@@ -789,7 +796,7 @@ function apply(ctx) {
       // Enter/Space 触发与点击相同的激活行为（多选=切换选中，否则开详情）；
       // focus 态用主题色 C.brand 2px outline（不用浏览器默认蓝框，保持主题一致）
       function activate() { if (state.selectMode) { if (state.selected[t.id]) delete state.selected[t.id]; else state.selected[t.id] = true; notify() } else { state.detailId = t.id; notify() } }
-      return React.createElement('div', { role: 'button', tabIndex: 0, 'aria-label': t.title + '（' + (statusLabels[t.status] || t.status) + '）', draggable: !state.selectMode, onDragStart: function (e) { onDragStart(e, t) }, onDragEnd: onDragEnd, onMouseEnter: function () { if (delOk) setHover(t.id, 'del') }, onMouseLeave: function () { if (delOk) setHover('', '') }, onFocus: function () { setCardFocus(t.id) }, onBlur: function () { setCardFocus('') }, onKeyDown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate() } }, onClick: activate, style: { outline: isCardFocus(t.id) ? '2px solid ' + C.brand : 'none', outlineOffset: 2, border: '1px solid ' + (sel ? C.brand : (t.escalation ? C.err : (critGlow ? C.err : C.border))), borderRadius: 6, padding: '6px 8px', marginBottom: 6, background: sel ? C.nested : C.card, borderLeft: '3px solid ' + (t.escalation ? C.err : pc), cursor: state.selectMode ? 'pointer' : 'grab', fontSize: 12, opacity: dragging ? 0.4 : (depBlock ? 0.65 : 1), transition: 'opacity .15s', animation: critGlow ? 'tskb-crit 2s ease-in-out infinite' : 'none' } }, React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 4 } }, state.selectMode ? React.createElement('span', { style: { color: sel ? C.brand : C.text2, flexShrink: 0, marginTop: 1, display: 'inline-flex' } }, ic(sel ? 'square-check-big' : 'square', 12)) : null, React.createElement('div', { style: { fontWeight: 600, color: C.text, marginBottom: 2, wordBreak: 'break-word', flex: 1 } }, t.title), React.createElement('span', { style: { flexShrink: 0, marginTop: 1, display: 'inline-flex', color: C.text2 }, title: pm.label }, ic(pm.icon, 10)), React.createElement('span', { style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + pc + ' 20%, transparent)', color: pc, flexShrink: 0, marginTop: 1 } }, prioLabel[t.priority] || '中'), noResearch(t) ? React.createElement('span', { title: '本任务未附调研上下文，Worker 需自行定位——建议补 contextFiles/contextNotes', style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + C.warn + ' 18%, transparent)', color: C.warn, fontWeight: 600, flexShrink: 0, marginTop: 1, whiteSpace: 'nowrap' } }, '⚠️ 无调研') : null, (t.usage && t.usage.total) ?React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0, marginTop: 1 }, title: '本任务累计 token：' + String(t.usage.total) + '（' + (t.usage.runs || 0) + ' 次 run）' }, '⛁ ' + fmtTokens(t.usage.total)) : null), t.parentId ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: parentT ? '父任务：' + parentT.title + ' (' + t.parentId + ')' : t.parentId }, '↳ ' + (parentT && parentT.title ? parentT.title : shortId(t.parentId))) : null, t.escalation ? React.createElement('div', { style: { fontSize: 10, color: C.err, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 3 } }, ic('alert-triangle', 10), '待裁决 — 点击查看疑问') : null, t.stuckSince ? React.createElement('div', { style: { fontSize: 10, color: C.warn, fontWeight: 600, marginBottom: 2, animation: 'tskb-pulse 1.5s ease-in-out infinite' } }, '⏱ 疑似卡死 · ' + ago(t.stuckSince) + ' — 点击处理') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2, display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' } },
+      return React.createElement('div', { role: 'button', tabIndex: 0, 'aria-label': t.title + '（' + (statusLabels[t.status] || t.status) + '）', draggable: !state.selectMode, onDragStart: function (e) { onDragStart(e, t) }, onDragEnd: onDragEnd, onMouseEnter: function () { if (delOk) setHover(t.id, 'del') }, onMouseLeave: function () { if (delOk) setHover('', '') }, onFocus: function () { setCardFocus(t.id) }, onBlur: function () { setCardFocus('') }, onKeyDown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate() } }, onClick: activate, style: { outline: isCardFocus(t.id) ? '2px solid ' + C.brand : 'none', outlineOffset: 2, border: '1px solid ' + (sel ? C.brand : (t.escalation ? C.err : (critGlow ? C.err : C.border))), borderRadius: 6, padding: '6px 8px', marginBottom: 6, background: sel ? C.nested : C.card, borderLeft: '3px solid ' + (t.escalation ? C.err : pc), cursor: state.selectMode ? 'pointer' : 'grab', fontSize: 12, opacity: dragging ? 0.4 : (depBlock ? 0.65 : 1), transition: 'opacity .15s', animation: critGlow ? 'tskb-crit 2s ease-in-out infinite' : 'none' } }, React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 4 } }, state.selectMode ? React.createElement('span', { style: { color: sel ? C.brand : C.text2, flexShrink: 0, marginTop: 1, display: 'inline-flex' } }, ic(sel ? 'square-check-big' : 'square', 12)) : null, React.createElement('div', { style: { fontWeight: 600, color: C.text, marginBottom: 2, wordBreak: 'break-word', flex: 1 } }, t.title), React.createElement('span', { style: { flexShrink: 0, marginTop: 1, display: 'inline-flex', color: C.text2 }, title: pm.label }, ic(pm.icon, 10)), React.createElement('span', { style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + pc + ' 20%, transparent)', color: pc, flexShrink: 0, marginTop: 1 } }, prioLabel[t.priority] || '中'), reviewPending(t) ? React.createElement('span', { title: '👁 建议过目（命中风险信号）：\n' + ((t.reviewHint && t.reviewHint.reasons) || []).join('\n'), style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.warn + ' 22%, transparent)', color: C.warn, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0, marginTop: 1 } }, '👁 建议过目') : null, noResearch(t) ? React.createElement('span', { title: '本任务未附调研上下文，Worker 需自行定位——建议补 contextFiles/contextNotes', style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + C.warn + ' 18%, transparent)', color: C.warn, fontWeight: 600, flexShrink: 0, marginTop: 1, whiteSpace: 'nowrap' } }, '⚠️ 无调研') : null, (t.usage && t.usage.total) ?React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0, marginTop: 1 }, title: '本任务累计 token：' + String(t.usage.total) + '（' + (t.usage.runs || 0) + ' 次 run）' }, '⛁ ' + fmtTokens(t.usage.total)) : null), t.parentId ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: parentT ? '父任务：' + parentT.title + ' (' + t.parentId + ')' : t.parentId }, '↳ ' + (parentT && parentT.title ? parentT.title : shortId(t.parentId))) : null, t.escalation ? React.createElement('div', { style: { fontSize: 10, color: C.err, fontWeight: 600, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 3 } }, ic('alert-triangle', 10), '待裁决 — 点击查看疑问') : null, t.stuckSince ? React.createElement('div', { style: { fontSize: 10, color: C.warn, fontWeight: 600, marginBottom: 2, animation: 'tskb-pulse 1.5s ease-in-out infinite' } }, '⏱ 疑似卡死 · ' + ago(t.stuckSince) + ' — 点击处理') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2, display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' } },
             epic ? React.createElement('span', { title: '史诗父卡：' + csDone + '/' + cs.total + ' 个子任务已了结（完成/取消/归档）', style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.brand + ' 14%, transparent)', color: C.brand, fontWeight: 600 } }, '📦 史诗 · ' + csDone + '/' + cs.total) : null,
             // hook 相位徽章：与 📦 徽章**并存**（相位是 epic 的附加过程态，不是替代进度）
             epic ? hookPhaseBadge(t) : null,
@@ -843,6 +850,7 @@ function apply(ctx) {
           return React.createElement('div', { key: t.id, style: { padding: '6px 8px', marginBottom: 5, background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } },
             React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
               React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: C.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: t.title }, t.title),
+              reviewPending(t) ? React.createElement('span', { title: '👁 建议过目（命中风险信号）：\n' + ((t.reviewHint && t.reviewHint.reasons) || []).join('\n'), style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.warn + ' 22%, transparent)', color: C.warn, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 } }, '👁 建议过目') : null,
               t.verification ? React.createElement('span', { title: '验收结论: ' + (t.verification.summary || '').slice(0, 100), style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: t.verification.verdict === 'approved' ? C.ok : C.err, color: C_INV } }, t.verification.verdict === 'approved' ? '过' : '驳') : null,
               React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, t.archivedAt ? ago(t.archivedAt) : '')),
             t.verification && t.verification.summary ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '📝 ' + t.verification.summary) : null,
@@ -1172,11 +1180,63 @@ function apply(ctx) {
         React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 4, lineHeight: 1.6 } }, '每个点位是一次真实 agent 运行（不是声明式命令）：prompt 只给薄框架契约与上下文，动作由 hook agent 自行决策，吃不准会歧义上报；失败即转阻塞等人裁决（重试/跳过/放弃），不会自动重跑。清空 prompt 保存 = 撤掉该点位。hooks 仅主窗口可设（host 门禁，失败原因原样回显）。'))
     }
 
+    // ===== 审视摘要区（异常驱动审视①④）：详情顶部新块，仅 reviewHint 命中时显示 =====
+    // 四问动线 + 来源徽标，素材全用现有字段纯展示拼装（reviewHint 由 host 现算、get-tasks 透出）：
+    //   ①为什么在这 → reviewHint.reasons（host 现算中文理由行）
+    //   ②改了什么 → deliverable.summary + deliverable.diff（git diff --stat 原文），标「Worker 汇报」来源徽标
+    //   ③机器怎么验的 → verification 结论（标「Verifier 实证」）+ 验收脚本 + 驳回/仲裁史（标「系统记录」）
+    //   ④怎么亲自确认 → verification.userTest 自测指南复用渲染，缺省显示 tier=internal 提示
+    // 已阅（reviewedAt 非空）仍显示：已阅只收敛列表徽章/chip，详情块不消失——用户要真正过目，不能打开即闪退。
+    function ReviewSummary(props) {
+      var task = props.task
+      var rh = task.reviewHint
+      if (!rh || !(rh.score > 0)) return null
+      function srcBadge(text, color) { return React.createElement('span', { style: { fontSize: 9, padding: '0 5px', borderRadius: 3, background: 'color-mix(in srgb, ' + color + ' 16%, transparent)', color: color, fontWeight: 600, flexShrink: 0 } }, text) }
+      // ③ 驳回/仲裁史：history（歧义/裁决/驳回/干预/rejected）+ messages（rejection/arbitration）
+      var histLines = []
+      if (Array.isArray(task.history)) task.history.forEach(function (h) { if (h && h.note && /歧义|裁决|驳回|干预|rejected/i.test(h.note)) histLines.push('[' + (h.timestamp || '') + '] ' + String(h.note).slice(0, 160)) })
+      if (Array.isArray(task.messages)) task.messages.forEach(function (m) { if (m && (m.kind === 'rejection' || m.kind === 'arbitration')) histLines.push('[' + (m.kind === 'rejection' ? '驳回' : '裁决') + '] ' + String(m.text || '').slice(0, 160)) })
+      histLines = histLines.slice(0, 5)
+      var q3rows = []
+      if (task.verification) q3rows.push(React.createElement('div', { key: 'v', style: { display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 2 } }, srcBadge('Verifier 实证', C.ok), React.createElement('span', { style: { fontSize: 11, color: C.text } }, (task.verification.verdict === 'approved' ? '验收通过' : '验收驳回') + (task.verification.summary ? '：' + task.verification.summary : ''))))
+      if (task.acceptance) q3rows.push(React.createElement('div', { key: 'a', style: { display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 2 } }, srcBadge('系统记录', C.text2), React.createElement('span', { style: { fontSize: 10, color: C.text2, fontFamily: 'monospace' } }, '验收脚本：' + task.acceptance)))
+      if (histLines.length) q3rows.push(React.createElement('div', { key: 'h', style: { display: 'flex', alignItems: 'flex-start', gap: 4 } }, srcBadge('系统记录', C.text2), React.createElement('span', { style: { fontSize: 10, color: C.text2, whiteSpace: 'pre-wrap', lineHeight: 1.5 } }, '驳回/仲裁史：\n' + histLines.join('\n'))))
+      // ④ 自测指南：复用现有 userTest 渲染口径，缺省 tier=internal 提示
+      var q4
+      var ut = task.verification && task.verification.userTest
+      if (ut) {
+        var tierMeta = ut.tier === 'ui' ? { c: C.ok, label: 'UI 可操作' } : (ut.tier === 'metric' ? { c: C.brand, label: '看指标' } : { c: C.text2, label: '纯内部' })
+        q4 = React.createElement('div', { style: { marginBottom: 6 } },
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 4 } }, '④ 怎么亲自确认', srcBadge('自测指南 · ' + tierMeta.label, tierMeta.c)),
+          ut.gist ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 2 } }, ut.gist) : null,
+          ut.steps && ut.steps.length ? React.createElement('div', { style: { fontSize: 10, color: C.text } }, ut.steps.map(function (s, i) { return React.createElement('div', { key: i, style: { marginBottom: 1 } }, (i + 1) + '. ' + s) })) : null,
+          ut.expect ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '预期：' + ut.expect) : null)
+      } else {
+        q4 = React.createElement('div', { style: { fontSize: 10, color: C.text2, lineHeight: 1.5 } }, '④ 怎么亲自确认：本卡无用户自测指南（tier=internal / 未附 userTest）——纯内部改动，验证靠测试套件')
+      }
+      return React.createElement('div', { id: 'tskb-review-summary', style: { marginBottom: 8, padding: '8px 10px', border: '1px solid ' + C.warn, borderRadius: 6, background: 'color-mix(in srgb, ' + C.warn + ' 7%, transparent)' } },
+        React.createElement('div', { style: { fontSize: 12, fontWeight: 700, color: C.warn, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('alert-triangle', 13), '待你过目 · 命中 ' + rh.score + ' 条风险信号'),
+        React.createElement('div', { style: { marginBottom: 6 } },
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 2 } }, '① 为什么在这'),
+          (rh.reasons || []).map(function (r, i) { return React.createElement('div', { key: i, style: { fontSize: 11, color: C.text, lineHeight: 1.5 } }, '· ' + r) })),
+        React.createElement('div', { style: { marginBottom: 6 } },
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 4 } }, '② 改了什么', srcBadge('Worker 汇报', C.brand)),
+          (task.deliverable && task.deliverable.summary) ? React.createElement('div', { style: { fontSize: 11, color: C.text, whiteSpace: 'pre-wrap', marginBottom: 2 } }, task.deliverable.summary) : React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 2 } }, '(无开发描述)'),
+          (task.deliverable && task.deliverable.diff) ? React.createElement('div', { style: { fontSize: 10, color: C.text2, whiteSpace: 'pre-wrap', maxHeight: 80, overflowY: 'auto', fontFamily: 'monospace' } }, task.deliverable.diff) : null),
+        q3rows.length ? React.createElement('div', { style: { marginBottom: 6 } },
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 2 } }, '③ 机器怎么验的'),
+          q3rows) : null,
+        q4)
+    }
+
     function DetailView() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect; var task = getTask(state.detailId)
       var _a = useState(task ? task.title : ''), editTitle = _a[0], setEditTitle = _a[1]; var _b = useState(task ? task.description || '' : ''), editDesc = _b[0], setEditDesc = _b[1]; var _c = useState(false), saving = _c[0], setSaving = _c[1]; var _d = useState(state.boardMode), mode = _d[0], setMode = _d[1]
       var _e2 = useState(''), arbAnswer = _e2[0], setArbAnswer = _e2[1]; var _f2 = useState(''), interveneMsg = _f2[0], setInterveneMsg = _f2[1]; var _g2 = useState(''), actionMsg = _g2[0], setActionMsg = _g2[1]; var _h2 = useState('resume'), arbAction = _h2[0], setArbAction = _h2[1]
       useEffect(function () { function update() { setMode(state.boardMode) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
+      // 已阅落账（异常驱动审视①③）：打开命中且未阅的详情页即幂等 mark-reviewed——
+      // host 幂等只写一次；本轮渲染仍按「未阅」展示审视摘要区（fetchTasks 回来前不闪退）。
+      useEffect(function () { var t = getTask(state.detailId); if (t && t.reviewHint && t.reviewHint.score > 0 && !t.reviewedAt) { rpc('mark-reviewed', { taskId: t.id }).then(fetchTasks).catch(function () {}) } }, [state.detailId])
       if (!task) { state.detailId = null; return React.createElement('div', { style: { padding: 20, color: C.text2 } }, '任务不存在') }
       function doAction(fn) { fn().then(fetchTasks).catch(function () {}) }
       function saveEdit() { setSaving(true); rpc('update-task', { taskId: task.id, title: editTitle, description: editDesc, resetToPending: true }).then(function () { setSaving(false); fetchTasks() }).catch(function () { setSaving(false) }) }
@@ -1227,6 +1287,7 @@ function apply(ctx) {
       }
       return React.createElement('div', { style: { padding: '4px 2px' } },
         React.createElement('div', { onClick: function () { state.detailId = null; notify() }, style: { fontSize: 11, color: C.brand, cursor: 'pointer', marginBottom: 8 } }, '← 返回看板'),
+        React.createElement(ReviewSummary, { task: task }),
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 } }, React.createElement('span', { style: { fontSize: 10, padding: '1px 6px', borderRadius: 3, background: 'color-mix(in srgb, ' + (prioColor[task.priority] || prioColor.low) + ' 20%, transparent)', color: (prioColor[task.priority] || prioColor.low) } }, prioLabel[task.priority] || '中'), React.createElement('span', { style: { fontSize: 11, padding: '1px 8px', borderRadius: 3, background: C.nested, color: C.text } }, statusLabels[task.status] || task.status), React.createElement('select', { value: task.pipeline || 'full', onChange: function (e) { rpc('update-task', { taskId: task.id, pipeline: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '管线档位', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'full' }, '全流程（执行+验证）'), React.createElement('option', { value: 'work' }, '免验证（只做不验）'), React.createElement('option', { value: 'direct' }, '主窗口处理')), task.pipelineAuto ? React.createElement('span', { style: { fontSize: 9, color: C.text2 }, title: '由规则自动分类，可手动覆盖' }, 'auto') : null, isManual ? React.createElement('span', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('user', 10), '手动派发') : null),
         // 流转到按钮组（键盘可达的状态迁移入口，替代拖拽；无合法迁移的状态（draft/resolved 等）整块不渲染）
         flowBtns.length > 0 ? React.createElement('div', { role: 'group', 'aria-label': '状态流转', style: { display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginBottom: 8, padding: '5px 8px', border: '1px solid ' + C.border, borderRadius: 6, background: C.card } },
@@ -1585,7 +1646,7 @@ function apply(ctx) {
     function batchDigest() {
       var now = Date.now(), since = now - 86400000
       var all = (Array.isArray(state.tasks) ? state.tasks : []).concat(Array.isArray(state.archived) ? state.archived : [])
-      var resolved = 0, rejected = 0, tokTot = 0, tokEff = 0, timeouts = 0, trendResolved = 0, trendFirstPass = 0
+      var resolved = 0, rejected = 0, tokTot = 0, tokEff = 0, timeouts = 0, trendResolved = 0, trendFirstPass = 0, reviewPending = 0
       function in24(iso) { var d = Date.parse(iso); return isFinite(d) && d >= since && d <= now }
       function pos(v) { var n = Number(v); return isFinite(n) && n > 0 ? n : 0 }
       all.forEach(function (t) {
@@ -1604,13 +1665,15 @@ function apply(ctx) {
           tokTot += tot; tokEff += inp + outp + cw
           if (r.outcome === 'timeout/error' || r.outcome === 'timeout') timeouts++
         })
+        // ===== 未过目计数（异常驱动审视①⑤）：命中风险信号且未阅的已完成/归档卡 =====
+        if (reviewPending(t)) reviewPending++
       })
       var ghosts = 0
       var hints = Array.isArray(state.healthHints) ? state.healthHints : []
       hints.forEach(function (h) { var m = h && h.text ? String(h.text).match(/本轮回收 (\d+) 个幽灵活跃表项/) : null; if (m) ghosts += pos(m[1]) })
       var trend = trendResolved > 0 ? ('一次通过率 ' + Math.round(trendFirstPass / trendResolved * 100) + '%（近 24h 完成 ' + trendResolved + ' 张中 ' + trendFirstPass + ' 张零驳回）') : '近 24h 无完成记录，暂无质量趋势'
       var has = resolved > 0 || rejected > 0 || tokTot > 0 || timeouts > 0 || ghosts > 0 || trendResolved > 0
-      return { has: has, resolved: resolved, rejected: rejected, tokTot: tokTot, tokEff: tokEff, timeouts: timeouts, ghosts: ghosts, trend: trend }
+      return { has: has, resolved: resolved, rejected: rejected, tokTot: tokTot, tokEff: tokEff, timeouts: timeouts, ghosts: ghosts, trend: trend, reviewPending: reviewPending }
     }
 
     function buildReport() {
@@ -1624,10 +1687,12 @@ function apply(ctx) {
         lines.push('- Token：约 ' + fmtTokens(dg.tokTot) + (dg.tokEff > 0 ? '（其中有效 ' + fmtTokens(dg.tokEff) + '）' : ''))
         lines.push('- 异常事件：超时 ' + dg.timeouts + ' 次 · 幽灵回收 ' + dg.ghosts + ' 次')
         lines.push('- 质量趋势：' + dg.trend)
+        lines.push('- 未过目：' + dg.reviewPending + ' 张')
         lines.push('')
       } else {
         lines.push('## 批次摘要（近 24 小时）')
         lines.push('近 24 小时无活动记录（无完成 / 驳回 / 消耗 / 异常事件）')
+        lines.push('- 未过目：' + dg.reviewPending + ' 张')
         lines.push('')
       }
       var groups = { inProgress: [], verifying: [], pending: [], blocked: [], resolved: [] }
