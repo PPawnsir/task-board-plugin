@@ -139,6 +139,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **依赖调度**：`dependsOn` 声明依赖（DFS 环检测），依赖全部完成后才会被派发，串行链路自动编排
 - **管线分档**：`full`（执行+验证）/ `work`（只做不验）/ `direct`（不进池，主窗口直接处理），创建时按规则自动分类、可手动覆盖
 - **硬性验收**：`acceptance` 字段写验收脚本命令，Worker 必须实际运行、Verifier 必须独立复跑
+- **git 纪律红线**：Worker prompt 写死禁止还原命令（`git checkout` / `git restore` / `git reset --hard` / `git clean` 等——会冲掉并行 Worker 与你自己的未提交在途编辑）；只改自己写的文件、别人改了别的文件与你无关，确实需要干净基线时走歧义上报（`board_report` kind=escalate）由主窗口裁决
 - **文件级排他**：`touches` 声明本任务要改的文件/glob（如 `["src/**", "README.md"]`）；持有文件锁的任务（`in-progress`/`verifying`）与候选 touches 重叠就跳过本轮（卡片显示 `🔒 等文件释放`，详情页列出在等谁），**锁随工作态**：状态流转到已完成（`resolved`）即放锁，`cancelled`/归档同样不再持锁（归档回归纯收纳动作、不再是释放点）——锁只护「正在写」的阶段，「验收后-提交前」的窗口期由主窗口「回执到即提交」纪律 + 史诗 post-hook 承接，不用长持锁把整批串行化。避免并行 Worker 改同一批文件互踩；手动「派发」遇到冲突会列出冲突任务，确认后才以 `force` 越权派发
 - **里程碑进展通道**：Worker 每完成一个可验证的里程碑，可调用 `board_report`（`kind: "progress"`，`question` 写一行进展摘要 ≤200 字符）上报——进行中的卡片显示「📈 最近进展 · 相对时间」（覆盖式只留最新一条），详情页消息流保留全部 progress 条目
 - **防表演式汇报**：进展契约只写在 Worker prompt 里、且要求「有实际产物/结论才报」（禁止定时汇报）；progress **静默不通知主窗口**（不进回执聚合），也不写 `history` 流转记录，避免刷屏
@@ -186,6 +187,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **结算双通道 + 池韧性（2026-10-06 事故修复）**：continuable 结算有事件通道（`agent/status` 的 running→idle，身份取 `agent.session.id`）与上报通道（`board_report` 落定即收尾）两条入口，任一到达即关账（结局/usage/超时臂三件套，幂等）；派发周期自带**幽灵活跃表项 GC**（卡面证据核对回收残留 rec，防残留把派发容量顶到 0 拖死全池）+ 整轮 try/catch 与逐卡隔离（单点异常只作废该卡该轮）+ 去抖 latch 时间戳兜底复位
 - **续跑指令优先级**：断点续跑指令会带上卡上 messages 原文（仲裁/干预/驳回理由），并声明**最新裁决/干预优先于历史原始契约**（冲突以最新为准）——冷复活子会话的历史里没有仲裁答案，不带原文它无从知晓
 - **高优干预实时送达 continuable Worker**：`task_intervene` 对 continuable rec 走宿主投递通道（保留插件 source，下一个 step 边界消费），会话不可用降级 `sendMessage` 冷复活投递，再不行回退「记录注入随重派送达」并在 history 注明
+- **运行区子会话 id 归属标注（防误杀）**：卡详情「运行」区显示当前活跃 run 的子会话 id（childId）并标注「对应子代理列表同名条目」，终止 Worker 前先到子代理列表核对该 id 的同名条目，避免误杀别的合法 Worker
 
 ### 工作模式（三档）
 

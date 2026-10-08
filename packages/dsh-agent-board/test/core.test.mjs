@@ -480,6 +480,27 @@ test('buildVerifierPrompt: 注入交付物 + 验收脚本 + messages', () => {
   assert.match(p, /做完了/); assert.match(p, /npm test/); assert.match(p, /board_verdict/); assert.match(p, /方案B/)
 })
 
+test('buildWorkerPrompt: git 纪律红线（禁还原命令）注入，verifier prompt 不注入（源码断言）', () => {
+  const t = mkTask({ id: 'g1' })
+  const p = core.buildWorkerPrompt(t)
+  assert.match(p, /git 纪律红线/)
+  assert.match(p, /禁止 git checkout \/ git restore \/ git reset --hard \/ git clean 等还原命令/)
+  assert.match(p, /会冲掉并行 Worker 与你自己的未提交在途编辑/)
+  assert.match(p, /确实需要干净基线时用 board_report（kind=escalate）上报/)
+  // verifier prompt 不动
+  const pv = core.buildVerifierPrompt(t)
+  assert.doesNotMatch(pv, /git 纪律红线/)
+  assert.doesNotMatch(pv, /reset --hard/)
+  // 源码级：条款只在 buildWorkerPrompt 体内（切片边界到 buildVerifierPrompt 之前），不在 buildVerifierPrompt 体内
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  const wBody = coreSrc.slice(coreSrc.indexOf('export function buildWorkerPrompt'), coreSrc.indexOf('export function buildVerifierPrompt'))
+  assert.ok(wBody.length > 500, 'buildWorkerPrompt 切片成功')
+  assert.match(wBody, /git 纪律红线/)
+  assert.match(wBody, /git reset --hard/)
+  const vBody = coreSrc.slice(coreSrc.indexOf('export function buildVerifierPrompt'), coreSrc.indexOf('export function buildHookPrompt'))
+  assert.doesNotMatch(vBody, /git 纪律红线/)
+})
+
 // ===== 预研上下文段（瘦身分离形态，task-muvjs392）：笔记全文 + 文件清单，不含文件内容本体 =====
 // 形态：### 主窗口调研笔记（全文 ≤8000 字符）\n…\n\n### 调研文件清单（- 路径:L起-L止 — 一句用途）
 test('buildContextPackSection: 空清单返回空串', () => {
@@ -2588,6 +2609,26 @@ test('FamilySection: 子任务清单含归档（灰化 + 「已归档」徽章 +
   const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   assert.match(built, /'已归档'/)
   assert.match(built, /csDone/)
+})
+
+test('详情「运行」区：渲染活跃 run 子会话 id（childId）+ 标注「对应子代理列表同名条目」（源码级断言）', () => {
+  const src = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  // 运行区门禁：仅 in-progress + claimedBy（有活跃 run）才渲染，claimedBy 即该 run 的子会话 id（childId）
+  assert.match(src, /task\.status === 'in-progress' && task\.claimedBy \?/)
+  assert.match(src, /'子会话 id: ' \+ task\.claimedBy/)
+  assert.match(src, /对应子代理列表同名条目/)
+  // 组装产物里也要有（npm pretest 已保证 build-client 先跑）
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /'子会话 id: ' \+ task\.claimedBy/)
+  assert.match(built, /对应子代理列表同名条目/)
+})
+
+test('README 双份：运行区子会话 id 归属标注 + git 纪律红线各补一句且逐字一致', () => {
+  const r1 = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')
+  const r2 = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  assert.equal(r1, r2, 'README 双份必须逐字一致（npm run sync-readme）')
+  assert.ok(r1.indexOf('对应子代理列表同名条目') >= 0, 'README 缺运行区子会话 id 归属标注说明')
+  assert.ok(r1.indexOf('git 纪律红线') >= 0, 'README 缺 git 纪律红线说明')
 })
 
 // ===== 归档 tab 数据源口径（反馈 n-muyg3e0m9z7i）：归档 tab 空 vs 仪表盘 68 根修 =====

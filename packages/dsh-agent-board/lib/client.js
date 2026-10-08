@@ -1239,6 +1239,7 @@ function apply(ctx) {
           ic('activity', 10),
           React.createElement('span', null, '已运行 ' + elapsedSince(task.claimedAt) + '（软超时 ' + state.softTimeoutMin + ' 分提醒 · 硬超时 ' + state.hardTimeoutMin + ' 分自动终止）'),
           elapsedMin(task.claimedAt) > state.softTimeoutMin ? React.createElement('span', { style: { color: C.warn, fontWeight: 600 } }, '⏱ 已超软超时') : null,
+          React.createElement('span', { title: '当前活跃 run 的子会话 id（continuable 即 childId）；终止前先到子代理列表核对该 id 的同名条目，避免误杀别的合法 Worker', style: { fontSize: 10, color: C.text2, fontFamily: 'monospace', wordBreak: 'break-all', flexBasis: '100%' } }, '子会话 id: ' + task.claimedBy + '（对应子代理列表同名条目）'),
           React.createElement('button', { onClick: doTerminate, title: '终止该执行 Agent，任务回 pending 重新排队', style: { fontSize: 10, padding: '2px 8px', border: '1px solid ' + C.err, borderRadius: 3, background: 'transparent', color: C.err, cursor: 'pointer', marginLeft: 'auto' } }, '⏹ 立即终止')) : null,
         task.escalation ? React.createElement('div', { id: 'tskb-escalation', style: { marginBottom: 8, padding: '8px 10px', border: '1px solid ' + C.err, borderRadius: 6, background: 'color-mix(in srgb, ' + C.err + ' 8%, transparent)' } },
           React.createElement('div', { style: { fontSize: 12, fontWeight: 700, color: C.err, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('alert-triangle', 13), 'Worker 上报歧义 — 等待主窗口裁决'),
