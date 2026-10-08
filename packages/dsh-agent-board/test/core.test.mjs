@@ -2590,6 +2590,31 @@ test('FamilySection: 子任务清单含归档（灰化 + 「已归档」徽章 +
   assert.match(built, /csDone/)
 })
 
+// ===== 归档 tab 数据源口径（反馈 n-muyg3e0m9z7i）：归档 tab 空 vs 仪表盘 68 根修 =====
+// 旧 ArchiveView 数据源走独立 state.archived/fetchArchived：异步填库却未接入 TopPanel 的 notify 更新项，
+// 归档 tab 打开后停在「暂无归档任务」空态；仪表盘「已归档」计数来自 state.tasks（get-tasks 全量含归档）。
+// 修法：ArchiveView 直接读 state.tasks.filter(status==='archived')，与仪表盘同源全量 + 归档时间倒序 + 顶部注条数。
+test('ArchiveView: 归档数据源读 state.tasks 全量（对齐仪表盘「已归档」），不依赖 state.archived/fetchArchived（源码级断言）', () => {
+  const src = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+  // 数据源必须与仪表盘同源：state.tasks.filter(status==='archived')（get-tasks 全量含归档）
+  assert.match(src, /var archived = state\.tasks\.filter\(function \(t\) \{ return t\.status === 'archived' \}\)/)
+  // 反向断言：不得再读独立 state.archived.filter（异步填库不触发重渲染 → tab 恒空）
+  assert.doesNotMatch(src, /state\.archived\.filter/)
+  // 不得再挂「空则 fetchArchived」的 useEffect（独立数据源已移除）
+  assert.doesNotMatch(src, /useEffect\(function \(\) \{ if \(!state\.archived\.length\) fetchArchived\(\) \}/)
+  // 不得有任何 7 日窗口 cutoff（老归档 >7 天被整批滤掉是原根因候选形态之一）
+  assert.doesNotMatch(src, /cutoff/)
+  assert.doesNotMatch(src, /7 \* 24 \* 60|7 \* 86400000|604800000/)
+  // 顶部注明条数（与仪表盘「已归档」同口径）
+  assert.match(src, /'共 ' \+ archived\.length \+ ' 条归档/)
+  // 归档时间倒序：archivedAt 优先，回退 resolvedAt/createdAt
+  assert.match(src, /function archTs\(t\) \{ return t\.archivedAt \|\| t\.resolvedAt \|\| t\.createdAt \|\| '' \}/)
+  // 组装产物同步（pretest 已跑 build-client）
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /var archived = state\.tasks\.filter\(function \(t\) \{ return t\.status === 'archived' \}\)/)
+  assert.match(built, /'共 ' \+ archived\.length \+ ' 条归档/)
+})
+
 // ===== 史诗 hooks=agent run（task-muuw4ov7）：host 生命周期接线（pre 闸门 / post 收口 / 薄框架 prompt / 主窗口限定写入）=====
 // 设计定稿：hook 点 = 一次**真实 agent 运行**（不是声明式命令）；点位可选（epic 未声明 hooks 则全链路零变化）；
 // 薄框架 + agent 自行决策 + 歧义上报兜底；commit/push 不入任何默认形态；hooks 只许主窗口设置。

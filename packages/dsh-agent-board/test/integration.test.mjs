@@ -504,3 +504,40 @@ test('集成i·孤儿回收：in-progress 无活跃 rec 的卡推进时钟后回
     assert.equal(env.sent.length, 0, '孤儿回收的系统通知攒在 sysNotesBuf 等回执冲刷，不单独投递')
   } finally { await env.cleanup() }
 })
+
+// ===== 场景 j：归档数据源全量——老归档（>7 天）与仪表盘同口径，get-tasks 全量返回 =====
+// 归档 tab 空 vs 仪表盘 68 的根因锁定（反馈 n-muyg3e0m9z7i）：归档 tab 数据源必须与仪表盘「已归档」
+// 计数同源（state.tasks 全量，无 7 日窗口、无字段缺失）。host 侧 get-tasks 本就返回全量含归档，
+// 本用例锁死这条数据源契约：建卡→resolve→archive（含 archivedAt>7 天前构造）→断言归档数据源含该卡。
+test('集成j·归档数据源全量：老归档(>7天)与仪表盘同口径，get-tasks 返回全部归档', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    // 新归档 + 老归档各一张：先建卡再 resolve 再 archive（省去派发链路，直接走到可归档态）
+    await createTask(env, 'task-j1', { pipeline: 'work' })
+    await createTask(env, 'task-j2', { pipeline: 'work' })
+    env.patchBoard(function (d) {
+      d.tasks.forEach(function (t) { if (t.id === 'task-j1' || t.id === 'task-j2') { t.status = 'resolved'; t.resolvedAt = new Date(Date.now() - 86400000).toISOString() } })
+    })
+    var a1 = await env.rpc('archive-task', { sessionId: env.sid, taskId: 'task-j1' })
+    var a2 = await env.rpc('archive-task', { sessionId: env.sid, taskId: 'task-j2' })
+    assert.equal(a1.ok, true, 'task-j1 可归档')
+    assert.equal(a2.ok, true, 'task-j2 可归档')
+    // 构造老归档：task-j1 归档于 20 天前（>7 天），task-j2 归档于现在
+    env.patchBoard(function (d) {
+      var j1 = d.tasks.find(function (x) { return x.id === 'task-j1' })
+      j1.archivedAt = new Date(Date.now() - 20 * 86400000).toISOString()
+    })
+    // 归档数据源（get-tasks 全量）：两张归档都在，老归档（>7 天）不被窗口滤掉
+    var d = await env.rpc('get-tasks', { sessionId: env.sid, includeArchived: true })
+    var arch = d.tasks.filter(function (t) { return t.status === 'archived' })
+    assert.equal(arch.length, 2, '归档数据源含全部归档（全量，无 7 日窗口）')
+    assert.ok(arch.some(function (t) { return t.id === 'task-j1' && new Date(Date.now()) - new Date(t.archivedAt) > 7 * 86400000 }), '老归档（>7 天）仍在归档数据源')
+    assert.ok(arch.some(function (t) { return t.id === 'task-j2' }), '新归档也在归档数据源')
+    // 归档字段完整：archivedAt 已落卡（客户端按归档时间倒序的数据源字段不缺）
+    assert.ok(arch.every(function (t) { return !!t.archivedAt }), '每张归档卡都带 archivedAt')
+    // 与仪表盘口径一致：仪表盘「已归档」= state.tasks 里 status==='archived' 的计数，二者同源同值
+    var d2 = await env.rpc('get-tasks', { sessionId: env.sid })
+    assert.equal(d2.tasks.filter(function (t) { return t.status === 'archived' }).length, 2, '无 includeArchived 时同样全量（与仪表盘计数同源）')
+  } finally { await env.cleanup() }
+})

@@ -182,22 +182,27 @@
           t.status === 'verifying' && preview ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '📝 ' + preview) : null, depBlock ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: '依赖全部完成后才会派发' }, '⛓ 等待「' + depWaitTitle + '」' + (depWaitN > 1 ? ' 等 ' + depWaitN + ' 个' : '')) : null) }
 
     function ArchiveView() {
-      var _R = React; var useState = _R.useState, useEffect = _R.useEffect
+      var _R = React; var useState = _R.useState
       var _a = useState(state.archQ || ''), q = _a[0], setQ = _a[1]
-      useEffect(function () { if (!state.archived.length) fetchArchived() }, [])
-      var list = state.archived.filter(function (t) {
+      // 归档数据源口径对齐仪表盘（反馈 n-muyg3e0m9z7i）：直接读 state.tasks（get-tasks 全量含归档），
+      // 不再依赖独立 state.archived/fetchArchived——旧路径异步填库却未接入 TopPanel 的 notify 更新项，
+      // 归档 tab 打开后停在「暂无归档任务」空态，而仪表盘「已归档」计数来自 state.tasks（全量），二者对不上。
+      // 全量 + 按归档时间倒序（archivedAt 优先，回退 resolvedAt/createdAt）+ 顶部注明条数。
+      var archived = state.tasks.filter(function (t) { return t.status === 'archived' })
+      var list = archived.filter(function (t) {
         if (!q) return true
         var qq = q.toLowerCase()
         return (t.title || '').toLowerCase().indexOf(qq) >= 0 || (t.id || '').toLowerCase().indexOf(qq) >= 0 || (t.tags || []).join(' ').toLowerCase().indexOf(qq) >= 0
       }).sort(function (a, b) {
-        // 完成时间最近在前：resolvedAt 优先，回退验收时间/归档时间/最后活动时间
-        function doneTs(t) { return t.resolvedAt || (t.verification && t.verification.at) || t.archivedAt || taskLastTs(t) || '' }
-        return (doneTs(b) || '').localeCompare(doneTs(a) || '')
+        // 归档时间倒序：archivedAt 优先，回退 resolvedAt/createdAt（老卡可能缺 archivedAt）
+        function archTs(t) { return t.archivedAt || t.resolvedAt || t.createdAt || '' }
+        return (archTs(b) || '').localeCompare(archTs(a) || '')
       })
-      function restore(id) { rpc('update-task', { taskId: id, resetToPending: true }).then(function () { fetchArchived(); fetchTasks() }).catch(function () {}) }
+      function restore(id) { rpc('update-task', { taskId: id, resetToPending: true }).then(function () { fetchTasks() }).catch(function () {}) }
       return React.createElement('div', null,
         React.createElement('input', { value: q, onChange: function (e) { setQ(e.target.value); state.archQ = e.target.value }, placeholder: '检索标题 / ID / 标签…', style: { width: '100%', padding: '5px 8px', fontSize: 11, border: '1px solid ' + C.border2, borderRadius: 5, background: C.card, color: C.text, marginBottom: 8 } }),
-        state.archived.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '暂无归档任务') :
+        React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, '共 ' + archived.length + ' 条归档（全量，与仪表盘「已归档」同口径）'),
+        archived.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '暂无归档任务') :
         list.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '无匹配结果') :
         list.map(function (t) {
           return React.createElement('div', { key: t.id, style: { padding: '6px 8px', marginBottom: 5, background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } },
