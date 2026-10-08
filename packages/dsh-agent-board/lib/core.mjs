@@ -923,6 +923,80 @@ export function createTaskWarnings(t) {
   return out
 }
 
+// ===== 任务起草 lint（proposal n-muwlpbspl3w2）：四规则软警告，存 task.lintWarnings[]，不阻塞 =====
+// 与上方「调研门禁」（createTaskWarnings，瞬态 warning 字段）正交：那是「缺调研材料」的即时软提示；
+// 这是「起草质量」的持久诊断（粒度过粗/双仓库歧义/缺验收/标题缺动词/描述空），随卡落盘、
+// get-tasks 透出、详情页 ⚠️ 行展示。纯函数：双仓库歧义读盘（io 注入），本体零 IO 可单测。
+// 四规则（各一触发 + 各一不触发，单测锁定）：
+//   ① touches 含整树 glob（src/** 级）→ 粒度过粗，几乎锁整仓
+//   ② touches 相对路径在 ownerCwd 多个直接子目录下同名命中 → 路径双仓库歧义
+//   ③ pipeline=full 但无 acceptance 验收脚本 → 建议带验收命令
+//   ④ 标题缺动作动词 / 描述为空 → 建议补指令式标题 / 补目标约束
+export var TREE_GLOB_LINT = 'touches 粒度过粗，几乎锁整仓'
+export var AMBIGUOUS_PATH_LINT = '路径双仓库歧义，建议加仓库前缀'
+export var FULL_NO_ACCEPTANCE_LINT = 'full 管线建议带验收命令'
+export var TITLE_NO_VERB_LINT = '标题缺动作动词，建议改为「动词+宾语」指令式'
+
+// 标题动作动词白名单（中文指令式任务标题高频动词，命中任一即算「有动词」）。
+// 只做软提示：宁可漏检不可误报（漏了最多不亮这条），因此不做「非动词开头即判缺动词」的严格反例。
+var TITLE_VERBS = /添加|新增|修复|实现|重构|优化|支持|调整|更新|删除|迁移|拆分|整理|调研|设计|接入|改造|移除|升级|编写|撰写|起草|补充|完善|收敛|扩展|统一|替换|清理|测试|验证|审查|复核|审计|沉淀|回写|生成|构建|发布|上线|评审|分析|汇总|统计|梳理|排查|定位|解决|处理|切换|对齐|收口|接线|透出|承接|重建|适配|放宽|收紧|拦截|放行|归一|聚合|装配|注入|投递|挂载|卸载|裁剪|截断|折叠|去重|合并|回滚|撤销|归档|恢复|继承|出清|释放|覆盖|包裹|转发|代理|缓存|落盘|读盘|心跳|轮询|结算|推进|回填|重命名|改名|重写|重排|重试|重投|重派|复查|复跑|补全|补齐|补写|补录|追加|跟进|追踪|溯源|归因|归类|导出|导入|展示|渲染|刷新|跳转|筛选|排序/
+
+// touches 相对路径的「仓库内目录前缀」：剥掉 glob 尾段，得到跨仓库判重锚点。
+// 'packages/dsh-agent-board/**' → 'packages/dsh-agent-board'；'src/x.mjs' → 'src'；
+// 'a/b/c.mjs' → 'a/b'；裸文件名（无 '/'）→ ''（无目录前缀，不参与双仓库判重）。
+export function touchDirPrefix(p) {
+  var v = normTouch(p)
+  if (!v || v === '**') return ''
+  var i = v.lastIndexOf('/')
+  return i < 0 ? '' : v.slice(0, i)
+}
+
+// 双仓库歧义：某条 touches 相对路径的目录前缀，在 root 的 ≥2 个直接子目录下都存在 → 命中同名仓库副本。
+// 返回命中的相对路径原文（首个）或 null；io = { root, subdirs[], dirExists(path) } 由调用方注入（读盘）。
+// 绝对路径/盘符（C:）/裸文件名不参与判重（裸文件名没有目录锚点，判不了）。
+export function ambiguousTouch(touches, io) {
+  if (!io || typeof io.dirExists !== 'function') return null
+  var list = Array.isArray(touches) ? touches : []
+  var subs = Array.isArray(io.subdirs) ? io.subdirs : []
+  if (!subs.length) return null
+  var root = String(io.root || '')
+  for (var i = 0; i < list.length; i++) {
+    var p = list[i]
+    if (typeof p !== 'string' || !p.trim()) continue
+    var v = normTouch(p)
+    if (!v || path.isAbsolute(v) || /^[a-zA-Z]:/.test(v)) continue
+    var dir = touchDirPrefix(v)
+    if (!dir) continue
+    var hits = 0
+    for (var j = 0; j < subs.length && hits < 2; j++) {
+      var cand = path.join(root, subs[j], dir)
+      var ok = false
+      try { ok = !!io.dirExists(cand) } catch (_) { ok = false }
+      if (ok) hits++
+    }
+    if (hits >= 2) return p
+  }
+  return null
+}
+
+// 起草质量 lint 主入口：返回 string[]（task.lintWarnings 字段内容）。io 缺省时规则②退化为不触发（零 IO 安全）。
+export function draftLint(t, io) {
+  var out = []
+  if (!t || typeof t !== 'object') return out
+  var touches = Array.isArray(t.touches) ? t.touches : []
+  // ① 整树 glob（多条只报一次）
+  for (var i = 0; i < touches.length; i++) { if (isTreeGlob(touches[i])) { out.push(TREE_GLOB_LINT); break } }
+  // ② 双仓库歧义（附命中路径，便于定位该加哪个仓库前缀）
+  var amb = ambiguousTouch(touches, io)
+  if (amb) out.push(AMBIGUOUS_PATH_LINT + '（' + amb + '）')
+  // ③ full 无 acceptance（pipeline 空串按默认 full 口径）
+  if ((t.pipeline || 'full') === 'full' && !String(t.acceptance || '').trim()) out.push(FULL_NO_ACCEPTANCE_LINT)
+  // ④ 标题缺动词 / 描述为空（描述为空复用调研门禁 EMPTY_DESC_WARNING 文案，单一事实源）
+  if (!TITLE_VERBS.test(String(t.title || ''))) out.push(TITLE_NO_VERB_LINT)
+  if (!String(t.description || '').trim()) out.push(EMPTY_DESC_WARNING)
+  return out
+}
+
 // ===== touches → suggestedContextFiles 自动桥接（调研遵循·host 三件套 ①）=====
 // 让遵守成为最省力路径：建卡触发「无调研上下文」warning 时，直接把 touches 里的具体文件
 // 提炼成可一键采纳的 contextFiles 建议（响应挂 suggestedContextFiles 字段）。

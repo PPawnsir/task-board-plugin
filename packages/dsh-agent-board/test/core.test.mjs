@@ -1318,6 +1318,103 @@ test('create-task RPC: 空描述 + 无调研上下文 + 整树 glob → 三条�
   assert.equal(r.warning.split('；').length, 3)
 })
 
+// ===== 任务起草 lint（proposal n-muwlpbspl3w2）：四规则 lintWarnings[]，不阻塞 =====
+// 与「调研门禁」（createTaskWarnings，瞬态 warning）正交：这是起草质量持久诊断（存 task.lintWarnings[]，
+// get-tasks 透出、详情页 ⚠️ 行）。纯函数 draftLint 在 core.mjs，双仓库歧义读盘经 io 注入。
+
+test('touchDirPrefix: 剥 glob 尾段得目录前缀（裸文件名/纯 ** 无锚点 → 空）', () => {
+  assert.equal(core.touchDirPrefix('packages/dsh-agent-board/**'), 'packages/dsh-agent-board')
+  assert.equal(core.touchDirPrefix('src/**'), 'src')
+  assert.equal(core.touchDirPrefix('src/x.mjs'), 'src')
+  assert.equal(core.touchDirPrefix('a/b/c.mjs'), 'a/b')
+  assert.equal(core.touchDirPrefix('core.mjs'), '')   // 裸文件名无目录锚点，不参与判重
+  assert.equal(core.touchDirPrefix('**'), '')
+})
+
+test('ambiguousTouch: ≥2 子目录同名命中 → 返回相对路径原文；绝对路径/盘符/裸名/缺 io → null', () => {
+  const two = { root: 'ws', subdirs: ['task-board-plugin', 'task-board-federation', 'other'], dirExists: (p) => p === path.join('ws', 'task-board-plugin', 'packages/dsh-agent-board') || p === path.join('ws', 'task-board-federation', 'packages/dsh-agent-board') }
+  assert.equal(core.ambiguousTouch(['packages/dsh-agent-board/core.mjs'], two), 'packages/dsh-agent-board/core.mjs')
+  const one = { root: 'ws', subdirs: ['task-board-plugin', 'other'], dirExists: (p) => p === path.join('ws', 'task-board-plugin', 'packages/dsh-agent-board') }
+  assert.equal(core.ambiguousTouch(['packages/dsh-agent-board/core.mjs'], one), null)
+  assert.equal(core.ambiguousTouch(['/abs/pkg/core.mjs'], two), null)          // 绝对路径不判
+  assert.equal(core.ambiguousTouch(['C:\\abs\\pkg\\core.mjs'], two), null)     // 盘符不判
+  assert.equal(core.ambiguousTouch(['core.mjs'], two), null)                  // 裸文件名不判
+  assert.equal(core.ambiguousTouch(['src/**'], null), null)                   // 缺 io → 零 IO 安全
+  assert.equal(core.ambiguousTouch(['src/**'], { subdirs: ['a', 'b'] }), null) // 缺 dirExists → 退化为不触发
+})
+
+test('draftLint: 四规则各一触发 + 各一不触发（纯函数矩阵）', () => {
+  const io2 = { root: 'ws', subdirs: ['a', 'b'], dirExists: (p) => p === path.join('ws', 'a', 'pkg') || p === path.join('ws', 'b', 'pkg') }
+  // ① 整树 glob：触发 / 不触发（精确到文件级不触发）
+  const t1 = mkTask({ title: '修复样式', description: 'd', acceptance: 'node --test', touches: ['src/**'] })
+  assert.ok(core.draftLint(t1).includes(core.TREE_GLOB_LINT))
+  assert.ok(!core.draftLint(mkTask({ title: '修复样式', description: 'd', acceptance: 'node --test', touches: ['src/x.mjs'] })).includes(core.TREE_GLOB_LINT))
+  // ② 双仓库歧义：触发 / 不触发（目录前缀在两个子目录下都存在才算歧义）
+  const t2 = mkTask({ title: '修复 x', description: 'd', acceptance: 'node --test', touches: ['pkg/core.mjs'] })
+  assert.match(core.draftLint(t2, io2).find((w) => w.indexOf(core.AMBIGUOUS_PATH_LINT) === 0), /pkg\/core\.mjs/)
+  const io1 = { root: 'ws', subdirs: ['a', 'b'], dirExists: (p) => p === path.join('ws', 'a', 'pkg') }
+  assert.equal(core.draftLint(t2, io1).find((w) => w.indexOf(core.AMBIGUOUS_PATH_LINT) === 0), undefined)
+  // ③ full 无验收：触发 / 不触发（work 档或有验收不触发）
+  assert.ok(core.draftLint(mkTask({ title: '修复 x', description: 'd', pipeline: 'full', acceptance: '' })).includes(core.FULL_NO_ACCEPTANCE_LINT))
+  assert.ok(!core.draftLint(mkTask({ title: '修复 x', description: 'd', pipeline: 'work', acceptance: '' })).includes(core.FULL_NO_ACCEPTANCE_LINT))
+  assert.ok(!core.draftLint(mkTask({ title: '修复 x', description: 'd', pipeline: 'full', acceptance: 'node --test' })).includes(core.FULL_NO_ACCEPTANCE_LINT))
+  // ④ 标题缺动词 / 描述空：触发 / 不触发
+  const t4 = mkTask({ title: '看板规则', description: 'd', acceptance: 'node --test' })
+  assert.ok(core.draftLint(t4).includes(core.TITLE_NO_VERB_LINT))
+  const t4n = mkTask({ title: '修复 lint 规则', description: '明确描述', acceptance: 'node --test' })
+  assert.ok(!core.draftLint(t4n).includes(core.TITLE_NO_VERB_LINT))
+  assert.ok(!core.draftLint(t4n).includes(core.EMPTY_DESC_WARNING))
+  assert.ok(core.draftLint(mkTask({ title: '修复 x', description: '', acceptance: 'node --test' })).includes(core.EMPTY_DESC_WARNING))
+})
+
+test('create-task RPC: 起草 lint 落卡 lintWarnings[]，get-tasks 透出（不阻断创建）', async () => {
+  const board = mkBoard([])
+  const h = mkRpcHandlers(board)
+  const r = await h['create-task']({ title: '修复 lint 规则', description: '明确描述', touches: ['src/**'], acceptance: 'node --test' })
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.task.lintWarnings, [core.TREE_GLOB_LINT])
+  const got = await h['get-tasks']({})
+  assert.deepEqual(got.tasks[0].lintWarnings, [core.TREE_GLOB_LINT])
+})
+
+test('update-task RPC: 改标题后重算 lintWarnings（无动词标题触发，改回动词清空）', async () => {
+  const board = mkBoard([mkTask({ id: 't1', title: '修复 x', description: 'd', acceptance: 'node --test' })])
+  const h = mkRpcHandlers(board)
+  assert.equal(board.tasks[0].lintWarnings, undefined) // 直接建卡无字段（老卡零字段）
+  const r = await h['update-task']({ taskId: 't1', title: '看板规则' })
+  assert.deepEqual(r.task.lintWarnings, [core.TITLE_NO_VERB_LINT])
+  const r2 = await h['update-task']({ taskId: 't1', title: '修复 lint 规则' })
+  assert.deepEqual(r2.task.lintWarnings, [])
+})
+
+test('起草 lint：老卡无 lintWarnings 字段 → get-tasks 照常返回不炸（零字段兼容）', async () => {
+  const board = mkBoard([mkTask({ id: 'old', title: '老卡', description: 'd', acceptance: 'node --test' })])
+  const h = mkRpcHandlers(board)
+  const got = await h['get-tasks']({})
+  assert.equal(got.tasks.length, 1)
+  assert.equal(got.tasks[0].lintWarnings, undefined) // 不补造字段，undefined 不炸
+})
+
+test('起草 lint 接线：四入口 draftLint 落卡 + 详情 ⚠️ 行 + README 双份（源码级断言）', () => {
+  const host = hostSrc()
+  assert.equal((host.match(/t\.lintWarnings = draftLint\(t, draftLintIo\(sid, d\.ownerCwd\)/g) || []).length, 4) // task_create/create-task/task_update/update-task 四入口
+  assert.equal((host.match(/function draftLintIo\(/g) || []).length, 1) // IO 注入 helper 单一出处
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  assert.match(coreSrc, /export function draftLint\(t, io\)/)
+  assert.match(coreSrc, /export function ambiguousTouch\(touches, io\)/)
+  assert.match(coreSrc, /export function touchDirPrefix\(p\)/)
+  assert.match(coreSrc, /TREE_GLOB_LINT = 'touches 粒度过粗，几乎锁整仓'/)
+  assert.match(coreSrc, /AMBIGUOUS_PATH_LINT = '路径双仓库歧义，建议加仓库前缀'/)
+  assert.match(coreSrc, /FULL_NO_ACCEPTANCE_LINT = 'full 管线建议带验收命令'/)
+  assert.match(coreSrc, /TITLE_NO_VERB_LINT = '标题缺动作动词/)
+  const detail = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  assert.match(detail, /task\.lintWarnings\.map\(function \(w, i\)/) // 详情 ⚠️ 行小块
+  const pkgReadme = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  const rootReadme = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')
+  assert.equal((pkgReadme.match(/lintWarnings\[\]/g) || []).length, 2)  // 包 README 双处（调研门禁 + 三档通用）
+  assert.equal((rootReadme.match(/lintWarnings\[\]/g) || []).length, 2) // 根 README 同步双处
+})
+
 test('epicPrecheck: 字段有无 + 路径存在性（exists 注入），direct/归档子任务不参与', () => {
   const kids = [
     mkTask({ id: 'k1', title: '无材料', parentId: 'ep', context: { files: [], notes: '' } }),
@@ -3632,7 +3729,7 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
   // dispatch.mjs 解构表尾部追加 hook 族（buildHookPrompt/hookOn/hookSetState/gsb）与驳回包 helper（pushRejection，task-muvg15p5）、
   // Verifier 验收员加餐常量（VERIFIER_PERSONA/VERIFIER_TOOL_FILTER，task-muy3gm03）
   assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER \} = core/)
-  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest \} = core/)
+  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint \} = core/)
   // 既有「全子任务 resolved → 父 verifying」逻辑不动（checkParentAuto 仍在 verifyApply 链路；
   // 但其内部已委托共享 helper maybeAutoCloseParent——单一判定口径，core.mjs 不在 hostSrc 清单，单独读）
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')

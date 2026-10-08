@@ -162,7 +162,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **预研上下文注入（contextFiles/contextNotes，瘦身分离形态）**：主窗口调研时读过的文件与笔记随子代理的**首条 prompt 一次性注入**——调研笔记全文（notes，≤8000 字符）+ **文件清单**（每行「`路径:L起-L止` — 一句用途」）；**文件内容本体不进 prompt**，由子代理用 `read` 工具按行号范围按需自取（执行时盘面更新鲜；旧形态「host 读盘取正文注入」既受单文件 8KB/总包 40KB 截断，又随 runtime 快照每轮刷新重发——自治 run 实测 6×48.8K 字符≈白烧 75–100K token）；UI 侧调研门禁——full/work 且声明了 touches 却未附调研的卡片亮「⚠️ 无调研」徽章，详情页「调研注入」区列 files 清单 + notes 字数（无则明示）
   - **锚点行段与用途**：`contextFiles` 条目写法「`path:L2350-L2420` / `path:L2350`」+ 可选「` — 一句用途`」（em dash 两侧空格分隔；缺省只给路径行号）——锚点只认尾部 `:L<行号>`（兼容 Windows 盘符），清单里原样带上行号供子代理直接按行段 read；锚点写错（`:L0` / `:L5-L2`）自动剥掉，不误导子代理去读空段
   - **按需自取代替 host 预切段**：派发侧零读盘（不再切行段、不再附结构索引块）——子代理自己 `read(path, offset, limit)` 取需要的那段，清单里给出的行号就是起点；`task_preview_context` / `preview-context` 返回的也是这份瘦身清单（不是文件正文）
-- **派发调研门禁（warning 族，软提示不阻断）**：`task_create`/`create-task` 响应附 `warning` 字段——①描述为空「Worker 只能凭标题猜需求」②full/work + touches 非空而未附调研上下文 ③touches 含整树 glob 建议精确到文件级（可多条合并）；GUI 表单内黄色展示不关窗。epic 发布（publish）时自动轻量预检全部子任务注入情况，缺材料则 pushSysNote 汇总提醒主窗口（全有不打扰）；派发时清单组装失败落任务「最近失败」行，不再静默
+- **派发调研门禁（warning 族，软提示不阻断）**：`task_create`/`create-task` 响应附 `warning` 字段——①描述为空「Worker 只能凭标题猜需求」②full/work + touches 非空而未附调研上下文 ③touches 含整树 glob 建议精确到文件级（可多条合并）；GUI 表单内黄色展示不关窗。epic 发布（publish）时自动轻量预检全部子任务注入情况，缺材料则 pushSysNote 汇总提醒主窗口（全有不打扰）；派发时清单组装失败落任务「最近失败」行，不再静默。另存 `lintWarnings[]` 起草 lint（四规则：touches 整树 glob「粒度过粗，几乎锁整仓」/ 相对路径双仓库歧义「建议加仓库前缀」/ full 无验收「建议带验收命令」/ 标题缺动词或描述空），落卡透出、详情页 ⚠️ 行展示，不阻断创建
 - **Worker/Verifier 均可配置异构模型**（⚙️ 弹出层下拉选择，空 = 继承父级），避免同源盲点；模型故障自动熔断回退父级模型
 - 孤儿回收：子代理 run 结束/丢失超 2 分钟 → 任务自动回待办重派
 - 看门狗：运行超时且事件流停滞 → 标记"疑似卡死"（不自动杀，裁决权交主窗口/用户）
@@ -205,6 +205,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **歧义裁决**：Worker 遇歧义不猜测，一律上报；裁决后新 Worker 携带答案接手（Team 托管档附带 system prompt 派发引导 + 默认草稿护栏）
 - **Verifier 验收**：`acceptance` 硬性验收脚本命令，Worker 必须实际运行、Verifier 必须独立复跑；跨档一致
 - **touches 排他**：`touches` 文件级排他锁在活动任务间生效，冲突任务跳过本轮派发，**锁随工作态**（`in-progress`/`verifying` 持有；状态流转到 `resolved` 即释放，`cancelled`/归档同样释放——归档不再承担解锁职责）；跨档一致
+- **起草 lint**：`task_create`/`create-task` 与更新入口现算四规则软警告（touches 整树 glob「粒度过粗，几乎锁整仓」/ 相对路径双仓库歧义「建议加仓库前缀」/ full 无验收「建议带验收命令」/ 标题缺动词或描述空），存 `lintWarnings[]` 落卡透出、详情页 ⚠️ 行展示，不阻断；跨档一致
 - 孤儿回收、看门狗、级联归档、会话隔离同样三档一致
 
 Team 托管档独有（调度员体验）：
