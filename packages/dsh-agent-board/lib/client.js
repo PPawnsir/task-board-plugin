@@ -364,10 +364,14 @@ function apply(ctx) {
         state.poolStatus = (d && d.poolStatus) || null
         // token 消耗聚合（board 级，host 端现算）：范围守卫——响应回来时范围若已变，保留旧值不覆盖
         // （新范围的那次请求会带着新聚合回来；老 host 不返回该字段 → null，零渲染）
-        // ===== usageSummary 变化检测（task-muwq9u04：选范围不重渲染）=====
-        // 病根：范围切换只让 state.usageSummary 换对象，tasksHash 与四个 cfg 开关都不变 → 无 notify
-        // → Token 区冻在旧数字上，要等下一次任意 notify（改任务/切开关）才翻新。
-        // 为什么用「上一次的 JSON 串」比对而不是对象引用：host 每次 get-tasks 都现算聚合、**必然返回新对象**
+        // ===== usageSummary 变化检测 + React 订阅（task-muwq9u04 → task-mv10lvud 根修）=====
+        // 病根（task-mv10lvud 实测「点今天也没变化」）：范围切换时 setRange 先换 state.dateRange（新对象
+        // → setDR 身份变化 → 第一帧渲染成功），随后 fetchTasks 响应把 state.usageSummary 换成新对象并 notify()，
+        // 但 TopPanel 的 update() 里所有 setX 值都 Object.is 全等（tasks 引用不变、布尔不变）→ React 18 全量
+        // bailout，零重渲染 → Token 区永远拿不到新聚合。notify ≠ React 重渲染，须有「新身份的订阅值」做载体。
+        // 修法：TopPanel 补 usageSummary 专属 React state（setUsage(state.usageSummary)），host 每次响应都是
+        // 新对象，身份变化天然触发渲染（订阅见 TopPanel 的 update()）。
+        // 为什么本处用「上一次的 JSON 串」比对而不是对象引用：host 每次 get-tasks 都现算聚合、**必然返回新对象**
         // （引用比较恒真）→ 3s 轮询每轮都 notify，tasksHash 的渲染节约当场作废。JSON 串只在这份聚合
         // 真变了时才不等（KB 级体积、3s 一次，代价可忽略）；赋值前先快照，赋值后比对。
         var usageJsonPrev = JSON.stringify(state.usageSummary || null)
@@ -589,7 +593,8 @@ function apply(ctx) {
       var _ndo = useState(state.notifyDispatch), ndOn = _ndo[0], setNdOn = _ndo[1]; var _nno = useState(state.notifyDone), nnOn = _nno[0], setNnOn = _nno[1]
       var _eso = useState(state.epicSplit), esOn = _eso[0], setEsOn = _eso[1] // 史诗拆分总开关勾选态（设置区「功能」）
       var _vug = useState(state.verifyUserGuide), vugOn = _vug[0], setVugOn = _vug[1] // 自测指南开关勾选态（设置区「验收」）
-      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setNdOn(state.notifyDispatch); setNnOn(state.notifyDone); setEsOn(state.epicSplit); setVugOn(state.verifyUserGuide); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
+      var _usg = useState(state.usageSummary), setUsage = _usg[1] // Token 区聚合订阅（task-mv10lvud 根修）：usageSummary 换新对象即触发渲染
+      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setNdOn(state.notifyDispatch); setNnOn(state.notifyDone); setEsOn(state.epicSplit); setVugOn(state.verifyUserGuide); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr); setUsage(state.usageSummary) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!open) return null
       if (!state.isRootStable) return null // 子代理会话不渲染看板面板（读 isRootStable：瞬态 false 不闪，见 isRoot 蝶变防抖）
       var active = tasks.filter(function (t) { return t.status !== 'archived' }); var archived = tasks.filter(function (t) { return t.status === 'archived' })
