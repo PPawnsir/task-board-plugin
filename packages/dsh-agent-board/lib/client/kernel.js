@@ -194,6 +194,11 @@
         ['circle', { cx: 12, cy: 12, r: 10 }],
         ['rect', { width: 6, height: 6, x: 9, y: 9 }]
       ],
+      // 取消入口图标（详情页「取消」按钮；语义=作废不派发，与删除 trash-2 区分）
+      'ban': [
+        ['circle', { cx: 12, cy: 12, r: 10 }],
+        ['path', { d: 'm4.9 4.9 14.2 14.2' }]
+      ],
       'plus': [
         ['path', { d: 'M5 12h14' }],
         ['path', { d: 'M12 5v14' }]
@@ -497,6 +502,23 @@
         if (r && r.ok === false) { if (onMsg) onMsg('⚠️ ' + (r.error || '删除失败')) }
         else if (onMsg) onMsg('🗑 已删除「' + name + '」')
         if (state.detailId === id) state.detailId = null // 详情页开着被删任务 → 关掉，避免下一帧渲染"任务不存在"
+        fetchTasks()
+        return r
+      }).catch(function (e) { if (onMsg) onMsg('⚠️ ' + String(e)); return { ok: false, error: String(e) } })
+    }
+
+    // ===== 取消通道（与 host cancel-task / task_cancel 门禁一一对应）=====
+    // 可取消状态：草稿/待办/阻塞（未进入执行）。in-progress/verifying 需先终止；resolved 引导归档。
+    // 取消=显式放弃：置 cancelled + 留档可检索、可在归档 tab「恢复待办」；与删除不同，取消不丢数据。
+    function canCancel(t) { return !!t && (t.status === 'draft' || t.status === 'pending' || t.status === 'blocked') }
+    // confirm 预警（与 note「取消后不再派发，可在归档恢复」同口径）；失败时 host 门禁原因原样回显。
+    function cancelTask(id, title, onMsg) {
+      var t = getTask(id)
+      var name = title || (t && t.title) || id
+      if (!window.confirm('取消后不再派发，可在归档恢复。确认取消「' + name + '」？')) return Promise.resolve({ ok: false, cancelled: true })
+      return rpc('cancel-task', { taskId: id }).then(function (r) {
+        if (r && r.ok === false) { if (onMsg) onMsg('⚠️ ' + (r.error || '取消失败')) }
+        else if (onMsg) onMsg('🚫 已取消「' + name + '」（可在归档 tab 恢复待办）')
         fetchTasks()
         return r
       }).catch(function (e) { if (onMsg) onMsg('⚠️ ' + String(e)); return { ok: false, error: String(e) } })

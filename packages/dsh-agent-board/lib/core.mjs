@@ -260,6 +260,27 @@ export function archiveApply(d, t, actor, note) {
   if (p) r.parentUpdated = true
   return r
 }
+// 取消落定（task_cancel 工具与 cancel-task RPC 共享，单一行为口径；门禁 cancelGate 留在
+// rpc.mjs——它只需判 status + claimedBy，无需 IO，与 archiveErr/deleteGate 同居「门禁在接线层、
+// 状态流转在 core」的分工）。置 cancelled + 记历史（actor + 理由 note 可选）。
+// spawn-pending 占位回退：claimedBy='spawn-pending' 是派发瞬时占位（无真实 run，spawn 尚在途），
+// 取消时与 spawn 失败回退同口径清认领位（claimedBy/claimedAt → null），不留死占位。
+// 取消不级联子卡（删除有「未归档子卡」门禁防悬空引用；取消只标记本卡，父卡不删，子卡 parentId
+// 仍指向有效卡）；但取消子卡同样触发父卡自动收口（isChildSettled 已计 cancelled）。
+export function cancelApply(d, t, actor, note) {
+  var ps = t.status
+  if (t.claimedBy) { t.claimedBy = null; t.claimedAt = null } // spawn-pending / 残留认领位回退
+  t.status = 'cancelled'
+  t.cancelledAt = new Date().toISOString()
+  t.resolvedAt = null
+  t.resolution = null
+  delete t.stuckSince
+  ah(t, ps, 'cancelled', actor, note || 'cancelled')
+  var r = { ok: true, task: t }
+  var p = maybeAutoCloseParent(d, t) // 取消路径同样触发父卡自动收口（isChildSettled 已计 cancelled）
+  if (p) r.parentUpdated = true
+  return r
+}
 
 // ===== 史诗 hooks=agent run（宿主生命周期接线）=====
 // 定位：hook 点 = 一次**真实 agent 运行**（不是声明式命令、不走 shell），挂在 epic 卡上、

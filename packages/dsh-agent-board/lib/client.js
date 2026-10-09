@@ -207,6 +207,11 @@ function apply(ctx) {
         ['circle', { cx: 12, cy: 12, r: 10 }],
         ['rect', { width: 6, height: 6, x: 9, y: 9 }]
       ],
+      // 取消入口图标（详情页「取消」按钮；语义=作废不派发，与删除 trash-2 区分）
+      'ban': [
+        ['circle', { cx: 12, cy: 12, r: 10 }],
+        ['path', { d: 'm4.9 4.9 14.2 14.2' }]
+      ],
       'plus': [
         ['path', { d: 'M5 12h14' }],
         ['path', { d: 'M12 5v14' }]
@@ -510,6 +515,23 @@ function apply(ctx) {
         if (r && r.ok === false) { if (onMsg) onMsg('⚠️ ' + (r.error || '删除失败')) }
         else if (onMsg) onMsg('🗑 已删除「' + name + '」')
         if (state.detailId === id) state.detailId = null // 详情页开着被删任务 → 关掉，避免下一帧渲染"任务不存在"
+        fetchTasks()
+        return r
+      }).catch(function (e) { if (onMsg) onMsg('⚠️ ' + String(e)); return { ok: false, error: String(e) } })
+    }
+
+    // ===== 取消通道（与 host cancel-task / task_cancel 门禁一一对应）=====
+    // 可取消状态：草稿/待办/阻塞（未进入执行）。in-progress/verifying 需先终止；resolved 引导归档。
+    // 取消=显式放弃：置 cancelled + 留档可检索、可在归档 tab「恢复待办」；与删除不同，取消不丢数据。
+    function canCancel(t) { return !!t && (t.status === 'draft' || t.status === 'pending' || t.status === 'blocked') }
+    // confirm 预警（与 note「取消后不再派发，可在归档恢复」同口径）；失败时 host 门禁原因原样回显。
+    function cancelTask(id, title, onMsg) {
+      var t = getTask(id)
+      var name = title || (t && t.title) || id
+      if (!window.confirm('取消后不再派发，可在归档恢复。确认取消「' + name + '」？')) return Promise.resolve({ ok: false, cancelled: true })
+      return rpc('cancel-task', { taskId: id }).then(function (r) {
+        if (r && r.ok === false) { if (onMsg) onMsg('⚠️ ' + (r.error || '取消失败')) }
+        else if (onMsg) onMsg('🚫 已取消「' + name + '」（可在归档 tab 恢复待办）')
         fetchTasks()
         return r
       }).catch(function (e) { if (onMsg) onMsg('⚠️ ' + String(e)); return { ok: false, error: String(e) } })
@@ -831,18 +853,20 @@ function apply(ctx) {
     function ArchiveView() {
       var _R = React; var useState = _R.useState
       var _a = useState(state.archQ || ''), q = _a[0], setQ = _a[1]
-      // 归档数据源口径对齐仪表盘（反馈 n-muyg3e0m9z7i）：直接读 state.tasks（get-tasks 全量含归档），
+      // 归档 tab 数据源口径对齐仪表盘（反馈 n-muyg3e0m9z7i）：直接读 state.tasks（get-tasks 全量含归档），
       // 不再依赖独立 state.archived/fetchArchived——旧路径异步填库却未接入 TopPanel 的 notify 更新项，
       // 归档 tab 打开后停在「暂无归档任务」空态，而仪表盘「已归档」计数来自 state.tasks（全量），二者对不上。
-      // 全量 + 按归档时间倒序（archivedAt 优先，回退 resolvedAt/createdAt）+ 顶部注明条数。
-      var archived = state.tasks.filter(function (t) { return t.status === 'archived' })
+      // 全量 + 按归档/取消时间倒序（archivedAt 优先，回退 cancelledAt/resolvedAt/createdAt）+ 顶部注明条数。
+      // 含 cancelled（反馈 n-mv0zbqk... 取消通道）：取消卡在待办列消失（cancelled 不在 COLUMNS）后，
+      // 归入本 tab 可见、可「恢复待办」——否则作废卡从 UI 上彻底蒸发、无法找回。
+      var archived = state.tasks.filter(function (t) { return t.status === 'archived' || t.status === 'cancelled' })
       var list = archived.filter(function (t) {
         if (!q) return true
         var qq = q.toLowerCase()
         return (t.title || '').toLowerCase().indexOf(qq) >= 0 || (t.id || '').toLowerCase().indexOf(qq) >= 0 || (t.tags || []).join(' ').toLowerCase().indexOf(qq) >= 0
       }).sort(function (a, b) {
-        // 归档时间倒序：archivedAt 优先，回退 resolvedAt/createdAt（老卡可能缺 archivedAt）
-        function archTs(t) { return t.archivedAt || t.resolvedAt || t.createdAt || '' }
+        // 归档/取消时间倒序：archivedAt 优先，回退 cancelledAt/resolvedAt/createdAt（老卡可能缺 archivedAt）
+        function archTs(t) { return t.archivedAt || t.cancelledAt || t.resolvedAt || t.createdAt || '' }
         return (archTs(b) || '').localeCompare(archTs(a) || '')
       })
       // 工作模式（与 fetchTasks 同口径）：list=清单模式（恢复不重派）不弹；auto/team 恢复即重派 → confirm 门禁
@@ -855,8 +879,8 @@ function apply(ctx) {
       }
       return React.createElement('div', null,
         React.createElement('input', { value: q, onChange: function (e) { setQ(e.target.value); state.archQ = e.target.value }, placeholder: '检索标题 / ID / 标签…', style: { width: '100%', padding: '5px 8px', fontSize: 11, border: '1px solid ' + C.border2, borderRadius: 5, background: C.card, color: C.text, marginBottom: 8 } }),
-        React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, '共 ' + archived.length + ' 条归档（全量，与仪表盘「已归档」同口径）'),
-        archived.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '暂无归档任务') :
+        React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, '共 ' + archived.length + ' 条归档/已取消（全量，与仪表盘「已归档」同口径；已取消卡同样可恢复待办）'),
+        archived.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '暂无归档/已取消任务') :
         list.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '无匹配结果') :
         list.map(function (t) {
           // 归档行点击进详情（用户 2026-10-09 指令）：复用 state.detailId 机制，与看板卡同路径；
@@ -866,7 +890,8 @@ function apply(ctx) {
               React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: C.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: t.title }, t.title),
               reviewPending(t) ? React.createElement('span', { title: '👁 建议过目（命中风险信号）：\n' + ((t.reviewHint && t.reviewHint.reasons) || []).join('\n'), style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.warn + ' 22%, transparent)', color: C.warn, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 } }, '👁 建议过目') : null,
               t.verification ? React.createElement('span', { title: '验收结论: ' + (t.verification.summary || '').slice(0, 100), style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: t.verification.verdict === 'approved' ? C.ok : C.err, color: C_INV } }, t.verification.verdict === 'approved' ? '过' : '驳') : null,
-              React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, t.archivedAt ? ago(t.archivedAt) : '')),
+              t.status === 'cancelled' ? React.createElement('span', { title: '已取消（可恢复待办）', style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.warn + ' 20%, transparent)', color: C.warn, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 } }, '已取消') : null,
+              React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, (t.archivedAt || t.cancelledAt) ? ago(t.archivedAt || t.cancelledAt) : '')),
             t.verification && t.verification.summary ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '📝 ' + t.verification.summary) : null,
             React.createElement('div', { style: { display: 'flex', gap: 5, marginTop: 4, flexWrap: 'wrap' } },
               React.createElement('button', { onClick: function (e) { e.stopPropagation(); restore(t.id) }, title: wm === 'list' ? '恢复为待办' : '恢复为待办（将按当前工作模式立即重新派发，消耗一轮 Worker+Verifier token）', style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '↩ 恢复待办'),
@@ -1440,6 +1465,8 @@ function apply(ctx) {
           task.status === 'verifying' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'approved' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.ok, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('check-circle', 10), '通过') : null,
           task.status === 'verifying' ? React.createElement('button', { onClick: function () { var r = window.prompt('驳回原因：'); doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'rejected', comment: r || '' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.err, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('x-circle', 10), '驳回') : null,
           task.status === 'resolved' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('archive-task', { taskId: task.id }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.text2, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('archive', 10), '归档') : null),
+          // 取消（仅草稿/待办/阻塞）：confirm 预警「取消后不再派发，可在归档恢复」；与删除并列但语义=作废留档（可恢复）
+          canCancel(task) ? React.createElement('button', { onClick: function () { cancelTask(task.id, task.title, setActionMsg) }, title: '取消任务（取消后不再派发，可在归档恢复待办）', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.warn, borderRadius: 3, background: 'transparent', color: C.warn, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('ban', 10), '取消') : null,
           // 删除（仅草稿/待办/阻塞）：confirm 防误删；被 host 门禁拒绝时把原因回显到详情页 actionMsg
           // 容器 div 的收尾括号已挂在「归档」行；删除按钮作为**额外一行元素**排在它后面
           // （多一个实参给同一个 createElement，属于合法调用），因此本行自身必须配平。

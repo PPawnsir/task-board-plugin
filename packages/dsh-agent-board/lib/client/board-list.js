@@ -192,18 +192,20 @@
     function ArchiveView() {
       var _R = React; var useState = _R.useState
       var _a = useState(state.archQ || ''), q = _a[0], setQ = _a[1]
-      // 归档数据源口径对齐仪表盘（反馈 n-muyg3e0m9z7i）：直接读 state.tasks（get-tasks 全量含归档），
+      // 归档 tab 数据源口径对齐仪表盘（反馈 n-muyg3e0m9z7i）：直接读 state.tasks（get-tasks 全量含归档），
       // 不再依赖独立 state.archived/fetchArchived——旧路径异步填库却未接入 TopPanel 的 notify 更新项，
       // 归档 tab 打开后停在「暂无归档任务」空态，而仪表盘「已归档」计数来自 state.tasks（全量），二者对不上。
-      // 全量 + 按归档时间倒序（archivedAt 优先，回退 resolvedAt/createdAt）+ 顶部注明条数。
-      var archived = state.tasks.filter(function (t) { return t.status === 'archived' })
+      // 全量 + 按归档/取消时间倒序（archivedAt 优先，回退 cancelledAt/resolvedAt/createdAt）+ 顶部注明条数。
+      // 含 cancelled（反馈 n-mv0zbqk... 取消通道）：取消卡在待办列消失（cancelled 不在 COLUMNS）后，
+      // 归入本 tab 可见、可「恢复待办」——否则作废卡从 UI 上彻底蒸发、无法找回。
+      var archived = state.tasks.filter(function (t) { return t.status === 'archived' || t.status === 'cancelled' })
       var list = archived.filter(function (t) {
         if (!q) return true
         var qq = q.toLowerCase()
         return (t.title || '').toLowerCase().indexOf(qq) >= 0 || (t.id || '').toLowerCase().indexOf(qq) >= 0 || (t.tags || []).join(' ').toLowerCase().indexOf(qq) >= 0
       }).sort(function (a, b) {
-        // 归档时间倒序：archivedAt 优先，回退 resolvedAt/createdAt（老卡可能缺 archivedAt）
-        function archTs(t) { return t.archivedAt || t.resolvedAt || t.createdAt || '' }
+        // 归档/取消时间倒序：archivedAt 优先，回退 cancelledAt/resolvedAt/createdAt（老卡可能缺 archivedAt）
+        function archTs(t) { return t.archivedAt || t.cancelledAt || t.resolvedAt || t.createdAt || '' }
         return (archTs(b) || '').localeCompare(archTs(a) || '')
       })
       // 工作模式（与 fetchTasks 同口径）：list=清单模式（恢复不重派）不弹；auto/team 恢复即重派 → confirm 门禁
@@ -216,8 +218,8 @@
       }
       return React.createElement('div', null,
         React.createElement('input', { value: q, onChange: function (e) { setQ(e.target.value); state.archQ = e.target.value }, placeholder: '检索标题 / ID / 标签…', style: { width: '100%', padding: '5px 8px', fontSize: 11, border: '1px solid ' + C.border2, borderRadius: 5, background: C.card, color: C.text, marginBottom: 8 } }),
-        React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, '共 ' + archived.length + ' 条归档（全量，与仪表盘「已归档」同口径）'),
-        archived.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '暂无归档任务') :
+        React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, '共 ' + archived.length + ' 条归档/已取消（全量，与仪表盘「已归档」同口径；已取消卡同样可恢复待办）'),
+        archived.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '暂无归档/已取消任务') :
         list.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '无匹配结果') :
         list.map(function (t) {
           // 归档行点击进详情（用户 2026-10-09 指令）：复用 state.detailId 机制，与看板卡同路径；
@@ -227,7 +229,8 @@
               React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: C.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: t.title }, t.title),
               reviewPending(t) ? React.createElement('span', { title: '👁 建议过目（命中风险信号）：\n' + ((t.reviewHint && t.reviewHint.reasons) || []).join('\n'), style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.warn + ' 22%, transparent)', color: C.warn, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 } }, '👁 建议过目') : null,
               t.verification ? React.createElement('span', { title: '验收结论: ' + (t.verification.summary || '').slice(0, 100), style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: t.verification.verdict === 'approved' ? C.ok : C.err, color: C_INV } }, t.verification.verdict === 'approved' ? '过' : '驳') : null,
-              React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, t.archivedAt ? ago(t.archivedAt) : '')),
+              t.status === 'cancelled' ? React.createElement('span', { title: '已取消（可恢复待办）', style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.warn + ' 20%, transparent)', color: C.warn, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 } }, '已取消') : null,
+              React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, (t.archivedAt || t.cancelledAt) ? ago(t.archivedAt || t.cancelledAt) : '')),
             t.verification && t.verification.summary ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '📝 ' + t.verification.summary) : null,
             React.createElement('div', { style: { display: 'flex', gap: 5, marginTop: 4, flexWrap: 'wrap' } },
               React.createElement('button', { onClick: function (e) { e.stopPropagation(); restore(t.id) }, title: wm === 'list' ? '恢复为待办' : '恢复为待办（将按当前工作模式立即重新派发，消耗一轮 Worker+Verifier token）', style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '↩ 恢复待办'),

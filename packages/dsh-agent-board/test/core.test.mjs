@@ -2743,8 +2743,8 @@ test('README 双份：运行区子会话 id 归属标注 + git 纪律红线各�
 // 修法：ArchiveView 直接读 state.tasks.filter(status==='archived')，与仪表盘同源全量 + 归档时间倒序 + 顶部注条数。
 test('ArchiveView: 归档数据源读 state.tasks 全量（对齐仪表盘「已归档」），不依赖 state.archived/fetchArchived（源码级断言）', () => {
   const src = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
-  // 数据源必须与仪表盘同源：state.tasks.filter(status==='archived')（get-tasks 全量含归档）
-  assert.match(src, /var archived = state\.tasks\.filter\(function \(t\) \{ return t\.status === 'archived' \}\)/)
+  // 数据源必须与仪表盘同源：state.tasks.filter(status==='archived' || status==='cancelled')（get-tasks 全量含归档；取消通道卡2：cancelled 归入本 tab 可见可恢复）
+  assert.match(src, /var archived = state\.tasks\.filter\(function \(t\) \{ return t\.status === 'archived' \|\| t\.status === 'cancelled' \}\)/)
   // 反向断言：不得再读独立 state.archived.filter（异步填库不触发重渲染 → tab 恒空）
   assert.doesNotMatch(src, /state\.archived\.filter/)
   // 不得再挂「空则 fetchArchived」的 useEffect（独立数据源已移除）
@@ -2752,14 +2752,17 @@ test('ArchiveView: 归档数据源读 state.tasks 全量（对齐仪表盘「已
   // 不得有任何 7 日窗口 cutoff（老归档 >7 天被整批滤掉是原根因候选形态之一）
   assert.doesNotMatch(src, /cutoff/)
   assert.doesNotMatch(src, /7 \* 24 \* 60|7 \* 86400000|604800000/)
-  // 顶部注明条数（与仪表盘「已归档」同口径）
-  assert.match(src, /'共 ' \+ archived\.length \+ ' 条归档/)
-  // 归档时间倒序：archivedAt 优先，回退 resolvedAt/createdAt
-  assert.match(src, /function archTs\(t\) \{ return t\.archivedAt \|\| t\.resolvedAt \|\| t\.createdAt \|\| '' \}/)
+  // 顶部注明条数（与仪表盘「已归档」同口径，含已取消）
+  assert.match(src, /'共 ' \+ archived\.length \+ ' 条归档\/已取消/)
+  // 归档/取消时间倒序：archivedAt 优先，回退 cancelledAt/resolvedAt/createdAt
+  assert.match(src, /function archTs\(t\) \{ return t\.archivedAt \|\| t\.cancelledAt \|\| t\.resolvedAt \|\| t\.createdAt \|\| '' \}/)
+  // 取消卡可见标记：行内「已取消」chip + 时间戳回退 cancelledAt
+  assert.match(src, /t\.status === 'cancelled' \? React\.createElement\('span', \{ title: '已取消（可恢复待办）'/)
+  assert.match(src, /\(t\.archivedAt \|\| t\.cancelledAt\) \? ago\(t\.archivedAt \|\| t\.cancelledAt\)/)
   // 组装产物同步（pretest 已跑 build-client）
   const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.match(built, /var archived = state\.tasks\.filter\(function \(t\) \{ return t\.status === 'archived' \}\)/)
-  assert.match(built, /'共 ' \+ archived\.length \+ ' 条归档/)
+  assert.match(built, /var archived = state\.tasks\.filter\(function \(t\) \{ return t\.status === 'archived' \|\| t\.status === 'cancelled' \}\)/)
+  assert.match(built, /'共 ' \+ archived\.length \+ ' 条归档\/已取消/)
 })
 
 // ===== 史诗 hooks=agent run（task-muuw4ov7）：host 生命周期接线（pre 闸门 / post 收口 / 薄框架 prompt / 主窗口限定写入）=====
@@ -4094,6 +4097,83 @@ test('task_archive 工具：与 archive-task RPC 同一门禁口径（僵尸放�
   h = mkRpcHandlers(mkBoard([t]), { hasActiveRun: () => true })
   r = await h.__tools['task_archive'].execute({ taskId: 'z3' }, {})
   assert.equal(r.ok, false); assert.match(r.error, /cannot archive/)
+})
+
+// ===== 取消通道（task_cancel 工具 + cancel-task RPC，反馈 n-mv0zbqk...）=====
+test('cancel-task RPC: draft/pending/blocked 三态可取消，reason 落历史', async () => {
+  const d1 = mkTask({ id: 'd1', status: 'draft' })
+  const p1 = mkTask({ id: 'p1', status: 'pending' })
+  const b1 = mkTask({ id: 'b1', status: 'blocked', resolution: '卡住了' })
+  const board = mkBoard([d1, p1, b1])
+  const h = mkRpcHandlers(board)
+  assert.equal((await h['cancel-task']({ taskId: 'd1', reason: '误建' })).ok, true)
+  assert.equal((await h['cancel-task']({ taskId: 'p1' })).ok, true)
+  assert.equal((await h['cancel-task']({ taskId: 'b1', reason: '放弃' })).ok, true)
+  assert.equal(d1.status, 'cancelled'); assert.ok(d1.cancelledAt)
+  assert.equal(p1.status, 'cancelled'); assert.ok(p1.cancelledAt)
+  assert.equal(b1.status, 'cancelled'); assert.equal(b1.resolution, null) // 阻塞残留 resolution 清空
+  // reason 落历史（actor + note）
+  assert.ok(d1.history.some(function (x) { return x.to === 'cancelled' && x.actor === 'tester' && /取消: 误建/.test(x.note) }))
+  assert.ok(p1.history.some(function (x) { return x.to === 'cancelled' && x.actor === 'tester' && /取消/.test(x.note) }))
+  assert.ok(b1.history.some(function (x) { return x.to === 'cancelled' && /取消: 放弃/.test(x.note) }))
+})
+
+test('cancel-task RPC: in-progress(真实 run)/verifying/resolved 拒（terminate/archive 语义）', async () => {
+  const ip = mkTask({ id: 'ip', status: 'in-progress', claimedBy: 'run-x' })
+  const vf = mkTask({ id: 'vf', status: 'verifying' })
+  const rs = mkTask({ id: 'rs', status: 'resolved' })
+  const board = mkBoard([ip, vf, rs])
+  const h = mkRpcHandlers(board)
+  let r = await h['cancel-task']({ taskId: 'ip' })
+  assert.equal(r.ok, false); assert.match(r.error, /terminate-agent/); assert.equal(ip.status, 'in-progress')
+  r = await h['cancel-task']({ taskId: 'vf' })
+  assert.equal(r.ok, false); assert.match(r.error, /terminate-agent/); assert.equal(vf.status, 'verifying')
+  r = await h['cancel-task']({ taskId: 'rs' })
+  assert.equal(r.ok, false); assert.match(r.error, /归档/); assert.equal(rs.status, 'resolved')
+})
+
+test('cancel-task RPC: spawn-pending 边缘回退（清认领位，不留死占位）', async () => {
+  const sp = mkTask({ id: 'sp', status: 'in-progress', claimedBy: 'spawn-pending', claimedAt: '2026-01-01T00:00:00Z' })
+  const board = mkBoard([sp])
+  const h = mkRpcHandlers(board)
+  const r = await h['cancel-task']({ taskId: 'sp', reason: 'spawn 在途作废' })
+  assert.equal(r.ok, true)
+  assert.equal(sp.status, 'cancelled')
+  assert.equal(sp.claimedBy, null); assert.equal(sp.claimedAt, null) // 占位回退（与 spawn 失败同口径）
+  assert.ok(sp.history.some(function (x) { return x.from === 'in-progress' && x.to === 'cancelled' }))
+})
+
+test('task_cancel 工具：与 cancel-task RPC 同一门禁口径（放行/拒绝/幂等）', async () => {
+  const t = mkTask({ id: 'x1', status: 'pending' })
+  let h = mkRpcHandlers(mkBoard([t]))
+  let r = await h.__tools['task_cancel'].execute({ taskId: 'x1', reason: '走工具通道' }, {})
+  assert.equal(r.ok, true); assert.equal(t.status, 'cancelled')
+  // 幂等：再次取消已取消卡 → alreadyCancelled
+  r = await h.__tools['task_cancel'].execute({ taskId: 'x1' }, {})
+  assert.equal(r.ok, true); assert.equal(r.alreadyCancelled, true)
+  // 执行中拒绝（工具通道同门禁）
+  const t2 = mkTask({ id: 'x2', status: 'in-progress', claimedBy: 'run-y' })
+  h = mkRpcHandlers(mkBoard([t2]))
+  r = await h.__tools['task_cancel'].execute({ taskId: 'x2' }, {})
+  assert.equal(r.ok, false); assert.match(r.error, /terminate-agent/)
+})
+
+test('task_cancel GUI 按钮门禁：canCancel 三态 + 详情页按钮接线 + confirm 预警 + 产物重组装', () => {
+  const ksrc = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
+  const tdsrc = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // canCancel 谓词与 canDelete 同三态口径（draft/pending/blocked）
+  assert.match(ksrc, /function canCancel\(t\) \{ return !!t && \(t\.status === 'draft' \|\| t\.status === 'pending' \|\| t\.status === 'blocked'\) \}/)
+  // confirm 预警 + cancel-task RPC 调用
+  assert.ok(ksrc.indexOf('取消后不再派发，可在归档恢复。确认取消') >= 0, 'kernel.js 缺 confirm 预警')
+  assert.ok(ksrc.indexOf("rpc('cancel-task'") >= 0, 'kernel.js 缺 cancel-task 调用')
+  // 详情页按钮门禁：canCancel(task) 才渲染取消按钮
+  assert.ok(tdsrc.indexOf('canCancel(task) ? React.createElement') >= 0, 'task-detail.js 缺 canCancel 门禁')
+  assert.ok(tdsrc.indexOf('cancelTask(task.id, task.title, setActionMsg)') >= 0, 'task-detail.js 缺取消按钮接线')
+  // 产物重组装：关键接线标记出现在 lib/client.js
+  for (const m of ['function canCancel(t)', "rpc('cancel-task'", '取消后不再派发，可在归档恢复', 'canCancel(task) ? React.createElement']) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺标记：' + m)
+  }
 })
 
 // ===== 反馈修复（task-mux3uvx3，反馈 n-muw706h1uymy）：归档路径触发父卡收口 + task_resolve 守卫对齐 =====
