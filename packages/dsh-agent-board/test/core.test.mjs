@@ -1018,6 +1018,15 @@ test('README 双份同步记录 touches 锁随工作态口径（状态流转到 
   assert.ok(!pkg.includes('锁持到归档'), 'README 不应再记录「锁持到归档」旧口径')
 })
 
+test('README 定位段：agent 团队持久台账与治理层关键词存在（台账/治理层/审计台/流水线归机器）+ 双份逐字一致', () => {
+  const pkg = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  const root = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')
+  assert.equal(pkg, root) // 两份 README 必须字节一致（npm run sync-readme 的约束）
+  for (const s of ['agent 团队的持久台账与治理层', '台账', '治理层', '审计台', '流水线归机器，审计台归人', '验收独立复跑', '适合谁']) {
+    assert.ok(root.includes(s), 'README 定位段应含关键词：' + s)
+  }
+})
+
 // ===== 派发决策（touches 拦截）=====
 test('pickDispatch: touches 与活动任务冲突 → 不进 pendings，记入 blockedTouches', () => {
   const tasks = [
