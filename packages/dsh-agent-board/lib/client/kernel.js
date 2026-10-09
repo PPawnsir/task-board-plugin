@@ -584,7 +584,7 @@
       if (hasFilter) { active = active.filter(passFilter); archived = archived.filter(passFilter) }
       var content
       if (view === 'dashboard') { content = React.createElement(Dashboard) }
-      else if (view === 'archive') { content = React.createElement(ArchiveView) }
+      else if (view === 'archive') { content = detailId ? React.createElement(DetailView) : React.createElement(ArchiveView) }
       else if (view === 'team') { content = React.createElement(TeamView) }
       else if (detailId) { content = React.createElement(DetailView) }
       else {

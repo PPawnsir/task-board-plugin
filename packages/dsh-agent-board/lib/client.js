@@ -597,7 +597,7 @@ function apply(ctx) {
       if (hasFilter) { active = active.filter(passFilter); archived = archived.filter(passFilter) }
       var content
       if (view === 'dashboard') { content = React.createElement(Dashboard) }
-      else if (view === 'archive') { content = React.createElement(ArchiveView) }
+      else if (view === 'archive') { content = detailId ? React.createElement(DetailView) : React.createElement(ArchiveView) }
       else if (view === 'team') { content = React.createElement(TeamView) }
       else if (detailId) { content = React.createElement(DetailView) }
       else {
@@ -854,7 +854,9 @@ function apply(ctx) {
         archived.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '暂无归档任务') :
         list.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '无匹配结果') :
         list.map(function (t) {
-          return React.createElement('div', { key: t.id, style: { padding: '6px 8px', marginBottom: 5, background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } },
+          // 归档行点击进详情（用户 2026-10-09 指令）：复用 state.detailId 机制，与看板卡同路径；
+          // 详情页对 archived 的操作区既有门禁不回归（恢复待办=保存并重置、删除仅 draft/pending/blocked）。
+          return React.createElement('div', { key: t.id, onClick: function () { state.detailId = t.id; notify() }, title: '点击查看详情', style: { padding: '6px 8px', marginBottom: 5, background: C.card, border: '1px solid ' + C.border, borderRadius: 6, cursor: 'pointer' } },
             React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
               React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: C.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: t.title }, t.title),
               reviewPending(t) ? React.createElement('span', { title: '👁 建议过目（命中风险信号）：\n' + ((t.reviewHint && t.reviewHint.reasons) || []).join('\n'), style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.warn + ' 22%, transparent)', color: C.warn, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 } }, '👁 建议过目') : null,
@@ -862,7 +864,7 @@ function apply(ctx) {
               React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, t.archivedAt ? ago(t.archivedAt) : '')),
             t.verification && t.verification.summary ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '📝 ' + t.verification.summary) : null,
             React.createElement('div', { style: { display: 'flex', gap: 5, marginTop: 4, flexWrap: 'wrap' } },
-              React.createElement('button', { onClick: function () { restore(t.id) }, title: wm === 'list' ? '恢复为待办' : '恢复为待办（将按当前工作模式立即重新派发，消耗一轮 Worker+Verifier token）', style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '↩ 恢复待办'),
+              React.createElement('button', { onClick: function (e) { e.stopPropagation(); restore(t.id) }, title: wm === 'list' ? '恢复为待办' : '恢复为待办（将按当前工作模式立即重新派发，消耗一轮 Worker+Verifier token）', style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '↩ 恢复待办'),
               (function () {
                 var runs = historyRuns(t)
                 if (!runs.length) return React.createElement('span', { style: { fontSize: 9, color: C.text2, opacity: 0.6, padding: '2px 0' } }, '无历史会话')
@@ -871,7 +873,7 @@ function apply(ctx) {
                   var seq = r.role === 'verifier' ? (++vN) : (++wN)
                   var isV = r.role === 'verifier'
                   return React.createElement('button', {
-                    key: i, onClick: function () { if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(r.id) },
+                    key: i, onClick: function (e) { e.stopPropagation(); if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(r.id) },
                     title: (isV ? 'Verifier' : 'Worker') + ' 第 ' + seq + ' 次' + (r.at ? ' · ' + ago(r.at) : '') + (r.model ? ' · ' + r.model : '') + '（' + r.id + '）',
                     style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + (isV ? C.warn : C.brand), borderRadius: 3, background: 'transparent', color: isV ? C.warn : C.brand, cursor: 'pointer' }
                   }, '→ ' + (isV ? 'V' : 'W') + '#' + seq)
