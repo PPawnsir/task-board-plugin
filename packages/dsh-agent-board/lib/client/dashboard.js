@@ -582,13 +582,14 @@
     // 近 14 天柱形通用画法（① 通过率 / ③ 超时率共用）：cells = [{ k, rate(null=当日无样本), tip }]
     //   今日柱 brand 高亮 + 率值顶标；无样本日画 3px 灰基线（title 写明无样本，不假装 0%）。
     function qtDayBars(cells, color, todayKey) {
-      return React.createElement('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 3, height: 46 } },
+      return React.createElement('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 3, height: 46, minWidth: 0, overflow: 'hidden' } },
         cells.map(function (c) {
           var isToday = c.k === todayKey
           var h = c.rate === null ? 3 : Math.max(4, Math.round(c.rate * 34))
+          h = Math.min(22, h) // clamp 柱高：100% 柱封顶 22px——46px 绘图容器扣掉上下率值/日期标签与 gap/描边后不越出，防单日 100% 黑柱向上盖住右列
           var kp = c.k.split('-')
           var dLabel = Number(kp[1]) + '/' + Number(kp[2])
-          return React.createElement('div', { key: c.k, style: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', gap: 1 }, title: c.tip },
+          return React.createElement('div', { key: c.k, style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', gap: 1 }, title: c.tip },
             c.rate !== null ? React.createElement('span', { style: { fontSize: 8, color: isToday ? C.brand : C.text2 } }, mpPct(c.rate)) : null,
             React.createElement('div', { style: { width: '100%', maxWidth: 22, height: h + 'px', borderRadius: 2, background: c.rate === null ? C.nested : (isToday ? C.brand : color), border: '1px solid ' + (isToday ? C.brand : (c.rate === null ? C.border : color)) } }),
             React.createElement('span', { style: { fontSize: 8, color: isToday ? C.brand : C.text2 } }, dLabel))
@@ -633,7 +634,7 @@
       })
       var fpHas = false; fpCells.forEach(function (c) { if (c.rate !== null) fpHas = true })
       var fpToday = fpCells[fpCells.length - 1]
-      var block1 = React.createElement('div', { style: { flex: '1 1 260px', minWidth: 230 } },
+      var block1 = React.createElement('div', { style: { flex: '1 1 260px', minWidth: 230, overflow: 'hidden' } },
         blockHead('一次通过率（近 14 天）', React.createElement('span', null, '今日 ', React.createElement('span', { style: { color: fpToday.rate !== null ? C.brand : C.text2, fontWeight: 600 } }, fpToday.rate !== null ? mpPct(fpToday.rate) : '—')), '一次通过率 = 当天落定「已完成」任务里零驳回（rejectCount=0）的占比；驳回 = Verifier 验收判 reject'),
         fpHas ? qtDayBars(fpCells, C.ok, todayKey)
           : React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '近 14 天窗口内暂无 resolved 任务落定'))
@@ -661,7 +662,7 @@
       })
       var toHas = false; toCells.forEach(function (c) { if (c.rate !== null) toHas = true })
       var toToday = toCells[toCells.length - 1]
-      var block3 = React.createElement('div', { style: { flex: '1 1 260px', minWidth: 230 } },
+      var block3 = React.createElement('div', { style: { flex: '1 1 260px', minWidth: 230, overflow: 'hidden' } },
         blockHead('超时率走势（近 14 天）', React.createElement('span', null, '今日 ', React.createElement('span', { style: { color: toToday.rate !== null ? C.warn : C.text2, fontWeight: 600 } }, toToday.rate !== null ? mpPct(toToday.rate) : '—')), '超时率 = 超时落定（timeout/error）的 run 占当天 run 的比例'),
         toHas ? qtDayBars(toCells, C.warn, todayKey)
           : React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '近 14 天窗口内暂无 run 落定'))

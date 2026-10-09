@@ -8,6 +8,7 @@
 //   ③ 空态——整区空态灰字（锚 id 照挂）+ 单块空态灰字；无样本日画灰基线不假装 0%
 //   ④ caption 口径一句——看板派发 run 本体 + 驳回定义（验收 verdict rejected）
 //   ⑤ 接线与产物——Dashboard 在 ModelPerf 正下方挂载 QualityTrends；client.js 已重组装；README 双份同步
+//   ⑥ 重叠回归锁（task-mv11xd0o）——柱图容器 minWidth/overflow 三件套 + 柱高 clamp 22px（防单日 100% 柱越界盖右列）
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -101,4 +102,24 @@ test('卡4⑤：接线——Dashboard 挂载在 ModelPerf 正下方；产物已�
   const r2 = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
   assert.equal(r1, r2, 'README 双份必须逐字一致（npm run sync-readme）')
   assert.ok(r1.indexOf('质量趋势') >= 0, 'README 仪表盘段缺「质量趋势」区说明')
+})
+
+// ===== ⑥ 重叠回归锁（task-mv11xd0o）：柱图容器 minWidth/overflow + 柱高 clamp =====
+// 缺陷复盘：范围收窄到单日 + 当日 100% 时，一次通过率黑柱向上越界盖住右侧「卡时长分布」面板标题/条形。
+// 锁法（源码级硬断言，防回归重跑）：① 柱图容器 minWidth:0 + overflow:hidden（flex 项不越界三件套）
+//   ② 柱高 clamp 到 22px（46px 绘图容器扣上下率值/日期标签与 gap/描边后不越出）
+test('卡4⑥：重叠回归锁——柱图容器 minWidth/overflow 三件套 + 柱高 clamp 22px', () => {
+  // ① 柱图容器锁：qtDayBars 容器带 minWidth:0 + overflow:hidden（flex 项不越界三件套）
+  const bars = sliceFn(src, 'qtDayBars')
+  assert.ok(bars.indexOf('height: 46, minWidth: 0, overflow: \'hidden\'') >= 0, 'qtDayBars 容器须带 minWidth:0 + overflow:hidden（flex 不越界三件套）')
+  // ① 柱体 cell 锁：flex:1 项必须 minWidth:0 才能收缩到容器内（否则 min-content 撑破容器越界）
+  assert.ok(bars.indexOf('flex: 1, minWidth: 0') >= 0, '柱体 cell 须带 minWidth:0（flex:1 项可收缩）')
+  // ① 左右分栏锁：block1（一次通过率）/ block3（超时率）左列容器 overflow:hidden 防越界盖右列
+  const blockLocks = src.split('flex: \'1 1 260px\', minWidth: 230, overflow: \'hidden\'').length - 1
+  assert.ok(blockLocks >= 2, 'block1/block3 左列容器须均带 overflow:hidden（命中 ' + blockLocks + ' 处，应 ≥2）')
+  // ② 柱高 clamp：100% 柱封顶 22px（防单日 100% 黑柱越出绘图容器）
+  assert.ok(src.indexOf('h = Math.min(22, h)') >= 0, '柱高须 clamp 到 22px（防单日 100% 黑柱越界）')
+  // 产物重组装：client.js 同源标记须存在（npm run build-client 已重组装）
+  assert.ok(built.indexOf('height: 46, minWidth: 0, overflow: \'hidden\'') >= 0, 'client.js 缺容器锁标记（需 npm run build-client 重组装）')
+  assert.ok(built.indexOf('h = Math.min(22, h)') >= 0, 'client.js 缺柱高 clamp 标记（需 npm run build-client 重组装）')
 })
