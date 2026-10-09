@@ -9,6 +9,11 @@ import path from 'node:path'
 import fsNode from 'node:fs'
 const { seed, normalizeBoard, vt, boardHome } = core
 
+// 进程内 tmp 序号（配合 pid + 时间戳拼出唯一 tmp 名）：并发 wt() 各自写各自的 tmp，
+// 消灭「两个 chunked 写在同一 p+'.tmp' 上交错 → rename 把拼接怪装上正位」的撕裂根因。
+// 模块级（而非 per-store）是为了同一进程内多个 store 实例（测试/热重载）也不会撞名。
+var tmpSeq = 0
+
 // 腐坏看板自动抢救（P0 根修 task-mv0bl9vg ③）：从撕裂/夹残片的 JSON 原文里截取**第一个完整 JSON 值**。
 // 手法 = JSON.parse 报错 position 截断法（本次事故人工恢复就是这招）：整串 parse 失败时，
 // V8 报错信息含 "position N"（实测 node v24：'{"a":1}{"b":2}' 报 position 18，即第二个值起点），
@@ -108,6 +113,11 @@ export function createStore(ctx, state, deps) {
       }
       return false
     }
+    // 锁感知写回（P1 根修 task-mv1e17x9）：locked=true（调用方已在 mutateLocked 锁内）→ 直接执行；
+    // locked=false（rt 被锁外直读触发，如 poolCycle/rpc/notify）→ 经 withLock 串行。
+    // 为什么不能一律 withLock：rt 在 mutateLocked 锁内被调用时，再套 withLock 会链到当前**未落定**的锁上
+    // （withLock 是简单 promise 链，不可重入）→ 死锁。故用 locked 标志位区分，锁内直跑、锁外补锁。
+    function lockAware(sid, locked, fn) { return locked ? fn() : withLock(sid, fn) }
     // 接管落盘：两条路径，都保证「接管后看板目录里只剩新 sid 那一个文件」（不残留 .adopt-/.tmp 之类残件——
     // 残留一份含全部历史卡的旧板 = 用户磁盘上多一份完整看板，下次继承还会把它算成候选）。
     //   ① 主路径 rename(p → np)：原子、复用 wt() 同款 EPERM/EBUSY 退避重试。注意 rename 只搬内容，
@@ -116,32 +126,37 @@ export function createStore(ctx, state, deps) {
     //      读到 ownerSession 不匹配会退回空板，用户视角仍是「看板被清空」）。
     //   ② 兜底 rename 走不通（跨设备/顽固占用）→ wt() 写新板 + unlinkRetry 删旧板。先写后删：
     //      任何时刻磁盘上至少有一份完整看板。
-    async function adoptBoard(sid, cand, cwd) {
-      var p = boardPath(cand.sid), np = boardPath(sid)
-      // 目标名已被占用 → 绝不接管（防覆盖：本会话看板若只是「这一刻读不到」，覆盖等于把本板换成孤儿板）
-      if (cand.sid === sid || fsNode.existsSync(np)) return false
-      var c = null
-      try { c = JSON.parse(await fsNode.promises.readFile(p, 'utf8')) } catch (e) { console.error('[task-board] 继承失败（读旧板）:', String(e)); return false }
-      if (!vt(c)) return false
-      c.ownerSession = sid
-      if (typeof cwd === 'string' && cwd) c.ownerCwd = cwd
-      if (await renameRetry(p, np)) {                            // ① 主路径：先改名，再把 ownerSession 改写写回
-        try {
-          await wt(sid, c)
-          console.error('[task-board] 继承看板 ' + cand.sid + ' → ' + sid + '（工作区 ' + cwd + '，原主已不在 roots）')
-          return true
-        } catch (e) {
-          console.error('[task-board] 继承失败（改写 ownerSession）:', String(e))
-          await renameRetry(np, p)                               // 回滚到旧名：下次 rt 还能再试，且不留半成品
-          return false
+    // 整段经 lockAware 串行（继承写回归一进锁）：locked=false 时并发继承/写盘不会互相交错。
+    async function adoptBoard(sid, cand, cwd, locked) {
+      return lockAware(sid, locked, async function () {
+        var p = boardPath(cand.sid), np = boardPath(sid)
+        // 目标名已被占用 → 绝不接管（防覆盖：本会话看板若只是「这一刻读不到」，覆盖等于把本板换成孤儿板）
+        if (cand.sid === sid || fsNode.existsSync(np)) return false
+        var c = null
+        try { c = JSON.parse(await fsNode.promises.readFile(p, 'utf8')) } catch (e) { console.error('[task-board] 继承失败（读旧板）:', String(e)); return false }
+        if (!vt(c)) return false
+        c.ownerSession = sid
+        if (typeof cwd === 'string' && cwd) c.ownerCwd = cwd
+        if (await renameRetry(p, np)) {                            // ① 主路径：先改名，再把 ownerSession 改写写回
+          try {
+            await wt(sid, c)
+            console.error('[task-board] 继承看板 ' + cand.sid + ' → ' + sid + '（工作区 ' + cwd + '，原主已不在 roots）')
+            return true
+          } catch (e) {
+            console.error('[task-board] 继承失败（改写 ownerSession）:', String(e))
+            await renameRetry(np, p)                               // 回滚到旧名：下次 rt 还能再试，且不留半成品
+            return false
+          }
         }
-      }
-      try { await wt(sid, c) } catch (e) { console.error('[task-board] 继承失败（写新板）:', String(e)); return false }
-      await unlinkRetry(p)
-      console.error('[task-board] 继承看板 ' + cand.sid + ' → ' + sid + '（工作区 ' + cwd + '，原主已不在 roots；rename 不通，走写新+删旧）')
-      return true
+        try { await wt(sid, c) } catch (e) { console.error('[task-board] 继承失败（写新板）:', String(e)); return false }
+        await unlinkRetry(p)
+        console.error('[task-board] 继承看板 ' + cand.sid + ' → ' + sid + '（工作区 ' + cwd + '，原主已不在 roots；rename 不通，走写新+删旧）')
+        return true
+      })
     }
-    async function rt(sid) {
+    // locked（内部参数）：true=调用方已在 mutateLocked 锁内（继承/抢救写回不得再套 withLock，防死锁）；
+    // 缺省 false=锁外直读（写回经 lockAware 补锁串行）。对外只暴露 rt(sid)，锁内调用由 mutateLocked 传 true。
+    async function rt(sid, locked) {
       var r = null
       try { r = await fsNode.promises.readFile(boardPath(sid), 'utf8') } catch (e) {
         // 只有「文件确实不存在（ENOENT）」才触发继承：EACCES/EPERM/被占 等说明本会话看板很可能存在、
@@ -151,7 +166,7 @@ export function createStore(ctx, state, deps) {
         try {
           var cwd0 = sessionCwd(sid)
           var cand = findAdoptableBoardFile(sid, cwd0)
-          if (cand && await adoptBoard(sid, cand, cwd0)) r = await fsNode.promises.readFile(boardPath(sid), 'utf8')
+          if (cand && await adoptBoard(sid, cand, cwd0, locked)) r = await fsNode.promises.readFile(boardPath(sid), 'utf8')
         } catch (e2) { console.error('[task-board] 继承流程异常（降级为空板）:', String(e2)) }
         if (r === null) return seed(sid, sessionCwd(sid))
       }
@@ -167,45 +182,49 @@ export function createStore(ctx, state, deps) {
         return seed(sid, sessionCwd(sid))
       } catch (_) {
         // JSON 截断/损坏（如强杀打断写盘、中部夹杂另一版本残片）→ 抢救 + 隔离 + 可见化（P0 根修）
-        return recoverCorrupt(sid, r)
+        return recoverCorrupt(sid, r, locked)
       }
     }
     // ===== 腐坏看板：自动 salvage + 隔离可见化（task-mv0bl9vg ②③）=====
     // 三件套：① 隔离前先 trySalvage 截断抢救（成功则以抢救出的完整 JSON 为底继续）；
     // ② 原始坏文件一律 .corrupt-<ts> 留档（抢救成功=复制留档+写回覆盖，抢救失败=改名隔离；撕裂尾部都不丢）；
     // ③ 追加 healthHints err 级 hint（写 poolHealth[sid].corruptNote）+ notify 通知 owner——不再静默。
-    async function recoverCorrupt(sid, raw) {
-      var p = boardPath(sid)
-      var ts = Date.now()
-      var corruptPath = p + '.corrupt-' + ts
-      var salv = trySalvage(raw)
-      var salvaged = null, kept = 0
-      if (salv.ok && vt(salv.board)) {
-        salvaged = normalizeBoard(salv.board)
-        salvaged.ownerSession = sid                              // 抢救出的板归属本 sid（与 adoptBoard 同口径）
-        var cw = sessionCwd(sid)
-        if (!salvaged.ownerCwd && cw) salvaged.ownerCwd = cw
-        kept = (salvaged.tasks || []).length
-      }
-      if (salvaged) {
-        // 抢救成功：原始坏内容**复制**留档 .corrupt-<ts>（不动主板，撕裂尾部不丢），
-        // 再以截断后的完整 JSON 为底原子写回主板继续用；写回失败则下次读盘再抢救（幂等，不留空板空档）。
-        try { await fsNode.promises.copyFile(p, corruptPath) } catch (e) { console.error('[task-board] 腐坏看板复制留档失败:', String(e)) }
-        try {
-          await wt(sid, salvaged)
-          teamModeCache[sid] = !!salvaged.teamMode
-          feedbackCache[sid] = salvaged.feedbackEnabled !== false
-          epicSplitCache[sid] = salvaged.epicSplit !== false
-        } catch (e) { console.error('[task-board] 抢救写回失败（原始文件已留档 ' + corruptPath + '）:', String(e)) }
-        recordCorruptNote(sid, { at: ts, salvage: true, kept: kept, file: path.basename(corruptPath) })
-        console.error('[task-board] board file corrupt, salvaged (kept ' + kept + ' tasks), original quarantined: ' + corruptPath)
-        return salvaged
-      }
-      // 抢救失败：坏文件改名 .corrupt-<ts> 隔离（防反复 poison）+ 空板重启（禁止回写）+ 可见 hint + notify
-      try { await fsNode.promises.rename(p, corruptPath) } catch (e) { console.error('[task-board] 腐坏看板隔离改名失败（下次读盘重试）:', String(e)) }
-      recordCorruptNote(sid, { at: ts, salvage: false, kept: 0, file: path.basename(corruptPath) })
-      console.error('[task-board] board file corrupt, quarantined: ' + corruptPath)
-      return seedNoPersist(sid)
+    // locked 语义同 adoptBoard：锁外直读触发 → 经 withLock 串行（双生 .corrupt 对已实证读路径并发触发写真实存在）；
+    // mutateLocked 锁内触发 → 直跑。整段（含 copyFile 留档 + wt 写回 / rename 隔离）归一进锁，写回不再 bypass withLock。
+    async function recoverCorrupt(sid, raw, locked) {
+      return lockAware(sid, locked, async function () {
+        var p = boardPath(sid)
+        var ts = Date.now()
+        var corruptPath = p + '.corrupt-' + ts
+        var salv = trySalvage(raw)
+        var salvaged = null, kept = 0
+        if (salv.ok && vt(salv.board)) {
+          salvaged = normalizeBoard(salv.board)
+          salvaged.ownerSession = sid                              // 抢救出的板归属本 sid（与 adoptBoard 同口径）
+          var cw = sessionCwd(sid)
+          if (!salvaged.ownerCwd && cw) salvaged.ownerCwd = cw
+          kept = (salvaged.tasks || []).length
+        }
+        if (salvaged) {
+          // 抢救成功：原始坏内容**复制**留档 .corrupt-<ts>（不动主板，撕裂尾部不丢），
+          // 再以截断后的完整 JSON 为底原子写回主板继续用；写回失败则下次读盘再抢救（幂等，不留空板空档）。
+          try { await fsNode.promises.copyFile(p, corruptPath) } catch (e) { console.error('[task-board] 腐坏看板复制留档失败:', String(e)) }
+          try {
+            await wt(sid, salvaged)
+            teamModeCache[sid] = !!salvaged.teamMode
+            feedbackCache[sid] = salvaged.feedbackEnabled !== false
+            epicSplitCache[sid] = salvaged.epicSplit !== false
+          } catch (e) { console.error('[task-board] 抢救写回失败（原始文件已留档 ' + corruptPath + '）:', String(e)) }
+          recordCorruptNote(sid, { at: ts, salvage: true, kept: kept, file: path.basename(corruptPath) })
+          console.error('[task-board] board file corrupt, salvaged (kept ' + kept + ' tasks), original quarantined: ' + corruptPath)
+          return salvaged
+        }
+        // 抢救失败：坏文件改名 .corrupt-<ts> 隔离（防反复 poison）+ 空板重启（禁止回写）+ 可见 hint + notify
+        try { await fsNode.promises.rename(p, corruptPath) } catch (e) { console.error('[task-board] 腐坏看板隔离改名失败（下次读盘重试）:', String(e)) }
+        recordCorruptNote(sid, { at: ts, salvage: false, kept: 0, file: path.basename(corruptPath) })
+        console.error('[task-board] board file corrupt, quarantined: ' + corruptPath)
+        return seedNoPersist(sid)
+      })
     }
     // 腐坏/抢救 hint 落 poolHealth（get-tasks 现算透出 err 级 hint）+ notify 通知 owner
     function recordCorruptNote(sid, note) {
@@ -237,7 +256,11 @@ export function createStore(ctx, state, deps) {
       finally { await fh.close().catch(function () {}) }
     }
     async function wt(sid, d) {
-      var c = JSON.stringify(d); var p = boardPath(sid); var tmp = p + '.tmp'
+      var c = JSON.stringify(d); var p = boardPath(sid)
+      // tmp 唯一名（P1 根修 task-mv1e17x9）：pid + 时间戳 + 进程内自增序号——并发 wt() 各自写各自的 tmp，
+      // rename 装上的永远是**某一份**完整 JSON（旧实现共享 p+'.tmp'：两个并发 chunked 写在同一 tmp 交错，
+      // rename 把拼接怪原子装上正位——原子 rename 防写一半，防不住 tmp 本身是拼的）。
+      var tmp = p + '.' + process.pid + '.' + Date.now() + '-' + (++tmpSeq) + '.tmp'
       for (var attempt = 0; attempt < 6; attempt++) {
         try { await writeTmpFsync(tmp, c); await fsNode.promises.rename(tmp, p); return }
         catch (e) {
@@ -246,14 +269,15 @@ export function createStore(ctx, state, deps) {
             await new Promise(function (r) { setTimeout(r, 60 * (attempt + 1)) })
             continue
           }
+          await unlinkRetry(tmp, 2)                                 // 非瞬时错误：清掉自己的 tmp 残件再抛（不堆积）
           console.error('[task-board] write:', String(e)); throw e
         }
       }
       // 退避重试耗尽（顽固瞬时占用）→ 降级「先 unlink 目标再 rename」并记录；最后一步失败则抛（不吞）
       console.error('[task-board] write: rename 直覆失败（重试耗尽），降级 unlink+rename: ' + p)
-      try { await writeTmpFsync(tmp, c) } catch (e) { console.error('[task-board] write:', String(e)); throw e }
+      try { await writeTmpFsync(tmp, c) } catch (e) { await unlinkRetry(tmp, 2); console.error('[task-board] write:', String(e)); throw e }
       await unlinkRetry(p, 6)
-      await fsNode.promises.rename(tmp, p)
+      try { await fsNode.promises.rename(tmp, p) } catch (e) { await unlinkRetry(tmp, 2); console.error('[task-board] write:', String(e)); throw e }
     }
     // 每会话一条 promise 链，串行化所有 读-改-写，消除并发写竞争
     function withLock(sid, fn) { var prev = fileLocks[sid] || Promise.resolve(); var p = prev.then(function () { return fn() }); fileLocks[sid] = p.catch(function () {}); return p }
@@ -285,7 +309,7 @@ export function createStore(ctx, state, deps) {
       }
       if (tm) tm.timeout(50).then(go, go); else Promise.resolve().then(go)
     }
-    function mutateLocked(sid, mutate, skipKick) { return withLock(sid, async function () { var d = await rt(sid); if (d && d.__noPersist) { console.error('[task-board] 看板暂时不可读，拒绝在空板上覆写（防瞬时读失败清板）: ' + sid); return { ok: false, error: '看板暂时不可读，请重试' } } var r = await mutate(d); if (r !== null && r !== undefined) { await wt(sid, d); if (!skipKick) kickCycle(sid); return r } return r }) }
+    function mutateLocked(sid, mutate, skipKick) { return withLock(sid, async function () { var d = await rt(sid, true); if (d && d.__noPersist) { console.error('[task-board] 看板暂时不可读，拒绝在空板上覆写（防瞬时读失败清板）: ' + sid); return { ok: false, error: '看板暂时不可读，请重试' } } var r = await mutate(d); if (r !== null && r !== undefined) { await wt(sid, d); if (!skipKick) kickCycle(sid); return r } return r }) }
 
     return { rt: rt, wt: wt, kickCycle: kickCycle, mutateLocked: mutateLocked }
 }

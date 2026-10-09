@@ -12,7 +12,7 @@ const { ah, cfg, claimApply, resolveApply, verifyApply, lateVerdictApply, parseS
 export function createDispatch(ctx, state, deps) {
     // 宿主 fs 句柄与「会话工作区解析根」随预研注入瘦身退役（task-muvjs392）：派发侧不再读盘——
     // 清单只给「路径:L行号 — 一句用途」，文件内容由 Worker 自己用 read 工具按行号范围自取。
-    var rt = deps.rt, wt = deps.wt, mutateLocked = deps.mutateLocked, kickCycle = deps.kickCycle
+    var rt = deps.rt, mutateLocked = deps.mutateLocked, kickCycle = deps.kickCycle
     var rootForSession = deps.rootForSession, withTimeout = deps.withTimeout, runsFor = deps.runsFor, feedbackOn = deps.feedbackOn
     // 会话日志根（可选注入）：usage 增量结算（卡3）必须「真读真日志」才测得出重复计账——
     // 生产不注入（usage.mjs 回退 os.homedir()），单测注入临时目录（否则只能开子进程改 HOME，
@@ -1114,7 +1114,7 @@ export function createDispatch(ctx, state, deps) {
       try { await reconcileRoot(sid) } catch (e) { console.error('[task-board] reconcile 失败:', String(e)) }
       // 幽灵占位回收（池冻结根修）：必须排在活跃度计数与 pickDispatch 之前——残留表项正是把 capW 拉到 0、
       // 并把卡挡在 Verifier 派发之外的元凶（见 reapGhostRecs 头注释）。收尾会写盘（结局/usage），
-      // 故有回收时重读一次快照——否则下面空闲快进的 wt(snap) 会拿旧快照把收尾结果覆盖回去。
+      // 故有回收时重读一次快照——否则下面空闲快进的 stalePool/staleInfo 判定会拿旧快照误判（写盘已归一进锁）。
       var reapedN = 0
       try { reapedN = await reapGhostRecs(sid, snap) } catch (e) { console.error('[task-board] 幽灵占位回收失败（本轮跳过，派发照常）:', String(e)) }
       if (reapedN > 0) {
@@ -1137,8 +1137,20 @@ export function createDispatch(ctx, state, deps) {
         var stalePool = snap.poolStatus && (((snap.poolStatus.workers || []).length + (snap.poolStatus.verifiers || []).length) > 0)
         // dispatchInfo 是瞬时通知（90s TTL）：空闲周期也要负责过期清理，否则永久残留
         var staleInfo = snap.dispatchInfo && (!snap.dispatchInfoAt || Date.now() - new Date(snap.dispatchInfoAt).getTime() > 90000)
-        if (staleInfo) { delete snap.dispatchInfo; delete snap.dispatchInfoAt }
-        if (stalePool || staleInfo) { if (stalePool) snap.poolStatus = emptyPool; try { await wt(sid, snap) } catch (_) {} }
+        if (stalePool || staleInfo) {
+          // 锁归一（P1 根修 task-mv1e17x9）：空闲清理写盘必须走 mutateLocked，且过期判定在锁内重读重判——
+          // 锁外读到的 stalePool/staleInfo 此刻可能已被并发写清掉，拿旧快照直写会把它覆盖回去（丢更新）。
+          try {
+            await mutateLocked(sid, function (d) {
+              var sp2 = d.poolStatus && (((d.poolStatus.workers || []).length + (d.poolStatus.verifiers || []).length) > 0)
+              var si2 = d.dispatchInfo && (!d.dispatchInfoAt || Date.now() - new Date(d.dispatchInfoAt).getTime() > 90000)
+              if (!sp2 && !si2) return null                         // 锁内重判已无过期项 → 不写（避免覆盖并发写）
+              if (sp2) d.poolStatus = emptyPool
+              if (si2) { delete d.dispatchInfo; delete d.dispatchInfoAt }
+              return true                                           // 返回非空触发写盘
+            }, true)                                                 // skipKick：本轮已是 poolCycle，无需再踢
+          } catch (_) {}
+        }
         return snap
       }
       var c = cfg(snap)

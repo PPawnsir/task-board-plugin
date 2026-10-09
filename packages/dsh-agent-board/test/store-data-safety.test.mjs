@@ -6,9 +6,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { createMockCtx } from './helpers/mock-ctx.mjs'
 import * as plugin from '../index.mjs'
+import { createStore } from '../lib/store.mjs'
 
 function boardFile(env) { return path.join(env.home, '.dsh', 'tasks-' + env.sid + '.json') }
 
@@ -108,5 +110,108 @@ test('③ 自动 salvage：完整 JSON 尾部夹杂撕裂残片 → 截断抢救
     assert.equal(corrupts.length, 1, '原始撕裂文件已留档 .corrupt-<ts>')
     var msg = env.sent.find(function (m) { return m && m.content && /抢救/.test(m.content[0].text) })
     assert.ok(msg, 'notify 通知 owner（抢救型）')
+  } finally { await env.cleanup() }
+})
+
+// ===== ④ P1 根修（task-mv1e17x9）：tmp 唯一名 + 四条锁外写路径归一（原子写时代撕裂根修）=====
+
+// 直连 store 层的最小环境：只测 wt() 原子写 / tmp 残件清理，不拉起整个插件。
+// 独立接管 process.env.HOME（与 createMockCtx 同款纪律：HOME 是进程级，用例串行 + finally 恢复）。
+function makeRawStore() {
+  var home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-board-wt-'))
+  fs.mkdirSync(path.join(home, '.dsh'), { recursive: true })
+  var prevHome = process.env.HOME
+  var hadHome = Object.prototype.hasOwnProperty.call(process.env, 'HOME')
+  process.env.HOME = home
+  var state = { fileLocks: {}, cyclePending: {}, poolHealth: {}, teamModeCache: {}, feedbackCache: {}, epicSplitCache: {} }
+  var store = createStore({}, state, { sessionCwd: function () { return home } })
+  return {
+    store: store, home: home,
+    cleanup: function () {
+      if (hadHome) process.env.HOME = prevHome
+      else delete process.env.HOME
+      try { fs.rmSync(home, { recursive: true, force: true }) } catch (_) {}
+    },
+  }
+}
+
+test('④ tmp 唯一名（源码级）：wt() 的 tmp 名 = pid + 时间戳 + 进程内自增序号', () => {
+  var sto = fs.readFileSync(new URL('../lib/store.mjs', import.meta.url), 'utf8')
+  assert.match(sto, /process\.pid/)          // tmp 名含 pid（跨进程也唯一）
+  assert.match(sto, /Date\.now\(\)/)          // 含时间戳
+  assert.match(sto, /\+\+tmpSeq/)             // 含进程内自增序号（同 ms 并发也唯一）
+  assert.match(sto, /\+ '\.tmp'/)             // 仍是 .tmp 后缀
+  assert.match(sto, /var tmpSeq = 0/)         // 序号计数器声明（模块级，跨 store 实例共享）
+})
+
+test('④ tmp 唯一名（行为级）：两个并发 3MB 写后文件必是其中一份完整 JSON，且无 .tmp 残件', async () => {
+  var env = makeRawStore()
+  var sid = 'session-wt-' + Date.now().toString(36)
+  try {
+    var fillerA = 'A'.repeat(3 * 1024 * 1024)
+    var fillerB = 'B'.repeat(3 * 1024 * 1024)
+    var dA = { ownerSession: sid, tasks: [], marker: 'A', filler: fillerA }
+    var dB = { ownerSession: sid, tasks: [], marker: 'B', filler: fillerB }
+    var a = JSON.stringify(dA), b = JSON.stringify(dB)
+    await Promise.all([env.store.wt(sid, dA), env.store.wt(sid, dB)])
+    var p = path.join(env.home, '.dsh', 'tasks-' + sid + '.json')
+    var final = fs.readFileSync(p, 'utf8')
+    assert.ok(final === a || final === b, '最终文件必是其中一份完整 JSON（不是拼接怪）')
+    var leftovers = fs.readdirSync(path.join(env.home, '.dsh')).filter(function (f) { return /\.tmp$/.test(f) })
+    assert.equal(leftovers.length, 0, '成功写盘后无 .tmp 残件')
+  } finally { env.cleanup() }
+})
+
+test('④ 无 .tmp 残件（行为级）：rename 非瞬时失败后清理自己的 tmp', async () => {
+  var env = makeRawStore()
+  var sid = 'session-wt-fail-' + Date.now().toString(36)
+  var origRename = fs.promises.rename
+  try {
+    var p = path.join(env.home, '.dsh', 'tasks-' + sid + '.json')
+    await env.store.wt(sid, { ownerSession: sid, tasks: [] })           // 先正常写一次
+    assert.ok(fs.existsSync(p), '前置：主板已落盘')
+    fs.promises.rename = async function () { var e = new Error('EIO injected'); e.code = 'EIO'; throw e }
+    try { await env.store.wt(sid, { ownerSession: sid, tasks: [] }) } catch (_) {}
+    var leftovers = fs.readdirSync(path.join(env.home, '.dsh')).filter(function (f) { return /\.tmp$/.test(f) })
+    assert.equal(leftovers.length, 0, 'rename 失败后无 .tmp 残件（残件已被清理）')
+  } finally {
+    fs.promises.rename = origRename
+    env.cleanup()
+  }
+})
+
+test('④ 锁归一（源码级）：四条锁外写路径全部归一进 withLock，dispatch 不再直写 wt', () => {
+  var sto = fs.readFileSync(new URL('../lib/store.mjs', import.meta.url), 'utf8')
+  var disp = fs.readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  // 锁感知写回 + 不可重入死锁说明必须显式存在
+  assert.match(sto, /function lockAware\(sid, locked, fn\)/)
+  assert.match(sto, /withLock 是简单 promise 链，不可重入/)
+  assert.match(sto, /async function adoptBoard\(sid, cand, cwd, locked\)/)
+  assert.match(sto, /async function recoverCorrupt\(sid, raw, locked\)/)
+  assert.match(sto, /return lockAware\(sid, locked, async function \(\)/)
+  assert.match(sto, /await rt\(sid, true\)/)                          // mutateLocked 锁内调用 rt 传 true
+  // poolCycle 空闲快进清理：不再直写 wt，改走 mutateLocked（锁内重读重判）
+  assert.doesNotMatch(disp, /await wt\(/)
+  assert.doesNotMatch(disp, /deps\.wt/)
+  assert.match(disp, /mutateLocked\(sid, function \(d\) \{/)
+})
+
+test('④ poolCycle 空闲清理（行为级）：残留忙碌 poolStatus 经锁被清空', async () => {
+  var env = createMockCtx()
+  plugin.apply(env.ctx)
+  try {
+    await createTask(env, 'idle1')                                      // 建卡 + touchSession 入 knownSessions
+    // 模拟 DSH 重启：内存 runs 已空、文件里残留重启前的忙碌快照 + 无活跃任务 → 走空闲快进清理
+    env.patchBoard(function (d) {
+      d.tasks = []
+      d.poolStatus = { workers: [{ id: 'ghost-w', taskId: 'x', role: 'worker' }], verifiers: [{ id: 'ghost-v', taskId: 'y', role: 'verifier' }] }
+    })
+    await env.clock.tick()                                              // 触发 15s 心跳 → poolCycle → 空闲清理
+    await env.waitFor(function () {
+      var b = env.board()
+      return b && b.poolStatus.workers.length === 0 && b.poolStatus.verifiers.length === 0
+    })
+    var b = env.board()
+    assert.equal(b.poolStatus.workers.length + b.poolStatus.verifiers.length, 0, '残留忙碌 poolStatus 已被清空')
   } finally { await env.cleanup() }
 })
