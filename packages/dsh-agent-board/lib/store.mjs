@@ -1,12 +1,31 @@
 // dsh-agent-board — 看板持久化层（lib/store.mjs）
-// createStore(ctx, state, deps)：家目录绝对路径直读写 / 原子写盘（tmp+rename+瞬时占用退避）/
-// 跨重启继承（唯一孤儿板接管）/ 每会话文件锁串行化读-改-写 / mutateLocked + kickCycle 派发触发。
+// createStore(ctx, state, deps)：家目录绝对路径直读写 / 原子写盘（tmp+fsync+rename+瞬时占用退避+unlink 兜底）/
+// 跨重启继承（唯一孤儿板接管）/ 腐坏隔离可见化 + 自动 salvage（截断抢救）/
+// 每会话文件锁串行化读-改-写 / mutateLocked + kickCycle 派发触发。
 // deps.poolCycle 为晚绑定（index.mjs 在 dispatch 创建后收口）：kickCycle 经 50ms 去抖才调用，
 // 而 kickCycle 只可能被工具/RPC/心跳写盘触发（全部发生在 apply 接线完成之后），晚绑定无窗口风险。
 import * as core from './core.mjs'
 import path from 'node:path'
 import fsNode from 'node:fs'
 const { seed, normalizeBoard, vt, boardHome } = core
+
+// 腐坏看板自动抢救（P0 根修 task-mv0bl9vg ③）：从撕裂/夹残片的 JSON 原文里截取**第一个完整 JSON 值**。
+// 手法 = JSON.parse 报错 position 截断法（本次事故人工恢复就是这招）：整串 parse 失败时，
+// V8 报错信息含 "position N"（实测 node v24：'{"a":1}{"b":2}' 报 position 18，即第二个值起点），
+// 截到 N 再 parse 即得第一个完整值；无 position（如单对象中部截断 "Unexpected end of JSON input"）或
+// 截断后仍 parse 失败 → 返回 { ok:false }，交由调用方隔离空板。
+function trySalvage(raw) {
+  if (typeof raw !== 'string' || !raw) return { ok: false }
+  try { var d = JSON.parse(raw); return d && typeof d === 'object' ? { ok: true, board: d } : { ok: false } }
+  catch (e) {
+    var m = /position (\d+)/.exec(String(e && e.message))
+    if (!m) return { ok: false }
+    var pos = parseInt(m[1], 10)
+    if (!(pos > 0)) return { ok: false }
+    try { var v = JSON.parse(raw.slice(0, pos)); return v && typeof v === 'object' ? { ok: true, board: v } : { ok: false } }
+    catch (_) { return { ok: false } }
+  }
+}
 
 export function createStore(ctx, state, deps) {
     var sessionCwd = deps.sessionCwd
@@ -16,6 +35,7 @@ export function createStore(ctx, state, deps) {
     var epicSplitCache = state.epicSplitCache
     var fileLocks = state.fileLocks
     var cyclePending = state.cyclePending
+    var poolHealth = state.poolHealth || (state.poolHealth = {})   // 腐坏隔离/抢救 hint 落这里（与 runtime health 同表）
 
     // 看板文件用「家目录绝对路径 + node:fs」直读写——不再走 fs 服务的相对路径解析
     // （fs 服务的相对路径解析根 = 进程启动 cwd，cwd 一变所有看板静默读成空板；
@@ -146,27 +166,81 @@ export function createStore(ctx, state, deps) {
         }
         return seed(sid, sessionCwd(sid))
       } catch (_) {
-        // JSON 截断/损坏（如强杀打断写盘）：隔离留档再种新板——数据不丢，坏文件也不反复 poison
-        console.error('[task-board] board file corrupt, quarantining: ' + boardPath(sid))
-        fsNode.promises.rename(boardPath(sid), boardPath(sid) + '.corrupt-' + Date.now()).catch(function () {})
-        return seedNoPersist(sid)
+        // JSON 截断/损坏（如强杀打断写盘、中部夹杂另一版本残片）→ 抢救 + 隔离 + 可见化（P0 根修）
+        return recoverCorrupt(sid, r)
+      }
+    }
+    // ===== 腐坏看板：自动 salvage + 隔离可见化（task-mv0bl9vg ②③）=====
+    // 三件套：① 隔离前先 trySalvage 截断抢救（成功则以抢救出的完整 JSON 为底继续）；
+    // ② 原始坏文件一律 .corrupt-<ts> 留档（抢救成功=复制留档+写回覆盖，抢救失败=改名隔离；撕裂尾部都不丢）；
+    // ③ 追加 healthHints err 级 hint（写 poolHealth[sid].corruptNote）+ notify 通知 owner——不再静默。
+    async function recoverCorrupt(sid, raw) {
+      var p = boardPath(sid)
+      var ts = Date.now()
+      var corruptPath = p + '.corrupt-' + ts
+      var salv = trySalvage(raw)
+      var salvaged = null, kept = 0
+      if (salv.ok && vt(salv.board)) {
+        salvaged = normalizeBoard(salv.board)
+        salvaged.ownerSession = sid                              // 抢救出的板归属本 sid（与 adoptBoard 同口径）
+        var cw = sessionCwd(sid)
+        if (!salvaged.ownerCwd && cw) salvaged.ownerCwd = cw
+        kept = (salvaged.tasks || []).length
+      }
+      if (salvaged) {
+        // 抢救成功：原始坏内容**复制**留档 .corrupt-<ts>（不动主板，撕裂尾部不丢），
+        // 再以截断后的完整 JSON 为底原子写回主板继续用；写回失败则下次读盘再抢救（幂等，不留空板空档）。
+        try { await fsNode.promises.copyFile(p, corruptPath) } catch (e) { console.error('[task-board] 腐坏看板复制留档失败:', String(e)) }
+        try {
+          await wt(sid, salvaged)
+          teamModeCache[sid] = !!salvaged.teamMode
+          feedbackCache[sid] = salvaged.feedbackEnabled !== false
+          epicSplitCache[sid] = salvaged.epicSplit !== false
+        } catch (e) { console.error('[task-board] 抢救写回失败（原始文件已留档 ' + corruptPath + '）:', String(e)) }
+        recordCorruptNote(sid, { at: ts, salvage: true, kept: kept, file: path.basename(corruptPath) })
+        console.error('[task-board] board file corrupt, salvaged (kept ' + kept + ' tasks), original quarantined: ' + corruptPath)
+        return salvaged
+      }
+      // 抢救失败：坏文件改名 .corrupt-<ts> 隔离（防反复 poison）+ 空板重启（禁止回写）+ 可见 hint + notify
+      try { await fsNode.promises.rename(p, corruptPath) } catch (e) { console.error('[task-board] 腐坏看板隔离改名失败（下次读盘重试）:', String(e)) }
+      recordCorruptNote(sid, { at: ts, salvage: false, kept: 0, file: path.basename(corruptPath) })
+      console.error('[task-board] board file corrupt, quarantined: ' + corruptPath)
+      return seedNoPersist(sid)
+    }
+    // 腐坏/抢救 hint 落 poolHealth（get-tasks 现算透出 err 级 hint）+ notify 通知 owner
+    function recordCorruptNote(sid, note) {
+      var rec = poolHealth[sid] || (poolHealth[sid] = {})
+      rec.corruptNote = note
+      var text = note.salvage
+        ? '看板数据文件腐坏，已自动抢救保留 ' + note.kept + ' 张卡（丢弃撕裂残片），原始文件留档 ' + note.file + '，可联系恢复'
+        : '看板数据文件腐坏已隔离，历史在 ' + note.file + '，可联系恢复'
+      // 晚绑定直读 deps.notifyBoardCorrupt（index.mjs 在 notify 创建后才收口，创建时取值为 undefined）
+      var nb = deps.notifyBoardCorrupt
+      if (typeof nb === 'function') {
+        try { nb(sid, text) } catch (e) { console.error('[task-board] 腐坏通知失败:', String(e)) }
       }
     }
     // 瞬时读失败/坏文件隔离后的空板必须禁止回写：否则一个「读不到」的瞬间就会把 106 张卡覆成空板。
     // __noPersist 用 non-enumerable 挂载——即使将来有路径漏判把它写出去，JSON.stringify 也会跳过该字段。
     function seedNoPersist(sid) { var d = seed(sid, sessionCwd(sid)); try { Object.defineProperty(d, '__noPersist', { value: true, enumerable: false }) } catch (_) {} return d }
-    // 原子写盘：先写临时文件再 rename——强杀若发生在写盘中途，磁盘上最多留个 .tmp 残件，
+    // 原子写盘：写 tmp → fsync → rename 覆盖目标——强杀若发生在写盘中途，磁盘上最多留个 .tmp 残件，
     // 看板本体永远不会是截断的半个 JSON（此前非原子直写，kill 中写 = 看板被 seed 清空）
+    // fsync 保证 tmp 内容真正落盘后再 rename（rename 在同分区是原子的）。
     // Windows 特有问题：rename 目标被并发读句柄/Defender/索引器短暂占用时抛 EPERM/EBUSY
     // （E2E 实测：GUI 3s 轮询 + 脚本 10s 轮询下偶发，publish 写入整个丢失）。
     // 对这类瞬时占用做有限退避重试；其他错误（只读/不存在目录等）直接抛。
+    // 重试耗尽仍失败 → 降级「先 unlink 目标再 rename」并记录（Windows rename-over-existing 实测
+    // node v24 win32 直接覆盖 OK，仅被占时才需 unlink 兜底——绝不丢整板）。
+    async function writeTmpFsync(tmp, content) {
+      var fh = await fsNode.promises.open(tmp, 'w')
+      try { await fh.writeFile(content, 'utf8'); await fh.sync() }
+      finally { await fh.close().catch(function () {}) }
+    }
     async function wt(sid, d) {
       var c = JSON.stringify(d); var p = boardPath(sid); var tmp = p + '.tmp'
-      var lastErr = null
       for (var attempt = 0; attempt < 6; attempt++) {
-        try { await fsNode.promises.writeFile(tmp, c, 'utf8'); await fsNode.promises.rename(tmp, p); return }
+        try { await writeTmpFsync(tmp, c); await fsNode.promises.rename(tmp, p); return }
         catch (e) {
-          lastErr = e
           var code = e && e.code
           if (code === 'EPERM' || code === 'EBUSY' || code === 'ENOTEMPTY' || code === 'EACCES') {
             await new Promise(function (r) { setTimeout(r, 60 * (attempt + 1)) })
@@ -175,7 +249,11 @@ export function createStore(ctx, state, deps) {
           console.error('[task-board] write:', String(e)); throw e
         }
       }
-      console.error('[task-board] write: retry exhausted (6 次) ->', String(lastErr)); throw lastErr
+      // 退避重试耗尽（顽固瞬时占用）→ 降级「先 unlink 目标再 rename」并记录；最后一步失败则抛（不吞）
+      console.error('[task-board] write: rename 直覆失败（重试耗尽），降级 unlink+rename: ' + p)
+      try { await writeTmpFsync(tmp, c) } catch (e) { console.error('[task-board] write:', String(e)); throw e }
+      await unlinkRetry(p, 6)
+      await fsNode.promises.rename(tmp, p)
     }
     // 每会话一条 promise 链，串行化所有 读-改-写，消除并发写竞争
     function withLock(sid, fn) { var prev = fileLocks[sid] || Promise.resolve(); var p = prev.then(function () { return fn() }); fileLocks[sid] = p.catch(function () {}); return p }

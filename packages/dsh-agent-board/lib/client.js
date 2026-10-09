@@ -2201,7 +2201,7 @@ function apply(ctx) {
     function HealthHints() {
       var hints = (Array.isArray(state.healthHints) ? state.healthHints : []).filter(function (h) { return h && h.text })
       if (!hints.length) return null
-      // 两级配色：warn=⚠️ 琥珀（C.warn）；info=ℹ️ 蓝灰（DSH 现有 business 信息色——色板无独立 info 档）
+      // 三级配色：err=🚨 红（C.err，数据安全红线）；warn=⚠️ 琥珀（C.warn）；info=ℹ️ 蓝灰（DSH 现有 business 信息色）
       var infoColor = 'var(--dsw-alias-state-business-primary)'
       return React.createElement('div', { style: { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 } },
         React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('activity', 11), '架构健康'),
@@ -2209,9 +2209,10 @@ function apply(ctx) {
         React.createElement('div', { style: { fontSize: 9, color: C.text2, marginBottom: 5, lineHeight: 1.5 } }, '运行时自检告警，多为自动恢复的瞬时异常。术语：settle = 任务结算通道；touches = 任务声明的改动文件（文件锁）；p90 = 执行时长第 90 百分位'),
         hints.map(function (h, i) {
           var warn = h.level === 'warn'
-          var col = warn ? C.warn : infoColor
+          var err = h.level === 'err'
+          var col = err ? C.err : (warn ? C.warn : infoColor)
           return React.createElement('div', { key: i, style: { display: 'flex', alignItems: 'baseline', gap: 5, fontSize: 10, lineHeight: 1.5, color: col, marginBottom: 3 } },
-            React.createElement('span', { style: { flexShrink: 0 } }, warn ? '⚠️' : 'ℹ️'),
+            React.createElement('span', { style: { flexShrink: 0 } }, err ? '🚨' : (warn ? '⚠️' : 'ℹ️')),
             React.createElement('span', null, String(h.text)))
         }))
     }

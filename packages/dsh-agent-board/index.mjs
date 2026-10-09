@@ -63,6 +63,7 @@ export function apply(ctx) {
     var storeDeps = { sessionCwd: session.sessionCwd, poolCycle: null }
     var store = createStore(ctx, state, storeDeps)
     var notify = createNotify(ctx, state, { rt: store.rt, rootForSession: session.rootForSession, withTimeout: session.withTimeout, isDispatched: session.isDispatched })
+    storeDeps.notifyBoardCorrupt = notify.notifyBoardCorrupt // 晚绑定收口（腐坏隔离/抢救通知；store.rt 只在 apply 完成后才触发）
     var dispatch = createDispatch(ctx, state, {
       rt: store.rt, wt: store.wt, mutateLocked: store.mutateLocked, kickCycle: store.kickCycle,
       rootForSession: session.rootForSession,

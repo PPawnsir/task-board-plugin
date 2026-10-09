@@ -183,5 +183,15 @@ export function createNotify(ctx, state, deps) {
       } else deliver().catch(function (e) { console.error('[task-board] receipt flush failed:', String(e)) })
     }
 
-    return { maybeNotify: maybeNotify, notifyTaskDone: notifyTaskDone, notifyDispatched: notifyDispatched, pushSysNote: pushSysNote }
+    // ===== 看板数据文件腐坏/抢救通知（task-mv0bl9vg ②）：P0 数据安全，直投 owner，不走回执聚合 =====
+    // store.recoverCorrupt 隔离/抢救时调用（经 storeDeps.notifyBoardCorrupt 晚绑定注入）。
+    // 与歧义裁决通知同款：任何模式都投、不读回执开关、直接 followup——数据可能丢了必须立刻提醒，
+    // 不能等 45s 聚合窗口、更不能被「回执已关」吞掉（回执开关只闸派发/完成两条回执）。
+    function notifyBoardCorrupt(sid, text) {
+      var root = rootForSession(sid)
+      if (!root) return
+      try { root.followup(makeMsg('🚨 [任务看板] ' + text + '\n\n历史看板数据未丢，可从留档文件人工恢复；如需协助请告知。', 'notice', '看板数据文件腐坏')) } catch (e) { console.error('[task-board] board corrupt notify failed:', String(e)) }
+    }
+
+    return { maybeNotify: maybeNotify, notifyTaskDone: notifyTaskDone, notifyDispatched: notifyDispatched, pushSysNote: pushSysNote, notifyBoardCorrupt: notifyBoardCorrupt }
 }

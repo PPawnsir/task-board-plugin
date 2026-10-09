@@ -194,6 +194,19 @@ export function computeRuntimeHealthHints(board, rt, opts) {
   var bornAt = typeof rt.bornAt === 'number' ? rt.bornAt : now
   var tasks = board.tasks
 
+  // --- ④ 看板数据文件腐坏/抢救可见化（task-mv0bl9vg ②③）---
+  // store.recoverCorrupt 隔离/抢救时写 rt.corruptNote（{ at, salvage, kept, file }），这里现算透出
+  // err 级 hint（客户端红色档，区别于 warn/info）。数据安全红线信号：sticky 不消费、不 TTL——
+  // 只要板还处于腐坏态就持续亮（poolHealth 纯内存，host 重启自然清）。level='err' 是通道新档，
+  // 客户端按非 warn/info 渲染红色；老客户端缺省降级为 info 色，信号仍可见。
+  var cn = rt.corruptNote
+  if (cn && typeof cn === 'object') {
+    var cnText = cn.salvage
+      ? '🔴 看板数据文件腐坏，已自动抢救保留 ' + (cn.kept || 0) + ' 张卡（丢弃撕裂残片），原始文件留档 ' + (cn.file || '') + '，可联系恢复'
+      : '🔴 看板数据文件腐坏已隔离，历史在 ' + (cn.file || '') + '，可联系恢复'
+    out.hints.push({ level: 'err', text: cnText })
+  }
+
   if (alive) {
     // --- ① 派发循环心跳：有可派卡 + 池有空位 + 上次成功轮 >5min ---
     // poolLastOkAt 缺失时退到 bornAt（首次见到本板的时刻）：host 重启后心跳全断也能在 5min 宽限后亮条，
