@@ -1415,6 +1415,14 @@ function apply(ctx) {
               ut.steps && ut.steps.length ? React.createElement('div', { style: { fontSize: 10, color: C.text, marginBottom: 3 } }, ut.steps.map(function (s, i) { return React.createElement('div', { key: i, style: { marginBottom: 1 } }, (i + 1) + '. ' + s) })) : null,
               ut.expect ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '预期：' + ut.expect) : null)
           })() : null) : null,
+        // ===== 迟到 Verifier 结论块（验收时序三洞 ③）：verifier 结论落到已落定卡后的留痕展示 =====
+        // 主窗口抢批/归档早于 Verifier 结算时，其独立结论落 t.lateVerdict 而非静默丢弃——此处整块展示
+        // （verdict/summary/checks + note 说明 + 时间来源），与上方正常 verification 块并列可对照。
+        task.lateVerdict ? React.createElement('div', { style: { marginBottom: 8, padding: '6px 8px', border: '1px solid ' + (task.lateVerdict.verdict === 'approved' ? C.ok : C.err), borderRadius: 6, background: 'color-mix(in srgb, ' + (task.lateVerdict.verdict === 'approved' ? C.ok : C.err) + ' 8%, transparent)' } },
+          React.createElement('div', { style: { fontSize: 11, fontWeight: 700, color: task.lateVerdict.verdict === 'approved' ? C.ok : C.err, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('alert-triangle', 12), '迟到 Verifier 结论 · ' + (task.lateVerdict.by || '') + ' · ' + ago(task.lateVerdict.at)),
+          React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 4 } }, String(task.lateVerdict.note || '')),
+          React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 4, whiteSpace: 'pre-wrap' } }, (task.lateVerdict.verdict === 'approved' ? '验收通过' : '验收驳回') + (task.lateVerdict.summary ? '：' + task.lateVerdict.summary : '')),
+          task.lateVerdict.checks ? React.createElement('div', { style: { marginTop: 4 } }, React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '核对项'), React.createElement('div', { style: { fontSize: 10, color: C.text2, whiteSpace: 'pre-wrap', maxHeight: 120, overflowY: 'auto' } }, task.lateVerdict.checks)) : null) : null,
         React.createElement(MsgThread, { messages: task.messages, taskId: task.id }),
         Array.isArray(task.history) && task.history.length > 0 ? React.createElement('div', { style: { marginBottom: 8 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 3 } }, '流转轨迹'), React.createElement('div', { style: { fontSize: 10, color: C.text2, padding: '4px 6px', background: C.nested, borderRadius: 4 } }, task.history.map(function (h, i) { return React.createElement('div', { key: i, style: { marginBottom: 2 } }, React.createElement('span', { style: { color: C.brand } }, statusLabels[h.to] || h.to), ' · ' + ago(h.timestamp) + ' · ', React.createElement(ActorLink, { id: h.actor }), h.note ? ' · ' + h.note : '') }))) : null,
         React.createElement('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6 } },

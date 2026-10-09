@@ -207,6 +207,15 @@ export function computeRuntimeHealthHints(board, rt, opts) {
     out.hints.push({ level: 'err', text: cnText })
   }
 
+  // --- ⑤ 迟到驳回可见化（验收时序三洞 ③，用户 n-mv0ebretgv1o）---
+  // 主窗口 force 抢批后 Verifier 迟到驳回：err 级 hint（sticky 不 TTL——host 重启才清），
+  // 与 corruptNote 同款「进行中的事故优先」语义。rt.lateRejectNote 由 board_verdict/settleVerifier
+  // 迟到落账路径写入（dispatch.mjs poolHealthFor / rpc.mjs state.poolHealth）。
+  var lr = rt.lateRejectNote
+  if (lr && typeof lr === 'object' && lr.taskId) {
+    out.hints.push({ level: 'err', text: '迟到驳回：' + String(lr.taskId) + ' 你批早了但 Verifier 验出红的' })
+  }
+
   if (alive) {
     // --- ① 派发循环心跳：有可派卡 + 池有空位 + 上次成功轮 >5min ---
     // poolLastOkAt 缺失时退到 bornAt（首次见到本板的时刻）：host 重启后心跳全断也能在 5min 宽限后亮条，

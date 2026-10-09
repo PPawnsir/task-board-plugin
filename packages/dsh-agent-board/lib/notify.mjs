@@ -193,5 +193,17 @@ export function createNotify(ctx, state, deps) {
       try { root.followup(makeMsg('🚨 [任务看板] ' + text + '\n\n历史看板数据未丢，可从留档文件人工恢复；如需协助请告知。', 'notice', '看板数据文件腐坏')) } catch (e) { console.error('[task-board] board corrupt notify failed:', String(e)) }
     }
 
-    return { maybeNotify: maybeNotify, notifyTaskDone: notifyTaskDone, notifyDispatched: notifyDispatched, pushSysNote: pushSysNote, notifyBoardCorrupt: notifyBoardCorrupt }
+    // ===== 迟到驳回通知（验收时序三洞 ③，用户 n-mv0ebretgv1o）：err 级，回执直投 owner，不走开关/聚合 =====
+    // 主窗口抢批（force approve）后 Verifier 迟到驳回——「你批早了但验收是红的」是 P1 信号，必须立刻直达
+    // owner：不进 45s 回执聚合、不被 notifyDone 开关吞掉（与 notifyBoardCorrupt 同一纪律）。
+    function notifyLateReject(sid, t) {
+      var root = rootForSession(sid)
+      if (!root) return
+      var lv = (t && t.lateVerdict) || {}
+      try {
+        root.followup(makeMsg('🚨 [任务看板] 迟到驳回：' + (t.id || '') + ' 你批早了但 Verifier 验出红的\n\n任务: ' + String(t.title || '') + ' (' + (t.id || '') + ')\n\nVerifier 结论（迟到）: ' + String(lv.summary || '(无)') + '\n核对项: ' + String(lv.checks || '(无)') + '\n\n详情页已展示「迟到 Verifier 结论」块；如需据此返工，请把任务驳回重投或人工处置。', 'notice', '迟到驳回: ' + (t.id || '')))
+      } catch (e) { console.error('[task-board] late reject notify failed:', String(e)) }
+    }
+
+    return { maybeNotify: maybeNotify, notifyTaskDone: notifyTaskDone, notifyDispatched: notifyDispatched, pushSysNote: pushSysNote, notifyBoardCorrupt: notifyBoardCorrupt, notifyLateReject: notifyLateReject }
 }

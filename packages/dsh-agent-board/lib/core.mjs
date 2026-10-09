@@ -571,6 +571,28 @@ export function pushRejection(t, summary, checks, at, by) {
   return true
 }
 
+// ===== 迟到 verdict 落账（验收时序三洞 ③，用户 n-mv0ebretgv1o）=====
+// 事故：主窗口在 Verifier 活跃期 task_verify 抢批（早 0.4s）+ 归档，Verifier 的独立结论与自测
+// 指南被静默吞掉、无回执。修法：verifier 结论（工具通道 board_verdict / 文本通道 settleVerifier）
+// 落到已 resolved/archived/cancelled 卡时不再静默丢弃——落 t.lateVerdict 留痕。
+// 纯函数（零 IO）：写 t.lateVerdict；userTest 若开关开且解析得出 → 挂 t.lateVerdict.userTest，
+// 并补挂 t.verification.userTest（原 verification 缺 userTest 时；主窗口 task_verify approved 不写
+// t.verification，此时用迟到结论的 verdict/summary/checks 兜底建 verification，避免详情页渲染空验收块）。
+// 返回 { lateRejected, wasApproved }：调用方据此决定要不要发 err 级通知 + healthHint
+// （I/O 留在调用方，core 保持零依赖）。wasApproved 必须先算——下方可能覆写 t.verification。
+export function lateVerdictApply(t, verdict, summary, checks, userTest, at, by, verifyUserGuideOn) {
+  var approved = verdict === 'approved'
+  var wasApproved = t.status === 'resolved' || (t.status === 'archived' && !!(t.verifiedAt || t.verifiedBy || (t.verification && t.verification.verdict === 'approved')))
+  t.lateVerdict = { verdict: verdict, summary: summary || '', checks: checks || '', at: at || new Date().toISOString(), by: by || 'system', note: '迟到结论：卡在落定后收到' }
+  var ut = verifyUserGuideOn !== false ? normalizeUserTest(userTest) : null
+  if (ut) {
+    t.lateVerdict.userTest = ut
+    if (!t.verification) t.verification = { verdict: verdict, summary: summary || '', checks: checks || '', at: at || new Date().toISOString(), by: by || 'system' }
+    if (!t.verification.userTest) t.verification.userTest = ut
+  }
+  return { lateRejected: !approved, wasApproved: wasApproved }
+}
+
 // ===== 一次性子代理 prompt 构建（上下文由主窗口 agent 写入 description/instructions，系统只追加生命周期记录）=====
 // 学习飞轮 v1 软召回引导（feedbackEnabled 开时才拼进 prompt）：环境里若有笔记/记忆类工具，先查历史教训再动手。
 // 只是"提示先搜"——看板不代查、不调用任何记忆工具、也无从知道有没有这类工具（零耦合）。
@@ -1106,7 +1128,8 @@ export function tasksHash(tasks) {
       t.lastError, t.lastProgress && t.lastProgress.text,
       t.frozen ? '1' : '', t.stuckSince, t.escalation && t.escalation.question,
       t.reviewedAt,
-      t.reviewHint ? String(t.reviewHint.score) + ':' + (Array.isArray(t.reviewHint.reasons) ? t.reviewHint.reasons.join('|') : '') : ''
+      t.reviewHint ? String(t.reviewHint.score) + ':' + (Array.isArray(t.reviewHint.reasons) ? t.reviewHint.reasons.join('|') : '') : '',
+      t.lateVerdict ? (t.lateVerdict.verdict + ':' + t.lateVerdict.at) : ''
     ].join('\u0001'))
   }
   var s = parts.join('\u0002')

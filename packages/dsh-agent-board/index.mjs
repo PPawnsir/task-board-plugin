@@ -70,7 +70,7 @@ export function apply(ctx) {
       // sessionCwd 不再注入 dispatch（预研清单瘦身后派发侧不读盘）；rpc 侧仍需要（epic 预检路径存在性）
       withTimeout: session.withTimeout, runsFor: session.runsFor, feedbackOn: session.feedbackOn, epicSplitOn: session.epicSplitOn,
       pushSysNote: notify.pushSysNote, maybeNotify: notify.maybeNotify, notifyTaskDone: notify.notifyTaskDone,
-      notifyDispatched: notify.notifyDispatched,
+      notifyDispatched: notify.notifyDispatched, notifyLateReject: notify.notifyLateReject,
     })
     storeDeps.poolCycle = dispatch.poolCycle // 晚绑定收口
     // 僵尸 epic 出清配套（反馈 n-mutma3mmwceq）：archive-task 门禁的活性判定。
@@ -81,7 +81,7 @@ export function apply(ctx) {
       getActorId: session.getActorId, resolveRoot: session.resolveRoot, toolSessionId: session.toolSessionId, rpcSessionId: session.rpcSessionId,
       rootForSession: session.rootForSession, deriveWorkMode: session.deriveWorkMode, runsFor: session.runsFor,
       rt: store.rt, mutateLocked: store.mutateLocked,
-      maybeNotify: notify.maybeNotify, notifyTaskDone: notify.notifyTaskDone,
+      maybeNotify: notify.maybeNotify, notifyTaskDone: notify.notifyTaskDone, notifyLateReject: notify.notifyLateReject,
       pushSysNote: notify.pushSysNote, sessionCwd: session.sessionCwd, // 调研门禁③：epic 发布预检汇总投递 + 预研路径相对解析根
       spawnOneShot: dispatch.spawnOneShot, accumulateRunUsage: dispatch.accumulateRunUsage, readContextPack: dispatch.readContextPack,
       // 上报通道结算入口（task-muwkhqf8）：board_report/board_verdict 把任务推进到落定态时，
