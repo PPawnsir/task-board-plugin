@@ -255,11 +255,11 @@ Team 托管档独有（调度员体验）：
 > 兼容：旧的 `set-board-mode` / `set-team-mode` 两个 RPC 原样保留（旧客户端与脚本不受影响），
 > 内部仍以 `boardMode` + `teamMode` 两个字段落盘，老看板文件无损；`get-tasks` 额外返回派生字段 `workMode` 供 UI 单点读取。
 
-## 13 个 Agent 工具
+## 14 个 Agent 工具
 
 | 类别 | 工具 |
 |---|---|
-| 任务管理 | `task_create` / `task_list` / `task_context` / `task_update` / `task_claim` / `task_resolve` / `task_verify` / `task_archive` |
+| 任务管理 | `task_create` / `task_list` / `task_context` / `task_update` / `task_claim` / `task_resolve` / `task_verify` / `task_archive` / `task_cancel` |
 | 池治理 | `task_terminate` / `task_intervene` / `task_arbitrate` |
 | 子代理上报 | `board_report` / `board_verdict` |
 
