@@ -199,6 +199,7 @@
       // 含 cancelled（反馈 n-mv0zbqk... 取消通道）：取消卡在待办列消失（cancelled 不在 COLUMNS）后，
       // 归入本 tab 可见、可「恢复待办」——否则作废卡从 UI 上彻底蒸发、无法找回。
       var archived = state.tasks.filter(function (t) { return t.status === 'archived' || t.status === 'cancelled' })
+      var cancelledCount = archived.filter(function (t) { return t.status === 'cancelled' }).length // 文案口径修正：仪表盘「已归档」只数 archived，本 tab 含 cancelled，须单列
       var list = archived.filter(function (t) {
         if (!q) return true
         var qq = q.toLowerCase()
@@ -218,7 +219,7 @@
       }
       return React.createElement('div', null,
         React.createElement('input', { value: q, onChange: function (e) { setQ(e.target.value); state.archQ = e.target.value }, placeholder: '检索标题 / ID / 标签…', style: { width: '100%', padding: '5px 8px', fontSize: 11, border: '1px solid ' + C.border2, borderRadius: 5, background: C.card, color: C.text, marginBottom: 8 } }),
-        React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, '共 ' + archived.length + ' 条归档/已取消（全量，与仪表盘「已归档」同口径；已取消卡同样可恢复待办）'),
+        React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 }, title: '归档 tab 含已归档 + 已取消两类；仪表盘「已归档」只数已归档，不数已取消' }, '共 ' + archived.length + ' 条' + (cancelledCount > 0 ? '（含已取消 ' + cancelledCount + ' 条）' : '')),
         archived.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '暂无归档/已取消任务') :
         list.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '无匹配结果') :
         list.map(function (t) {

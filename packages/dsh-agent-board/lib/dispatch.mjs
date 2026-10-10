@@ -1386,5 +1386,5 @@ export function createDispatch(ctx, state, deps) {
       // 在并行 spawn 下存在认领错包的潜伏 bug，一并消灭。
     }
 
-    return { poolCycle: poolCycle, spawnOneShot: spawnOneShot, accumulateRunUsage: accumulateRunUsage, settleReportedRun: settleReportedRun, readContextPack: readContextPack }
+    return { poolCycle: poolCycle, spawnOneShot: spawnOneShot, accumulateRunUsage: accumulateRunUsage, settleReportedRun: settleReportedRun, readContextPack: readContextPack, closeRunHistory: closeRunHistory }
 }

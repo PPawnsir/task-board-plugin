@@ -2144,6 +2144,18 @@ test('Token 区②：usageSummary 变化纳入 notify 触发（选范围即渲�
   assert.equal(/state\.usageSummary !== prevUsage/.test(cli), false)
 })
 
+test('setUsage 订阅锁（task-mv10lvud 遗留，task-mv1pqy27 补锁）：TopPanel update() 内 setUsage(state.usageSummary) 订阅存在（kernel.js 源 + client.js 产物各一条）', () => {
+  const kernel = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // 订阅声明：usageSummary 换新对象即触发 Token 区重渲染
+  assert.match(kernel, /var _usg = useState\(state\.usageSummary\), setUsage = _usg\[1\]/)
+  assert.match(built, /var _usg = useState\(state\.usageSummary\), setUsage = _usg\[1\]/)
+  // 锁定「订阅存在于 update() 监听器内」：setUsage(state.usageSummary) 落在 update() 函数体、
+  // 且该 update 被 listeners.push 注册（而非游离在组件渲染路径上）
+  assert.match(kernel, /function update\(\) \{[\s\S]*?setUsage\(state\.usageSummary\)[\s\S]*?\}; listeners\.push\(update\)/)
+  assert.match(built, /function update\(\) \{[\s\S]*?setUsage\(state\.usageSummary\)[\s\S]*?\}; listeners\.push\(update\)/)
+})
+
 test('Token 区③：Top8 与模型分布主数字取总量（有效进 title），caption 写明口径翻转（源码级断言）', () => {
   const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   // 口径翻转（task-muxnqunk，用户 2026-10-07 裁决「算总的吧」，推翻 task-muwq9u04 有效主显）：
@@ -2752,8 +2764,9 @@ test('ArchiveView: 归档数据源读 state.tasks 全量（对齐仪表盘「已
   // 不得有任何 7 日窗口 cutoff（老归档 >7 天被整批滤掉是原根因候选形态之一）
   assert.doesNotMatch(src, /cutoff/)
   assert.doesNotMatch(src, /7 \* 24 \* 60|7 \* 86400000|604800000/)
-  // 顶部注明条数（与仪表盘「已归档」同口径，含已取消）
-  assert.match(src, /'共 ' \+ archived\.length \+ ' 条归档\/已取消/)
+  // 顶部注明条数：共 N 条；含已取消时补「（含已取消 X 条）」括号段，取消为 0 时省略（task-mv1pqy27 文案口径修正）
+  assert.match(src, /var cancelledCount = archived\.filter\(function \(t\) \{ return t\.status === 'cancelled' \}\)\.length/)
+  assert.match(src, /'共 ' \+ archived\.length \+ ' 条' \+ \(cancelledCount > 0 \? '（含已取消 ' \+ cancelledCount \+ ' 条）' : ''\)/)
   // 归档/取消时间倒序：archivedAt 优先，回退 cancelledAt/resolvedAt/createdAt
   assert.match(src, /function archTs\(t\) \{ return t\.archivedAt \|\| t\.cancelledAt \|\| t\.resolvedAt \|\| t\.createdAt \|\| '' \}/)
   // 取消卡可见标记：行内「已取消」chip + 时间戳回退 cancelledAt
@@ -2762,7 +2775,7 @@ test('ArchiveView: 归档数据源读 state.tasks 全量（对齐仪表盘「已
   // 组装产物同步（pretest 已跑 build-client）
   const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   assert.match(built, /var archived = state\.tasks\.filter\(function \(t\) \{ return t\.status === 'archived' \|\| t\.status === 'cancelled' \}\)/)
-  assert.match(built, /'共 ' \+ archived\.length \+ ' 条归档\/已取消/)
+  assert.match(built, /'共 ' \+ archived\.length \+ ' 条' \+ \(cancelledCount > 0 \? '（含已取消 ' \+ cancelledCount \+ ' 条）' : ''\)/)
 })
 
 // ===== 史诗 hooks=agent run（task-muuw4ov7）：host 生命周期接线（pre 闸门 / post 收口 / 薄框架 prompt / 主窗口限定写入）=====
@@ -3668,22 +3681,28 @@ test('可续跑 Worker⑫（卡2 续跑基线）：续跑轮没产出 → 残留
   } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
 })
 
-test('可续跑 Worker⑬（卡2 手动终止臂）：终止 continuable run → interrupt 留存（零 dispose），任务回 pending 且刻意不留续跑资格', async () => {
+test('可续跑 Worker⑬（卡2 手动终止臂）：终止 continuable run → interrupt 留存（零 dispose），任务回 pending 且关 run 结局 terminated（不留续跑资格）', async () => {
   const parent = { id: FULL_SID }
   const calls = { interrupt: [] }
+  const closed = []
   const t = mkTask({ id: 'mt1', title: '手动终止卡', status: 'in-progress', claimedBy: 'child-live', runs: [{ role: 'worker', id: 'child-live', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'running', hardMin: 120, continuable: true }] })
   const board = mkBoard([t])
   // 活跃 rec：continuable 形态（无 run，只能 interrupt）
   const runs = { mt1: { id: 'child-live', childId: 'child-live', continuable: true, ran: true, run: null, role: 'worker', taskId: 'mt1', startedAt: Date.now(), model: '', settled: false } }
-  const h = mkRpcHandlers(board, { rootForSession: () => parent, runsFor: () => runs }, { subagents: { interrupt: (id, auth) => calls.interrupt.push({ id: id, auth: auth }) } })
+  const h = mkRpcHandlers(board, {
+    rootForSession: () => parent, runsFor: () => runs,
+    // 手动终止 run 关账（task-mv1pqy27）：与生产 dispatch.closeRunHistory 同口径，只关 outcome==='running' 的条目
+    closeRunHistory: async (sid, taskId, runId, outcome) => { closed.push({ taskId: taskId, runId: runId, outcome: outcome }); var tt = board.tasks.find(function (x) { return x.id === taskId }); if (tt && Array.isArray(tt.runs)) { var rr = tt.runs[tt.runs.length - 1]; if (rr && rr.id === runId && rr.outcome === 'running') { rr.outcome = outcome; rr.endedAt = '2026-01-01T00:00:01Z' } } }
+  }, { subagents: { interrupt: (id, auth) => calls.interrupt.push({ id: id, auth: auth }) } })
   const r = await h['terminate-agent']({ taskId: 'mt1' })
   assert.equal(r.ok, true); assert.equal(r.terminated, 'worker:mt1')
   // 终止 = interrupt 留存（不是 dispose）：authority 形状同硬超时臂
   assert.deepEqual(calls.interrupt, [{ id: 'child-live', auth: { kind: 'ancestor', agent: parent } }])
   assert.equal(runs.mt1, undefined)                 // 活跃表摘除（结算通道随之关闭，不会被 idle 事件误结算）
   assert.equal(t.status, 'pending'); assert.equal(t.claimedBy, null) // 既有语义：重新排队
-  // 刻意不留续跑资格：结局停在 running → resumeTarget 不认（重派走 fresh spawn，不唤醒刚被终止的子会话）
-  assert.equal(t.runs[t.runs.length - 1].outcome, 'running')
+  // 关 run 结局 terminated（与状态无关，task-mv1pqy27）：terminated 不满足 resumeTarget 续跑判据 → 仍不留续跑资格
+  assert.deepEqual(closed, [{ taskId: 'mt1', runId: 'child-live', outcome: 'terminated' }])
+  assert.equal(t.runs[t.runs.length - 1].outcome, 'terminated')
 })
 
 test('hooks 接线（源码级）：spawnOneShot 三态 prompt + settleRun 分派 + pre/post 占用与 spawn 失败回收', () => {
@@ -4156,6 +4175,37 @@ test('task_cancel 工具：与 cancel-task RPC 同一门禁口径（放行/拒�
   h = mkRpcHandlers(mkBoard([t2]))
   r = await h.__tools['task_cancel'].execute({ taskId: 'x2' }, {})
   assert.equal(r.ok, false); assert.match(r.error, /terminate-agent/)
+})
+
+test('restore 清 cancelledAt（task-mv1pqy27）：已取消卡 resetToPending 恢复待办不背取消时间戳（行为级，RPC + 工具双通道）', async () => {
+  // RPC 通道（归档 tab「↩ 恢复待办」走 update-task resetToPending）
+  const c = mkTask({ id: 'rc1', status: 'cancelled', cancelledAt: '2026-01-01T00:00:00Z' })
+  const h = mkRpcHandlers(mkBoard([c]))
+  const r = await h['update-task']({ taskId: 'rc1', resetToPending: true })
+  assert.equal(r.ok, true); assert.equal(c.status, 'pending')
+  assert.equal('cancelledAt' in c, false) // delete 语义：字段消失，不背取消时间戳
+  // 工具通道（task_update resetToPending）同口径
+  const c2 = mkTask({ id: 'rc2', status: 'cancelled', cancelledAt: '2026-01-01T00:00:00Z' })
+  const h2 = mkRpcHandlers(mkBoard([c2]))
+  const r2 = await h2.__tools['task_update'].execute({ taskId: 'rc2', resetToPending: true }, {})
+  assert.equal(r2.ok, true); assert.equal(c2.status, 'pending')
+  assert.equal('cancelledAt' in c2, false)
+})
+
+test('terminate 认领位清理与状态无关 + 关 run 结局 terminated（源码级，task-mv1pqy27 死结窗口根修）', () => {
+  const rpc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  // 认领位清理按命中的 run 角色（rec.role）而非卡状态分支（resolved/archived/cancelled 态也清）
+  assert.match(rpc, /if \(rec\) \{\s*if \(rec\.role === 'verifier'\) \{ t\.verifierRun = null; delete t\.verifierRunAt \}/)
+  assert.match(rpc, /else \{ t\.claimedBy = null; t\.claimedAt = null \}/)
+  // 关 run 结局 outcome:'terminated'（与状态无关，凡 terminate 命中该卡的 run 就关账）
+  assert.match(rpc, /closeRunHistory\(sid, taskId, String\(rec\.id\), 'terminated'\)/)
+  // stale 兜底仍保留：无 rec 的 verifying 卡仍按状态清 verifierRun（rec 不存在时 rec.role 无从判定）
+  assert.match(rpc, /else if \(t\.status === 'verifying'\) \{ t\.verifierRun = null; delete t\.verifierRunAt; ah\(t, 'verifying'/)
+  // 接线：dispatch 导出 closeRunHistory + index 注入 rpc（未接线则 doTerminate 走 no-op 兜底，关账失效）
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const idx = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
+  assert.match(dsp, /closeRunHistory: closeRunHistory/)
+  assert.match(idx, /closeRunHistory: dispatch\.closeRunHistory/)
 })
 
 test('task_cancel GUI 按钮门禁：canCancel 三态 + 详情页按钮接线 + confirm 预警 + 产物重组装', () => {

@@ -162,6 +162,32 @@ test('② 回归：无活跃 rec 的 stale verifying 卡（terminate 空转场�
   assert.equal(r3.ok, true); assert.equal(board.tasks[0].status, 'archived')
 })
 
+// ===== ② 死结窗口根修（task-mv1pqy27）：terminate 认领位清理与状态无关 + 关 run 结局 terminated =====
+test('② 死结窗口：resolved/cancelled 态 terminate（rec 仍在内存表）→ 认领位清 + run 关账，立即 archive 放行', async () => {
+  // resolved 态窗口：卡已 resolved，但 verifier run 的 rec 还挂在内存表（~50ms 结算窗口）
+  const board = mkBoard([mkTask({ id: 'a6', status: 'resolved', verifierRun: 'run-vX', runs: [{ role: 'verifier', id: 'run-vX', outcome: 'running' }] })])
+  const runs = { [FULL_SID]: { 'a6': { id: 'run-vX', role: 'verifier', settled: false } } }
+  const closed = []
+  const h = mkRpcHarness(board, runs, { closeRunHistory: async (sid, taskId, runId, outcome) => { closed.push({ taskId: taskId, runId: runId, outcome: outcome }); var tt = board.tasks.find(function (x) { return x.id === taskId }); if (tt && Array.isArray(tt.runs)) { var rr = tt.runs[tt.runs.length - 1]; if (rr && rr.id === runId && rr.outcome === 'running') { rr.outcome = outcome; rr.endedAt = '2026-01-01T00:00:01Z' } } } })
+  const r = await h['terminate-agent']({ taskId: 'a6' })
+  assert.equal(r.ok, true); assert.equal(r.terminated, 'verifier:a6')
+  assert.equal(board.tasks[0].verifierRun, null) // 状态无关：resolved 态也清 verifierRun（旧代码只在 verifying 清 → 死结）
+  assert.deepEqual(closed, [{ taskId: 'a6', runId: 'run-vX', outcome: 'terminated' }]) // 关 run 结局 terminated
+  assert.equal(board.tasks[0].runs[0].outcome, 'terminated')
+  const r3 = await h['archive-task']({ taskId: 'a6' })
+  assert.equal(r3.ok, true); assert.equal(board.tasks[0].status, 'archived') // 立即 archive 放行（修复前永久拒）
+
+  // cancelled 态窗口：worker run 的 rec 仍在内存表，claimedBy 仍指已终止 run（closeRunHistory 未注入 = no-op 兜底，只靠认领位清）
+  const board2 = mkBoard([mkTask({ id: 'a7', status: 'cancelled', claimedBy: 'run-wX', claimedAt: '2026-01-01T00:00:00Z', runs: [{ role: 'worker', id: 'run-wX', outcome: 'running' }] })])
+  const runs2 = { [FULL_SID]: { 'a7': { id: 'run-wX', role: 'worker', settled: false } } }
+  const h2 = mkRpcHarness(board2, runs2)
+  const rw = await h2['terminate-agent']({ taskId: 'a7' })
+  assert.equal(rw.ok, true); assert.equal(rw.terminated, 'worker:a7')
+  assert.equal(board2.tasks[0].claimedBy, null); assert.equal(board2.tasks[0].claimedAt, null) // 状态无关：cancelled 态也清 claimedBy
+  const rw3 = await h2['archive-task']({ taskId: 'a7' })
+  assert.equal(rw3.ok, true); assert.equal(board2.tasks[0].status, 'archived') // 取消卡立即 archive 放行
+})
+
 // ===== ③④⑤ 迟到 verdict 落账（工具通道 board_verdict）=====
 test('③ 迟到 approved：board_verdict 落到已 resolved 卡 → 落 lateVerdict，不炸、状态不动', async () => {
   const board = mkBoard([mkTask({ id: 'l1', status: 'resolved', verifiedAt: '2026-01-01T00:01:00Z' })])
