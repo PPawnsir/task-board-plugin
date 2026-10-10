@@ -755,6 +755,73 @@
         }))
     }
 
+    // ===== 存储清理区（已结算会话清理，task-mv2131cz）：数据源 host 端 cleanup-preview / cleanup-run =====
+    // preview 纯读盘零副作用；run 需 confirm:true 二次确认（删除不可恢复，token 账已入卡不受影响）。
+    // 可删判定四闸在 host lib/cleanup.mjs：outcome 落定 ∧ usageRecorded ∧ 非 continuable ∧ 不活跃。
+    function fmtBytes(n) {
+      var v = Number(n) || 0
+      if (v >= 1073741824) return (v / 1073741824).toFixed(1) + ' GB'
+      if (v >= 1048576) return (v / 1048576).toFixed(v >= 10485760 ? 0 : 1) + ' MB'
+      if (v >= 1024) return (v / 1024).toFixed(v >= 10240 ? 0 : 1) + ' KB'
+      return String(v) + ' B'
+    }
+    function StorageCleanup() {
+      var _R = React; var useState = _R.useState
+      var _p = useState(null), prev = _p[0], setPrev = _p[1]
+      var _o = useState(false), open = _o[0], setOpen = _o[1]
+      var _r = useState(null), report = _r[0], setReport = _r[1]
+      var _m = useState(''), msg = _m[0], setMsg = _m[1]
+      var _b = useState(false), busy = _b[0], setBusy = _b[1]
+      var _c = useState(false), confirmOn = _c[0], setConfirmOn = _c[1]
+      function preview() {
+        setBusy(true); setMsg('')
+        rpc('cleanup-preview').then(function (r) {
+          if (r && r.ok) { setPrev(r); setReport(null); setConfirmOn(false) } else { setMsg((r && r.error) || '预览失败') }
+          setBusy(false)
+        }).catch(function (e) { setMsg('预览失败: ' + (e && e.message || e)); setBusy(false) })
+      }
+      function runClean() {
+        setBusy(true); setMsg('')
+        rpc('cleanup-run', { confirm: true }).then(function (r) {
+          setReport(r); setPrev(null); setConfirmOn(false); setBusy(false)
+          if (r && r.ok) { if (typeof fetchTasks === 'function') fetchTasks() } else { setMsg((r && r.error) || '清理失败') }
+        }).catch(function (e) { setMsg('清理失败: ' + (e && e.message || e)); setBusy(false) })
+      }
+      var box = { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 }
+      var head = React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('trash-2', 11), '存储清理')
+      var btn = { fontSize: 10, padding: '2px 10px', border: '1px solid ' + C.border, borderRadius: 5, background: C.card, color: C.text, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }
+      var dangerBtn = { fontSize: 10, padding: '2px 10px', border: '1px solid ' + C.err, borderRadius: 5, background: C.card, color: C.err, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }
+      function skippedLine(s, i) {
+        return React.createElement('div', { key: 'sk' + i, style: { fontSize: 9, color: C.text2, marginBottom: 2 } },
+          React.createElement('span', { style: { color: C.warn } }, '⏭ '), String(s.id || '').slice(0, 14) + '…：' + (s.text || s.reason || ''))
+      }
+      return React.createElement('div', { style: box },
+        head,
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+          React.createElement('button', { onClick: preview, disabled: busy, style: btn, title: '扫描本看板所有已结算 Worker/Verifier 会话，估算可释放空间（只读不删）' }, ic('refresh-cw', 11), busy ? '扫描中…' : '预览可清理会话'),
+          prev ? React.createElement('span', { style: { fontSize: 10, color: C.text } }, prev.total > 0 ? ('可删 ' + prev.total + ' 个会话 · 约 ' + fmtBytes(prev.totalBytes)) : '无可删会话') : null,
+          prev && prev.total > 0 ? React.createElement('button', { onClick: function () { setOpen(!open); setConfirmOn(false) }, style: btn }, ic(open ? 'chevron-up' : 'chevron-down', 10), open ? '收起明细' : '展开明细') : null,
+          prev && prev.total > 0 ? (confirmOn ? React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+              React.createElement('button', { onClick: runClean, disabled: busy, style: dangerBtn, title: '确认删除不可恢复；token 账已入卡不受影响' }, ic('check', 11), '确认清理（不可恢复）'),
+              React.createElement('button', { onClick: function () { setConfirmOn(false) }, style: btn }, '取消'))
+            : React.createElement('button', { onClick: function () { setConfirmOn(true) }, disabled: busy, style: btn, title: '删除不可恢复；token 账已入卡不受影响' }, ic('trash-2', 11), '清理')) : null),
+        msg ? React.createElement('div', { style: { fontSize: 9, color: C.err, marginTop: 4 } }, msg) : null,
+        report && report.ok ? React.createElement('div', { style: { fontSize: 10, color: C.text, marginTop: 5 } },
+          '✅ 已释放约 ' + fmtBytes(report.freedBytes) + '（删除 ' + report.deleted + ' 个会话' + ((report.skipped && report.skipped.length) ? ' · 跳过 ' + report.skipped.length + ' 个' : '') + '）') : null,
+        report && report.ok && report.skipped && report.skipped.length ? React.createElement('div', { style: { marginTop: 4 } }, report.skipped.map(skippedLine)) : null,
+        open && prev && prev.total > 0 ? React.createElement('div', { style: { marginTop: 6, borderTop: '1px solid ' + C.nested, paddingTop: 5 } },
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginBottom: 4 } }, '可删会话（会话目录 + projcache 缓存一并删除）'),
+          (prev.byTask || []).map(function (b) {
+            return React.createElement('div', { key: b.taskId, style: { marginBottom: 3, fontSize: 9, color: C.text2 } },
+              React.createElement('span', { style: { color: C.brand } }, shortId(b.title)), '：' + b.count + ' 个 · 约 ' + fmtBytes(b.bytes))
+          }),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2 } }, '数据来源：本看板 runs[] 里已结算（outcome 落定 + usage 已记账 + 非可续跑）且已不活跃的一次性 Worker/Verifier 会话；token 账早已记入卡片，删除不影响任何统计。')
+        ) : null,
+        prev && prev.total === 0 && prev.skipped && prev.skipped.length ? React.createElement('div', { style: { marginTop: 5 } },
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginBottom: 3 } }, '无符合条件可删的会话（跳过项）'),
+          prev.skipped.slice(0, 8).map(skippedLine)) : null)
+    }
+
     function Dashboard() {
       var stats = computeStats(state.tasks); var statusOrder = ['pending', 'in-progress', 'verifying', 'resolved', 'blocked', 'archived']; var prioOrder = ['critical', 'high', 'medium', 'low']
       return React.createElement('div', null,
@@ -762,6 +829,7 @@
         React.createElement(GlobalBoards),
         React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' } }, React.createElement(StatCard, { label: '总任务', value: stats.total, color: C.text }), React.createElement(StatCard, { label: '待办', value: stats.byStatus['pending'] || 0, color: C.text2 }), React.createElement(StatCard, { label: '进行中', value: stats.byStatus['in-progress'] || 0, color: C.brand }), React.createElement(StatCard, { label: '验证中', value: stats.byStatus['verifying'] || 0, color: C.warn }), React.createElement(StatCard, { label: '已完成', value: stats.byStatus['resolved'] || 0, color: C.ok }), React.createElement(StatCard, { label: '已归档', value: stats.byStatus['archived'] || 0, color: C.text2 })),
         React.createElement(HealthHints),
+        React.createElement(StorageCleanup),
         React.createElement(TokenUsage, { usage: state.usageSummary }),
         // 模型表现区（卡3）：Token 区正下方；scoreboard 随 usageSummary 同通道透传（老 host 缺字段 → null → 空态）
         React.createElement(ModelPerf, { sb: (state.usageSummary && state.usageSummary.scoreboard) || null }),

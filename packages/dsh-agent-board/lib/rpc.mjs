@@ -13,6 +13,7 @@ import { TASK_SIZE_CONTRACT, withSplitHint, pushRejectLesson, pushArbitrationLes
 import { makeMsg } from './notify.mjs'
 import { computeHealthHints, computeRuntimeHealthHints } from './health.mjs'
 import { isFullSessionId } from './session.mjs' // 幻影板防线口径（纯函数，与 policy.mjs 直引同例）
+import { previewCleanup, runCleanup, SKIP_REASON_TEXT } from './cleanup.mjs' // 已结算会话清理（预览+执行）
 const { ah, isb, gsb, gpt, vt, validateDeps, classifyPipeline, cfg, claimCheck, claimApply, resolveApply, verifyApply, lateVerdictApply, archiveApply, cancelApply, maybeAutoCloseParent, PRIO_RANK, touchesConflict, holdsFiles, boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint } = core
 
 function defineTool(options) {
@@ -42,6 +43,27 @@ export function createRpc(ctx, state, deps) {
     var rt = deps.rt, mutateLocked = deps.mutateLocked
     // 主窗口消耗（task-muwsol23）：测试可注入临时日志根；生产 undefined → findRunLog 回退 ~/.dsh/sessions
     var sessionsRoot = (typeof deps.sessionsRoot === 'string' && deps.sessionsRoot) ? deps.sessionsRoot : undefined
+    // ===== 已结算会话清理（task-mv2131cz）：路径根 + 活跃/血统保护集 =====
+    // 会话日志与 projcache 布局（与 usage.mjs findRunLog 同源）：~/.dsh/sessions/<bucket>/<id>/、
+    // ~/.dsh/storages/session_projcache/sessions/<id>.json；注册表索引 ~/.dsh/storages/session_projcache.json
+    // 是宿主托管（version/seq 结构），**不清理**（残留形态见 README「存储清理」小节）。
+    var cleanupRoots = {
+      sessions: path.join(boardHome(), 'sessions'),
+      projcacheDir: path.join(boardHome(), 'storages', 'session_projcache', 'sessions'),
+    }
+    // 不可删保护集：本板主会话自身 + 活跃树里所有会话（roots + list）——覆盖「不活跃」与「本会话血统」两闸。
+    function cleanupBlockedIds(sid) {
+      var blocked = new Set()
+      blocked.add(String(sid)) // 本板主会话自身
+      var ag = ctx.agents
+      if (ag) {
+        try {
+          var roots = ag.roots(); if (Array.isArray(roots)) for (var i = 0; i < roots.length; i++) blocked.add(String(roots[i].id))
+          var all = ag.list(); if (Array.isArray(all)) for (var j = 0; j < all.length; j++) blocked.add(String(all[j].id))
+        } catch (_) {}
+      }
+      return blocked
+    }
     var maybeNotify = deps.maybeNotify, notifyTaskDone = deps.notifyTaskDone
     var notifyLateReject = (typeof deps.notifyLateReject === 'function') ? deps.notifyLateReject : null // 迟到驳回 err 级通知（未接线 → 静默跳过）
     var spawnOneShot = deps.spawnOneShot, accumulateRunUsage = deps.accumulateRunUsage, readContextPack = deps.readContextPack
@@ -891,6 +913,34 @@ export function createRpc(ctx, state, deps) {
         })
         return { ok: true, done: done, skipped: skipped }
       })
+    })
+
+    // ===== 已结算会话清理（task-mv2131cz）：cleanup-preview / cleanup-run =====
+    // preview：dry-run，返回可删清单（N 个 / 总大小 / 按卡分组 / 跳过项与理由），只读盘估体积零副作用。
+    // run：confirm 执行真删（会话目录 + projcache json），删前再验路径逃逸；操作写 board.cleanupLog 留痕。
+    handle('cleanup-preview', async function (args) {
+      var sid = rpcSessionId(args)
+      var d = await rt(sid)
+      var view = previewCleanup(d.tasks || [], { blockedIds: cleanupBlockedIds(sid), roots: cleanupRoots })
+      var skipped = (view.skipped || []).map(function (s) { return { id: s.id, taskId: s.taskId, reason: s.reason, text: s.text || SKIP_REASON_TEXT[s.reason] || s.reason } })
+      return { ok: true, total: view.total, totalBytes: view.totalBytes, items: view.items, skipped: skipped, byTask: view.byTask }
+    })
+    handle('cleanup-run', async function (args) {
+      var sid = rpcSessionId(args)
+      if (args.confirm !== true) return { ok: false, error: '删除不可恢复，需 confirm:true 确认（token 账已入卡不受影响）' }
+      var d = await rt(sid)
+      var view = previewCleanup(d.tasks || [], { blockedIds: cleanupBlockedIds(sid), roots: cleanupRoots })
+      if (!view.items || !view.items.length) return { ok: true, deleted: 0, freedBytes: 0, note: '无可删会话' }
+      var report = await runCleanup(view.items, { roots: cleanupRoots })
+      // 留痕：board.cleanupLog 追加一条（不逐卡写 history 防刷屏；见 README「存储清理」小节）
+      await mutateLocked(sid, function (dd) {
+        if (!Array.isArray(dd.cleanupLog)) dd.cleanupLog = []
+        dd.cleanupLog.push({ at: new Date().toISOString(), by: getActorId(), deleted: report.deleted, freedBytes: report.freedBytes, ids: report.deletedIds })
+        if (dd.cleanupLog.length > 50) dd.cleanupLog = dd.cleanupLog.slice(-50)
+        return { ok: true }
+      }, true)
+      var skippedText = (report.skipped || []).map(function (s) { return { id: s.id, reason: s.reason, text: SKIP_REASON_TEXT[s.reason] || s.reason } })
+      return { ok: true, deleted: report.deleted, freedBytes: report.freedBytes, deletedIds: report.deletedIds, skipped: skippedText }
     })
 
     // ===== client ↔ host RPC：POST /dsh-agent-board { method, args } → JSON =====

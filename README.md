@@ -157,6 +157,12 @@ dsh plugin --profile web remove dsh-agent-board
 - 统计区耗时同口径拆分：「平均排队 / 平均执行」双行展示（平均验收单列不变）
 - 统计区新增「调研 ROI」对比行：resolved/archived 卡按有无调研注入分组现算卡数 / 平均执行时长 / 平均 token（双组总样本 ≥4 才渲染，无调研组明显更慢时数字 warn 色提示）
 
+### 存储清理（已结算会话）
+
+- **看板内建「已结算会话清理」**（`task-mv2131cz`，用户指令「这个清理可以做到看板上」）：DSH 宿主无会话删除 API（归档=执行门禁不删数据），看板是唯一知道「哪些会话账已结清」的组件——清理只能长在看板上。仪表盘新增「**存储清理**」区：「预览可清理会话」按钮 → 展示可删会话数 + 预估释放空间 + 按卡分组明细 + 跳过项与理由（**只读不删**）；「清理」按钮**二次确认**后真删（删除不可恢复，token 账早已记入卡片、删除不影响任何统计），完成后报告「已释放 N / 跳过 M 及理由」
+- **可删筛选四闸**（host `lib/cleanup.mjs` 纯函数）：只删**本板 runs[] 关联的会话 id**，且 ① `outcome` 已落定（非 `running`）② `usageRecorded=true`（账已记入卡）③ 非 `continuable`（可续跑 Worker 会话还需续命，绝不删）④ 会话当前不活跃（不在 `ctx.agents` 活跃树 / 非本会话血统）——任一解析不确定即跳过并计入理由（宁漏勿错删）
+- **删除范围**：会话日志目录 `~/.dsh/sessions/<bucket>/<id>/`（`fs.rm` recursive）+ projcache 缓存 `~/.dsh/storages/session_projcache/sessions/<id>.json`；**路径逃逸双闸防护**：① 会话 id 白名单 `[A-Za-z0-9_-]`（含 `../`、`/`、`\` 一律拒）② `rm` 前再验目标绝对路径仍在 sessions/projcache 桶内（`path.relative` 判定）。**注册表索引残留**：`~/.dsh/storages/session_projcache.json`（宿主托管的 `version/seq` 结构）**不清理**——只是元数据索引，残留条目不占会话日志体积，宿主自会 GC；每次清理写 `board.cleanupLog` 留痕（时间/操作者/删除数/释放字节/会话 id 清单，上限 50 条）
+
 ### 学习反馈（候选教训信号 → 主窗口沉淀）
 
 - **信号源架构（零耦合）**：看板只产「候选教训**信号**」，不做**存储**——不调用任何笔记/记忆工具的 API、不写任何外部文件、也不知道教训最终被存到哪；用不用、存进哪个工具（如 `note_search` / `note_manage`）完全由主窗口 agent 自己决定
