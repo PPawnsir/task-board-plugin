@@ -247,7 +247,7 @@ function apply(ctx) {
       blocked: { title: '阻塞：卡住待处理（等依赖/等主窗口裁决）', empty: '暂无阻塞——任务卡住待裁决时会出现在这里' }
     }
     var reqEpoch = 0 // 会话切换纪元：切会话时自增，旧会话在途响应按纪元丢弃
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, verifyUserGuide: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', filterReview: false, selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', mpRole: '', mpSize: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, verifyUserGuide: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', filterReview: false, selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', mpRole: '', mpSize: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
 
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
@@ -398,6 +398,9 @@ function apply(ctx) {
         state.epicSplit = cfgKnobOf(d, 'epicSplit')
         // 自测指南开关（设置区「验收」）：同上——缺字段=开（详情块/报告清单段照常），只有显式 false 才关
         state.verifyUserGuide = cfgKnobOf(d, 'verifyUserGuide')
+        // 清理保留天数（设置区「存储清理」，卡龄主闸）：数值键，host 已 cfg 归一（缺字段/脏值=7、钳 1-90），
+        // 客户端读服务端权威值（与 softTimeoutMin/hardTimeoutMin 同款直接赋值，不做布尔口径纠偏）。
+        state.cleanupRetentionDays = (d && d.cleanupRetentionDays) || 7
         // 开关有变 / Token 区聚合有变 → 补一次 notify（tasksChanged 分支已在上面 notify 过，
         // 这里只管 hash 不变时被跳过的那两次：开关乐观更新纠偏 + 统计范围切换后的新聚合）
         var cfgDelta = !tasksChanged && cfgKnobsChanged(cfgKnobs, state)
@@ -615,8 +618,9 @@ function apply(ctx) {
       var _ndo = useState(state.notifyDispatch), ndOn = _ndo[0], setNdOn = _ndo[1]; var _nno = useState(state.notifyDone), nnOn = _nno[0], setNnOn = _nno[1]
       var _eso = useState(state.epicSplit), esOn = _eso[0], setEsOn = _eso[1] // 史诗拆分总开关勾选态（设置区「功能」）
       var _vug = useState(state.verifyUserGuide), vugOn = _vug[0], setVugOn = _vug[1] // 自测指南开关勾选态（设置区「验收」）
+      var _crd = useState(state.cleanupRetentionDays), crd = _crd[0], setCrd = _crd[1] // 清理保留天数（设置区「存储清理」）
       var _usg = useState(state.usageSummary), setUsage = _usg[1] // Token 区聚合订阅（task-mv10lvud 根修）：usageSummary 换新对象即触发渲染
-      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setNdOn(state.notifyDispatch); setNnOn(state.notifyDone); setEsOn(state.epicSplit); setVugOn(state.verifyUserGuide); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr); setUsage(state.usageSummary) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
+      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setNdOn(state.notifyDispatch); setNnOn(state.notifyDone); setEsOn(state.epicSplit); setVugOn(state.verifyUserGuide); setCrd(state.cleanupRetentionDays); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr); setUsage(state.usageSummary) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!open) return null
       if (!state.isRootStable) return null // 子代理会话不渲染看板面板（读 isRootStable：瞬态 false 不闪，见 isRoot 蝶变防抖）
       var active = tasks.filter(function (t) { return t.status !== 'archived' }); var archived = tasks.filter(function (t) { return t.status === 'archived' })
@@ -642,7 +646,7 @@ function apply(ctx) {
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', borderBottom: '1px solid ' + C.border, flexShrink: 0, flexWrap: 'wrap', gap: 4 } },
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, React.createElement('span', { style: { fontWeight: 600, fontSize: 13, color: C.text, display: 'inline-flex', alignItems: 'center', gap: 5 } }, ic('clipboard-list', 15), '智能看板'), React.createElement(ViewTab, null), React.createElement(PoolStatus, null)),
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' } },
-            React.createElement(PoolCfgPopover, { minW: minW, maxW: maxW, minV: minV, maxV: maxV, workerModel: workerModel, verifierModel: verifierModel, softT: softT, hardT: hardT, feedbackEnabled: fbEnabled, notifyDispatch: ndOn, notifyDone: nnOn, epicSplit: esOn, verifyUserGuide: vugOn }),
+            React.createElement(PoolCfgPopover, { minW: minW, maxW: maxW, minV: minV, maxV: maxV, workerModel: workerModel, verifierModel: verifierModel, softT: softT, hardT: hardT, feedbackEnabled: fbEnabled, notifyDispatch: ndOn, notifyDone: nnOn, epicSplit: esOn, verifyUserGuide: vugOn, retentionDays: crd }),
             dispatchInfo ? React.createElement('span', { style: { fontSize: 9, color: C.brand, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: dispatchInfo }, dispatchInfo) : null,
             React.createElement('button', { onClick: function () { state.createOpen = true; notify() }, title: '新建任务（可存为草稿）', style: { fontSize: 11, padding: '3px 8px', border: '1px solid ' + C.border, borderRadius: 6, cursor: 'pointer', background: 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('plus', 11), '新建任务'),
             createFlash ? React.createElement('span', { style: { fontSize: 10, color: C.ok } }, createFlash) : null,
@@ -2263,7 +2267,7 @@ function apply(ctx) {
 
     // ===== 存储清理区（已结算会话清理，task-mv2131cz）：数据源 host 端 cleanup-preview / cleanup-run =====
     // preview 纯读盘零副作用；run 需 confirm:true 二次确认（删除不可恢复，token 账已入卡不受影响）。
-    // 可删判定四闸在 host lib/cleanup.mjs：outcome 落定 ∧ usageRecorded ∧ 非 continuable ∧ 不活跃。
+    // 可删判定口径在 host lib/cleanup.mjs：卡龄主闸（卡归档满 cleanupRetentionDays 天）+ 三底闸（落定/不活跃/路径安全）。
     function fmtBytes(n) {
       var v = Number(n) || 0
       if (v >= 1073741824) return (v / 1073741824).toFixed(1) + ' GB'
@@ -2304,7 +2308,7 @@ function apply(ctx) {
       return React.createElement('div', { style: box },
         head,
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
-          React.createElement('button', { onClick: preview, disabled: busy, style: btn, title: '扫描本看板所有已结算 Worker/Verifier 会话，估算可释放空间（只读不删）' }, ic('refresh-cw', 11), busy ? '扫描中…' : '预览可清理会话'),
+          React.createElement('button', { onClick: preview, disabled: busy, style: btn, title: '扫描本看板归档超过保留天数的卡片的会话，估算可释放空间（只读不删）' }, ic('refresh-cw', 11), busy ? '扫描中…' : '预览可清理会话'),
           prev ? React.createElement('span', { style: { fontSize: 10, color: C.text } }, prev.total > 0 ? ('可删 ' + prev.total + ' 个会话 · 约 ' + fmtBytes(prev.totalBytes)) : '无可删会话') : null,
           prev && prev.total > 0 ? React.createElement('button', { onClick: function () { setOpen(!open); setConfirmOn(false) }, style: btn }, ic(open ? 'chevron-up' : 'chevron-down', 10), open ? '收起明细' : '展开明细') : null,
           prev && prev.total > 0 ? (confirmOn ? React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
@@ -2321,7 +2325,7 @@ function apply(ctx) {
             return React.createElement('div', { key: b.taskId, style: { marginBottom: 3, fontSize: 9, color: C.text2 } },
               React.createElement('span', { style: { color: C.brand } }, shortId(b.title)), '：' + b.count + ' 个 · 约 ' + fmtBytes(b.bytes))
           }),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2 } }, '数据来源：本看板 runs[] 里已结算（outcome 落定 + usage 已记账 + 非可续跑）且已不活跃的一次性 Worker/Verifier 会话；token 账早已记入卡片，删除不影响任何统计。')
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2 } }, '数据来源：本看板 runs[] 里所属卡已归档超过 ' + (state.cleanupRetentionDays || 7) + ' 天、且 outcome 已落定并已不活跃的 Worker/Verifier 会话；token 账早已记入卡片，删除不影响任何统计。')
         ) : null,
         prev && prev.total === 0 && prev.skipped && prev.skipped.length ? React.createElement('div', { style: { marginTop: 5 } },
           React.createElement('div', { style: { fontSize: 9, color: C.text2, marginBottom: 3 } }, '无符合条件可删的会话（跳过项）'),
@@ -2397,6 +2401,30 @@ function apply(ctx) {
           style: { width: 38, padding: '0px 3px', fontSize: 9, textAlign: 'center', border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text }
         }),
         React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '分'),
+        dirty ? React.createElement('button', { onClick: function () { commit(val) }, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
+    }
+    // 清理保留天数输入（卡龄主闸设置项 cleanupRetentionDays，1~90 天）：与 MinCfg 同款受控输入 + 失焦/回车提交，
+    // 越界值直接回弹到服务端权威值（不留脏态），成功走 set-board-config → fetchTasks 由服务端权威值纠偏。
+    function RetentionCfg(props) {
+      var _R = React; var useState = _R.useState, useEffect = _R.useEffect
+      var _a = useState(String(props.value)), val = _a[0], setVal = _a[1]
+      var _b = useState(false), dirty = _b[0], setDirty = _b[1]
+      useEffect(function () { setVal(String(props.value)); setDirty(false) }, [props.value])
+      function commit(v) {
+        var n = parseInt(v, 10)
+        if (isNaN(n) || n < 1 || n > 90) { setVal(String(props.value)); setDirty(false); return }
+        setVal(String(n)); setDirty(false); rpc('set-board-config', { key: 'cleanupRetentionDays', value: n }).then(fetchTasks).catch(function () {})
+      }
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } },
+        props.label,
+        React.createElement('input', {
+          value: val, title: props.tip || ('1 ~ 90 天，默认 7'),
+          onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== String(props.value)) },
+          onBlur: function () { if (dirty) commit(val) },
+          onKeyDown: function (e) { if (e.key === 'Enter') commit(val) },
+          style: { width: 38, padding: '0px 3px', fontSize: 9, textAlign: 'center', border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text }
+        }),
+        React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '天'),
         dirty ? React.createElement('button', { onClick: function () { commit(val) }, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
     }
 
@@ -2514,7 +2542,13 @@ function apply(ctx) {
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
             React.createElement('input', { type: 'checkbox', checked: props.epicSplit !== false, onChange: function (e) { setCfg('epicSplit', e.target.checked) } }),
             React.createElement('span', null, '🧩 史诗拆分：大任务引导拆为 epic + 子任务')),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '关掉只停引导：显式 parentId 建子卡与史诗自动收口照常工作')) : null)
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '关掉只停引导：显式 parentId 建子卡与史诗自动收口照常工作'),
+          // 清理保留天数（卡龄主闸 cleanupRetentionDays，默认 7、可配 1-90）：回收与归档生命周期对齐——
+          // 卡片归档满该天数后，其会话才进入可清理池。仪表盘「存储清理」区文案读同一服务端权威值。
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '存储清理'),
+          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+            React.createElement(RetentionCfg, { label: '归档保留', value: props.retentionDays, tip: '卡片归档后多少天可被完全回收（1~90 天，默认 7）' }),
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（归档满该天数后其会话可被清理回收）'))) : null)
     }
 
     function TeamView() {

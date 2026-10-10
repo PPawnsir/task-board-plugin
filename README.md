@@ -160,7 +160,7 @@ dsh plugin --profile web remove dsh-agent-board
 ### 存储清理（已结算会话）
 
 - **看板内建「已结算会话清理」**（`task-mv2131cz`，用户指令「这个清理可以做到看板上」）：DSH 宿主无会话删除 API（归档=执行门禁不删数据），看板是唯一知道「哪些会话账已结清」的组件——清理只能长在看板上。仪表盘新增「**存储清理**」区：「预览可清理会话」按钮 → 展示可删会话数 + 预估释放空间 + 按卡分组明细 + 跳过项与理由（**只读不删**）；「清理」按钮**二次确认**后真删（删除不可恢复，token 账早已记入卡片、删除不影响任何统计），完成后报告「已释放 N / 跳过 M 及理由」
-- **可删筛选四闸**（host `lib/cleanup.mjs` 纯函数）：只删**本板 runs[] 关联的会话 id**，且 ① `outcome` 已落定（非 `running`）② `usageRecorded=true`（账已记入卡）③ 非 `continuable`（可续跑 Worker 会话还需续命，绝不删）④ 会话当前不活跃（不在 `ctx.agents` 活跃树 / 非本会话血统）——任一解析不确定即跳过并计入理由（宁漏勿错删）
+- **可删判定：卡龄主闸 + 三底闸**（host `lib/cleanup.mjs` 纯函数）：只删**本板 runs[] 关联的会话 id**，且 **主闸 = 卡龄**——所属卡 `status=archived` 且 `archivedAt` 距今 ≥ `cleanupRetentionDays`（板级设置项，默认 **7 天**、可配 1-90，回收与归档生命周期对齐）；**三底闸永留**——① `outcome` 已落定（非 `running`）② 会话当前不活跃（不在 `ctx.agents` 活跃树 / 非本会话血统）③ 路径安全（id 白名单 + `rm` 前 `isWithin` 再验）——任一解析不确定即跳过并计入理由（宁漏勿错删）。`continuable`/`usageRecorded` 两道旧闸已撤：归档满保留天数即视为账本封存、续跑意愿过期（恢复待办时旧会话已被删走，既有「冷复活失败→回落新 spawn」路径承接，零新逻辑）
 - **删除范围**：会话日志目录 `~/.dsh/sessions/<bucket>/<id>/`（`fs.rm` recursive）+ projcache 缓存 `~/.dsh/storages/session_projcache/sessions/<id>.json`；**路径逃逸双闸防护**：① 会话 id 白名单 `[A-Za-z0-9_-]`（含 `../`、`/`、`\` 一律拒）② `rm` 前再验目标绝对路径仍在 sessions/projcache 桶内（`path.relative` 判定）。**注册表索引残留**：`~/.dsh/storages/session_projcache.json`（宿主托管的 `version/seq` 结构）**不清理**——只是元数据索引，残留条目不占会话日志体积，宿主自会 GC；每次清理写 `board.cleanupLog` 留痕（时间/操作者/删除数/释放字节/会话 id 清单，上限 50 条）
 
 ### 学习反馈（候选教训信号 → 主窗口沉淀）

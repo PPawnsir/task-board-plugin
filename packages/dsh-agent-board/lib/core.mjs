@@ -139,7 +139,11 @@ export function classifyPipeline(t) {
 export function cfg(d) {
   var soft = Math.max(1, Math.min(480, d.softTimeoutMin || 30))
   var hard = Math.max(soft, Math.min(1440, d.hardTimeoutMin || 120))
-  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false, workerContinuable: d.workerContinuable !== false, verifyUserGuide: d.verifyUserGuide !== false }
+  // 清理保留天数（卡龄主闸，默认 7 天）：读路径归一，缺字段/脏值=7，钳 1-90。
+  var crd = d.cleanupRetentionDays
+  if (typeof crd !== 'number' || !(crd >= 1)) crd = 7
+  crd = Math.max(1, Math.min(90, Math.round(crd)))
+  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, cleanupRetentionDays: crd, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false, workerContinuable: d.workerContinuable !== false, verifyUserGuide: d.verifyUserGuide !== false }
 }
 
 // ===== 看板数据目录（跨重启继承用）=====
@@ -156,7 +160,7 @@ export function boardHome() { return path.join(boardDirName(), '.dsh') }
 // ownerCwd（跨重启继承）：创建该看板的会话工作区路径，继承判定全靠它——取不到就省略字段
 // （绝不落空串，否则「路径读不到的多个会话」会被误判成同一工作区）。
 export function seed(sid, ownerCwd) {
-  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, poolStatus: { workers: [], verifiers: [] }, tasks: [] }
+  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, poolStatus: { workers: [], verifiers: [] }, tasks: [] }
   if (typeof ownerCwd === 'string' && ownerCwd) d.ownerCwd = ownerCwd
   return d
 }
@@ -178,6 +182,9 @@ export function normalizeBoard(d) {
     if (typeof d.epicSplit !== 'boolean') d.epicSplit = true
     if (typeof d.workerContinuable !== 'boolean') d.workerContinuable = true
     if (typeof d.verifyUserGuide !== 'boolean') d.verifyUserGuide = true
+    // 清理保留天数（卡龄主闸）：缺字段/脏值（非数或 <1）→ 7；合法值四舍五入并钳 1-90。
+    if (typeof d.cleanupRetentionDays !== 'number' || !(d.cleanupRetentionDays >= 1)) d.cleanupRetentionDays = 7
+    else d.cleanupRetentionDays = Math.max(1, Math.min(90, Math.round(d.cleanupRetentionDays)))
     if (Array.isArray(d.tasks)) {
       for (var i = 0; i < d.tasks.length; i++) {
         var t = d.tasks[i]

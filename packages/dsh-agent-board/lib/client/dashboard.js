@@ -757,7 +757,7 @@
 
     // ===== 存储清理区（已结算会话清理，task-mv2131cz）：数据源 host 端 cleanup-preview / cleanup-run =====
     // preview 纯读盘零副作用；run 需 confirm:true 二次确认（删除不可恢复，token 账已入卡不受影响）。
-    // 可删判定四闸在 host lib/cleanup.mjs：outcome 落定 ∧ usageRecorded ∧ 非 continuable ∧ 不活跃。
+    // 可删判定口径在 host lib/cleanup.mjs：卡龄主闸（卡归档满 cleanupRetentionDays 天）+ 三底闸（落定/不活跃/路径安全）。
     function fmtBytes(n) {
       var v = Number(n) || 0
       if (v >= 1073741824) return (v / 1073741824).toFixed(1) + ' GB'
@@ -798,7 +798,7 @@
       return React.createElement('div', { style: box },
         head,
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
-          React.createElement('button', { onClick: preview, disabled: busy, style: btn, title: '扫描本看板所有已结算 Worker/Verifier 会话，估算可释放空间（只读不删）' }, ic('refresh-cw', 11), busy ? '扫描中…' : '预览可清理会话'),
+          React.createElement('button', { onClick: preview, disabled: busy, style: btn, title: '扫描本看板归档超过保留天数的卡片的会话，估算可释放空间（只读不删）' }, ic('refresh-cw', 11), busy ? '扫描中…' : '预览可清理会话'),
           prev ? React.createElement('span', { style: { fontSize: 10, color: C.text } }, prev.total > 0 ? ('可删 ' + prev.total + ' 个会话 · 约 ' + fmtBytes(prev.totalBytes)) : '无可删会话') : null,
           prev && prev.total > 0 ? React.createElement('button', { onClick: function () { setOpen(!open); setConfirmOn(false) }, style: btn }, ic(open ? 'chevron-up' : 'chevron-down', 10), open ? '收起明细' : '展开明细') : null,
           prev && prev.total > 0 ? (confirmOn ? React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
@@ -815,7 +815,7 @@
             return React.createElement('div', { key: b.taskId, style: { marginBottom: 3, fontSize: 9, color: C.text2 } },
               React.createElement('span', { style: { color: C.brand } }, shortId(b.title)), '：' + b.count + ' 个 · 约 ' + fmtBytes(b.bytes))
           }),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2 } }, '数据来源：本看板 runs[] 里已结算（outcome 落定 + usage 已记账 + 非可续跑）且已不活跃的一次性 Worker/Verifier 会话；token 账早已记入卡片，删除不影响任何统计。')
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2 } }, '数据来源：本看板 runs[] 里所属卡已归档超过 ' + (state.cleanupRetentionDays || 7) + ' 天、且 outcome 已落定并已不活跃的 Worker/Verifier 会话；token 账早已记入卡片，删除不影响任何统计。')
         ) : null,
         prev && prev.total === 0 && prev.skipped && prev.skipped.length ? React.createElement('div', { style: { marginTop: 5 } },
           React.createElement('div', { style: { fontSize: 9, color: C.text2, marginBottom: 3 } }, '无符合条件可删的会话（跳过项）'),
@@ -891,6 +891,30 @@
           style: { width: 38, padding: '0px 3px', fontSize: 9, textAlign: 'center', border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text }
         }),
         React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '分'),
+        dirty ? React.createElement('button', { onClick: function () { commit(val) }, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
+    }
+    // 清理保留天数输入（卡龄主闸设置项 cleanupRetentionDays，1~90 天）：与 MinCfg 同款受控输入 + 失焦/回车提交，
+    // 越界值直接回弹到服务端权威值（不留脏态），成功走 set-board-config → fetchTasks 由服务端权威值纠偏。
+    function RetentionCfg(props) {
+      var _R = React; var useState = _R.useState, useEffect = _R.useEffect
+      var _a = useState(String(props.value)), val = _a[0], setVal = _a[1]
+      var _b = useState(false), dirty = _b[0], setDirty = _b[1]
+      useEffect(function () { setVal(String(props.value)); setDirty(false) }, [props.value])
+      function commit(v) {
+        var n = parseInt(v, 10)
+        if (isNaN(n) || n < 1 || n > 90) { setVal(String(props.value)); setDirty(false); return }
+        setVal(String(n)); setDirty(false); rpc('set-board-config', { key: 'cleanupRetentionDays', value: n }).then(fetchTasks).catch(function () {})
+      }
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } },
+        props.label,
+        React.createElement('input', {
+          value: val, title: props.tip || ('1 ~ 90 天，默认 7'),
+          onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== String(props.value)) },
+          onBlur: function () { if (dirty) commit(val) },
+          onKeyDown: function (e) { if (e.key === 'Enter') commit(val) },
+          style: { width: 38, padding: '0px 3px', fontSize: 9, textAlign: 'center', border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text }
+        }),
+        React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '天'),
         dirty ? React.createElement('button', { onClick: function () { commit(val) }, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
     }
 
@@ -1008,7 +1032,13 @@
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
             React.createElement('input', { type: 'checkbox', checked: props.epicSplit !== false, onChange: function (e) { setCfg('epicSplit', e.target.checked) } }),
             React.createElement('span', null, '🧩 史诗拆分：大任务引导拆为 epic + 子任务')),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '关掉只停引导：显式 parentId 建子卡与史诗自动收口照常工作')) : null)
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '关掉只停引导：显式 parentId 建子卡与史诗自动收口照常工作'),
+          // 清理保留天数（卡龄主闸 cleanupRetentionDays，默认 7、可配 1-90）：回收与归档生命周期对齐——
+          // 卡片归档满该天数后，其会话才进入可清理池。仪表盘「存储清理」区文案读同一服务端权威值。
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '存储清理'),
+          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+            React.createElement(RetentionCfg, { label: '归档保留', value: props.retentionDays, tip: '卡片归档后多少天可被完全回收（1~90 天，默认 7）' }),
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（归档满该天数后其会话可被清理回收）'))) : null)
     }
 
     function TeamView() {

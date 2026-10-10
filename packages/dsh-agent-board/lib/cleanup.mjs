@@ -1,7 +1,8 @@
 // dsh-agent-board — 已结算会话清理（lib/cleanup.mjs）
 // 纯函数 + node IO，不碰 ctx 与共享状态。看板内建「已结算会话清理」：
-// 扫本板全部任务 runs[]，四闸筛「可删」= outcome 已落定（非 running）∧ usageRecorded=true
-// ∧ 非 continuable（可续跑 Worker 会话绝不删）∧ 会话不活跃（不在活跃树/本会话血统）。
+// 扫本板全部任务 runs[]，卡龄主闸筛「可删」= 所属卡 status=archived 且 archivedAt 距今 ≥ cleanupRetentionDays
+// （板级设置项，默认 7 天、可配 1-90）；三底闸永留 = outcome 已落定（非 running）∧ 会话不活跃
+// （不在活跃树/本会话血统）∧ 路径安全（id 白名单 + rm 前 isWithin 再验）。
 // 路径逃逸防护两道闸：① 会话 id 白名单 [A-Za-z0-9_-]；② rm 前再验目标绝对路径仍在 sessions 桶内。
 // 数据源（与 usage.mjs findRunLog 同源布局，2026-10 本机核对）：
 //   会话日志目录：~/.dsh/sessions/<bucket>/<id>/（bucket=工作区转义目录名，id=会话 id 目录）
@@ -21,32 +22,56 @@ export function isSafeSessionId(id) {
   return /^[A-Za-z0-9_-]+$/.test(id)
 }
 
-// 四闸可删判定的跳过原因（稳定机器码，测试与仪表盘按它对齐）
+// 可删判定的跳过原因（稳定机器码，测试与仪表盘按它对齐）
 export var SKIP_REASON_TEXT = {
   'id-invalid': '会话 id 非法（路径逃逸防护）',
   'not-settled': 'outcome 未落定',
-  'not-recorded': 'usage 未记账',
-  'continuable': '可续跑会话（需续命，不删）',
+  'not-archived': '所属卡未归档',
+  'too-young': '归档未满保留天数',
   'active': '会话仍活跃/属本会话血统',
 }
 
-// 单个 run 条目四闸判定：返回 { deletable:true } 或 { deletable:false, reason }。
-// 闸序（先硬后软）：① id 合法 ② outcome 落定（非 running）③ usageRecorded ④ 非 continuable ⑤ 不活跃。
-export function classifyRun(run, blockedIds) {
+// 卡龄主闸保留天数（板级设置项 cleanupRetentionDays 与此对齐：默认 7 天、可配 1-90）
+export var CLEANUP_RETENTION_DEFAULT = 7
+export var CLEANUP_RETENTION_MIN = 1
+export var CLEANUP_RETENTION_MAX = 90
+var MS_PER_DAY = 86400000
+
+function retentionOf(opts) {
+  var d = (opts && typeof opts.retentionDays === 'number' && opts.retentionDays >= CLEANUP_RETENTION_MIN) ? Math.floor(opts.retentionDays) : CLEANUP_RETENTION_DEFAULT
+  if (d > CLEANUP_RETENTION_MAX) d = CLEANUP_RETENTION_MAX
+  return d
+}
+function nowOf(opts) {
+  return (opts && typeof opts.now === 'number' && opts.now > 0) ? opts.now : Date.now()
+}
+// 归档是否已满保留天数：archivedAt 缺失/非法一律不满足（宁漏勿错删，绝不因时间戳读不出而放行删除）
+export function archivedAged(archivedAt, retentionDays, now) {
+  if (!archivedAt) return false
+  var at = Date.parse(archivedAt)
+  if (!(at > 0)) return false
+  return (now - at) >= retentionDays * MS_PER_DAY
+}
+
+// 单个 run 条目可删判定：返回 { deletable:true } 或 { deletable:false, reason }。
+// 入参从「run 级」升到「run + 所属卡」级——卡龄主闸需要卡的 status/archivedAt。
+// 闸序（先硬后软）：① id 合法 ② outcome 落定（非 running）③ 卡龄主闸（archived + 满保留天数）④ 不活跃。
+export function classifyRun(run, card, blockedIds, opts) {
   var id = (run && typeof run.id === 'string') ? run.id : ''
   if (!isSafeSessionId(id)) return { deletable: false, reason: 'id-invalid' }
   if (!run.outcome || run.outcome === 'running') return { deletable: false, reason: 'not-settled' }
-  if (run.usageRecorded !== true) return { deletable: false, reason: 'not-recorded' }
-  if (run.continuable === true) return { deletable: false, reason: 'continuable' }
+  // 卡龄主闸（回收与归档生命周期对齐）：run 可删 ⟺ 所属卡已归档且归档满 retentionDays。
+  if (!card || card.status !== 'archived') return { deletable: false, reason: 'not-archived' }
+  if (!archivedAged(card.archivedAt, retentionOf(opts), nowOf(opts))) return { deletable: false, reason: 'too-young' }
   if (blockedIds && blockedIds.has(id)) return { deletable: false, reason: 'active' }
   return { deletable: true }
 }
 
 // 扫全部任务 runs[]：按会话 id 聚合分类。同一 id 只要任一条不可删 → 整组不可删（宁漏勿错删）。
 // 返回 { items: [{ id, taskId, role }], skipped: [{ id, taskId, reason, text }] }
-export function scanDeletable(tasks, blockedIds) {
+export function scanDeletable(tasks, blockedIds, opts) {
   var list = Array.isArray(tasks) ? tasks : []
-  var groups = {} // id -> { id, taskId, role, runs: [] }
+  var groups = {} // id -> { id, taskId, role, runs: [{ run, card }] }
   var order = []
   for (var ti = 0; ti < list.length; ti++) {
     var t = list[ti]
@@ -56,7 +81,7 @@ export function scanDeletable(tasks, blockedIds) {
       if (!r || typeof r.id !== 'string' || !r.id) continue
       var g = groups[r.id]
       if (!g) { g = groups[r.id] = { id: r.id, taskId: t.id, role: r.role || '', runs: [] }; order.push(r.id) }
-      g.runs.push(r)
+      g.runs.push({ run: r, card: t })
     }
   }
   var items = []
@@ -66,7 +91,8 @@ export function scanDeletable(tasks, blockedIds) {
     var grp = groups[id]
     var reason = null
     for (var k = 0; k < grp.runs.length; k++) {
-      var c = classifyRun(grp.runs[k], blockedIds)
+      var e = grp.runs[k]
+      var c = classifyRun(e.run, e.card, blockedIds, opts)
       if (!c.deletable) { reason = c.reason; break }
     }
     if (reason === null) items.push({ id: id, taskId: grp.taskId, role: grp.role })
@@ -155,7 +181,7 @@ export function previewCleanup(tasks, opts) {
   var list = Array.isArray(tasks) ? tasks : []
   var titleById = {}
   for (var ti = 0; ti < list.length; ti++) { if (list[ti] && list[ti].id) titleById[list[ti].id] = list[ti].title || list[ti].id }
-  var scan = scanDeletable(list, opts.blockedIds)
+  var scan = scanDeletable(list, opts.blockedIds, opts)
   var dirIndex = buildSessionDirIndex(sessionsRoot)
   var items = []
   var totalBytes = 0
