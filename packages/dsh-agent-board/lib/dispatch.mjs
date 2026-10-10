@@ -1001,6 +1001,67 @@ export function createDispatch(ctx, state, deps) {
       }
     }
 
+    // ===== 僵尸 run 留档清扫（task-mv22z61v）：关账「落定卡上的 running 无 endedAt 留档」+ 清卡面认领位 =====
+    // 事故（用户实证）：0.4.1/0.4.5 时代老卡，宿主多次重启后 run 留档停在 outcome:'running' 无 endedAt +
+    // 卡面 verifierRun/claimedBy 残留指向死会话。归档门禁 activeRunOf 的卡面兜底（liveEntry 认 claimedBy/
+    // verifierRun 匹配的 running 留档）把它们误判活跃 → archive 永久拒。mv1pqy27 的 doTerminate 状态无关
+    // 清理只覆盖「rec 在内存表」场景；重启后 rec 消失 + 卡已落定的组合落入盲区（resolved 无分支，什么都不清），
+    // 且没有任何工具能关一条无 rec 的 run 留档本体。
+    // 修法：扫描本板卡片的 runs[]，凡 outcome==='running' 且无 endedAt 且该 run id 不在内存活跃表（runsFor）
+    // 且所属卡已落定（resolved/cancelled/archived）→ 关账（endedAt=now，outcome 改 'stale-closed'，注记
+    // note='host 重启僵尸留档清扫'）+ 清对应卡面认领位（verifierRun/claimedBy 若指向它）。
+    // 边界（宁少勿多）：
+    //   ① 只对落定卡做——在飞卡的 running 留档是 reconcile / 结算通道的辖区，别越界；
+    //   ② 无活跃 rec 才扫——内存表里仍活着（!settled）的 run 留给结算通道 / reapGhostRecs 关账（它们用
+    //      'completed'/'timeout-error' 等真结局，而非这里的 'stale-closed'，口径更准）；
+    //   ③ 幂等——关账后 outcome!=running，二次运行零改动；回调无改动时返回 null 不写盘（沿用空闲快进的
+    //      「不写盘」纪律，安静板不因清扫产生 15s 心跳写盘）；
+    //   ④ 留痕——history 行 + console 一行（有产出时）。
+    // 'stale-closed' 是既有枚举之外的新结局值：详情页/聚合端对未知 outcome 一律按「已结束（有 endedAt）」
+    // 兜底展示，不会把它误判成 running（running 的判据是 outcome==='running' 且无 endedAt，二者已同时改写）。
+    async function sweepZombieRuns(sid, snap) {
+      if (!snap || snap.__noPersist || !Array.isArray(snap.tasks)) return 0 // 瞬时读盘失败/空板：跳过，不写盘
+      // 预扫快照：有候选（落定卡 + running 无 endedAt 留档）才进锁写；否则零 mutateLocked 调用——
+      // 空板/安静板走空闲快进「不写盘」的纪律不受清扫破坏（每 15s 心跳也不能因清扫多出一次写盘调用）。
+      var hasCandidate = false
+      for (var pi = 0; pi < snap.tasks.length && !hasCandidate; pi++) {
+        var pt = snap.tasks[pi]
+        if (!pt || (pt.status !== 'resolved' && pt.status !== 'cancelled' && pt.status !== 'archived')) continue
+        var prs = Array.isArray(pt.runs) ? pt.runs : []
+        for (var pj = 0; pj < prs.length; pj++) { if (prs[pj] && prs[pj].outcome === 'running' && !prs[pj].endedAt) { hasCandidate = true; break } }
+      }
+      if (!hasCandidate) return 0
+      var runs = runsFor(sid)
+      var swept = []
+      await mutateLocked(sid, function (d) {
+        if (!d || !Array.isArray(d.tasks)) return null
+        var any = false
+        d.tasks.forEach(function (t) {
+          if (!t) return
+          if (t.status !== 'resolved' && t.status !== 'cancelled' && t.status !== 'archived') return // 只清扫已落定卡
+          if (!Array.isArray(t.runs)) return
+          var cardChanged = false
+          t.runs.forEach(function (r) {
+            if (!r || r.outcome !== 'running' || r.endedAt) return // 只关「还开着且无 endedAt」的条目
+            var rid = String(r.id)
+            var rec = runs[t.id]
+            if (rec && !rec.settled && String(rec.id) === rid) return // 内存活跃表里还活着 → 结算通道辖区，不扫
+            r.outcome = 'stale-closed'
+            r.endedAt = new Date().toISOString()
+            r.note = 'host 重启僵尸留档清扫'
+            if (t.verifierRun === rid) { t.verifierRun = null; delete t.verifierRunAt }
+            if (t.claimedBy === rid) { t.claimedBy = null; t.claimedAt = null }
+            swept.push(t.id + '/' + rid + '/' + (r.role || '?'))
+            cardChanged = true
+          })
+          if (cardChanged) { ah(t, t.status, t.status, 'system', '僵尸 run 留档已关账（host 重启清扫）'); any = true }
+        })
+        return any ? d : null // 无改动返回 null → 不写盘（安静板不因清扫产生心跳写盘）
+      }, true) // skipKick：本轮已是 poolCycle，无需再踢
+      if (swept.length) console.log('[task-board] 僵尸 run 留档清扫 ' + swept.length + ' 条：' + swept.join(', '))
+      return swept.length
+    }
+
     // ===== 幽灵占位回收（池冻结根修，task-muwlepg6）=====
     // 病根（活体实证）：活跃表项（rec）的**唯一**摘除点是各结算通道（事件通道 settleRun /
     // 上报通道 settleReportedRun / 手动终止）。任何一条漏走（worker 经 board_report 完成但当时
@@ -1112,6 +1173,10 @@ export function createDispatch(ctx, state, deps) {
       // 位置取舍：root 闸门必须是第一件事（无活 root 的板零 IO），所以本段只能排在早退闸门与 rt 读盘之后；
       // 而重建出来的 rec 仍在本轮被读到（活跃计数 / 池状态快照都在下面才求值），语义不受影响。
       try { await reconcileRoot(sid) } catch (e) { console.error('[task-board] reconcile 失败:', String(e)) }
+      // 僵尸 run 留档清扫（task-mv22z61v）：位置在 reconcile 之后、幽灵回收与空闲快进之前。
+      // 落定卡的僵尸留档无活跃 rec，reconcile（只在飞卡）/reapGhostRecs（只清内存表项）都管不到它，
+      // 而它若留在 running 会卡死 archive；安静板（只有已落定卡）会走空闲快进早退，清扫必须排在其前才能兜到。
+      try { await sweepZombieRuns(sid, snap) } catch (e) { console.error('[task-board] 僵尸留档清扫失败:', String(e)) }
       // 幽灵占位回收（池冻结根修）：必须排在活跃度计数与 pickDispatch 之前——残留表项正是把 capW 拉到 0、
       // 并把卡挡在 Verifier 派发之外的元凶（见 reapGhostRecs 头注释）。收尾会写盘（结局/usage），
       // 故有回收时重读一次快照——否则下面空闲快进的 stalePool/staleInfo 判定会拿旧快照误判（写盘已归一进锁）。

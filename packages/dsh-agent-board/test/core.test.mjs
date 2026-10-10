@@ -5092,6 +5092,82 @@ test('卡3②③：重启 reconcile——存活的续跑 Worker 被找回重挂�
   assert.equal(h.runs['k1'], before)
 })
 
+// ===== 僵尸 run 留档清扫（task-mv22z61v）：落定卡 running 无 endedAt 留档关账 + 清卡面认领位 =====
+test('僵尸 run 留档清扫：落定卡 running 无 endedAt 留档被关账+清位；在飞卡/活跃 rec 不扫；二次运行零改动', async () => {
+  const nowIso = new Date().toISOString()
+  // ① 僵尸 verifier 留档：resolved 卡 + verifierRun 残留指向死会话 + runs[] 里 verifier:running 无 endedAt
+  const zv = mkTask({ id: 'zv', title: '僵尸 verifier 卡', status: 'resolved', verifierRun: 'v-dead', verifierRunAt: '2026-01-01T00:00:00Z',
+    runs: [{ role: 'verifier', id: 'v-dead', at: '2026-01-01T00:00:00Z', model: '', outcome: 'running' }] })
+  // ② 僵尸 worker 留档：cancelled 卡 + claimedBy 残留指向死会话
+  const zw = mkTask({ id: 'zw', title: '僵尸 worker 卡', status: 'cancelled', claimedBy: 'w-dead', claimedAt: '2026-01-01T00:00:00Z',
+    runs: [{ role: 'worker', id: 'w-dead', at: '2026-01-01T00:00:00Z', model: '', outcome: 'running' }] })
+  // ③ 已关账留档：outcome 已落定 + endedAt，非 running 条目不该被碰（不误扫非 running 留档）
+  const zc = mkTask({ id: 'zc', title: '已关账卡', status: 'resolved',
+    runs: [{ role: 'worker', id: 'w-ok', at: '2026-01-01T00:00:00Z', model: '', outcome: 'completed', endedAt: '2026-01-01T00:05:00Z' }] })
+  // ④ 在飞卡（in-progress）：running 留档是 reconcile/结算通道辖区，绝不误扫（断言②）
+  const inflight = mkTask({ id: 'fly', title: '在飞卡', status: 'in-progress', claimedBy: 'w-alive', claimedAt: nowIso,
+    runs: [{ role: 'worker', id: 'w-alive', at: nowIso, model: '', outcome: 'running', continuable: true }] })
+  // ⑤ 在飞卡（verifying）+ 活跃 rec：双重护栏——status 非落定 + 内存活跃表里还活着，都该跳过（断言② + 无活跃 rec 才扫）
+  const vfy = mkTask({ id: 'vfy', title: '验收中卡', status: 'verifying', verifierRun: 'v-alive', verifierRunAt: nowIso,
+    runs: [{ role: 'verifier', id: 'v-alive', at: nowIso, model: '', outcome: 'running' }] })
+  const board = mkBoard([zv, zw, zc, inflight, vfy])
+  const h = mkUsageDispatch(board)
+  h.runs['vfy'] = { id: 'v-alive', role: 'verifier', taskId: 'vfy', startedAt: Date.now(), model: '', settled: false }
+  await h.dispatch.poolCycle(FULL_SID)
+  // ① 僵尸 verifier 留档：关账（stale-closed + endedAt + note）+ 清 verifierRun 位 + 留一行 history
+  assert.equal(zv.runs[0].outcome, 'stale-closed')
+  assert.ok(zv.runs[0].endedAt, '僵尸 verifier 留档要带 endedAt')
+  assert.equal(zv.runs[0].note, 'host 重启僵尸留档清扫')
+  assert.equal(zv.verifierRun, null)
+  assert.equal('verifierRunAt' in zv, false)
+  assert.equal(zv.history.filter(function (x) { return /僵尸 run 留档已关账/.test(x.note || '') }).length, 1)
+  // ② 僵尸 worker 留档：关账 + 清 claimedBy 位
+  assert.equal(zw.runs[0].outcome, 'stale-closed')
+  assert.ok(zw.runs[0].endedAt)
+  assert.equal(zw.runs[0].note, 'host 重启僵尸留档清扫')
+  assert.equal(zw.claimedBy, null)
+  assert.equal(zw.claimedAt, null)
+  // ③ 已关账留档零改动
+  assert.equal(zc.runs[0].outcome, 'completed')
+  assert.equal(zc.runs[0].endedAt, '2026-01-01T00:05:00Z')
+  assert.equal(zc.runs[0].note, undefined)
+  // ④⑤ 在飞卡 running 留档零改动（断言②：in-progress/verifying 都不扫）
+  assert.equal(inflight.runs[0].outcome, 'running')
+  assert.equal(inflight.runs[0].endedAt, undefined)
+  assert.equal(inflight.claimedBy, 'w-alive')
+  assert.equal(vfy.runs[0].outcome, 'running')
+  assert.equal(vfy.runs[0].endedAt, undefined)
+  assert.equal(vfy.verifierRun, 'v-alive')
+  // ⑤ 幂等：二次运行零改动（关账后 outcome!=running，不再新增 history 行 / 不再刷新 endedAt）
+  const zvEndedAt = zv.runs[0].endedAt
+  const zwEndedAt = zw.runs[0].endedAt
+  const zvHistoryLen = zv.history.length
+  const zwHistoryLen = zw.history.length
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(zv.runs[0].outcome, 'stale-closed')
+  assert.equal(zv.runs[0].endedAt, zvEndedAt)
+  assert.equal(zv.history.length, zvHistoryLen)
+  assert.equal(zw.runs[0].outcome, 'stale-closed')
+  assert.equal(zw.runs[0].endedAt, zwEndedAt)
+  assert.equal(zw.history.length, zwHistoryLen)
+})
+
+test('僵尸 run 留档清扫接线（源码级）：sweepZombieRuns 定义 + poolCycle 挂点 + 只清扫落定卡门禁', () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  // ① 清扫函数定义（含「只对落定卡做」状态门禁与「无活跃 rec 才扫」护栏）
+  assert.match(dsp, /async function sweepZombieRuns\(sid, snap\) \{/)
+  assert.match(dsp, /if \(t\.status !== 'resolved' && t\.status !== 'cancelled' && t\.status !== 'archived'\) return/)
+  assert.match(dsp, /if \(rec && !rec\.settled && String\(rec\.id\) === rid\) return/)
+  assert.match(dsp, /r\.outcome = 'stale-closed'/)
+  assert.match(dsp, /r\.endedAt = new Date\(\)\.toISOString\(\)/)
+  assert.match(dsp, /r\.note = 'host 重启僵尸留档清扫'/)
+  assert.match(dsp, /if \(t\.verifierRun === rid\) \{ t\.verifierRun = null; delete t\.verifierRunAt \}/)
+  assert.match(dsp, /if \(t\.claimedBy === rid\) \{ t\.claimedBy = null; t\.claimedAt = null \}/)
+  assert.match(dsp, /return any \? d : null/) // 无改动不写盘（安静板不因清扫产生心跳写盘）
+  // ② poolCycle 挂点：reconcile 之后、幽灵回收之前（落定卡僵尸留档 reconcile/reap 都管不到，须在空闲快进前兜到）
+  assert.match(dsp, /try \{ await sweepZombieRuns\(sid, snap\) \} catch \(e\) \{ console\.error\('\[task-board\] 僵尸留档清扫失败:/)
+})
+
 test('卡2/卡3 接线（源码级）：usage 水位线落卡 + reconcile 一次性 + 详情页 ↻ 续跑标注 + 文档收尾', () => {
   const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
   const usageSrc = readFileSync(new URL('../lib/usage.mjs', import.meta.url), 'utf8')
