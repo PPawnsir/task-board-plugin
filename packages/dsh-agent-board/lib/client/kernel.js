@@ -315,7 +315,12 @@
       // 空范围（两端皆空）不传 field：host 收到 undefined 即全量聚合，与老 host 的调用形态完全一致；
       // 绝不用空字符串占位（host 侧 `from`/`to` 空串虽也判为无范围，但少传一个字段就少一处口径分叉）。
       var rgSend = activeRange()
-      var rpcArgs = (rgSend.from || rgSend.to) ? { range: rgSend } : undefined
+      var rpcArgs = (rgSend.from || rgSend.to) ? { range: rgSend } : {}
+      // 条件请求瘦身（task-mv492for）：带上轮 tasksHash 作 ifHash，host 比对一致则返回 unchanged:true
+      // 轻量响应（不含 tasks 全量，轮询载荷 1.34MB→KB 级）；首轮/会话切换后 state.tasksHash 为空不带
+      // ifHash → 全量返回（与不带 ifHash 的老客户端同路径）。空范围时 rpcArgs 由 undefined 改 {} 是同义
+      // 形态（rpc 助手 args||{} 归一；host 只读 range/sessionId/ifHash，多传空对象无害）。
+      if (state.tasksHash) rpcArgs.ifHash = state.tasksHash
       // 范围守卫：范围已在本轮响应回来前被改掉 → 这份响应属于旧范围，丢弃 usageSummary 赋值
       // （否则旧范围的旧聚合会覆盖新范围的新聚合，用户看到「切了范围数字没变」直到下一次轮询）。
       // 注意 tasksHash 短路只管 tasks：usageSummary 照常赋值（现状已对，保持）。
@@ -330,7 +335,11 @@
         // （hash 只管任务列表渲染；这些字段随下次任意 notify 生效，不为它们单独渲染）。
         // 老 host 不返回 tasksHash → 恒视为变化，行为与旧版完全一致。
         var newHash = (d && d.tasksHash) || ''
-        var tasksChanged = !newHash || newHash !== state.tasksHash
+        // 条件请求瘦身（task-mv492for）：host 判 ifHash 一致时返回 unchanged:true（响应不含 tasks 全量）。
+        // state.tasks 必须原样保留——unchanged 优先于 hash 比对：缺 tasks 的响应若误入变化分支，
+        // `(d && d.tasks) || []` 会把列表清空。轻量字段不受影响，照常走下方既有赋值链。
+        var unchanged = !!(d && d.unchanged)
+        var tasksChanged = !unchanged && (!newHash || newHash !== state.tasksHash)
         // 设置开关的权威纠偏（task-muw5uudk）：开关不走 tasksHash，hash 不变分支里照常赋值也没有 notify
         // → 勾选框必须等下一次任意 notify 才翻面（安静板卡数秒）。这里在赋值前快照、赋值后比对，
         // 有变化就补一次 notify：乐观更新（PoolCfgPopover）已让点击瞬时翻面，本兜底是服务端权威值纠偏

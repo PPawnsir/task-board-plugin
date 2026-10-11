@@ -323,8 +323,21 @@ export function createRpc(ctx, state, deps) {
         if (__rkt && __rhints[__rkt.id]) __rkt.reviewHint = __rhints[__rkt.id]
       }
       // 渲染变更检测（反馈 n-mut9rzs2mkhg）：tasks 关键字段的稳定 hash（纯函数，口径见 core.tasksHash），
-      // 客户端 3s 轮询 hash 相同则跳过 state.tasks 赋值 + notify——传输仍全量，省的是渲染
+      // 客户端 3s 轮询 hash 相同则跳过 state.tasks 赋值 + notify
       d.tasksHash = tasksHash(d.tasks)
+      // ===== 条件请求瘦身（task-mv492for，巡检实证 n-mv2turd1o3iv）：轮询载荷 1.34MB→KB 级 =====
+      // 客户端轮询带上轮 tasksHash 作 args.ifHash：一致说明任务列表实质没变——reviewHint 挂在卡上
+      // 已进 hash 序列化口径；childStats 纯由 tasks 派生（输入 status/parentId 已覆盖）；usageSummary/
+      // healthHints/poolStatus/childStats/各开关是 KB 级聚合，unchanged 分支照常现算返回（上方赋值链不动）。
+      // 响应只剔 tasks 全量（description/context/runs/deliverable 全文——1.34MB 大头全在这），
+      // 客户端收 unchanged:true 保留 state.tasks 不动（见 kernel.js fetchTasks 的 unchanged 分支）。
+      // 不带 ifHash 的老客户端与 includeArchived（归档 tab 数据源 fetchArchived）一律走原有全量分支，零回归。
+      if (args && args.ifHash && args.ifHash === d.tasksHash && !args.includeArchived) {
+        var __light = Object.assign({}, d)
+        delete __light.tasks
+        __light.unchanged = true
+        return __light
+      }
       return d })
     // 派发前上下文预览：主 agent 用它确认"我将注入给子代理的瘦身清单"是否足够（不发任务、不落盘）
     handle('preview-context', async function (args) {

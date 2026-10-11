@@ -2101,9 +2101,10 @@ test('Token 区统计范围接线：get-tasks 接 range 透传 + fetchTasks 带�
   // host：get-tasks 把 args.range 透传给聚合（过滤在 host 做——run 级数据只在 host）
   assert.match(host, /aggregateUsageSummary\(d\.tasks, args && args\.range\)/)
   assert.match(host, /runs\[i\]\.usage/)                        // run 级留账（范围过滤的数据源，先于本次改动已在）
-  // client：轮询带上当前统计范围；空范围不传 field（老 host 调用形态逐字不变）
+  // client：轮询带上当前统计范围；空范围传 {} 占位（rpc 助手 args||{} 归一，host 只读 range 字段，
+  // 与老 host 调用形态等价；task-mv492for 起 {} 上再挂 ifHash 做条件请求）
   assert.match(cli, /var rgSend = activeRange\(\)/)
-  assert.match(cli, /var rpcArgs = \(rgSend\.from \|\| rgSend\.to\) \? \{ range: rgSend \} : undefined/)
+  assert.match(cli, /var rpcArgs = \(rgSend\.from \|\| rgSend\.to\) \? \{ range: rgSend \} : \{\}/)
   assert.match(cli, /rpc\('get-tasks', rpcArgs\)/)
   // 范围守卫：响应回来时范围已变则丢弃旧范围的聚合，不覆盖新范围的值
   assert.match(cli, /if \(rgKey === \(rgNow\.from \+ '~' \+ rgNow\.to\)\) state\.usageSummary = \(d && d\.usageSummary\) \|\| null/)
@@ -4304,9 +4305,10 @@ test('反馈修复接线断言：index.mjs 注入 hasActiveRun + get-tasks 附 t
   const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
   assert.equal((rpcSrc.match(/archiveErr\(sid, t\)/g) || []).length, 3)
   // kernel：hash 短路分支存在（hash 相同跳过 tasks 赋值 + notify；老 host 无 hash 恒视为变化）
+  // task-mv492for：tasksChanged 叠加 unchanged 闸门（host 条件响应不含 tasks 时绝不清空列表）
   const ksrc = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
   assert.match(ksrc, /var newHash = \(d && d\.tasksHash\) \|\| ''/)
-  assert.match(ksrc, /var tasksChanged = !newHash \|\| newHash !== state\.tasksHash/)
+  assert.match(ksrc, /var tasksChanged = !unchanged && \(!newHash \|\| newHash !== state\.tasksHash\)/)
   assert.match(ksrc, /if \(tasksChanged\) \{[\s\S]*?notify\(\)/)
 })
 
@@ -5326,8 +5328,9 @@ test('fetchTasks 设置开关权威纠偏：hash 不变时配置变化补 notify
   const iNotify = src.indexOf('if (cfgDelta || usageDelta) notify()')
   const iEsc = src.indexOf('if (tasksChanged) {\n          var newEsc')
   assert.ok(iDelta < iNotify && iEsc > iNotify, '补 notify 必须在配置赋值之后、escalation 分支之前')
-  // ④ 既有渲染节约（tasksHash 短路）逐字保持——本次只加不删
-  assert.match(src, /var tasksChanged = !newHash \|\| newHash !== state\.tasksHash/)
+  // ④ 既有渲染节约（tasksHash 短路）结构保持——task-mv492for 起 tasksChanged 叠加 unchanged 闸门
+  // （host 条件响应 unchanged:true 不含 tasks 全量时保留 state.tasks），hash 比对短路语义不变
+  assert.match(src, /var tasksChanged = !unchanged && \(!newHash \|\| newHash !== state\.tasksHash\)/)
   assert.match(src, /if \(tasksChanged\) \{\s*\n\s*state\.tasksHash = newHash\s*\n\s*state\.tasks = \(d && d\.tasks\) \|\| \[\]\s*\n\s*\}/)
   // ⑤ 产物接线：client.js 为拼装产物，真源改动必须已重建（产物与源一致由 build-client --check 兜底）
   const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')

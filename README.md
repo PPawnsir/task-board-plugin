@@ -190,7 +190,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **防表演式汇报**：进展契约只写在 Worker prompt 里、且要求「有实际产物/结论才报」（禁止定时汇报）；progress **静默不通知主窗口**（不进回执聚合），也不写 `history` 流转记录，避免刷屏
 - **子任务**：父子层级 + 上下文继承 + 父任务自动流转 + 级联归档（僵尸态出清：`archive-task` 对「无活跃 run 的 in-progress」——典型如被 parentKick 推进后子任务已全部归档的史诗——直接放行，有活跃 run 的仍拒）；**归档子任务仍计入史诗进度并在详情留档可见**——进度分子口径 `settled = resolved | cancelled | archived`、分母也含归档，归档一张子卡不会再让史诗进度从 `0/10` 退化成 `0/9`（进度只增不减），全归档的父卡也照常显示徽章；详情子任务清单不排归档行（灰化 + 行尾「已归档」徽章 + 沉底排序，点击仍可进子卡看留档）
 - **死会话零打扰**：15s 派发心跳对无活 root 的会话板直接跳过（不读盘/不写盘/零日志，会话重开后自动恢复派发）；`create-task` 拒绝不完整 sessionId（防裸短 id 建出幻影板）
-- **面板轮询渲染短路**：`get-tasks` 响应附 `tasksHash`，任务列表无变化时前端跳过重渲染（usage/池状态等轻量字段照常刷新）
+- **面板轮询条件请求 + 渲染短路**：`get-tasks` 响应附 `tasksHash`；客户端轮询带上轮 hash 作 `ifHash`，host 比对一致时返回 `{unchanged:true}` 轻量响应（**不含 tasks 全量**——轮询载荷从 1.34MB 级降到 KB 级，usage/healthHints/池状态等轻量聚合照常返回），前端保留 `state.tasks` 不动并跳过重渲染；hash 不一致 / 不带 `ifHash` / `includeArchived` 一律全量返回（老客户端零回归）
 - **看板抽屉稳定性（isRoot 持久语义 + 蝶变防抖）**：`isRoot` 判定改读**持久 parentSession**（根会话=无父）——休眠根会话（有板有卡但无活 agent）也算 root，入口不再分钟级消失；子代理会话（parentSession 指向父）恒不显示入口。客户端防抖仍保留兜底：已确认 root 的会话需**连续 3 次（≈9s）false** 才收起抽屉（会话生命周期内「曾确认 true」粘滞），看板不再在生成状态切换时突然消失；从未确认 root 的子代理会话仍即时隐藏入口，保护语义不变
   - 卡片识别层：父卡显示「📦 史诗 · settled/total」徽章 + 3px 迷你进度条（`settled = resolved | cancelled | archived`，total 同口径含归档；有在跑子任务时附「▸ 在跑：标题」行）；子卡标题下显示「↳ 父任务标题」；依赖未满足的待办卡底部灰字「⛓ 等待「依赖标题」」（childStats 由 host 现算，缺字段一律不渲染）
   - 详情父子区块：父卡详情列子任务清单（状态色点 + 标题，**含已归档留档**——归档行灰化 + 行尾「已归档」徽章并沉底，点击直达子卡详情，标题行汇总 settled/total）；子卡详情顶行「↳ 史诗：父标题」点击回跳父卡
