@@ -207,7 +207,7 @@ function apply(ctx) {
         ['circle', { cx: 12, cy: 12, r: 10 }],
         ['rect', { width: 6, height: 6, x: 9, y: 9 }]
       ],
-      // 取消入口图标（详情页「取消」按钮；语义=作废不派发，与删除 trash-2 区分）
+      // 取消入口图标（详情页「取消任务」按钮；语义=作废不派发，与删除 trash-2 区分）
       'ban': [
         ['circle', { cx: 12, cy: 12, r: 10 }],
         ['path', { d: 'm4.9 4.9 14.2 14.2' }]
@@ -1358,7 +1358,10 @@ function apply(ctx) {
         p.then(function (r) { if (r && r.ok === false) setActionMsg('⚠️ 流转失败：' + (r.error || '未知错误')); else setActionMsg('✅ 已流转到「' + (statusLabels[to] || to) + '」'); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) })
       }
       return React.createElement('div', { style: { padding: '4px 2px' } },
-        React.createElement('div', { onClick: function () { state.detailId = null; notify() }, style: { fontSize: 11, color: C.brand, cursor: 'pointer', marginBottom: 8 } }, '← 返回看板'),
+        // 头部行（task-mv493xjs 巡检次生观察②）：左「← 返回看板」+ 右上显性 ✕ 关闭钮（原来只有文字链不够显性）
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 } },
+          React.createElement('div', { onClick: function () { state.detailId = null; notify() }, style: { fontSize: 11, color: C.brand, cursor: 'pointer' } }, '← 返回看板'),
+          React.createElement('button', { onClick: function () { state.detailId = null; notify() }, title: '关闭详情面板（返回看板）', style: { fontSize: 11, padding: '1px 6px', border: '1px solid ' + C.border, borderRadius: 3, background: 'transparent', color: C.text2, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', lineHeight: 1.4 } }, ic('x', 11))),
         React.createElement(ReviewSummary, { task: task }),
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 } }, React.createElement('select', { value: task.priority || 'medium', onChange: function (e) { rpc('update-task', { taskId: task.id, priority: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '优先级（四档：紧急/高/中/低）', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: (prioColor[task.priority] || prioColor.low), fontWeight: 600 } }, ['critical', 'high', 'medium', 'low'].map(function (p) { return React.createElement('option', { key: p, value: p }, prioLabel[p] + '（' + p + '）') })), React.createElement('span', { style: { fontSize: 11, padding: '1px 8px', borderRadius: 3, background: C.nested, color: C.text } }, statusLabels[task.status] || task.status), React.createElement('select', { value: task.pipeline || 'full', onChange: function (e) { rpc('update-task', { taskId: task.id, pipeline: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '管线档位', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'full' }, '全流程（执行+验证）'), React.createElement('option', { value: 'work' }, '免验证（只做不验）'), React.createElement('option', { value: 'direct' }, '主窗口处理')), task.pipelineAuto ? React.createElement('span', { style: { fontSize: 9, color: C.text2 }, title: '由规则自动分类，可手动覆盖' }, 'auto') : null, isManual ? React.createElement('span', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('user', 10), '手动派发') : null),
         React.createElement(TagsEditor, { key: task.id, task: task }),
@@ -1479,12 +1482,15 @@ function apply(ctx) {
           task.status === 'verifying' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'approved' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.ok, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('check-circle', 10), '通过') : null,
           task.status === 'verifying' ? React.createElement('button', { onClick: function () { var r = window.prompt('驳回原因：'); doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'rejected', comment: r || '' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.err, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('x-circle', 10), '驳回') : null,
           task.status === 'resolved' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('archive-task', { taskId: task.id }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.text2, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('archive', 10), '归档') : null),
-          // 取消（仅草稿/待办/阻塞）：confirm 预警「取消后不再派发，可在归档恢复」；与删除并列但语义=作废留档（可恢复）
-          canCancel(task) ? React.createElement('button', { onClick: function () { cancelTask(task.id, task.title, setActionMsg) }, title: '取消任务（取消后不再派发，可在归档恢复待办）', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.warn, borderRadius: 3, background: 'transparent', color: C.warn, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('ban', 10), '取消') : null,
-          // 删除（仅草稿/待办/阻塞）：confirm 防误删；被 host 门禁拒绝时把原因回显到详情页 actionMsg
-          // 容器 div 的收尾括号已挂在「归档」行；删除按钮作为**额外一行元素**排在它后面
-          // （多一个实参给同一个 createElement，属于合法调用），因此本行自身必须配平。
-          canDelete(task) ? React.createElement('button', { onClick: function () { deleteTask(task.id, task.title, setActionMsg) }, title: '删除任务（不可恢复；执行中请先终止，已落定请用归档）', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.err, borderRadius: 3, background: 'transparent', color: C.err, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('trash-2', 10), '删除') : null,
+          // ===== 破坏性操作区（task-mv493xjs 消歧，巡检实证 n-mv2turadjv63 误触）=====
+          // 视觉分层：与上方表单按钮组（保存/发布/领取/派发/通过/驳回/归档）拉开——独立一行 +
+          // 顶部虚线分隔 + 「危险操作」前缀标签。「取消」改名「取消任务」：按表单惯例会被误读为
+          // 「关面板」，实际是 task_cancel 破坏性流转（confirm 确认在 kernel.cancelTask 已存在）。
+          // 取消（仅草稿/待办/阻塞）语义=作废留档（可恢复）；删除=真删不可恢复，被 host 门禁拒绝时原因回显 actionMsg。
+          (canCancel(task) || canDelete(task)) ? React.createElement('div', { role: 'group', 'aria-label': '危险操作', style: { display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center', marginTop: 8, paddingTop: 6, borderTop: '1px dashed ' + C.err } },
+            React.createElement('span', { style: { fontSize: 9, color: C.err, fontWeight: 700, marginRight: 2, letterSpacing: 1 } }, '危险操作'),
+            canCancel(task) ? React.createElement('button', { onClick: function () { cancelTask(task.id, task.title, setActionMsg) }, title: '取消任务（取消后不再派发，可在归档恢复待办）', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.warn, borderRadius: 3, background: 'transparent', color: C.warn, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('ban', 10), '取消任务') : null,
+            canDelete(task) ? React.createElement('button', { onClick: function () { deleteTask(task.id, task.title, setActionMsg) }, title: '删除任务（不可恢复；执行中请先终止，已落定请用归档）', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.err, borderRadius: 3, background: 'transparent', color: C.err, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('trash-2', 10), '删除') : null) : null,
         (function () {
           // 历史会话：无论任务处于哪个阶段都完整列出（Worker 各次 + Verifier 各次）
           var runs = historyRuns(task)

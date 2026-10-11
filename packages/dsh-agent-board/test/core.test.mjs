@@ -4227,6 +4227,49 @@ test('task_cancel GUI 按钮门禁：canCancel 三态 + 详情页按钮接线 + 
   }
 })
 
+// ===== 详情面板「取消」消歧（task-mv493xjs，巡检实证 n-mv2turadjv63 误触 task_cancel）=====
+test('详情面板消歧：「取消」改名「取消任务」+ 危险操作区视觉分层 + ✕ 关闭钮（源码+产物双锁）', () => {
+  const tdsrc = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // ① 新文案源码锁定：按钮标签为「取消任务」，不再出现裸「取消」按钮标签（ic('ban', 10), '取消'）
+  assert.ok(tdsrc.indexOf("ic('ban', 10), '取消任务'") >= 0, 'task-detail.js 缺「取消任务」新文案')
+  assert.ok(tdsrc.indexOf("ic('ban', 10), '取消')") < 0, 'task-detail.js 仍残留裸「取消」按钮标签')
+  // ② 视觉分层：破坏性按钮独立成区（虚线分隔 + 「危险操作」前缀 + aria-label），与表单按钮组拉开
+  assert.ok(tdsrc.indexOf("'aria-label': '危险操作'") >= 0, 'task-detail.js 缺危险操作区分组')
+  assert.ok(tdsrc.indexOf("borderTop: '1px dashed ' + C.err") >= 0, 'task-detail.js 缺危险区顶部分隔线')
+  assert.ok(tdsrc.indexOf('危险操作') >= 0, 'task-detail.js 缺「危险操作」前缀标签')
+  // ④ ✕ 关闭钮：详情头部右上显性关闭（与「← 返回看板」同行走 state.detailId = null）
+  assert.ok(tdsrc.indexOf("title: '关闭详情面板（返回看板）'") >= 0, 'task-detail.js 缺 ✕ 关闭钮')
+  // ③ 产物重组装：新文案/分层/关闭钮全部进 lib/client.js
+  for (const m of ["ic('ban', 10), '取消任务'", '危险操作', "title: '关闭详情面板（返回看板）'"]) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺标记：' + m)
+  }
+})
+
+// ===== GUI RPC 操作者回退（task-mv493xjs，巡检次生观察①：流转轨迹 actor 显示 unknown）=====
+// 面板 HTTP RPC 无 agent 调用栈 → getActorId() 落 'unknown'；rpcActor 回退 args 自带 sessionId。
+test('GUI RPC actor 回退：getActorId=unknown 时流转历史 actor 落会话身份（不再 unknown）', async () => {
+  const t = mkTask({ id: 'g1', status: 'pending' })
+  const board = mkBoard([t])
+  const h = mkRpcHandlers(board, { getActorId: () => 'unknown' })
+  const r = await h['cancel-task']({ taskId: 'g1', reason: 'GUI 误建' })
+  assert.equal(r.ok, true)
+  // actor 不再是 unknown，而是 rpcSessionId(args) 归一出的会话 id（测试桩=FULL_SID）
+  assert.ok(t.history.some(function (x) { return x.to === 'cancelled' && x.actor === FULL_SID }), 'history actor 未回退到会话 id')
+  assert.ok(!t.history.some(function (x) { return x.actor === 'unknown' }), 'history 仍出现 unknown actor')
+  // 正对照：有真实 initiator 时不回退（保持 actor 原值）
+  const t2 = mkTask({ id: 'g2', status: 'pending' })
+  const h2 = mkRpcHandlers(mkBoard([t2]))
+  await h2['cancel-task']({ taskId: 'g2' })
+  assert.ok(t2.history.some(function (x) { return x.to === 'cancelled' && x.actor === 'tester' }), '有 initiator 时 actor 被意外改写')
+  // 归档通道同口径（GUI 高频操作）
+  const t3 = mkTask({ id: 'g3', status: 'resolved' })
+  const h3 = mkRpcHandlers(mkBoard([t3]), { getActorId: () => 'unknown' })
+  const r3 = await h3['archive-task']({ taskId: 'g3' })
+  assert.equal(r3.ok, true)
+  assert.ok(t3.history.some(function (x) { return x.to === 'archived' && x.actor === FULL_SID }), '归档 history actor 未回退到会话 id')
+})
+
 // ===== 反馈修复（task-mux3uvx3，反馈 n-muw706h1uymy）：归档路径触发父卡收口 + task_resolve 守卫对齐 =====
 test('归档双通道触发父卡自动收口：archive-task RPC 与 task_archive 工具同一 archiveApply 口径', async () => {
   // RPC 通道：归档末子卡 → 父卡 in-progress → verifying
