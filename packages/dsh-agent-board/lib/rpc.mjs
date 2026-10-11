@@ -51,7 +51,15 @@ export function createRpc(ctx, state, deps) {
       sessions: path.join(boardHome(), 'sessions'),
       projcacheDir: path.join(boardHome(), 'storages', 'session_projcache', 'sessions'),
     }
+    // 体积估算主源（task-mv39ag1e）：官方 SessionPersistenceSnapshot.sizeBytes——stat(id) 只读元数据
+    // （不读事件日志、不取写所有权，preview 零副作用不破），替代逐会话目录递归（消全量预览 ~340ms 同步 IO）。
+    // 老宿主/测试桩无 sessionPersistence → statSession=null → cleanup 层回退目录遍历（双轨降级不炸）。
+    var cleanupSp = ctx.get && ctx.get('sessionPersistence')
+    var statSession = (cleanupSp && typeof cleanupSp.stat === 'function') ? function (id) { return cleanupSp.stat(id) } : null
     // 不可删保护集：本板主会话自身 + 活跃树里所有会话（roots + list）——覆盖「不活跃」与「本会话血统」两闸。
+    // 「不活跃」判定维持活跃树/血统口径（task-mv39ag1e 决策留痕）：上游官方活性判据是 open(id,'write')
+    // 抛 SessionAlreadyOwnedError，但 open 'write' 不抛时即**真拿到单写所有权**（且 handle close 会 drain
+    // 落盘）——探活本身有副作用，preview 零副作用红线不允许，故不升级，维持现有活跃树判定。
     function cleanupBlockedIds(sid) {
       var blocked = new Set()
       blocked.add(String(sid)) // 本板主会话自身
@@ -924,7 +932,7 @@ export function createRpc(ctx, state, deps) {
     handle('cleanup-preview', async function (args) {
       var sid = rpcSessionId(args)
       var d = await rt(sid)
-      var view = previewCleanup(d.tasks || [], { blockedIds: cleanupBlockedIds(sid), roots: cleanupRoots, retentionDays: cfg(d).cleanupRetentionDays })
+      var view = await previewCleanup(d.tasks || [], { blockedIds: cleanupBlockedIds(sid), roots: cleanupRoots, retentionDays: cfg(d).cleanupRetentionDays, statSession: statSession })
       var skipped = (view.skipped || []).map(function (s) { return { id: s.id, taskId: s.taskId, reason: s.reason, text: s.text || SKIP_REASON_TEXT[s.reason] || s.reason } })
       return { ok: true, total: view.total, totalBytes: view.totalBytes, items: view.items, skipped: skipped, byTask: view.byTask }
     })
@@ -932,9 +940,9 @@ export function createRpc(ctx, state, deps) {
       var sid = rpcSessionId(args)
       if (args.confirm !== true) return { ok: false, error: '删除不可恢复，需 confirm:true 确认（token 账已入卡不受影响）' }
       var d = await rt(sid)
-      var view = previewCleanup(d.tasks || [], { blockedIds: cleanupBlockedIds(sid), roots: cleanupRoots, retentionDays: cfg(d).cleanupRetentionDays })
+      var view = await previewCleanup(d.tasks || [], { blockedIds: cleanupBlockedIds(sid), roots: cleanupRoots, retentionDays: cfg(d).cleanupRetentionDays, statSession: statSession })
       if (!view.items || !view.items.length) return { ok: true, deleted: 0, freedBytes: 0, note: '无可删会话' }
-      var report = await runCleanup(view.items, { roots: cleanupRoots })
+      var report = await runCleanup(view.items, { roots: cleanupRoots, statSession: statSession })
       // 留痕：board.cleanupLog 追加一条（不逐卡写 history 防刷屏；见 README「存储清理」小节）
       await mutateLocked(sid, function (dd) {
         if (!Array.isArray(dd.cleanupLog)) dd.cleanupLog = []

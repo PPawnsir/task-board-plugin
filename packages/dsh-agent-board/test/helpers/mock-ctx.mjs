@@ -10,7 +10,8 @@
 //   · subagents.startContinuable({...})         → { childId, messageId }（持久子会话，turn 结算走 emitStatus）
 //   · subagents.sendMessage / interrupt / listChildren → 记录器 + 可剧本化
 //   · agents.currentInitiator()/roots()/list()/get()/isOwnedBy() → 按测试剧本返回（缺省单 root，actor=root；env.setRoots 可清空模拟休眠）
-//   · ctx.get('sessionPersistence')             → 持久会话表 stat(id)（env.persistedHeaders 可写 parentSession 模拟子会话/根会话）
+//   · ctx.get('sessionPersistence')             → 持久会话表 stat(id)（env.persistedHeaders 可写 parentSession 模拟子会话/根会话；
+//                                                 env.persistedSizes[id]=N 可让快照带 sizeBytes——cleanup 体积主源断言用）
 //   · tools.register / webServer.register       → 捕获工具表与 RPC 路由（env.rpc 走真 readBody/handler 路径）
 //   · ctx.get('systemPrompt'|'llm')             → 记录器（注册了什么段/查了什么模型都留痕）
 //   · ctx.effect / ctx.on('agent/status')       → 真实执行 + disposer 收口 / 事件捕获与重放
@@ -51,6 +52,7 @@ import { Readable } from 'node:stream'
  * @property {string} actor          currentInitiator 返回值（缺省=root sid；测试可改写模拟子代理身份）
  * @property {(list:Object[])=>void} setRoots  改写活跃 root 集（传 [] 模拟休眠根会话/重建窗口）
  * @property {Object} persistedHeaders  持久会话表 sid → { id, parentSession }（写 parentSession 模拟子会话；缺省根会话 parentSession=undefined）
+ * @property {Object} persistedSizes    快照体积表 sid → sizeBytes 数字（cleanup 体积主源断言用；缺省=快照无 sizeBytes → 目录遍历回退）
  * @property {()=>Object} board      读当前看板文件 JSON（不存在返回 null）
  * @property {(id:string)=>Object|undefined} task  看板里按 id 取任务
  * @property {(fn:Function, label?:string, timeoutMs?:number)=>Promise<any>} waitFor  真实时间轮询直到条件为真（默认 5s 上限）
@@ -194,6 +196,7 @@ export function createMockCtx(opts) {
   var rootsList = [root] // 活跃 root 集（测试可 env.setRoots([]) 清空模拟「休眠根会话」）
   var persistedHeaders = {} // 持久会话表 sid → SessionHeader（测试可写 parentSession 模拟子会话/根会话）
   persistedHeaders[sid] = { id: sid, parentSession: undefined }
+  var persistedSizes = {} // 快照体积表 sid → sizeBytes（task-mv39ag1e：cleanup 体积主源断言用；缺省=快照无 sizeBytes，走目录遍历回退）
   var agents = {
     currentInitiator: function () { return { id: env.actor } },
     roots: function () { return rootsList },
@@ -237,7 +240,8 @@ export function createMockCtx(opts) {
       }
       if (name === 'sessionPersistence') {
         return {
-          stat: async function (id) { var h = persistedHeaders[id]; return h ? { header: h } : undefined },
+          // 快照形态对齐官方 SessionPersistenceSnapshot：sizeBytes 仅当后端能廉价提供时才带（未登记=缺省字段）
+          stat: async function (id) { var h = persistedHeaders[id]; if (!h) return undefined; var snap = { header: h }; if (typeof persistedSizes[id] === 'number') snap.sizeBytes = persistedSizes[id]; return snap },
         }
       }
       return undefined
@@ -274,6 +278,7 @@ export function createMockCtx(opts) {
     actor: sid,
     setRoots: function (list) { rootsList = list || [] }, // 清空/改写活跃 root 集（模拟休眠/重建窗口）
     persistedHeaders: persistedHeaders, // 持久会话表（sid → { id, parentSession }）；写 parentSession 模拟子会话
+    persistedSizes: persistedSizes, // 快照体积表（sid → sizeBytes 数字）；cleanup 体积主源断言用
 
     // 以真 RPC 语义调用捕获的 webServer 路由（POST /dsh-agent-board → readBody → handlers[method]）
     rpc: async function (method, args) {

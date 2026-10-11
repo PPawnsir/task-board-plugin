@@ -4,6 +4,7 @@
 //   ③ run 真删会话目录 + projcache json（临时 HOME 构造，与真实布局一致）
 //   ④ 路径逃逸防护（id 含 ../ 之类拒 + rm 前 isWithin 再验）
 //   ⑤ cleanupRetentionDays 设置项读写（缺省 7 / 钳 1-90 / get-tasks 透出 / 客户端文案）
+//   ⑥ 体积估算双轨（task-mv39ag1e）：stat().sizeBytes 快照主源优先（不走目录遍历）+ stat 缺失/异常回退目录遍历
 // 纯函数断言直接 import lib/cleanup.mjs；RPC 端到端跑真实 index.mjs apply(mockCtx)。
 // 口径重构（task-mv22cd5m，2026-10-10 用户指令「回收与归档状态一致，归档后 X 天可完全回收」）：
 //   旧四闸（落定+已记账+非 continuable+不活跃）→ 卡龄主闸（卡归档满 X 天）+ 三底闸（落定/不活跃/路径安全）。
@@ -95,7 +96,7 @@ test('previewCleanup 只读不删、runCleanup 真删目录+projcache', async fu
     var agedAt = new Date(Date.now() - 8 * 86400000).toISOString()
     var tasks = [{ id: 't1', title: 't1', status: 'archived', archivedAt: agedAt, runs: [{ id: 'child-ok', role: 'worker', outcome: 'completed' }] }]
     // preview：dry-run，估体积 + 不动盘
-    var pv = previewCleanup(tasks, { blockedIds: new Set(), roots: roots })
+    var pv = await previewCleanup(tasks, { blockedIds: new Set(), roots: roots })
     assert.equal(pv.total, 1)
     assert.ok(pv.totalBytes >= 1500, '体积估算含目录+projcache')
     assert.ok(fs.existsSync(sessionDir), 'preview 后会话目录仍在（零副作用）')
@@ -106,6 +107,70 @@ test('previewCleanup 只读不删、runCleanup 真删目录+projcache', async fu
     assert.ok(!fs.existsSync(sessionDir), 'run 后会话目录已删')
     assert.ok(!fs.existsSync(pcPath), 'run 后 projcache 已删')
     assert.equal(rep.freedBytes, pv.totalBytes, '释放字节与预览一致')
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+// ===== ④b 体积估算主源（task-mv39ag1e）：snapshot sizeBytes 优先，不走目录遍历 =====
+test('previewCleanup：stat 返回 sizeBytes 时体积取自快照（不走目录遍历）', async function () {
+  var tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-cleanup-snap-'))
+  try {
+    var sessionsRoot = path.join(tmp, 'sessions')
+    var sessionDir = path.join(sessionsRoot, 'b1', 'child-snap')
+    fs.mkdirSync(sessionDir, { recursive: true })
+    fs.writeFileSync(path.join(sessionDir, 'session.v4.jsonl.zstd'), 'x'.repeat(1000)) // 盘上真实 1000 字节
+    var projcacheDir = path.join(tmp, 'projcache')
+    fs.mkdirSync(projcacheDir, { recursive: true })
+    fs.writeFileSync(path.join(projcacheDir, 'child-snap.json'), 'y'.repeat(500))
+    var roots = { sessions: sessionsRoot, projcacheDir: projcacheDir }
+    var agedAt = new Date(Date.now() - 8 * 86400000).toISOString()
+    var tasks = [{ id: 't1', title: 't1', status: 'archived', archivedAt: agedAt, runs: [{ id: 'child-snap', role: 'worker', outcome: 'completed' }] }]
+    // mock 官方快照面：sizeBytes=77777（与盘上 1000 不同——体积等于 77777+500 即证未走目录遍历）
+    var statCalls = []
+    var statSession = async function (id) { statCalls.push(id); return { header: { id: id }, revision: 'r1', sizeBytes: 77777 } }
+    var pv = await previewCleanup(tasks, { blockedIds: new Set(), roots: roots, statSession: statSession })
+    assert.equal(pv.total, 1)
+    assert.equal(pv.items[0].bytes, 77777 + 500, '体积=快照 sizeBytes + projcache（目录遍历口径应为 1000+500）')
+    assert.equal(pv.totalBytes, 77777 + 500)
+    assert.deepEqual(statCalls, ['child-snap'], 'stat 只查可删项（跳过项不查）')
+    assert.ok(fs.existsSync(sessionDir), 'preview 后会话目录仍在（零副作用）')
+    // run 同走快照主源：释放字节 = 快照口径
+    var rep = await runCleanup(pv.items, { roots: roots, statSession: statSession })
+    assert.equal(rep.deleted, 1)
+    assert.equal(rep.freedBytes, 77777 + 500, 'run 释放字节与快照预览一致')
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
+// ===== ④c 体积估算回退（task-mv39ag1e）：stat 缺失/异常/无 sizeBytes → 目录遍历兜底 =====
+test('previewCleanup：stat 回退路径（undefined/异常/无 sizeBytes）一律目录遍历兜底', async function () {
+  var tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-cleanup-fb-'))
+  try {
+    var sessionsRoot = path.join(tmp, 'sessions')
+    var sessionDir = path.join(sessionsRoot, 'b1', 'child-fb')
+    fs.mkdirSync(sessionDir, { recursive: true })
+    fs.writeFileSync(path.join(sessionDir, 'session.v4.jsonl.zstd'), 'x'.repeat(1000))
+    var projcacheDir = path.join(tmp, 'projcache')
+    fs.mkdirSync(projcacheDir, { recursive: true })
+    fs.writeFileSync(path.join(projcacheDir, 'child-fb.json'), 'y'.repeat(500))
+    var roots = { sessions: sessionsRoot, projcacheDir: projcacheDir }
+    var agedAt = new Date(Date.now() - 8 * 86400000).toISOString()
+    var tasks = [{ id: 't1', title: 't1', status: 'archived', archivedAt: agedAt, runs: [{ id: 'child-fb', role: 'worker', outcome: 'completed' }] }]
+    // A：stat 返回 undefined（会话不在持久层）→ 目录遍历
+    var pvA = await previewCleanup(tasks, { blockedIds: new Set(), roots: roots, statSession: async function () { return undefined } })
+    assert.equal(pvA.items[0].bytes, 1500, 'stat undefined → 目录遍历兜底（1000+500）')
+    // B：stat 抛异常 → 目录遍历
+    var pvB = await previewCleanup(tasks, { blockedIds: new Set(), roots: roots, statSession: async function () { throw new Error('backend down') } })
+    assert.equal(pvB.items[0].bytes, 1500, 'stat 异常 → 目录遍历兜底')
+    // C：snapshot 无 sizeBytes（未物化会话/非 JSONL 后端缺省字段）→ 目录遍历
+    var pvC = await previewCleanup(tasks, { blockedIds: new Set(), roots: roots, statSession: async function (id) { return { header: { id: id }, revision: 'r1' } } })
+    assert.equal(pvC.items[0].bytes, 1500, 'sizeBytes 缺省 → 目录遍历兜底')
+    // D：非法 sizeBytes（负值/NaN 脏值）→ 目录遍历
+    var pvD = await previewCleanup(tasks, { blockedIds: new Set(), roots: roots, statSession: async function (id) { return { header: { id: id }, sizeBytes: -3 } } })
+    assert.equal(pvD.items[0].bytes, 1500, 'sizeBytes 脏值 → 目录遍历兜底')
+    assert.ok(fs.existsSync(sessionDir), '回退路径 preview 同样零副作用')
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }
@@ -186,6 +251,43 @@ test('RPC cleanup-preview/run 端到端 + 留痕 + 活跃/逃逸跳过', async f
     var board = env.board()
     assert.ok(Array.isArray(board.cleanupLog) && board.cleanupLog.length === 1, 'cleanupLog 留痕')
     assert.equal(board.cleanupLog[0].deleted, 1)
+  } finally {
+    await env.cleanup()
+  }
+})
+
+// ===== ⑥b RPC 端到端（task-mv39ag1e）：snapshot sizeBytes 主源经真实接线生效 =====
+test('RPC cleanup-preview/run：sessionPersistence.stat sizeBytes 主源经真实接线生效', async function () {
+  var env = createMockCtx()
+  plugin.apply(env.ctx)
+  try {
+    // 盘上真实会话目录 2000 字节 + projcache 600
+    var sessionDir = path.join(env.home, '.dsh', 'sessions', 'b1', 'child-snap')
+    fs.mkdirSync(sessionDir, { recursive: true })
+    fs.writeFileSync(path.join(sessionDir, 'session.v4.jsonl.zstd'), 'z'.repeat(2000))
+    var projDir = path.join(env.home, '.dsh', 'storages', 'session_projcache', 'sessions')
+    fs.mkdirSync(projDir, { recursive: true })
+    fs.writeFileSync(path.join(projDir, 'child-snap.json'), 'w'.repeat(600))
+    await env.rpc('create-task', { sessionId: env.sid, id: 'seed', title: 'seed', description: 'x' })
+    var agedAt = new Date(Date.now() - 8 * 86400000).toISOString()
+    env.patchBoard(function (d) {
+      d.tasks = [{ id: 't1', title: 't1', status: 'archived', archivedAt: agedAt, runs: [{ id: 'child-snap', role: 'worker', outcome: 'completed' }] }]
+    })
+    // 官方快照面登记：header 入持久表 + sizeBytes=88888（≠盘上 2000——体积取自快照即证主源生效）
+    env.persistedHeaders['child-snap'] = { id: 'child-snap', parentSession: undefined }
+    env.persistedSizes['child-snap'] = 88888
+    var pv = await env.rpc('cleanup-preview', { sessionId: env.sid })
+    assert.equal(pv.ok, true)
+    assert.equal(pv.total, 1)
+    assert.equal(pv.totalBytes, 88888 + 600, 'preview 体积=快照 sizeBytes+projcache（目录遍历口径为 2600，不等即证主源）')
+    assert.ok(fs.existsSync(sessionDir), 'preview 零副作用不动盘')
+    var rep = await env.rpc('cleanup-run', { sessionId: env.sid, confirm: true })
+    assert.equal(rep.ok, true)
+    assert.equal(rep.deleted, 1)
+    assert.equal(rep.freedBytes, 88888 + 600, 'run 释放字节同走快照主源')
+    assert.ok(!fs.existsSync(sessionDir), 'run 后目录真删')
+    var board = env.board()
+    assert.ok(Array.isArray(board.cleanupLog) && board.cleanupLog.length === 1, 'cleanupLog 留痕')
   } finally {
     await env.cleanup()
   }

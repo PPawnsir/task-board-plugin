@@ -4,6 +4,9 @@
 // （板级设置项，默认 7 天、可配 1-90）；三底闸永留 = outcome 已落定（非 running）∧ 会话不活跃
 // （不在活跃树/本会话血统）∧ 路径安全（id 白名单 + rm 前 isWithin 再验）。
 // 路径逃逸防护两道闸：① 会话 id 白名单 [A-Za-z0-9_-]；② rm 前再验目标绝对路径仍在 sessions 桶内。
+// 体积估算主源（task-mv39ag1e）：官方 SessionPersistenceSnapshot.sizeBytes——sessionPersistence.stat(id)
+// 只读元数据（不读事件日志、不取写所有权，preview 零副作用红线不破），替代逐会话目录递归遍历
+// （Verifier 实测全量预览 ~340ms 同步 IO 阻塞事件循环）；stat 缺失/异常/sizeBytes 缺省 → 回退目录遍历（老宿主降级不炸）。
 // 数据源（与 usage.mjs findRunLog 同源布局，2026-10 本机核对）：
 //   会话日志目录：~/.dsh/sessions/<bucket>/<id>/（bucket=工作区转义目录名，id=会话 id 目录）
 //   projcache 逐会话：~/.dsh/storages/session_projcache/sessions/<id>.json
@@ -172,12 +175,28 @@ export function isWithin(root, p) {
 
 // ===== preview：dry-run，只读盘估体积、绝不删任何文件 =====
 // opts.roots = { sessions: '<home>/.dsh/sessions', projcacheDir: '<home>/.dsh/storages/session_projcache/sessions' }
+// opts.statSession（可选，task-mv39ag1e）：官方快照面 `sessionPersistence.stat(id)` 的注入形态——
+// 返回 { sizeBytes? } 或 undefined。体积主源走快照，以下四种情况一律回退目录遍历（双轨，老宿主不炸）：
+//   ① 未注入（老宿主无 sessionPersistence 服务/测试桩）② 返回 undefined（会话不在持久层）
+//   ③ snapshot.sizeBytes 缺省（未物化会话/非 JSONL 后端）④ stat 抛异常。
+// 口径注记：sizeBytes=会话日志物理体积（官方快照口径），可能略小于目录全量（目录或含附件等）——预览是估算，可接受。
+async function sessionBytesOf(id, dir, statSession) {
+  if (typeof statSession === 'function') {
+    try {
+      var snap = await statSession(id)
+      if (snap && typeof snap.sizeBytes === 'number' && isFinite(snap.sizeBytes) && snap.sizeBytes >= 0) return snap.sizeBytes
+    } catch (_) { /* stat 异常 → 回退目录遍历 */ }
+  }
+  return dir ? dirSizeOf(dir) : 0
+}
+
 // 返回 { total, totalBytes, items: [{id,taskId,role,bytes,sessionDir,projcachePath}], skipped, byTask }
-export function previewCleanup(tasks, opts) {
+export async function previewCleanup(tasks, opts) {
   opts = opts || {}
   var roots = opts.roots || {}
   var sessionsRoot = roots.sessions
   var projcacheDir = roots.projcacheDir
+  var statSession = opts.statSession
   var list = Array.isArray(tasks) ? tasks : []
   var titleById = {}
   for (var ti = 0; ti < list.length; ti++) { if (list[ti] && list[ti].id) titleById[list[ti].id] = list[ti].title || list[ti].id }
@@ -189,7 +208,7 @@ export function previewCleanup(tasks, opts) {
   for (var i = 0; i < scan.items.length; i++) {
     var it = scan.items[i]
     var dir = dirIndex[it.id] || null
-    var dirBytes = dir ? dirSizeOf(dir) : 0
+    var dirBytes = await sessionBytesOf(it.id, dir, statSession)
     var pcPath = projcacheDir ? path.join(projcacheDir, it.id + '.json') : null
     var pcBytes = pcPath ? fileSizeOf(pcPath) : 0
     var bytes = dirBytes + pcBytes
@@ -222,9 +241,9 @@ export async function runCleanup(items, opts) {
     if (dir && !isWithin(sessionsRoot, dir)) { skipped.push({ id: it.id, reason: 'path-escape' }); continue }
     if (pcPath && projcacheDir && !isWithin(projcacheDir, pcPath)) { skipped.push({ id: it.id, reason: 'path-escape' }); continue }
     var freed = 0
-    // 删会话目录（核心目标；失败则整项算跳过，绝不误报成功）
+    // 删会话目录（核心目标；失败则整项算跳过，绝不误报成功）。释放字节同走快照主源（sessionBytesOf 内部回退目录遍历）。
     if (dir) {
-      try { var db = dirSizeOf(dir); await fsNode.promises.rm(dir, { recursive: true, force: true }); freed += db } catch (e) { skipped.push({ id: it.id, reason: 'rm-failed' }); continue }
+      try { var db = await sessionBytesOf(it.id, dir, opts.statSession); await fsNode.promises.rm(dir, { recursive: true, force: true }); freed += db } catch (e) { skipped.push({ id: it.id, reason: 'rm-failed' }); continue }
     }
     // 删 projcache json（best-effort：删不掉不阻断主目标）
     if (pcPath && projcacheDir) {
