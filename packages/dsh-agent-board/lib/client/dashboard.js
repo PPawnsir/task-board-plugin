@@ -960,6 +960,23 @@
         dirty ? React.createElement('button', { onClick: save, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
     }
 
+    // 界面缩放档位选择（task-mv58e01j，用户反馈「字体整体偏小」）：90/100/110/125/150% 五档下拉。
+    // 纯客户端偏好——不走 set-board-config（host 不管 UI 偏好）：选中即 localStorage.setItem 持久化
+    // + state.uiZoom + notify，TopPanel 根容器 zoom 订阅即时生效；非法档位（脏值）不采纳。
+    function ZoomCfg() {
+      var cur = state.uiZoom || 1
+      function pick(v) {
+        var n = parseFloat(v)
+        if (UI_ZOOM_LEVELS.indexOf(n) < 0) return
+        state.uiZoom = n
+        try { localStorage.setItem(UI_ZOOM_KEY, String(n)) } catch (_) {}
+        notify()
+      }
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, '界面缩放',
+        React.createElement('select', { value: String(cur), onChange: function (e) { pick(e.target.value) }, title: '界面缩放：等比放大/缩小面板内字体、图标与间距（选中即时生效，本地记忆）', style: { padding: '0px 4px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
+          UI_ZOOM_LEVELS.map(function (z) { return React.createElement('option', { key: String(z), value: String(z) }, Math.round(z * 100) + '%' + (z === 1 ? '（默认）' : '')) })))
+    }
+
     function PoolCfgPopover(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect, useRef = _R.useRef
       var _a = useState(false), open = _a[0], setOpen = _a[1]
@@ -983,12 +1000,16 @@
         // position:fixed + 视口坐标：面板容器是 overflow:hidden + maxHeight:60vh，
         // absolute 弹窗在面板内容短时会被裁掉下半截（超时配置行曾被整个裁掉）。
         // fixed 脱离任何祖先裁剪（面板无 transform/filter，不会形成包含块）。
-        if (!open && btnRef.current) { var r = btnRef.current.getBoundingClientRect(); setPos({ top: r.bottom + 4, right: Math.max(8, window.innerWidth - r.right) }) }
+        // 界面缩放补偿（task-mv58e01j）：根容器挂了 CSS zoom 后，getBoundingClientRect 返回缩放后的
+        // 可视坐标，而 fixed 弹层在 zoom 子树内 top/right/maxHeight 会再被缩一次 → 各项除以档位还原成
+        // CSS px，弹层仍贴着按钮且不溢出视口底（zoom=1 时与旧行为逐字一致）。
+        var z = state.uiZoom || 1
+        if (!open && btnRef.current) { var r = btnRef.current.getBoundingClientRect(); setPos({ top: (r.bottom + 4) / z, right: Math.max(8, window.innerWidth - r.right) / z, maxH: Math.max(140, (window.innerHeight - r.bottom - 16) / z) }) }
         setOpen(!open)
       }
       return React.createElement('span', { ref: ref, style: { position: 'relative', display: 'inline-flex' } },
         React.createElement('button', { ref: btnRef, onClick: toggle, title: '池配置', style: { fontSize: 12, padding: '3px 8px', border: '1px solid ' + (open ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: open ? C.nested : 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('settings', 13)),
-        open && pos ? React.createElement('div', { style: { position: 'fixed', top: pos.top + 'px', right: pos.right + 'px', padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: 'calc(100vh - ' + (pos.top + 12) + 'px)', overflowY: 'auto' } },
+        open && pos ? React.createElement('div', { style: { position: 'fixed', top: pos.top + 'px', right: pos.right + 'px', padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: (pos.maxH || 300) + 'px', overflowY: 'auto' } },
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 5 } }, '并发上限（一次性派发，用完即销毁）'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
             React.createElement(PoolCfg, { label: 'Worker 并发', cfgKey: 'maxWorkers', value: props.maxW }),
@@ -1038,7 +1059,13 @@
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '存储清理'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
             React.createElement(RetentionCfg, { label: '归档保留', value: props.retentionDays, tip: '卡片归档后多少天可被完全回收（1~90 天，默认 7）' }),
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（归档满该天数后其会话可被清理回收）'))) : null)
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（归档满该天数后其会话可被清理回收）')),
+          // 界面缩放档位（task-mv58e01j）：设置弹层「界面」小节——五档下拉选中即 localStorage
+          // 持久化 + state.uiZoom + notify 即时生效（zoom 挂在 TopPanel 根容器，只影响本面板）。
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '界面'),
+          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+            React.createElement(ZoomCfg, null),
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（等比缩放面板字体/图标/间距，仅本面板生效并本地记忆）'))) : null)
     }
 
     function TeamView() {

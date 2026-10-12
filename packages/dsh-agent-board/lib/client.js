@@ -247,7 +247,15 @@ function apply(ctx) {
       blocked: { title: '阻塞：卡住待处理（等依赖/等主窗口裁决）', empty: '暂无阻塞——任务卡住待裁决时会出现在这里' }
     }
     var reqEpoch = 0 // 会话切换纪元：切会话时自增，旧会话在途响应按纪元丢弃
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, verifyUserGuide: true, lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', filterReview: false, selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', mpRole: '', mpSize: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
+    // ===== 界面缩放档位（task-mv58e01j，用户 2026-10-12「字体整体偏小」）=====
+    // 面板内 ~317 处内联 fontSize px 写死（9/10/11 为主），逐处改不值 → 面板根容器 CSS zoom
+    // 等比缩放统一接管（Chromium 支持，字体/图标/间距一并放大；zoom 只作用本面板子树，不碰宿主页面）。
+    // 纯客户端偏好（不走 host set-board-config）：localStorage 键 dsh-agent-board-ui-zoom 持久化，缺省 1；
+    // 脏值/档位外值/读取异常一律回退 1（白名单校验，不写回——下次选中档位时覆盖）。
+    var UI_ZOOM_KEY = 'dsh-agent-board-ui-zoom'
+    var UI_ZOOM_LEVELS = [0.9, 1, 1.1, 1.25, 1.5] // 90% / 100%（默认）/ 110% / 125% / 150%
+    function readUiZoom() { try { var v = parseFloat(localStorage.getItem(UI_ZOOM_KEY)); return UI_ZOOM_LEVELS.indexOf(v) >= 0 ? v : 1 } catch (_) { return 1 } }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, verifyUserGuide: true, uiZoom: readUiZoom(), lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', filterReview: false, selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', mpRole: '', mpSize: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
 
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
@@ -628,8 +636,9 @@ function apply(ctx) {
       var _eso = useState(state.epicSplit), esOn = _eso[0], setEsOn = _eso[1] // 史诗拆分总开关勾选态（设置区「功能」）
       var _vug = useState(state.verifyUserGuide), vugOn = _vug[0], setVugOn = _vug[1] // 自测指南开关勾选态（设置区「验收」）
       var _crd = useState(state.cleanupRetentionDays), crd = _crd[0], setCrd = _crd[1] // 清理保留天数（设置区「存储清理」）
+      var _uzm = useState(state.uiZoom), uiZoom = _uzm[0], setUiZoom = _uzm[1] // 界面缩放档位（设置区「界面」，zoom 挂面板根容器）
       var _usg = useState(state.usageSummary), setUsage = _usg[1] // Token 区聚合订阅（task-mv10lvud 根修）：usageSummary 换新对象即触发渲染
-      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setNdOn(state.notifyDispatch); setNnOn(state.notifyDone); setEsOn(state.epicSplit); setVugOn(state.verifyUserGuide); setCrd(state.cleanupRetentionDays); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr); setUsage(state.usageSummary) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
+      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setNdOn(state.notifyDispatch); setNnOn(state.notifyDone); setEsOn(state.epicSplit); setVugOn(state.verifyUserGuide); setCrd(state.cleanupRetentionDays); setUiZoom(state.uiZoom); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr); setUsage(state.usageSummary) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!open) return null
       if (!state.isRootStable) return null // 子代理会话不渲染看板面板（读 isRootStable：瞬态 false 不闪，见 isRoot 蝶变防抖）
       var active = tasks.filter(function (t) { return t.status !== 'archived' }); var archived = tasks.filter(function (t) { return t.status === 'archived' })
@@ -651,7 +660,10 @@ function apply(ctx) {
         })
         content = React.createElement('div', null, React.createElement(FilterBar, null), hasFilter && active.length === 0 && archived.length === 0 ? React.createElement('div', { style: { textAlign: 'center', padding: 16, color: C.text2, fontSize: 11 } }, '无匹配任务') : null, React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, state.selectMode ? '多选模式：点击卡片勾选，底部批量操作' : '提示：拖拽卡片到目标列即可流转状态'), tasks.length === 0 ? React.createElement('div', { style: { textAlign: 'center', padding: '16px 8px 12px', color: C.text2, fontSize: 12 } }, '点击右上角', React.createElement('span', { style: { color: C.brand, fontWeight: 600 } }, '「+ 新建任务」'), '创建第一张卡，或直接在对话里说：帮我建一张任务卡') : null, React.createElement('div', { style: { display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4 } }, cols),  React.createElement(BatchBar, null))
       }
-      return React.createElement('div', { style: { position: 'fixed', top: 44, left: (layL + 8) + 'px', right: (layR + 8) + 'px', maxHeight: '60vh', zIndex: 900, background: C.bg, border: '1px solid ' + C.border, borderRadius: '0 0 10px 10px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', display: 'flex', flexDirection: 'column', overflow: 'hidden' } },
+      // 面板根容器（顶层 div）：zoom 挂这里——等比缩放整个面板子树（字体/图标/间距），只影响本面板
+      // 不影响宿主页面；uiZoom 为订阅值（设置弹层选档 → state.uiZoom + notify → 本组件重渲染即时生效）。
+      // React 的 zoom 属无单位数值型 style（isUnitlessNumber 含 zoom），直接传数值不会拼 px。
+      return React.createElement('div', { style: { position: 'fixed', top: 44, left: (layL + 8) + 'px', right: (layR + 8) + 'px', maxHeight: '60vh', zIndex: 900, zoom: uiZoom, background: C.bg, border: '1px solid ' + C.border, borderRadius: '0 0 10px 10px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', display: 'flex', flexDirection: 'column', overflow: 'hidden' } },
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', borderBottom: '1px solid ' + C.border, flexShrink: 0, flexWrap: 'wrap', gap: 4 } },
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, React.createElement('span', { style: { fontWeight: 600, fontSize: 13, color: C.text, display: 'inline-flex', alignItems: 'center', gap: 5 } }, ic('clipboard-list', 15), '智能看板'), React.createElement(ViewTab, null), React.createElement(PoolStatus, null)),
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' } },
@@ -2485,6 +2497,23 @@ function apply(ctx) {
         dirty ? React.createElement('button', { onClick: save, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
     }
 
+    // 界面缩放档位选择（task-mv58e01j，用户反馈「字体整体偏小」）：90/100/110/125/150% 五档下拉。
+    // 纯客户端偏好——不走 set-board-config（host 不管 UI 偏好）：选中即 localStorage.setItem 持久化
+    // + state.uiZoom + notify，TopPanel 根容器 zoom 订阅即时生效；非法档位（脏值）不采纳。
+    function ZoomCfg() {
+      var cur = state.uiZoom || 1
+      function pick(v) {
+        var n = parseFloat(v)
+        if (UI_ZOOM_LEVELS.indexOf(n) < 0) return
+        state.uiZoom = n
+        try { localStorage.setItem(UI_ZOOM_KEY, String(n)) } catch (_) {}
+        notify()
+      }
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, '界面缩放',
+        React.createElement('select', { value: String(cur), onChange: function (e) { pick(e.target.value) }, title: '界面缩放：等比放大/缩小面板内字体、图标与间距（选中即时生效，本地记忆）', style: { padding: '0px 4px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
+          UI_ZOOM_LEVELS.map(function (z) { return React.createElement('option', { key: String(z), value: String(z) }, Math.round(z * 100) + '%' + (z === 1 ? '（默认）' : '')) })))
+    }
+
     function PoolCfgPopover(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect, useRef = _R.useRef
       var _a = useState(false), open = _a[0], setOpen = _a[1]
@@ -2508,12 +2537,16 @@ function apply(ctx) {
         // position:fixed + 视口坐标：面板容器是 overflow:hidden + maxHeight:60vh，
         // absolute 弹窗在面板内容短时会被裁掉下半截（超时配置行曾被整个裁掉）。
         // fixed 脱离任何祖先裁剪（面板无 transform/filter，不会形成包含块）。
-        if (!open && btnRef.current) { var r = btnRef.current.getBoundingClientRect(); setPos({ top: r.bottom + 4, right: Math.max(8, window.innerWidth - r.right) }) }
+        // 界面缩放补偿（task-mv58e01j）：根容器挂了 CSS zoom 后，getBoundingClientRect 返回缩放后的
+        // 可视坐标，而 fixed 弹层在 zoom 子树内 top/right/maxHeight 会再被缩一次 → 各项除以档位还原成
+        // CSS px，弹层仍贴着按钮且不溢出视口底（zoom=1 时与旧行为逐字一致）。
+        var z = state.uiZoom || 1
+        if (!open && btnRef.current) { var r = btnRef.current.getBoundingClientRect(); setPos({ top: (r.bottom + 4) / z, right: Math.max(8, window.innerWidth - r.right) / z, maxH: Math.max(140, (window.innerHeight - r.bottom - 16) / z) }) }
         setOpen(!open)
       }
       return React.createElement('span', { ref: ref, style: { position: 'relative', display: 'inline-flex' } },
         React.createElement('button', { ref: btnRef, onClick: toggle, title: '池配置', style: { fontSize: 12, padding: '3px 8px', border: '1px solid ' + (open ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: open ? C.nested : 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('settings', 13)),
-        open && pos ? React.createElement('div', { style: { position: 'fixed', top: pos.top + 'px', right: pos.right + 'px', padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: 'calc(100vh - ' + (pos.top + 12) + 'px)', overflowY: 'auto' } },
+        open && pos ? React.createElement('div', { style: { position: 'fixed', top: pos.top + 'px', right: pos.right + 'px', padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: (pos.maxH || 300) + 'px', overflowY: 'auto' } },
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 5 } }, '并发上限（一次性派发，用完即销毁）'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
             React.createElement(PoolCfg, { label: 'Worker 并发', cfgKey: 'maxWorkers', value: props.maxW }),
@@ -2563,7 +2596,13 @@ function apply(ctx) {
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '存储清理'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
             React.createElement(RetentionCfg, { label: '归档保留', value: props.retentionDays, tip: '卡片归档后多少天可被完全回收（1~90 天，默认 7）' }),
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（归档满该天数后其会话可被清理回收）'))) : null)
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（归档满该天数后其会话可被清理回收）')),
+          // 界面缩放档位（task-mv58e01j）：设置弹层「界面」小节——五档下拉选中即 localStorage
+          // 持久化 + state.uiZoom + notify 即时生效（zoom 挂在 TopPanel 根容器，只影响本面板）。
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '界面'),
+          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+            React.createElement(ZoomCfg, null),
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（等比缩放面板字体/图标/间距，仅本面板生效并本地记忆）'))) : null)
     }
 
     function TeamView() {

@@ -136,6 +136,7 @@ dsh plugin --profile web remove dsh-agent-board
 - 归档区：时间倒序 + 排序选择器 + 纵向滚动
 - Esc 逐级关闭（详情 → 看板 → 面板）
 - 全部结构性图标为 Lucide 线性 SVG（`currentColor` 跟随主题，浅深色自适应）
+- **界面缩放档位**（⚙️ 设置弹层「界面」小节，90% / 100%（默认）/ 110% / 125% / 150% 五档）：面板根容器 CSS `zoom` 等比缩放（字体/图标/间距一并放大，只影响本面板、不碰宿主页面），选中即时生效并 `localStorage` 本地记忆（键 `dsh-agent-board-ui-zoom`）
 
 ### 仪表盘（Token 消耗）
 
