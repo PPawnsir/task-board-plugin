@@ -233,13 +233,18 @@ export function createRpc(ctx, state, deps) {
     // 旧实现 roots() 只含活体会话——休眠根会话（有板有卡）恒 false，且生成开始/结束 agents 树重建有瞬态窗口
     // 返回不含本 sid（假 false），入口分钟级消失。改读持久 parentSession（见 isRootPersistent）：
     //   主源 sessionPersistence.stat(sid)（持久表，休眠会话也读得到）→ header.parentSession 缺省 = 根；
+    //   fork/seed 会话（v3→v4 迁移产物：parentSession 有值但 delegationDepth===0）同样认根
+    //   （task-mv59nn9m：「本体数据平台开发」fork 会话被旧判据误判非根导致看板不可见）；
     //   老宿主/测试桩无 sessionPersistence → 回退活跃 agent 的 session.header.parentSession，再回退旧 roots() 成员判定。
     // 防抖仍在客户端：kernel.js applyIsRoot——曾确认 true 的会话需连续 3 次 false（3s 心跳≈9s）才收抽屉；
     // 从未 true 的子代理会话仍即时收起（反馈 n-muuerxv9ijxs / task-muupr8ld）。
     async function isRootPersistent(sid) {
       var sp = ctx.get && ctx.get('sessionPersistence')
       if (sp && typeof sp.stat === 'function') {
-        try { var snap = await sp.stat(sid); if (snap && snap.header) return !snap.header.parentSession } catch (_) {}
+        // 判据改用 delegationDepth（task-mv59nn9m）：无父 = 根；有父但 delegationDepth===0 的 fork/seed
+        // 会话同样认根；delegationDepth 缺省（v3 时代老会话无此字段）且有 parentSession 时维持非根
+        // 保守判定——兼容 v3 时代子代理不误放行。
+        try { var snap = await sp.stat(sid); if (snap && snap.header) { var hh = snap.header; return !hh.parentSession || (typeof hh.delegationDepth === 'number' && hh.delegationDepth === 0) } } catch (_) {}
       }
       var ag = ctx.agents
       if (ag) {

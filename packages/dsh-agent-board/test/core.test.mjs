@@ -4533,11 +4533,35 @@ test('isRoot 持久语义：host 侧改读 parentSession（根=无父），防�
   const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
   // isRoot 持久判定入口：根会话=无父，不再读活跃 roots() 集
   assert.match(rpcSrc, /async function isRootPersistent\(sid\)/)
-  assert.match(rpcSrc, /snap\.header\) return !snap\.header\.parentSession/)
+  // task-mv59nn9m：判据改用 delegationDepth——无父=根，或 parentSession 有值但 delegationDepth===0（fork/seed 会话）也认根
+  assert.match(rpcSrc, /return !hh\.parentSession \|\| \(typeof hh\.delegationDepth === 'number' && hh\.delegationDepth === 0\)/)
   assert.match(rpcSrc, /d\.isRoot = await isRootPersistent\(sid\)/)
   // 指针注释：防抖仍在客户端 kernel.js applyIsRoot，曾确认 true 需连续 3 次 false 才收
   assert.match(rpcSrc, /防抖仍在客户端：kernel\.js applyIsRoot/)
   assert.match(rpcSrc, /曾确认 true 的会话需连续 3 次/)
+})
+
+// ===== fork 会话认根（task-mv59nn9m，用户报障：ontology_ai「本体数据平台开发」fork 会话看板不可见）=====
+// 根因：isRootPersistent stat 主源旧判据 `!header.parentSession` 把 fork/seed 会话
+//（v3→v4 迁移产物：parentSession 有值 + delegationDepth:0 + isSeeded:true）误判非根 → isRoot:false → 看板入口消失。
+// 修法：判据改 `!h.parentSession || (typeof h.delegationDepth==='number' && h.delegationDepth===0)`；
+// delegationDepth 缺省（v3 时代老会话无此字段）且有 parentSession 时维持非根保守判定（兼容 v3 时代子代理）。
+test('isRootPersistent 判据 delegationDepth（行为级）：fork 认根 / 子代理非根 / 老形态保守 / 真根不变', async () => {
+  function mkPersistCtx(header) {
+    return { get: function (name) { if (name === 'sessionPersistence') return { stat: async function () { return { header: header } } }; return undefined } }
+  }
+  // ① fork/seed 头（parentSession 有 + delegationDepth 0）→ 根（本卡修复目标）
+  const h1 = mkRpcHandlers(mkBoard([]), null, mkPersistCtx({ parentSession: 'session-parent', delegationDepth: 0 }))
+  assert.equal((await h1['get-tasks']({})).isRoot, true)
+  // ② 真子代理头（parentSession 有 + delegationDepth 1）→ 非根
+  const h2 = mkRpcHandlers(mkBoard([]), null, mkPersistCtx({ parentSession: 'session-parent', delegationDepth: 1 }))
+  assert.equal((await h2['get-tasks']({})).isRoot, false)
+  // ③ 老形态头（parentSession 有 + delegationDepth 缺省，v3 时代会话）→ 非根（保守判定不放行）
+  const h3 = mkRpcHandlers(mkBoard([]), null, mkPersistCtx({ parentSession: 'session-parent' }))
+  assert.equal((await h3['get-tasks']({})).isRoot, false)
+  // ④ 真根（无 parentSession）→ 根
+  const h4 = mkRpcHandlers(mkBoard([]), null, mkPersistCtx({}))
+  assert.equal((await h4['get-tasks']({})).isRoot, true)
 })
 
 // ===== 史诗 hooks UI（task-muuw56yf）：卡片相位徽章 + 详情页 hooks 编辑区 =====
