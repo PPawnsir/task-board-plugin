@@ -480,25 +480,34 @@ test('buildVerifierPrompt: 注入交付物 + 验收脚本 + messages', () => {
   assert.match(p, /做完了/); assert.match(p, /npm test/); assert.match(p, /board_verdict/); assert.match(p, /方案B/)
 })
 
-test('buildWorkerPrompt: git 纪律红线（禁还原命令）注入，verifier prompt 不注入（源码断言）', () => {
+test('buildWorkerPrompt: git 纪律红线（禁还原命令 + 精确路径 add）注入，verifier prompt 不注入（源码断言）', () => {
   const t = mkTask({ id: 'g1' })
   const p = core.buildWorkerPrompt(t)
   assert.match(p, /git 纪律红线/)
   assert.match(p, /禁止 git checkout \/ git restore \/ git reset --hard \/ git clean 等还原命令/)
   assert.match(p, /会冲掉并行 Worker 与你自己的未提交在途编辑/)
   assert.match(p, /确实需要干净基线时用 board_report（kind=escalate）上报/)
+  // 精确路径 add 条款（task-mv73ylwe；n-mv6xntg1p6i5 实证：并行 Worker 共享暂存区，宽泛 add 吞并他卡在途编辑）
+  assert.match(p, /提交时只允许精确路径 git add <本卡 touches 声明的文件>/)
+  assert.match(p, /禁止 git add -A \/ git add \. \/ git add 目录/)
+  assert.match(p, /并行 Worker 共享暂存区，宽泛 add 会把别卡在途编辑卷进你的 commit/)
   // verifier prompt 不动
   const pv = core.buildVerifierPrompt(t)
   assert.doesNotMatch(pv, /git 纪律红线/)
   assert.doesNotMatch(pv, /reset --hard/)
+  assert.doesNotMatch(pv, /精确路径 git add/)
+  assert.doesNotMatch(pv, /git add -A/)
   // 源码级：条款只在 buildWorkerPrompt 体内（切片边界到 buildVerifierPrompt 之前），不在 buildVerifierPrompt 体内
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
   const wBody = coreSrc.slice(coreSrc.indexOf('export function buildWorkerPrompt'), coreSrc.indexOf('export function buildVerifierPrompt'))
   assert.ok(wBody.length > 500, 'buildWorkerPrompt 切片成功')
   assert.match(wBody, /git 纪律红线/)
   assert.match(wBody, /git reset --hard/)
+  assert.match(wBody, /提交时只允许精确路径 git add/)
+  assert.match(wBody, /禁止 git add -A/)
   const vBody = coreSrc.slice(coreSrc.indexOf('export function buildVerifierPrompt'), coreSrc.indexOf('export function buildHookPrompt'))
   assert.doesNotMatch(vBody, /git 纪律红线/)
+  assert.doesNotMatch(vBody, /精确路径 git add/)
 })
 
 test('buildWorkerPrompt: 大文件交付纪律（write 主体+edit 续块）注入，verifier prompt 不注入（源码断言）', () => {
@@ -2791,6 +2800,7 @@ test('README 双份：运行区子会话 id 归属标注 + git 纪律红线各�
   assert.equal(r1, r2, 'README 双份必须逐字一致（npm run sync-readme）')
   assert.ok(r1.indexOf('对应子代理列表同名条目') >= 0, 'README 缺运行区子会话 id 归属标注说明')
   assert.ok(r1.indexOf('git 纪律红线') >= 0, 'README 缺 git 纪律红线说明')
+  assert.ok(r1.indexOf('git add -A') >= 0, 'README 缺精确路径 add 条款说明')
 })
 
 // ===== 归档 tab 数据源口径（反馈 n-muyg3e0m9z7i）：归档 tab 空 vs 仪表盘 68 根修 =====

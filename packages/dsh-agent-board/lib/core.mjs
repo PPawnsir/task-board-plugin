@@ -767,7 +767,10 @@ export function buildWorkerPrompt(t, pack, feedbackEnabled) {
   if (feedbackEnabled !== false) p += '\n\n' + LESSON_RECALL_HINT
   // git 纪律红线（n-muyaaoo7cqnd 实证事故：并行 Worker 跑 git checkout HEAD -- package.json
   // 把另一 Worker 的在途编辑冲掉）：禁止还原命令，只改自己写的文件，要干净基线走 escalate 上报。
-  p += '\n\ngit 纪律红线：禁止 git checkout / git restore / git reset --hard / git clean 等还原命令（会冲掉并行 Worker 与你自己的未提交在途编辑）；你只需管自己写的文件，别人改了别的文件与你无关；确实需要干净基线时用 board_report（kind=escalate）上报，由主窗口裁决。'
+  // 精确路径 add 条款（n-mv6xntg1p6i5 实证：并行 Worker 共享 worktree+暂存区，宽泛 git add
+  // 三起吞并他卡在途编辑——p4-rdf 带走 p4-apply-ddl-core 的 4 处在途编辑混入自己 commit）：
+  // 提交只允许精确路径 add（本卡 touches 或逐一列明改过的文件），禁 git add -A / . / 目录。
+  p += '\n\ngit 纪律红线：禁止 git checkout / git restore / git reset --hard / git clean 等还原命令（会冲掉并行 Worker 与你自己的未提交在途编辑）；你只需管自己写的文件，别人改了别的文件与你无关；确实需要干净基线时用 board_report（kind=escalate）上报，由主窗口裁决。提交时只允许精确路径 git add <本卡 touches 声明的文件>（或明确你改过的文件路径逐一列出）；禁止 git add -A / git add . / git add 目录——并行 Worker 共享暂存区，宽泛 add 会把别卡在途编辑卷进你的 commit。'
   // 大文件交付纪律（实证 n-mv65bhk0mg5w：gs-gov-policy task-mv63fo9y 池 Worker 连续 3 个 run 单次输出
   // 64k tok 撞上限、烧 330k token 零文件产出——都在试图一次性 write 整个 22.5KB HTML；主窗口改用
   // write×1 + edit×2 分块落地同一 spec 一次过）：固定段写死「预估 >8KB 禁止单次 write 全量」。
