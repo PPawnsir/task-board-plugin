@@ -47,6 +47,10 @@ export function createRpc(ctx, state, deps) {
     function rpcActor(args) { var a = getActorId(); if (a && a !== 'unknown') return a; return rpcSessionId(args) }
     var rootForSession = deps.rootForSession, deriveWorkMode = deps.deriveWorkMode, runsFor = deps.runsFor
     var rt = deps.rt, mutateLocked = deps.mutateLocked
+    // 续跑资格判定（task-mv6c7cbo）：doIntervene 无活跃 rec 时细分「续跑窗口 / 真无 run」。
+    // 与 dispatch 同一函数（createDispatch 返回体透出，index.mjs 接线注入），不另写第二套口径；
+    // 老宿主/测试桩未注入时退化空函数——claimedBy 窗口判定仍可命中，语义只降不炸。
+    var resumeTarget = typeof deps.resumeTarget === 'function' ? deps.resumeTarget : function () { return '' }
     // 主窗口消耗（task-muwsol23）：测试可注入临时日志根；生产 undefined → findRunLog 回退 ~/.dsh/sessions
     var sessionsRoot = (typeof deps.sessionsRoot === 'string' && deps.sessionsRoot) ? deps.sessionsRoot : undefined
     // ===== 已结算会话清理（task-mv2131cz）：路径根 + 活跃/血统保护集 =====
@@ -640,8 +644,36 @@ export function createRpc(ctx, state, deps) {
           try { agent.followup(m); delivered = true; channel = 'followup' } catch (_) {}
         }
       }
-      await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === taskId }); if (t) { if (!Array.isArray(t.messages)) t.messages = []; t.messages.push({ kind: 'intervention', text: msg, at: new Date().toISOString(), by: actor }); ah(t, t.status, t.status, actor, '高优干预: ' + msg.slice(0, 200) + (delivered ? '' : (missedNote || '（无活跃 run，随下次派发注入）'))) }; return t })
-      return { ok: true, delivered: delivered, channel: channel }
+      // ===== 无活跃 rec 的送达提示两态细分（task-mv6c7cbo，实证 n-mv65bhk0mg5w）=====
+      // intervene 时刻 run 可能刚结算（incomplete，rec 已摘除）而卡仍在续跑/重排窗口——「无活跃 run」
+      // 技术为真但对用户误导：干预落进 t.messages，续跑指令经 buildMessages 原文带上，注入语义依旧成立。
+      // 锁内新鲜快照判两态：① resumeTarget(t)!==''（下次重派走续跑）或 claimedBy 还在（结算/重排窗口）
+      //   → 文案如实写「随续跑注入」，state='resume-pending'；
+      // ② 真无 run（无续跑资格且无认领位）→ 维持原「随下次派发注入」文案，state='no-run'。
+      // state 全枚举：delivered（实时送达）/ redispatch（会话不可用转重派注入）/ resume-pending / no-run，
+      // 供 GUI 区分提示色。
+      var state = delivered ? 'delivered' : (missedNote ? 'redispatch' : '')
+      await mutateLocked(sid, function (d) {
+        var t = d.tasks.find(function (x) { return x.id === taskId })
+        if (t) {
+          if (!Array.isArray(t.messages)) t.messages = []
+          t.messages.push({ kind: 'intervention', text: msg, at: new Date().toISOString(), by: actor })
+          var note = delivered ? '' : missedNote
+          if (!delivered && !note) {
+            if (resumeTarget(t) !== '' || t.claimedBy) {
+              note = '（run 刚结算/续跑窗口，干预将随续跑注入）'
+              state = 'resume-pending'
+            } else {
+              note = '（无活跃 run，随下次派发注入）'
+              state = 'no-run'
+            }
+          }
+          ah(t, t.status, t.status, actor, '高优干预: ' + msg.slice(0, 200) + note)
+        }
+        return t
+      })
+      if (!state) state = 'no-run' // 兜底：卡已不存在等异常形态也给确定态（此时干预无处落卡）
+      return { ok: true, delivered: delivered, channel: channel, state: state }
     }
     // 终止执行某任务的 run：一次性 dispose / continuable interrupt 后回 pending（verifying 则保持待审，由新 verifier 接手）
     async function doTerminate(sid, actor, taskId) {
@@ -741,7 +773,7 @@ export function createRpc(ctx, state, deps) {
     handle('intervene-agent', async function (args) { return doIntervene(rpcSessionId(args), rpcActor(args), args.taskId, args.message) })
     // 主 Agent 工具版（Team 模式下主 Agent 通过工具裁决/介入）
     ctx.tools.register(defineTool({ name: 'task_arbitrate', description: 'Team 模式：裁决 Worker 上报的歧义（escalation）。action=resume（默认）裁决后任务回派发池立即重派；action=hold 任务挂起冻结、不参与自动派发（留给主窗口补 dependsOn/上下文，补完后用 task_update unfreeze:true 解冻）。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, answer: { type: 'string' }, action: { type: 'string', enum: ['resume', 'hold'], description: 'resume（默认）=裁决后重新派发；hold=挂起冻结不派发' } }, required: ['taskId', 'answer'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; return doResolveEscalation(toolSessionId(), getActorId(), args.taskId, args.answer, args.action) } }))
-    ctx.tools.register(defineTool({ name: 'task_intervene', description: 'Team 模式：向执行某任务的池中 Agent 发起高优先级指令（steer 通道，当前 step 结束即响应；无活跃 run 时记录随下次派发注入）。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, message: { type: 'string' } }, required: ['taskId', 'message'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; return doIntervene(toolSessionId(), getActorId(), args.taskId, args.message) } }))
+    ctx.tools.register(defineTool({ name: 'task_intervene', description: 'Team 模式：向执行某任务的池中 Agent 发起高优先级指令（steer 通道，当前 step 结束即响应；无活跃 run 时记录随下次派发注入——run 刚结算/续跑窗口内随续跑注入，真无 run 随下次派发注入，返回体 state 字段区分：delivered / redispatch / resume-pending / no-run）。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, message: { type: 'string' } }, required: ['taskId', 'message'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; return doIntervene(toolSessionId(), getActorId(), args.taskId, args.message) } }))
     // ===== 池中 Agent 结构化回报工具（双模：工具优先，文本分段为降级路径）=====
     ctx.tools.register(defineTool({ name: 'board_report', description: '[任务看板 Worker 专用] 上报任务结果。kind=complete 时填 summary/changes/selfTest/diffStat（git 仓库内改动附 git diff --stat 概要）；kind=escalate 时填 question（歧义上报，等待主窗口裁决）；kind=progress 时填 question（一行里程碑进展摘要，≤200 字符）——只在有实际产物/结论时报，禁止定时或表演式汇报，静默不通知主窗口。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, kind: { type: 'string', enum: ['complete', 'escalate', 'progress'] }, summary: { type: 'string' }, changes: { type: 'string' }, selfTest: { type: 'string' }, diffStat: { type: 'string', description: '变更概要：git diff --stat（含 git status --short）输出，≤1500 字符' }, question: { type: 'string', description: 'kind=escalate：歧义原文；kind=progress：一行里程碑进展摘要（≤200 字符）' } }, required: ['taskId', 'kind'] }, output: jo(), execute: async function (args) {
       var sid = toolSessionId(); var actor = getActorId()

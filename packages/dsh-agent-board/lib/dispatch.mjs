@@ -1558,5 +1558,7 @@ export function createDispatch(ctx, state, deps) {
       // 在并行 spawn 下存在认领错包的潜伏 bug，一并消灭。
     }
 
-    return { poolCycle: poolCycle, spawnOneShot: spawnOneShot, accumulateRunUsage: accumulateRunUsage, settleReportedRun: settleReportedRun, readContextPack: readContextPack, closeRunHistory: closeRunHistory }
+    // resumeTarget 一并透出（task-mv6c7cbo）：rpc 侧 doIntervene 在无活跃 rec 时靠它细分
+    // 「续跑窗口 / 真无 run」两态（纯读 t.runs 零 IO，同一函数两处复用，不另写第二套口径）。
+    return { poolCycle: poolCycle, spawnOneShot: spawnOneShot, accumulateRunUsage: accumulateRunUsage, settleReportedRun: settleReportedRun, readContextPack: readContextPack, closeRunHistory: closeRunHistory, resumeTarget: resumeTarget }
 }

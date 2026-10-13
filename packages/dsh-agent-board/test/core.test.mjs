@@ -5740,6 +5740,7 @@ test('高优干预①（continuable）：rec 无 run 也走宿主投递——hos
   assert.equal(r.ok, true)
   assert.equal(r.delivered, true, 'continuable rec 干预必须真的送达（旧实现整段被跳过 → delivered 恒 false）')
   assert.equal(r.channel, 'steer', 'e2e 断言口径不变：channel 必须仍是 steer')
+  assert.equal(r.state, 'delivered', '实时送达：state=delivered（task-mv6c7cbo 返回体新字段）')
   assert.equal(hostCalls.length, 1)
   assert.deepEqual(sent, [], 'host-protocol 可用时不再重复走 sendMessage（一次干预只投一次）')
   assert.equal(hostCalls[0].p, parent)                  // 授权者 = 活的直接父 Agent
@@ -5786,6 +5787,7 @@ test('高优干预②（一次性 rec 逐字不变）：agent.steer 优先、ste
   board.tasks.push(idle)
   r = await handlers['intervene-agent']({ taskId: 'iv8', message: '无 run 的干预' })
   assert.equal(r.delivered, false); assert.equal(r.channel, '')
+  assert.equal(r.state, 'no-run', '真无 run：state=no-run（GUI 提示色区分字段，task-mv6c7cbo）')
   assert.match(idle.history[idle.history.length - 1].note, /^高优干预: 无 run 的干预（无活跃 run，随下次派发注入）$/)
 })
 
@@ -5843,6 +5845,57 @@ test('高优干预③（continuable 回退链）：host 符号不可用 → send
   assert.equal(t7.messages.filter((m) => m.kind === 'intervention').length, 1)
   // 四条路径的干预原文都进 messages（通道选择不改变「记录一条干预」的既有语义）
   assert.equal(t6.messages.filter((m) => m.kind === 'intervention').length, 1)
+})
+
+// ===== 送达提示两态细分（task-mv6c7cbo，实证 n-mv65bhk0mg5w：run 已结算 rec 摘除、claimedBy 仍在续跑窗口，
+//       旧文案「无活跃 run」技术为真但对用户误导——干预实际随续跑注入）=====
+test('高优干预⑤（续跑窗口细分）：无 rec 但续跑资格/认领位还在 → 文案「随续跑注入」+ state=resume-pending', async () => {
+  // 形态 A：run 刚结算留档 incomplete+continuable（resumeTarget 命中），claimedBy 仍指已结算子会话（续跑窗口原形）
+  const resumeTask = mkTask({
+    id: 'iv9', title: '续跑窗口卡', status: 'in-progress', claimedBy: 'child-done',
+    runs: [{ role: 'worker', id: 'child-done', at: '2026-01-01T00:00:00Z', model: '', outcome: 'incomplete', continuable: true }],
+  })
+  // 形态 B：认领位还在但无任何 runs 留档（resumeTarget 空，纯 claimedBy 重排窗口）
+  const claimed = mkTask({ id: 'iv10', title: '重排窗口卡', status: 'in-progress', claimedBy: 'child-x' })
+  const board = mkBoard([resumeTask, claimed])
+  // resumeTarget 走真实函数（与 index.mjs 生产接线同径：从 createDispatch 返回体取出注入 deps）
+  const dsp = mkContinuableDispatch(mkBoard([]))
+  const handlers = mkRpcHandlers(board, { runsFor: () => ({}), resumeTarget: dsp.dispatch.resumeTarget })
+  // A：resumeTarget 命中 → 续跑窗口文案 + state，且不得再出现失真原文「无活跃 run」
+  let r = await handlers['intervene-agent']({ taskId: 'iv9', message: '窗口期干预A' })
+  assert.equal(r.ok, true); assert.equal(r.delivered, false); assert.equal(r.channel, '')
+  assert.equal(r.state, 'resume-pending')
+  const noteA = resumeTask.history[resumeTask.history.length - 1].note
+  assert.match(noteA, /^高优干预: 窗口期干预A（run 刚结算\/续跑窗口，干预将随续跑注入）$/)
+  assert.ok(!/无活跃 run/.test(noteA), '续跑窗口不得再报「无活跃 run」（task-mv6c7cbo 修复的失真原文）: ' + noteA)
+  // 干预原文落 messages——续跑指令经 buildMessages 原文带上（「随续跑注入」语义成立的依据）
+  assert.equal(resumeTask.messages.filter((m) => m.kind === 'intervention').length, 1)
+  assert.equal(resumeTask.messages.filter((m) => m.kind === 'intervention')[0].text, '窗口期干预A')
+  // B：claimedBy 窗口（resumeTarget 空）→ 同一文案与 state
+  r = await handlers['intervene-agent']({ taskId: 'iv10', message: '窗口期干预B' })
+  assert.equal(r.delivered, false); assert.equal(r.state, 'resume-pending')
+  assert.match(claimed.history[claimed.history.length - 1].note, /（run 刚结算\/续跑窗口，干预将随续跑注入）$/)
+  // C：deps 未注入 resumeTarget（老宿主/测试桩降级）→ claimedBy 窗口仍命中，语义只降不炸
+  const handlers2 = mkRpcHandlers(board, { runsFor: () => ({}) })
+  r = await handlers2['intervene-agent']({ taskId: 'iv10', message: '窗口期干预C' })
+  assert.equal(r.state, 'resume-pending')
+  assert.match(claimed.history[claimed.history.length - 1].note, /干预将随续跑注入/)
+})
+
+// ===== 两态细分接线（源码级）：文案/state 字段/透出/接线不被将来改动悄悄抹掉 =====
+test('高优干预⑥（源码级）：续跑窗口两态文案 + state 字段 + resumeTarget 透出与 rpc 接线在位', () => {
+  const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const idx = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
+  assert.match(rpcSrc, /（run 刚结算\/续跑窗口，干预将随续跑注入）/)                 // 续跑窗口文案
+  assert.match(rpcSrc, /（无活跃 run，随下次派发注入）/)                              // 真无 run 文案不回归
+  assert.match(rpcSrc, /state = 'resume-pending'/)
+  assert.match(rpcSrc, /state = 'no-run'/)
+  assert.match(rpcSrc, /return \{ ok: true, delivered: delivered, channel: channel, state: state \}/) // 返回体带 state
+  assert.match(rpcSrc, /resumeTarget\(t\) !== '' \|\| t\.claimedBy/)               // 两态判据（锁内新鲜快照）
+  assert.match(rpcSrc, /var resumeTarget = typeof deps\.resumeTarget === 'function'/) // 缺 dep 降级不炸
+  assert.match(dsp, /resumeTarget: resumeTarget/)                                  // dispatch 返回体透出
+  assert.match(idx, /resumeTarget: dispatch\.resumeTarget/)                        // 生产接线
 })
 
 // ===== Bug B ④（源码级）：投递点接线不被将来改动悄悄抹掉 =====

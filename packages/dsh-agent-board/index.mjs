@@ -85,6 +85,7 @@ export function apply(ctx) {
       pushSysNote: notify.pushSysNote, sessionCwd: session.sessionCwd, // 调研门禁③：epic 发布预检汇总投递 + 预研路径相对解析根
       spawnOneShot: dispatch.spawnOneShot, accumulateRunUsage: dispatch.accumulateRunUsage, readContextPack: dispatch.readContextPack,
       closeRunHistory: dispatch.closeRunHistory, // 手动终止 run 关账（doTerminate 状态无关清理，task-mv1pqy27）
+      resumeTarget: dispatch.resumeTarget,       // doIntervene 无活跃 rec 时细分续跑窗口/真无 run（task-mv6c7cbo）
       // 上报通道结算入口（task-muwkhqf8）：board_report/board_verdict 把任务推进到落定态时，
       // 由 rpc 侧顺手对「该任务当前的 continuable Worker rec」补做收尾三件套
       // （关 run 结局 / usage 落账 / 摘超时臂）——治「工具上报完成后 idle 事件没到 → run 永远 running」。
