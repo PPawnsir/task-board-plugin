@@ -916,6 +916,11 @@ export function touchesConflict(t, holds) {
 // pre hook 串行闸门（hooks=agent run 接线①）：候选所属 epic 的 hooks.pre 未 done 时整批不派
 // （见 preHookGate），由 poolCycle 改 spawn hook-pre run——同一 epic 的子任务在准备完成前
 // 一张都不派，这是「pre 闸门」的串行语义；未声明 hooks 的 epic 逐字不受影响。
+// 容器卡结构性排除（epic 占 worker 槽根修）：凡有子任务的卡（epic）永不进派发候选——
+// 与 pipeline 字段无关，不再只靠「pipeline=direct 口头约定」（task_create 缺省 full，
+// 手滑忘传 direct 的 epic 进池被派出占槽、已就绪任务空等，用户实证）。verifs 分支不动：
+// 子任务全了结后 epic 转 verifying 派 Verifier 验收是既有正确行为，不受此排除影响。
+// 子任务口径与 childStats 同源：含已归档（parentId 仍指向即算有子任务）。
 export function pickDispatch(d, capW, capV, busyTaskIds) {
   var blockedTouches = []
   var pendings = []
@@ -923,7 +928,7 @@ export function pickDispatch(d, capW, capV, busyTaskIds) {
   // 防止同一轮 cycle 派出的两个任务声明重叠 touches。
   var holds = holdsFiles(d)
   if (capW > 0) {
-    var cands = d.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && !t.frozen && t.assignMode !== 'manual' && t.pipeline !== 'direct' && depsSatisfied(d, t) && !t.escalation && preHookGate(gpt(t, d.tasks)).pass })
+    var cands = d.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && !t.frozen && t.assignMode !== 'manual' && t.pipeline !== 'direct' && !d.tasks.some(function (x) { return x.parentId === t.id }) && depsSatisfied(d, t) && !t.escalation && preHookGate(gpt(t, d.tasks)).pass })
       .sort(function (a, b) { var p = (PRIO_RANK[b.priority] || 2) - (PRIO_RANK[a.priority] || 2); return p !== 0 ? p : (a.createdAt || '').localeCompare(b.createdAt || '') })
     for (var i = 0; i < cands.length && pendings.length < capW; i++) {
       var conflicts = touchesConflict(cands[i], holds)

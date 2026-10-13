@@ -858,6 +858,29 @@ test('pickDispatch: frozen（裁决挂起冻结）不参与任何自动派发', 
   assert.deepEqual(r2.verifs.map(t => t.id).sort(), ['fv', 'nv'])
 })
 
+// ===== 容器卡结构性排除（epic 占 worker 槽根修，用户实证：maxWorkers=3 时一张 =====
+// pipeline=full 的 epic 被派出占槽、已就绪任务空等——此前只靠 pipeline=direct 口头约定）=====
+test('pickDispatch: 有子任务的容器卡（epic）结构性不进派发候选，与 pipeline 无关', () => {
+  const epi = mkTask({ id: 'epic', pipeline: 'full' })        // 手滑建 full 档 epic（缺省管线，未传 direct）
+  const c1 = mkTask({ id: 'c1', parentId: 'epic' })
+  const solo = mkTask({ id: 'solo' })                          // 无子任务普通卡照常派发（防回归）
+  const r = core.pickDispatch(mkBoard([epi, c1, solo]), 5, 0, null)
+  assert.deepEqual(r.pendings.map(t => t.id).sort(), ['c1', 'solo']) // epic 被排除，子任务与普卡照派
+  // 子任务口径含已归档（与 childStats 同源：parentId 仍指向即算容器）——全归档的 epic 也不复活进池
+  const e2 = mkTask({ id: 'e2', pipeline: 'full' })
+  const k1 = mkTask({ id: 'k1', parentId: 'e2', status: 'archived' })
+  assert.deepEqual(core.pickDispatch(mkBoard([e2, k1]), 5, 0, null).pendings.map(t => t.id), [])
+})
+
+test('pickDispatch: 容器卡排除只挡 Worker 派发——epic 收口转 verifying 后 Verifier 派发不受影响', () => {
+  // 既有正确行为：子任务全了结后 epic 转 verifying，派 Verifier 验收是真跑（verifs 分支不动）
+  const epi = mkTask({ id: 'epic', status: 'verifying', pipeline: 'full' })
+  const c1 = mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' })
+  const c2 = mkTask({ id: 'c2', parentId: 'epic', status: 'archived' })
+  const r = core.pickDispatch(mkBoard([epi, c1, c2]), 0, 5, null)
+  assert.deepEqual(r.verifs.map(t => t.id), ['epic'])
+})
+
 // ===== touches 文件级排他：glob 最小匹配器 =====
 test('patOverlap: 完全相同路径冲突 + 归一化（\\ → /、去 ./ 前缀与尾 /）', () => {
   assert.equal(core.patOverlap('src/a.js', 'src/a.js'), true)
