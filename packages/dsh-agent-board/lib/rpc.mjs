@@ -725,6 +725,9 @@ export function createRpc(ctx, state, deps) {
       var t = d.tasks.find(function (x) { return x.id === args.taskId })
       if (!t) return { ok: false, error: 'task disappeared' }
       var rec = await spawnOneShot(sid, t, role)
+      // 落闸弃权（task-mv6c7cdm）：spawn 在途被 terminate 等路径翻卡——闸门已停掉刚建的子会话，
+      // 占位由翻卡那笔写清掉。返回显式错误（误报 spawn failed 会误导成「再点一次」，实际是状态变了）
+      if (rec && rec.vetoed) return { ok: false, error: 'spawn-vetoed：派发途中任务状态已变更（可能刚被终止/重排），本轮已放弃，请查看卡片后重试' }
       if (rec) {
         if (role === 'worker') { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === args.taskId }); if (t2 && t2.claimedBy === 'spawn-pending') t2.claimedBy = String(rec.id); return t2 }, true) }
         if (role === 'verifier') { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === args.taskId }); if (t2) t2.verifierRun = String(rec.id); return t2 }, true) }

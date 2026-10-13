@@ -1,6 +1,7 @@
 // dsh-agent-board — 集成套件（无头基建卡2 前半 + 卡3 后半）：
 //   前半（a-d）：全链路 / 驳回重派 / dependsOn 接续 / touches 排他
 //   后半（e-i，task-muxpgq5b）：仲裁冻结时钟推进 / 回执聚合过滤 / 歧义去抖 / progress / 孤儿回收
+//   竞态根修（k-m，task-mv6c7cdm）：terminate×续跑在途落闸弃权 / 正常续跑不回归 / fresh spawn 在途弃权
 // 九场景全部跑在「真实 index.mjs apply(mockCtx)」上（卡1 harness），不改生产代码；
 // 每用例独立 mockCtx + 独立临时 HOME，互不污染（HOME env 是进程级，顶层用例默认串行，严禁并行）。
 //
@@ -539,5 +540,157 @@ test('集成j·归档数据源全量：老归档(>7天)与仪表盘同口径，g
     // 与仪表盘口径一致：仪表盘「已归档」= state.tasks 里 status==='archived' 的计数，二者同源同值
     var d2 = await env.rpc('get-tasks', { sessionId: env.sid })
     assert.equal(d2.tasks.filter(function (t) { return t.status === 'archived' }).length, 2, '无 includeArchived 时同样全量（与仪表盘计数同源）')
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 k：terminate × 续跑在途竞态根修①（task-mv6c7cdm，实证 n-mv65bhk0mg5w）=====
+// 竞态时序复刻：首轮 Worker 失败回 pending（留档 incomplete+continuable 有续跑资格）→ 重派轮
+// sendMessage 冷复活挂起（在途窗口）→ terminate 恰好落进窗口（活跃表无 rec，interrupt 打不到、
+// 关账轮不到，只把卡翻回 pending）→ 放行 sendMessage。修复前：续跑照旧落闸（注册 rec+落留档），
+// 下一轮 cycle 又把 pending 卡 fresh spawn → 同卡双 run。修复后：落闸前锁内重验发现卡面已翻走 →
+// 弃权三件套（interrupt 刚复活的子会话 + 旧留档立 noResume + 不注册/不落档），下一轮 fresh spawn
+// 新 Worker——同卡同秒最多一个 spawn 落闸。
+test('集成k·terminate竞态①：续跑 spawn 在途被 terminate → 落闸锁内重验弃权（interrupt+noResume），同卡不再双 run', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-k1', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 1 }, '首轮 worker spawn 发生')
+    var child1 = env.continuables[0].childId
+    await env.waitFor(function () { var x = env.task('task-k1'); return x && x.status === 'in-progress' && x.claimedBy === child1 ? x : null }, '落卡 in-progress')
+    // 首轮失败（不写子会话日志 → 空文本按失败重排）→ pending + 留档 incomplete（有续跑资格）
+    env.emitStatus(child1, 'running')
+    env.emitStatus(child1, 'idle')
+    await env.waitFor(function () { var x = env.task('task-k1'); return x && x.status === 'pending' && x.runs && x.runs[0] && x.runs[0].outcome === 'incomplete' ? x : null }, '失败回 pending 且留档 incomplete')
+    // ===== 构造竞态时序：续跑 sendMessage 挂起，在途窗口由测试掌控 =====
+    var origSend = env.ctx.subagents.sendMessage
+    var releaseResume = null
+    env.ctx.subagents.sendMessage = function (parent, childId, content) {
+      env.sendMessages.push({ parent: parent, childId: childId, content: content })
+      return new Promise(function (res) { releaseResume = function () { res({ ok: true }) } })
+    }
+    // 触发重派轮：占位 claim → tryResumeWorker → sendMessage 在途挂起
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.sendMessages.length >= 1 }, '续跑 sendMessage 已发出（在途挂起）')
+    var t = env.task('task-k1')
+    assert.equal(t.status, 'in-progress')
+    assert.equal(t.claimedBy, 'spawn-pending', '续跑在途时占位仍在')
+    // ===== terminate 落进在途窗口（竞态前提：活跃表无 rec，拦不住在途 spawn）=====
+    var term = await env.rpc('terminate-agent', { sessionId: env.sid, taskId: 'task-k1' })
+    assert.equal(term.ok, true)
+    assert.equal(term.terminated, 'no-active-run', '竞态前提成立：terminate 看不到在途续跑（无 rec 可 interrupt）')
+    t = env.task('task-k1')
+    assert.equal(t.status, 'pending', 'terminate 把卡翻回 pending')
+    assert.equal(t.claimedBy, null, 'terminate 清掉占位')
+    // ===== 放行 sendMessage → 落闸锁内重验：卡面已翻走 → 弃权 =====
+    releaseResume()
+    await env.waitFor(function () { return env.interrupts.some(function (x) { return x.childId === child1 }) }, '弃权即 interrupt 刚复活的子会话（防空跑烧上下文）')
+    t = await env.waitFor(function () { var x = env.task('task-k1'); return x && x.runs && x.runs[0] && x.runs[0].noResume === true ? x : null }, '旧留档立 noResume（与 terminate 命中同语义：不再续跑）')
+    // 弃权零落闸：不注册 rec、不落续跑留档、不新建子会话
+    assert.equal(env.continuables.length, 1, '弃权不新建子会话')
+    assert.equal(t.runs.length, 1, '弃权不落续跑留档（仍只有首轮一条）')
+    assert.equal(t.status, 'pending')
+    assert.equal(t.claimedBy, null)
+    // ===== 下一轮 cycle：noResume 关掉续跑资格 → fresh spawn 新 Worker（单 run 落闸）=====
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 2 }, '重派 fresh spawn 发生')
+    var child2 = env.continuables[1].childId
+    assert.notEqual(child2, child1, '新 Worker 是新会话（旧子按 terminate 语义废弃）')
+    assert.equal(env.sendMessages.length, 1, '续跑只有被弃权的那一次（noResume 挡住二次复活）')
+    t = await env.waitFor(function () { var x = env.task('task-k1'); return x && x.status === 'in-progress' && x.claimedBy === child2 ? x : null }, '新 Worker 落卡 in-progress')
+    assert.equal(t.runs.length, 2, '首轮 + 新 Worker 各一条留档（双 run 不再现：任一时刻最多一条在跑）')
+    assert.ok(!t.runs[1].resume, '第二条是新 spawn 留档（非续跑记录）')
+    // 新 Worker 正常完成 → 全链单 run 收口
+    var rep = await env.tools.get('board_report').execute({ taskId: 'task-k1', kind: 'complete', summary: '重跑交付', changes: '改了 k', selfTest: 'npm test 全绿', diffStat: '' })
+    assert.equal(rep.ok, true)
+    t = await env.waitFor(function () { var x = env.task('task-k1'); return x && x.status === 'resolved' && x.runs[1].outcome === 'completed' ? x : null }, 'work 档直落 resolved 且 run 关账')
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 l：terminate 竞态根修②（正常 resume 不回归）=====
+// 同样的「失败回 pending → 重派续跑」主线，但无 terminate 落窗：闸门必须以锁内新鲜快照放行——
+// sendMessage 冷复活照常落闸（rec 注册 + 续跑留档 resume:true），续跑轮可正常交付收口。
+test('集成l·terminate竞态②：正常续跑不回归——无 terminate 时闸门放行，冷复活照常落闸并交付', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-l1', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 1 }, '首轮 worker spawn 发生')
+    var child1 = env.continuables[0].childId
+    await env.waitFor(function () { var x = env.task('task-l1'); return x && x.status === 'in-progress' && x.claimedBy === child1 ? x : null }, '落卡 in-progress')
+    // 首轮失败 → pending + incomplete（有续跑资格）。
+    // 注意：失败结算本身就会 interrupt 一次（卡2 设计：打断当前 turn、留存会话供续跑）——
+    // 闸门不误伤的判据是「续跑全程不再新增 interrupt」，先记下基数。
+    env.emitStatus(child1, 'running')
+    env.emitStatus(child1, 'idle')
+    await env.waitFor(function () { var x = env.task('task-l1'); return x && x.status === 'pending' && x.runs && x.runs[0] && x.runs[0].outcome === 'incomplete' ? x : null }, '失败回 pending')
+    var interruptBase = env.interrupts.length
+    assert.equal(interruptBase, 1, '失败结算的 interrupt 留存（卡2 既有语义）')
+    // 正常重派：无 terminate → 续跑闸门放行（锁内快照：in-progress + 占位 + resumeTarget 指向原子会话）
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.sendMessages.length >= 1 }, '续跑 sendMessage 发出')
+    assert.equal(env.sendMessages[0].childId, child1, '冷复活目标是首轮 Worker 子会话')
+    assert.equal(env.continuables.length, 1, '续跑不新建子会话')
+    var t = await env.waitFor(function () { var x = env.task('task-l1'); return x && x.status === 'in-progress' && x.claimedBy === child1 && x.runs && x.runs.length === 2 ? x : null }, '续跑落闸：认领位回原子会话 + 续跑留档')
+    assert.equal(t.runs[1].resume, true, '第二条是续跑记录')
+    assert.equal(t.runs[1].outcome, 'running')
+    assert.ok(!t.runs[0].noResume, '正常路径不留 noResume 旗（续跑资格不受损）')
+    // 续跑轮正常交付（上报通道）→ resolved + run 关账
+    var rep = await env.tools.get('board_report').execute({ taskId: 'task-l1', kind: 'complete', summary: '续跑交付', changes: '改了 l', selfTest: 'npm test 全绿', diffStat: '' })
+    assert.equal(rep.ok, true)
+    t = await env.waitFor(function () { var x = env.task('task-l1'); return x && x.status === 'resolved' && x.runs[1].outcome === 'completed' ? x : null }, '续跑轮交付落 resolved 且关账')
+    assert.equal(env.interrupts.length, interruptBase, '正常续跑路径零新增 interrupt（闸门不误伤）')
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 m：terminate 竞态根修③（fresh spawn 臂）=====
+// 首派 spawn 在途（startContinuable 挂起）被 terminate：修复前 spawn 返回后照旧落闸（rec+留档），
+// 与 terminate 后的重派轮形成双 run；修复后落闸弃权——新建子会话立刻 interrupt、不落档不注册，
+// 下一轮 cycle 重新 fresh spawn，全程单 run。
+test('集成m·terminate竞态③：fresh spawn 在途被 terminate → 落闸弃权（interrupt 新建子会话），下一轮单 run 收口', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    // 首单 startContinuable 挂起：spawn 在途窗口由测试掌控；放行后后续 spawn 直通
+    var origStartC = env.ctx.subagents.startContinuable
+    var spawnHold = null
+    var releaseSpawn = null
+    env.ctx.subagents.startContinuable = function (o) {
+      if (!spawnHold) return origStartC(o)
+      return spawnHold.then(function () { return origStartC(o) })
+    }
+    spawnHold = new Promise(function (res) { releaseSpawn = res })
+    await createTask(env, 'task-m1', { pipeline: 'work' })
+    await env.clock.advance(50)
+    // 占位已 claim、spawn 在途挂起（startContinuable 未返回）
+    await env.waitFor(function () { var x = env.task('task-m1'); return x && x.status === 'in-progress' && x.claimedBy === 'spawn-pending' ? x : null }, '占位 claim 落卡，spawn 在途')
+    // terminate 落进在途窗口（竞态前提：活跃表无 rec）
+    var term = await env.rpc('terminate-agent', { sessionId: env.sid, taskId: 'task-m1' })
+    assert.equal(term.ok, true)
+    assert.equal(term.terminated, 'no-active-run', '竞态前提成立：terminate 看不到在途 spawn')
+    var t = env.task('task-m1')
+    assert.equal(t.status, 'pending', 'terminate 把卡翻回 pending')
+    assert.equal(t.claimedBy, null)
+    // 放行 spawn → 落闸重验：卡面已翻走 → 弃权（新建子会话立刻 interrupt，不注册不落档）
+    spawnHold = null
+    releaseSpawn()
+    await env.waitFor(function () { return env.continuables.length >= 1 && env.interrupts.some(function (x) { return x.childId === env.continuables[0].childId }) }, '弃权即 interrupt 刚建子会话')
+    t = env.task('task-m1')
+    assert.equal(t.status, 'pending')
+    assert.equal(t.claimedBy, null)
+    assert.ok(!t.runs || t.runs.length === 0, '弃权不落 run 留档（本次派发在卡面从未存在过）')
+    // 下一轮 cycle：正常 fresh spawn（闸门放行）→ 单 run 落卡
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 2 }, '重派 fresh spawn 发生')
+    var child2 = env.continuables[1].childId
+    assert.notEqual(child2, env.continuables[0].childId)
+    t = await env.waitFor(function () { var x = env.task('task-m1'); return x && x.status === 'in-progress' && x.claimedBy === child2 ? x : null }, '新 Worker 落卡 in-progress')
+    assert.equal(t.runs.length, 1, '只有一条真实落闸的留档（被弃权的首派零痕迹）')
+    // 正常完成 → resolved（单 run 收口）
+    var rep = await env.tools.get('board_report').execute({ taskId: 'task-m1', kind: 'complete', summary: '重跑交付', changes: '改了 m', selfTest: 'npm test 全绿', diffStat: '' })
+    assert.equal(rep.ok, true)
+    t = await env.waitFor(function () { var x = env.task('task-m1'); return x && x.status === 'resolved' && x.runs[0].outcome === 'completed' ? x : null }, 'resolved 收口且 run 关账')
   } finally { await env.cleanup() }
 })
