@@ -290,7 +290,7 @@ export function createRpc(ctx, state, deps) {
       // 缺省/空范围 = 现状逐字不变（aggregateUsageSummary 内部判定，空串不算范围）。
       d.usageSummary = aggregateUsageSummary(d.tasks, args && args.range)
       // ===== 记分卡聚合底座（task-muxhtgh9 卡2）：usageSummary.scoreboard =====
-      // 模型×角色×规模段七指标桶 + 全局质量趋势 rollup；与 usageSummary 同一 range 口径（run 日落点裁剪）。
+      // 模型×角色×规模段八指标桶 + 全局质量趋势 rollup；与 usageSummary 同一 range 口径（run 日落点裁剪）。
       // 增量缓存 state.scoreboardCache[sid]：键=(taskCount, 最新落定时刻)，命中则提取层零重算，
       // 范围裁剪在装配层现算（缓存的是未裁剪归一化记录，不随范围漂移）。
       d.usageSummary.scoreboard = buildScoreboard(d.tasks, args && args.range, state.scoreboardCache[sid] || (state.scoreboardCache[sid] = {}))

@@ -1,7 +1,7 @@
 // dsh-agent-board — 记分卡卡3 client 模型表现区单测（test/scoreboard-client.test.mjs，task-muxhtgi2）
 // client 无渲染 harness（react 不在包依赖，渲染由 dsh web 客户端运行时注入）——与历卡同一纪律：
 // 全部走源码级断言（dashboard.js 模块源 + client.js 重组装产物 + README 双份同步）。
-//   ① 表格渲染——ModelPerf 组件 + 区根锚 id + 七列列头逐字（各带 title 口径说明）+ 行键=模型×角色×规模段
+//   ① 表格渲染——ModelPerf 组件 + 区根锚 id + 八列列头逐字（各带 title 口径说明）+ 行键=模型×角色×规模段
 //   ② 筛选器本地过滤——角色/规模段两组 chip + buckets 本地 filter；组件体内无 rpc(/fetchTasks(（不重拉）
 //   ③ 样本不足灰显——insufficient 行 opacity 灰显 + title 前缀「样本 <5，仅供参考」
 //   ④ 空态——无数据「暂无足够 run 数据」（锚 id 照挂）；筛选空「当前筛选无匹配桶」
@@ -24,14 +24,20 @@ function sliceFn(s, name) {
   return s.slice(i, j || undefined)
 }
 
-// ===== ① 七指标表格渲染 =====
-test('卡3①：表格——组件/锚 id/七列列头带 title 口径/行键=模型×角色×规模段', () => {
+// ===== ① 八指标表格渲染 =====
+test('卡3①：表格——组件/锚 id/八列列头带 title 口径/失败率注脚/行键=模型×角色×规模段', () => {
   assert.match(src, /function ModelPerf\(props\)/)
   assert.match(src, /id: 'tskb-model-perf'/)
-  // 七列列名逐字（与任务描述同序）：有效均值/耗时中位/驳回率/一次通过率/超时率/续跑率/缓存命中率
-  const labels = ['有效均值', '耗时中位', '驳回率', '一次通过率', '超时率', '续跑率', '缓存命中率']
-  for (const lb of labels) assert.ok(src.indexOf("label: '" + lb + "'") >= 0, '缺七列列头：' + lb)
-  assert.equal(MP_COLS_count(src), 7, 'MP_COLS 必须恰好七列')
+  // 八列列名逐字：有效均值/耗时中位/驳回率/一次通过率/超时率/失败率/续跑率/缓存命中率
+  // （失败率 = task-mv73ym6i 补的第八列：跑崩落定 incomplete/error/failed 计入，terminated 人工终止不计入）
+  const labels = ['有效均值', '耗时中位', '驳回率', '一次通过率', '超时率', '失败率', '续跑率', '缓存命中率']
+  for (const lb of labels) assert.ok(src.indexOf("label: '" + lb + "'") >= 0, '缺八列列头：' + lb)
+  assert.equal(MP_COLS_count(src), 8, 'MP_COLS 必须恰好八列')
+  // 失败率列取值口径：读桶 failRate 字段，率类格式化（null → —，与既有率列同一 mpPct）
+  assert.match(src, /\{ k: 'failRate', label: '失败率', title: '失败率 = /)
+  assert.match(src, /fmt: function \(b\) \{ return mpPct\(b\.failRate\) \}/)
+  // 表下口径注脚含失败率定义（含 terminated 不计入口径）
+  assert.ok(src.indexOf('失败率 = 跑崩落定（outcome 为 incomplete/error/failed）的 run / 桶内 runs，terminated 人工终止不计入') >= 0, '表下口径注脚缺失败率定义')
   // 表头列名带 title 口径说明（th 挂 c.title，cursor:help 提示可悬浮）
   assert.match(src, /React\.createElement\('th', \{ key: c\.k, style: thR, title: c\.title \}, c\.label\)/)
   // 行 = 模型×场景桶：行键 model|role|size；场景列 角色·规模段（小/中/大）
@@ -91,8 +97,8 @@ test('卡3⑥：接线——Dashboard 挂载在 TokenUsage 正下方；scoreboar
   const iMp = src.indexOf("React.createElement(ModelPerf, { sb: (state.usageSummary && state.usageSummary.scoreboard) || null })")
   assert.ok(iTok >= 0, 'TokenUsage 挂载点必须存在')
   assert.ok(iMp > iTok, 'ModelPerf 必须挂在 TokenUsage 正下方')
-  // 产物重组装：模块源关键标记逐一出现在 lib/client.js
-  for (const m of ['function ModelPerf(props)', 'tskb-model-perf', '样本 <5，仅供参考', '暂无足够 run 数据', '当前筛选无匹配桶', '→ 模型表现', 'var MP_COLS = [']) {
+  // 产物重组装：模块源关键标记逐一出现在 lib/client.js（含失败率列——改完源必须 npm run build-client）
+  for (const m of ['function ModelPerf(props)', 'tskb-model-perf', '样本 <5，仅供参考', '暂无足够 run 数据', '当前筛选无匹配桶', '→ 模型表现', 'var MP_COLS = [', "label: '失败率'"]) {
     assert.ok(built.indexOf(m) >= 0, 'client.js 缺标记：' + m + '（需 npm run build-client 重组装）')
   }
   // kernel state 默认值（筛选档位跨渲染保持，与 rfOpen 同例）

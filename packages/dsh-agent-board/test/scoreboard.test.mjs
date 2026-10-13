@@ -1,7 +1,7 @@
 // dsh-agent-board — 记分卡卡2 host 聚合底座单测（test/scoreboard.test.mjs，task-muxhtgh9）
 // 覆盖（对应任务断言①~⑥ + 接线）：
-//   ① 七指标各一条数值正确性——模型×角色×规模段桶：有效token(均值+总额)/耗时(中位+P90)/驳回率/
-//     一次通过率/超时率/续跑率/缓存命中率
+//   ① 八指标各一条数值正确性——模型×角色×规模段桶：有效token(均值+总额)/耗时(中位+P90)/驳回率/
+//     一次通过率/超时率/失败率/续跑率/缓存命中率（失败率 = task-mv73ym6i 补的第八维度）
 //   ② 样本不足标记——桶内 runs<5 标 insufficient:true；恰好 5 条不标
 //   ③ 趋势 rollup byDay 正确——一次通过率 byDay / 卡时长四桶 / 超时率走势 byDay / 续跑成功率
 //   ④ 增量缓存命中零重算——(taskCount, 最新落定时刻) 不变时改字段值结果逐字不变；新 run 落地即重算
@@ -61,8 +61,8 @@ function bucketOf(sb, model, role, size) {
   return b.length ? b[0] : null
 }
 
-// ===== ① 七指标数值正确性 =====
-test('卡2①：七指标——m/a×worker×small 桶逐条数值核对（有效token/耗时/驳回率/一次通过率/超时率/续跑率/缓存命中率）', () => {
+// ===== ① 八指标数值正确性 =====
+test('卡2①：八指标——m/a×worker×small 桶逐条数值核对（有效token/耗时/驳回率/一次通过率/超时率/失败率/续跑率/缓存命中率）', () => {
   const sb = buildScoreboard(mkTasks())
   const b = bucketOf(sb, 'm/a', 'worker', 'small')
   assert.ok(b, 'm/a|worker|small 桶必须存在')
@@ -88,6 +88,9 @@ test('卡2①：七指标——m/a×worker×small 桶逐条数值核对（有效
   assert.equal(b.resumeRate, 1 / 3)
   // ⑦ 缓存命中率：cr 1000+3000+0=4000 / (inp 400 + cr 4000) = 4000/4400
   assert.ok(Math.abs(b.cacheHitRate - 4000 / 4400) < 1e-12)
+  // ⑧ 失败率（task-mv73ym6i）：夹具无跑崩 run → failed=0、failRate=0（率类分母=runs，与超时率同形态不 null）
+  assert.equal(b.failed, 0)
+  assert.equal(b.failRate, 0)
   assert.equal(b.insufficient, true) // 3 < 5 → 样本护栏
   // verifier 桶同轮核对（角色分桶 + 一次通过率按桶归属：tA 在 m/v 桶也是 firstPass）
   const bv = bucketOf(sb, 'm/v', 'verifier', 'small')
@@ -99,6 +102,8 @@ test('卡2①：七指标——m/a×worker×small 桶逐条数值核对（有效
   assert.equal(bv.rejected, 0)
   assert.equal(bv.firstPassRate, 1)
   assert.equal(bv.timeoutRate, 0)
+  assert.equal(bv.failed, 0)
+  assert.equal(bv.failRate, 0)
   assert.equal(bv.resumeRate, 0)
   assert.ok(Math.abs(bv.cacheHitRate - 500 / 550) < 1e-12)
   assert.equal(bv.insufficient, true)
@@ -268,4 +273,39 @@ test('卡2⑦：接线——get-tasks 挂载 scoreboard / 缓存并列在 state 
   assert.match(idx, /buildScoreboard, SCOREBOARD_MIN_SAMPLE/)
   // 范围裁剪复用同一 dayInRange/rangeOn（与 usageSummary 同一 range 口径的硬保证）
   assert.match(usage, /dayInRange\(q\.day, range\)/)
+})
+
+// ===== ⑧ 失败率维度（task-mv73ym6i）：跑崩落定计入 failed，terminated 人工终止不计入 =====
+// 实证背景 [[n-mv5ohczmaigu]]：flash 验收员两天三崩（incomplete 落定）桶面却 0 驳回 0 超时——
+// 跑崩 run 在桶里完全隐形。本测试钉死：incomplete/error/failed 计入 failed；
+// terminated（人工动作）/timeout-error（走超时率维度）/stale-closed（老卡残留关账）/completed 不计入。
+test('卡2⑧：失败率——incomplete/error/failed 计入 failed；terminated/timeout-error/stale-closed/completed 不计入；failRate=failed/runs', () => {
+  const tasks = [{
+    id: 'tF', title: 'F', status: 'resolved', createdAt: isoOf(2026, 10, 6, 9), verifiedAt: isoOf(2026, 10, 6, 16),
+    usage: { input: 700, output: 350, cacheWrite: 70, total: 1120 }, // 有效 1120 → small
+    runs: [
+      { role: 'worker', id: 'f1', at: isoOf(2026, 10, 6, 10), endedAt: isoOf(2026, 10, 6, 10, 5), model: 'm/f', outcome: 'completed', usage: U(100, 50, 1000, 10) },
+      { role: 'worker', id: 'f2', at: isoOf(2026, 10, 6, 11), endedAt: isoOf(2026, 10, 6, 11, 1), model: 'm/f', outcome: 'incomplete', usage: U(100, 50, 1000, 10) }, // 猝死跑崩（flash 实证形态）
+      { role: 'worker', id: 'f3', at: isoOf(2026, 10, 6, 12), endedAt: isoOf(2026, 10, 6, 12, 1), model: 'm/f', outcome: 'error', usage: U(100, 50, 1000, 10) },
+      { role: 'worker', id: 'f4', at: isoOf(2026, 10, 6, 13), endedAt: isoOf(2026, 10, 6, 13, 1), model: 'm/f', outcome: 'failed', usage: U(100, 50, 1000, 10) },
+      { role: 'worker', id: 'f5', at: isoOf(2026, 10, 6, 14), endedAt: isoOf(2026, 10, 6, 14, 1), model: 'm/f', outcome: 'terminated', usage: U(100, 50, 1000, 10) }, // 人工终止：不算失败
+      { role: 'worker', id: 'f6', at: isoOf(2026, 10, 6, 14, 30), endedAt: isoOf(2026, 10, 6, 14, 31), model: 'm/f', outcome: 'timeout/error', usage: U(100, 50, 1000, 10) }, // 超时走超时率维度，不重复计
+      { role: 'worker', id: 'f7', at: isoOf(2026, 10, 6, 15), endedAt: isoOf(2026, 10, 6, 15, 1), model: 'm/f', outcome: 'stale-closed', usage: U(100, 50, 1000, 10) }, // 老卡残留关账：非跑崩
+      { role: 'worker', id: 'f8', at: isoOf(2026, 10, 6, 15, 30), model: 'm/f', outcome: 'running' }, // 在飞：不进任何指标
+    ],
+  }]
+  const sb = buildScoreboard(tasks)
+  const b = bucketOf(sb, 'm/f', 'worker', 'small')
+  assert.ok(b, 'm/f|worker|small 桶必须存在')
+  assert.equal(sb.meta.runsSettled, 7) // 在飞的 f8 不进归一化记录
+  assert.equal(b.runs, 7)
+  assert.equal(b.failed, 3) // f2/f3/f4 = incomplete/error/failed
+  assert.equal(b.failRate, 3 / 7) // terminated(f5)/timeout-error(f6)/stale-closed(f7)/completed(f1) 不计入分子
+  assert.equal(b.timeouts, 1) // f6 只走超时维度
+  assert.equal(b.timeoutRate, 1 / 7)
+  // 全成功桶：failed=0、failRate=0（率类分母=runs，与超时率同一形态——0 而非 null）
+  const ok = [{ id: 'tG', status: 'resolved', createdAt: isoOf(2026, 10, 6, 9), verifiedAt: isoOf(2026, 10, 6, 11), usage: { input: 10, output: 10, cacheWrite: 0, total: 20 }, runs: [{ role: 'worker', id: 'g1', at: isoOf(2026, 10, 6, 10), endedAt: isoOf(2026, 10, 6, 10, 1), model: 'm/g', outcome: 'completed', usage: U(10, 10, 0, 0) }] }]
+  const bg = bucketOf(buildScoreboard(ok), 'm/g', 'worker', 'small')
+  assert.equal(bg.failed, 0)
+  assert.equal(bg.failRate, 0)
 })

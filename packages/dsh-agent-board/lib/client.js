@@ -2008,21 +2008,21 @@ function apply(ctx) {
         // 否则「选了范围数字没变」看起来像 bug。模型分布/Top8/累计才是范围生效的三处。
         React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：累计与 Top 8 仅看板派发的 Worker/Verifier run（= 一次执行）消耗；主窗口行=本会话对话消耗，与看板派发口径并列不混入（单列一行 + 模型分布尾部一条，不进累计 / Top 8）；主数字（今日 / 近 7 天 / 模型分布 / Top 8 / 主窗口行）均为总量口径（含缓存读）；有效消耗（input+output+cacheWrite，不含缓存读）见悬浮 title'),
         React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2, lineHeight: 1.5 } }, '统计范围作用于按模型分布 / 任务消耗 Top 8 / 累计三分量（按 run 的本地日落点过滤）；今日与「近 7 天」为固定口径，不随范围变化。'),
-        // 「→ 模型表现」滚动锚链接（task-muxhtgi2 卡3）：一键滚到下方模型×场景七指标表
+        // 「→ 模型表现」滚动锚链接（task-muxhtgi2 卡3）：一键滚到下方模型×场景八指标表
         // （与详情页 goArbitration 同一 scrollIntoView 原语；目标区空态也挂锚 id，链接始终可达）
         React.createElement('div', { style: { fontSize: 9, marginTop: 4 } },
-          React.createElement('span', { onClick: function () { var el = document.getElementById('tskb-model-perf'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start' }) }, style: { color: C.brand, cursor: 'pointer' }, title: '滚动到下方「模型表现」区：模型 × 场景（角色 × 规模段）七指标对比表' }, '→ 模型表现')))
+          React.createElement('span', { onClick: function () { var el = document.getElementById('tskb-model-perf'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start' }) }, style: { color: C.brand, cursor: 'pointer' }, title: '滚动到下方「模型表现」区：模型 × 场景（角色 × 规模段）八指标对比表' }, '→ 模型表现')))
     }
 
-    // ===== 模型表现区（记分卡卡3，task-muxhtgi2）：七指标表格 × 场景筛选器（本地过滤不重拉）=====
+    // ===== 模型表现区（记分卡卡3，task-muxhtgi2）：八指标表格 × 场景筛选器（本地过滤不重拉）=====
     // 数据源：state.usageSummary.scoreboard——卡2 host 聚合底座（buildScoreboard）挂进 get-tasks 响应，
     //   与 Token 区同通道透传、同一 range 口径（范围切换重拉后随 notify 同步刷新，本区零自持请求）。
     //   每桶 = 模型 × 角色（worker/verifier）× 规模段（small/medium/large，按任务有效 token 分桶）。
     // 本区三件事全部本地现算：
     //   ① 场景筛选器：角色（全部/worker/verifier）+ 规模段（全部/小/中/大）——scoreboard 已在响应里，
     //     筛选只是 buckets 数组 pass，绝不重拉（组件内无 rpc/fetchTasks）；
-    //   ② 七指标表格：每 模型×场景桶 一行，七列——有效均值/耗时中位/驳回率/一次通过率/超时率/续跑率/
-    //     缓存命中率；表头列名带 title 口径说明（与卡2 host 注释同源）；
+    //   ② 八指标表格：每 模型×场景桶 一行，八列——有效均值/耗时中位/驳回率/一次通过率/超时率/失败率/
+    //     续跑率/缓存命中率；表头列名带 title 口径说明（与卡2 host 注释同源）；
     //   ③ 样本护栏：insufficient（runs<5）行整行灰显 + title 前缀「样本 <5，仅供参考」——
     //     仅供参考，不参与任何「最优」视觉强调（本区 v1 不做任何高亮排名，从源头规避）。
     // 空态：scoreboard 缺字段 / buckets 空 → 「暂无足够 run 数据」（锚 id 照挂，Token 区链接始终可达）；
@@ -2032,13 +2032,16 @@ function apply(ctx) {
     // 率类/耗时格式化：null = 无样本（不假装 0，与 host 同哲学）
     function mpPct(r) { return (r === null || r === undefined || !isFinite(r)) ? '—' : Math.round(r * 100) + '%' }
     function mpDur(ms) { if (ms === null || ms === undefined || !isFinite(ms)) return '—'; var m = Math.round(ms / 60000); if (m < 1) return '<1m'; if (m < 60) return m + 'm'; return (m / 60).toFixed(1) + 'h' }
-    // 七列定义：label + title 口径说明 + 取值格式化（口径一句话版与 README 仪表盘段同步维护）
+    // 八列定义：label + title 口径说明 + 取值格式化（口径一句话版与 README 仪表盘段同步维护）
     var MP_COLS = [
       { k: 'effAvg', label: '有效均值', title: '有效 token 均值 = 桶内 run 有效消耗（输入+输出+缓存写，不含缓存读）的均值；无 usage 留账的 run 不进均值（不伪造 0）', fmt: function (b) { return b.effAvg === null ? '—' : fmtTokens(b.effAvg) } },
       { k: 'durMedianMs', label: '耗时中位', title: 'run 耗时（endedAt - at）中位数；P90 见行 title；无合法时刻的 run 不进分布', fmt: function (b) { return mpDur(b.durMedianMs) } },
       { k: 'rejectRate', label: '驳回率', title: '驳回率 = 归因到本桶 run 的验收驳回次数 / 桶内 runs（归因 = 驳回前最近 worker run）', fmt: function (b) { return mpPct(b.rejectRate) } },
       { k: 'firstPassRate', label: '一次通过率', title: '一次通过率 = 桶内 resolved 任务中 rejectCount=0（零驳回）的占比；桶内无 resolved 任务 → —', fmt: function (b) { return mpPct(b.firstPassRate) } },
       { k: 'timeoutRate', label: '超时率', title: '超时率 = outcome 超时落定（timeout/error）的 run / 桶内 runs', fmt: function (b) { return mpPct(b.timeoutRate) } },
+      // 失败率列（task-mv73ym6i）：跑崩的 run 不再隐形——incomplete（猝死/未产出结算）/error/failed
+      // 计入；terminated 人工终止不计入（人工动作非模型表现）；超时落定走「超时率」列不重复计。
+      { k: 'failRate', label: '失败率', title: '失败率 = 跑崩落定（outcome 为 incomplete/error/failed）的 run / 桶内 runs；terminated 人工终止不计入（人工动作非模型表现）；超时落定走「超时率」列，不重复计', fmt: function (b) { return mpPct(b.failRate) } },
       { k: 'resumeRate', label: '续跑率', title: '续跑率 = resume:true 续跑记录 / 桶内 runs', fmt: function (b) { return mpPct(b.resumeRate) } },
       { k: 'cacheHitRate', label: '缓存命中率', title: '缓存命中率 = cacheRead / (input + cacheRead)；⚠️ 跨 provider 口径可能不一（input 是否含缓存读各家不同），对比前先核口径；无 usage 样本 → —', fmt: function (b) { return mpPct(b.cacheHitRate) } }
     ]
@@ -2088,14 +2091,14 @@ function apply(ctx) {
               MP_COLS.map(function (c) { return React.createElement('th', { key: c.k, style: thR, title: c.title }, c.label) }))),
             React.createElement('tbody', null, shown.map(function (b) {
               // 样本护栏：insufficient 行整行灰显 + title 前缀「样本 <5，仅供参考」，不进任何最优强调
-              var tip = (b.insufficient ? '样本 <5，仅供参考——' : '') + b.model + ' × ' + b.role + ' × ' + (MP_SIZE_LABEL[b.size] || b.size) + '：runs=' + b.runs + '；有效总额 ' + fmtTokens(b.effSum) + ' tok；耗时 P90 ' + mpDur(b.durP90Ms) + '（七指标口径见表头 title）'
+              var tip = (b.insufficient ? '样本 <5，仅供参考——' : '') + b.model + ' × ' + b.role + ' × ' + (MP_SIZE_LABEL[b.size] || b.size) + '：runs=' + b.runs + '；有效总额 ' + fmtTokens(b.effSum) + ' tok；耗时 P90 ' + mpDur(b.durP90Ms) + '（八指标口径见表头 title）'
               return React.createElement('tr', { key: b.model + '|' + b.role + '|' + b.size, title: tip, style: { opacity: b.insufficient ? 0.45 : 1 } },
                 React.createElement('td', { style: tdL }, b.model),
                 React.createElement('td', { style: tdL }, b.role + '·' + (MP_SIZE_LABEL[b.size] || b.size)),
                 React.createElement('td', { style: tdR }, String(b.runs)),
                 MP_COLS.map(function (c) { return React.createElement('td', { key: c.k, style: tdR }, c.fmt(b)) }))
             })))),
-        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：每行 = 模型 × 角色 × 规模段桶（规模按任务有效 token：小 <1M / 中 1~10M / 大 >10M）；率类分母为桶内 runs，一次通过率分母为桶内 resolved 任务；runs<5 行灰显 = 样本不足仅供参考；随统计范围裁剪（与 Token 区同一 range）'))
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：每行 = 模型 × 角色 × 规模段桶（规模按任务有效 token：小 <1M / 中 1~10M / 大 >10M）；率类分母为桶内 runs，一次通过率分母为桶内 resolved 任务；失败率 = 跑崩落定（outcome 为 incomplete/error/failed）的 run / 桶内 runs，terminated 人工终止不计入；runs<5 行灰显 = 样本不足仅供参考；随统计范围裁剪（与 Token 区同一 range）'))
     }
 
     // ===== 质量趋势区（记分卡卡4，task-muxhtgil）：一次通过率趋势 / 卡时长分布 / 超时率走势 / 续跑成功率 =====

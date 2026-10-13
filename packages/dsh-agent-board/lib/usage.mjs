@@ -632,7 +632,7 @@ export function attributeRejection(t, rejectedAt) {
   }
 }
 
-// ===== 记分卡聚合底座（task-muxhtgh9 卡2）：scoreboard = 模型×角色×规模段七指标桶 + 全局质量趋势 rollup =====
+// ===== 记分卡聚合底座（task-muxhtgh9 卡2）：scoreboard = 模型×角色×规模段八指标桶 + 全局质量趋势 rollup =====
 // 设计稿 v3（笔记 n-muwsq9yztrpa）。数据源与卡1相同：任务级 t.runs[] 留账 + t.messages 驳回包
 // （kind='rejection'，三条驳回来源统一落点，pushRejection 已按 at/文本头判重）+ 落定时刻
 // （approved 验收 = t.verifiedAt；direct/work 档直落 resolved = t.resolvedAt）。纯函数零 IO：
@@ -641,7 +641,7 @@ export function attributeRejection(t, rejectedAt) {
 // 两层结构（增量缓存的关键）：
 //   提取层 buildScoreRecs(tasks)：扫全部任务的 runs/驳回消息，产出归一化记录 —— 唯一的重活
 //     （逐 run 归一 + 驳回归因 + 日落点解析 + 任务级规模段都在这层）。
-//   装配层 assembleScoreboard(recs, range)：七指标桶 + 趋势 rollup + 范围裁剪，每次调用现算，
+//   装配层 assembleScoreboard(recs, range)：八指标桶 + 趋势 rollup + 范围裁剪，每次调用现算，
 //     输入只是归一化记录（轻量数组 pass）——范围切换不触发重提取。
 // 增量缓存：runs 只增不改 —— 缓存槽（调用方持有，与 mainWindow 尾读缓存并列在 state）形态
 //   { taskCount, stamp, recs }，键 = (任务数, 最新落定时刻)。stamp 在「最新 run at/endedAt」上扩了
@@ -814,7 +814,7 @@ function assembleScoreboard(recs, range) {
     var key = q.model + '|' + q.role + '|' + q.size
     var b = bmap[key]
     if (!b) {
-      b = { key: key, model: q.model, role: q.role, size: q.size, runs: 0, effSum: 0, effCount: 0, durs: [], rejected: 0, resolved: 0, firstPass: 0, timeouts: 0, resumes: 0, inpSum: 0, crSum: 0 }
+      b = { key: key, model: q.model, role: q.role, size: q.size, runs: 0, effSum: 0, effCount: 0, durs: [], rejected: 0, resolved: 0, firstPass: 0, timeouts: 0, failed: 0, resumes: 0, inpSum: 0, crSum: 0 }
       bmap[key] = b; bTasks[key] = {}
     }
     b.runs++
@@ -822,6 +822,11 @@ function assembleScoreboard(recs, range) {
     if (q.eff !== null) { b.effSum += q.eff; b.effCount++ }
     if (q.durMs !== null) b.durs.push(q.durMs)
     if (q.outcome === 'timeout/error' || q.outcome === 'timeout') b.timeouts++
+    // 失败计数（task-mv73ym6i）：跑崩落定的 run 不再隐形——outcome ∈ {incomplete, error, failed}
+    // （settleRun 失败臂无 err 时落定 'incomplete'，flash 验收员猝死实证就是这种）；'timeout/error'
+    // 有独立超时率维度（上一行）不重复计；terminated = 人工终止（人工动作非模型表现）、
+    // stale-closed = 老卡 running 残留关账，均不算失败。
+    if (q.outcome === 'incomplete' || q.outcome === 'error' || q.outcome === 'failed') b.failed++
     if (q.resume) b.resumes++
     if (q.inp !== null || q.cr !== null) { b.inpSum += q.inp || 0; b.crSum += q.cr || 0 }
     bTasks[key][q.taskId] = true
@@ -853,7 +858,7 @@ function assembleScoreboard(recs, range) {
       if (!tk.rejectCount) bb.firstPass++
     }
   }
-  // ===== 七指标定稿 =====
+  // ===== 八指标定稿（task-mv73ym6i 补失败率维度）=====
   var out = []
   for (var fk in bmap) {
     if (!Object.prototype.hasOwnProperty.call(bmap, fk)) continue
@@ -878,6 +883,10 @@ function assembleScoreboard(recs, range) {
       //   口径）；若某 provider 把缓存读并进 input，分母被双计、命中率失真——跨 provider 对比先核各家口径。
       //   无 usage 样本（inpSum+crSum=0）→ null（不假装 0）。
       cacheHitRate: (f.inpSum + f.crSum) > 0 ? f.crSum / (f.inpSum + f.crSum) : null,
+      // ⑧ 失败率（task-mv73ym6i）= 跑崩落定 run / 桶内 runs：outcome ∈ {incomplete, error, failed}。
+      //   terminated（人工终止）不计入——那是人工动作不是模型跑崩；stale-closed（老卡残留关账）同不计；
+      //   与 ⑤ 超时率互补不重叠（timeout/error 只走超时维度）。
+      failed: f.failed, failRate: f.runs ? f.failed / f.runs : 0,
       // 样本量护栏：runs < 5 标 insufficient（客户端据此灰显不排名）
       insufficient: f.runs < SCOREBOARD_MIN_SAMPLE
     })
