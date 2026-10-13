@@ -501,6 +501,26 @@ test('buildWorkerPrompt: git 纪律红线（禁还原命令）注入，verifier 
   assert.doesNotMatch(vBody, /git 纪律红线/)
 })
 
+test('buildWorkerPrompt: 大文件交付纪律（write 主体+edit 续块）注入，verifier prompt 不注入（源码断言）', () => {
+  const t = mkTask({ id: 'lf1' })
+  const p = core.buildWorkerPrompt(t)
+  assert.match(p, /大文件交付纪律/)
+  assert.match(p, /单文件交付预估 >8KB（或 spec 含全量文案\/长代码）时，禁止单次 write 写入全量/)
+  assert.match(p, /先 write 落主体骨架，再用 edit 追加续块（每块 ≤4KB）逐块落地/)
+  // verifier prompt 不动（纪律只约束干活的 Worker）
+  const pv = core.buildVerifierPrompt(t)
+  assert.doesNotMatch(pv, /大文件交付纪律/)
+  assert.doesNotMatch(pv, /每块 ≤4KB/)
+  // 源码级：指引段写死在 buildWorkerPrompt 体内（切片边界到 buildVerifierPrompt 之前），不在 buildVerifierPrompt 体内
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  const wBody = coreSrc.slice(coreSrc.indexOf('export function buildWorkerPrompt'), coreSrc.indexOf('export function buildVerifierPrompt'))
+  assert.ok(wBody.length > 500, 'buildWorkerPrompt 切片成功')
+  assert.match(wBody, /大文件交付纪律/)
+  assert.match(wBody, /每块 ≤4KB/)
+  const vBody = coreSrc.slice(coreSrc.indexOf('export function buildVerifierPrompt'), coreSrc.indexOf('export function buildHookPrompt'))
+  assert.doesNotMatch(vBody, /大文件交付纪律/)
+})
+
 // ===== 预研上下文段（瘦身分离形态，task-muvjs392）：笔记全文 + 文件清单，不含文件内容本体 =====
 // 形态：### 主窗口调研笔记（全文 ≤8000 字符）\n…\n\n### 调研文件清单（- 路径:L起-L止 — 一句用途）
 test('buildContextPackSection: 空清单返回空串', () => {

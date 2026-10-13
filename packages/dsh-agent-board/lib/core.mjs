@@ -768,6 +768,11 @@ export function buildWorkerPrompt(t, pack, feedbackEnabled) {
   // git 纪律红线（n-muyaaoo7cqnd 实证事故：并行 Worker 跑 git checkout HEAD -- package.json
   // 把另一 Worker 的在途编辑冲掉）：禁止还原命令，只改自己写的文件，要干净基线走 escalate 上报。
   p += '\n\ngit 纪律红线：禁止 git checkout / git restore / git reset --hard / git clean 等还原命令（会冲掉并行 Worker 与你自己的未提交在途编辑）；你只需管自己写的文件，别人改了别的文件与你无关；确实需要干净基线时用 board_report（kind=escalate）上报，由主窗口裁决。'
+  // 大文件交付纪律（实证 n-mv65bhk0mg5w：gs-gov-policy task-mv63fo9y 池 Worker 连续 3 个 run 单次输出
+  // 64k tok 撞上限、烧 330k token 零文件产出——都在试图一次性 write 整个 22.5KB HTML；主窗口改用
+  // write×1 + edit×2 分块落地同一 spec 一次过）：固定段写死「预估 >8KB 禁止单次 write 全量」。
+  // 纯 prompt 层指引段，零逻辑风险；只进 Worker prompt，不进 verifier/hook（与 git 纪律段同例）。
+  p += '\n\n大文件交付纪律：单文件交付预估 >8KB（或 spec 含全量文案/长代码）时，禁止单次 write 写入全量——单次超长输出会撞模型输出上限、上下文耗尽零产出。先 write 落主体骨架，再用 edit 追加续块（每块 ≤4KB）逐块落地，直至写完。'
   p += '\n\n完成契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + t.id + '，summary=开发描述/changes=改动清单/selfTest=自测情况/diffStat=变更概要）；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况 / ## diff 概要）。\n   diffStat 要求：若本次改动发生在 git 仓库内，运行 git diff --stat（含 git status --short），把输出贴进 diffStat（≤1500 字符）；关键逻辑变更可附 ≤20 行核心片段。非代码任务/无 git 仓库可省略。\n   **board_report 调用成功即任务终点：立即结束输出，不要再修改/验证任何文件**。上报后任务即刻进入验收，你继续改动会让代码在验收口径之外漂移、且阻塞 Verifier 派发（实测有 Worker 上报后又自测 16 分钟）；上报后发现新问题的，写进 selfTest 备注交由 Verifier/主窗口裁决。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate, taskId=' + t.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测。上报歧义后直接结束本轮——裁决后会有新 Worker 带着裁决答案接手。\n3. 进展汇报（较大任务）：按里程碑推进，每完成一个可验证的里程碑调用一次 board_report（kind="progress", taskId=' + t.id + ', question=一行进展摘要，≤200 字符）。只在有实际产物/结论时报；禁止定时汇报或表演式汇报。'
   return p
 }

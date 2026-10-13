@@ -188,6 +188,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **管线分档**：`full`（执行+验证）/ `work`（只做不验）/ `direct`（不进池，主窗口直接处理），创建时按规则自动分类、可手动覆盖
 - **硬性验收**：`acceptance` 字段写验收脚本命令，Worker 必须实际运行、Verifier 必须独立复跑
 - **git 纪律红线**：Worker prompt 写死禁止还原命令（`git checkout` / `git restore` / `git reset --hard` / `git clean` 等——会冲掉并行 Worker 与你自己的未提交在途编辑）；只改自己写的文件、别人改了别的文件与你无关，确实需要干净基线时走歧义上报（`board_report` kind=escalate）由主窗口裁决
+- **大文件交付纪律**：Worker prompt 写死分块写入指引——单文件交付预估 >8KB（或 spec 含全量文案/长代码）时禁止单次 `write` 写入全量（单次超长输出会撞模型输出上限、上下文耗尽零产出），先 `write` 落主体骨架、再用 `edit` 追加续块（每块 ≤4KB）逐块落地
 - **文件级排他**：`touches` 声明本任务要改的文件/glob（如 `["src/**", "README.md"]`）；持有文件锁的任务（`in-progress`/`verifying`）与候选 touches 重叠就跳过本轮（卡片显示 `🔒 等文件释放`，详情页列出在等谁），**锁随工作态**：状态流转到已完成（`resolved`）即放锁，`cancelled`/归档同样不再持锁（归档回归纯收纳动作、不再是释放点）——锁只护「正在写」的阶段，「验收后-提交前」的窗口期由主窗口「回执到即提交」纪律 + 史诗 post-hook 承接，不用长持锁把整批串行化。避免并行 Worker 改同一批文件互踩；手动「派发」遇到冲突会列出冲突任务，确认后才以 `force` 越权派发
 - **里程碑进展通道**：Worker 每完成一个可验证的里程碑，可调用 `board_report`（`kind: "progress"`，`question` 写一行进展摘要 ≤200 字符）上报——进行中的卡片显示「📈 最近进展 · 相对时间」（覆盖式只留最新一条），详情页消息流保留全部 progress 条目
 - **防表演式汇报**：进展契约只写在 Worker prompt 里、且要求「有实际产物/结论才报」（禁止定时汇报）；progress **静默不通知主窗口**（不进回执聚合），也不写 `history` 流转记录，避免刷屏
