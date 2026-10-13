@@ -919,7 +919,15 @@ export function createDispatch(ctx, state, deps) {
           // 失败原因落卡（截断 300）：verifier 故障/输出无法判定的原因留在卡片上供排查
           t.lastError = String(errText || 'verifier 未给出有效结论（输出格式异常）').slice(0, 300)
           // 失败/空输出/无法判定：verifyRetries 计数，>=3 转人工验收（deliverable 已完成，是 verifier 故障不是任务故障）
-          if (failed && rec.model) { badModels[modelKey(sid, rec.model)] = true; pushSysNote(sid, '模型 ' + rec.model + ' 验收连续失败，已熔断回退父级模型') }
+          if (failed && rec.model) {
+            badModels[modelKey(sid, rec.model)] = true
+            // 熔断文案分态（task-mv73ym2k，实证 n-mv6ezj6vary4）：错误串含 UNKNOWN_MODEL = 模型 id 非法
+            // （mistake 类：配置写错，模型无辜）——与「连续验收失败」（quality 类）区分，不归一堆。
+            var modelIllegal = /UNKNOWN_MODEL/i.test(String(errText || ''))
+            pushSysNote(sid, modelIllegal
+              ? '模型 ' + rec.model + ' 配置非法（不在可用清单），已熔断回退父级模型——请经 list-models 选合法 id 重配'
+              : '模型 ' + rec.model + ' 验收连续失败，已熔断回退父级模型')
+          }
           t.verifyRetries = (t.verifyRetries || 0) + 1
           if (t.verifyRetries >= 3) { t.escalation = { question: 'Verifier 连续 ' + t.verifyRetries + ' 次未能给出有效结论（' + (failed ? String(errText).slice(0, 150) : '输出格式异常') + '）。交付物已完成，请人工验收：看板详情页直接通过/驳回，或 task_verify 裁决。', at: new Date().toISOString(), by: 'system' }; ah(t, 'verifying', 'verifying', 'system', 'verifier 故障，转人工验收'); return { task: t, escalated: true } }
           ah(t, 'verifying', 'verifying', 'system', 'verifier 未给出有效结论，重新排队审查 (' + t.verifyRetries + '/3)')

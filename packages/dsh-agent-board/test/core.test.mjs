@@ -6021,3 +6021,154 @@ test('巡检三连②-③：归档「恢复待办」confirm 门禁（list 不弹
   const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   assert.match(built, /window\.confirm\('恢复待办后将按当前工作模式立即重新派发，消耗一轮 Worker\+Verifier token。继续/)
 })
+
+// ===== set-board-config 模型字段校验（task-mv73ym2k，实证 n-mv6ezj6vary4）=====
+// ① 非法 id 拒写 + 报错带合法清单 ② 合法 id 通过 ③ 空串清除放行 ④ llm 缺失降级放行
+// ⑤ 熔断通知分态：UNKNOWN_MODEL → 「配置非法（不在可用清单）」≠「验收连续失败」
+function mkLlmCtx(modelsByProvider) {
+  // modelsByProvider: { providerId: [{id, name}] }——对齐宿主 llm 服务契约（listProviders/listModels）
+  return {
+    get: function (name) {
+      if (name !== 'llm') return null
+      return {
+        listProviders: function () { return Object.keys(modelsByProvider).map(function (id) { return { id: id, name: id } }) },
+        listModels: async function (p) { return modelsByProvider[p] || [] },
+      }
+    },
+  }
+}
+const MOCK_MODELS = { deepseek: [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }, { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner' }], kimi: [{ id: 'kimi-k2', name: 'Kimi K2' }] }
+
+test('set-board-config 模型校验①：非法 id 拒写 + 报错带合法清单，看板不落脏值', async () => {
+  const board = mkBoard([])
+  const h = mkRpcHandlers(board, {}, mkLlmCtx(MOCK_MODELS))
+  // 实证原形：显示名「kimi/kimi-k3」抄成 id（合法的是 kimi/kimi-k2）
+  const r = await h['set-board-config']({ key: 'verifierModel', value: 'kimi/kimi-k3' })
+  assert.equal(r.ok, false)
+  assert.match(r.error, /非法模型 id: kimi\/kimi-k3/)
+  assert.match(r.error, /不在当前网关可用清单/)
+  assert.match(r.error, /合法清单（3 个，示前 3 个）/) // 总数 + 截断计数透出
+  assert.match(r.error, /deepseek\/deepseek-chat/) // 清单样例带合法 id
+  assert.match(r.error, /list-models/) // 指引完整清单入口
+  assert.equal(board.verifierModel, undefined) // 拒写：看板字段未被污染
+  // workerModel 同款门禁
+  const r2 = await h['set-board-config']({ key: 'workerModel', value: 'openai/gpt-99' })
+  assert.equal(r2.ok, false)
+  assert.match(r2.error, /非法模型 id/)
+  assert.equal(board.workerModel, undefined)
+})
+
+test('set-board-config 模型校验②：合法 id 双字段通过落盘', async () => {
+  const board = mkBoard([])
+  const h = mkRpcHandlers(board, {}, mkLlmCtx(MOCK_MODELS))
+  const r = await h['set-board-config']({ key: 'verifierModel', value: 'kimi/kimi-k2' })
+  assert.equal(r.ok, true)
+  assert.equal(board.verifierModel, 'kimi/kimi-k2')
+  const r2 = await h['set-board-config']({ key: 'workerModel', value: ' deepseek/deepseek-reasoner ' }) // 首尾空格 trim 后命中
+  assert.equal(r2.ok, true)
+  assert.equal(board.workerModel, 'deepseek/deepseek-reasoner')
+})
+
+test('set-board-config 模型校验③：空串/非字符串=清除覆盖，放行不校验', async () => {
+  const board = mkBoard([])
+  board.verifierModel = 'kimi/kimi-k2'
+  const h = mkRpcHandlers(board, {}, mkLlmCtx(MOCK_MODELS))
+  const r = await h['set-board-config']({ key: 'verifierModel', value: '' })
+  assert.equal(r.ok, true)
+  assert.equal(board.verifierModel, '')
+  const r2 = await h['set-board-config']({ key: 'verifierModel', value: undefined })
+  assert.equal(r2.ok, true)
+  assert.equal(board.verifierModel, '')
+  // 非模型键不受枚举影响（无 llm 也照常写）
+  const h2 = mkRpcHandlers(board)
+  const r3 = await h2['set-board-config']({ key: 'maxWorkers', value: 5 })
+  assert.equal(r3.ok, true)
+  assert.equal(board.maxWorkers, 5)
+})
+
+test('set-board-config 模型校验④：llm 服务缺失（老宿主）降级放行，不炸', async () => {
+  const board = mkBoard([])
+  // 显式给「有 get 但 llm 缺席」的老宿主形态（mkRpcHandlers 默认 ctx 无 get 方法，生产 ctx.get 恒存在）
+  const hNoLlm = mkRpcHandlers(board, {}, { get: function () { return null } })
+  const r = await hNoLlm['set-board-config']({ key: 'verifierModel', value: 'whatever/display-name' })
+  assert.equal(r.ok, true) // 降级放行：不校验直接写
+  assert.equal(board.verifierModel, 'whatever/display-name')
+  // list-models 在同形态下报服务不可用（既有契约不变）
+  const lm = await hNoLlm['list-models']({})
+  assert.equal(lm.ok, false)
+  assert.match(lm.error, /llm service unavailable/)
+})
+
+test('set-board-config 模型校验④b：provider 枚举失败不阻塞，其余 provider 清单仍可校验', async () => {
+  const board = mkBoard([])
+  const ctxExtra = {
+    get: function (name) {
+      if (name !== 'llm') return null
+      return {
+        listProviders: function () { return [{ id: 'broken', name: 'B' }, { id: 'kimi', name: 'K' }] },
+        listModels: async function (p) { if (p === 'broken') throw new Error('gateway boom'); return [{ id: 'kimi-k2' }] },
+      }
+    },
+  }
+  const h = mkRpcHandlers(board, {}, ctxExtra)
+  const rBad = await h['set-board-config']({ key: 'workerModel', value: 'broken/any' }) // 枚举失败的 provider 清单缺席 → 拒
+  assert.equal(rBad.ok, false)
+  assert.match(rBad.error, /kimi\/kimi-k2/)
+  const rOk = await h['set-board-config']({ key: 'workerModel', value: 'kimi/kimi-k2' })
+  assert.equal(rOk.ok, true)
+  assert.equal(board.workerModel, 'kimi/kimi-k2')
+})
+
+// 熔断通知分态行为测试 harness：一次性 verifier run 失败，捕获 pushSysNote 文案 + badModels 落账
+async function runVerifierFuseCase(errText) {
+  const t = mkTask({ id: 'v-fuse', title: '待验收卡', status: 'verifying' })
+  const board = mkBoard([t])
+  board.verifierModel = 'kimi/kimi-k3' // 已写入的（非法）模型覆盖 → rec.model 非空才会触发熔断
+  const notes = []
+  const runs = {}
+  const activeRuns = { [FULL_SID]: runs }
+  const badModels = {}
+  const listeners = []
+  const ctx = {
+    fs: {}, get: function () { return null }, timer: null,
+    effect: function (f) { var d = f(); return function () { if (typeof d === 'function') d() } },
+    on: function (name, fn) { listeners.push({ name: name, fn: fn }); return function () {} },
+    subagents: {
+      list: () => ['mock'],
+      getProvider: () => ({ inheritsParentContext: false }),
+      // spawn 本身成功（半建会话不存在的问题在 provider 层），run.result 随后以给定错误落定失败
+      start: async () => ({ id: 'run-fuse', result: new Promise(function (res, rej) { setImmediate(function () { rej(new Error(errText)) }) }), dispose: async function () {} }),
+      startContinuable: async () => ({ childId: 'child-x', messageId: 'm1' }),
+    },
+  }
+  const dispatch = createDispatch(ctx, { knownSessions: {}, dispatchedEver: {}, badModels: badModels, teamModeCache: {}, activeRuns: activeRuns }, {
+    rt: async () => board, wt: async () => {}, mutateLocked: async (sid, fn) => fn(board), kickCycle: () => {},
+    rootForSession: () => ({ id: FULL_SID }),
+    withTimeout: (p) => p, runsFor: () => runs, feedbackOn: () => true,
+    pushSysNote: (sid, text) => { notes.push(text) }, maybeNotify: () => {}, notifyTaskDone: () => {},
+  })
+  await dispatch.poolCycle(FULL_SID)
+  assert.ok(runs['v-fuse'], 'verifier run 应已登记活跃表')
+  // 等 run.result 拒绝 → settleRun → settleVerifier 链落定
+  const flushN = () => new Promise(r => setImmediate(r))
+  for (var i = 0; i < 8; i++) await flushN()
+  return { notes: notes, badModels: badModels, task: t }
+}
+
+test('模型熔断分态①：UNKNOWN_MODEL → 「配置非法（不在可用清单）」，不误报连续失败', async () => {
+  const r = await runVerifierFuseCase('spawn failed: UNKNOWN_MODEL: kimi/kimi-k3 (model not configured)')
+  assert.equal(r.badModels[FULL_SID + '|kimi/kimi-k3'], true) // 熔断照常落账（下轮回退父级）
+  assert.equal(r.notes.length, 1)
+  assert.match(r.notes[0], /模型 kimi\/kimi-k3 配置非法（不在可用清单），已熔断回退父级模型/)
+  assert.match(r.notes[0], /list-models/) // 指引重配入口
+  assert.ok(!/验收连续失败/.test(r.notes[0]), 'mistake 类不得误报为 quality 类')
+  assert.equal(r.task.verifyRetries, 1) // 重试计数语义不变
+})
+
+test('模型熔断分态②：非 UNKNOWN_MODEL 失败 → 保持「验收连续失败」原文案', async () => {
+  const r = await runVerifierFuseCase('provider timeout after 30s')
+  assert.equal(r.badModels[FULL_SID + '|kimi/kimi-k3'], true)
+  assert.equal(r.notes.length, 1)
+  assert.match(r.notes[0], /模型 kimi\/kimi-k3 验收连续失败，已熔断回退父级模型/)
+  assert.ok(!/配置非法/.test(r.notes[0]))
+})

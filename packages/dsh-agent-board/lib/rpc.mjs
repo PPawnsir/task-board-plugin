@@ -866,9 +866,10 @@ export function createRpc(ctx, state, deps) {
       }
       return result
     } }))
-    // 枚举当前网关可用模型（供 Verifier 模型下拉选择）：llm.listProviders + listModels
-    handle('list-models', async function () {
-      var llm = ctx.get('llm'); if (!llm) return { ok: false, error: 'llm service unavailable' }
+    // 枚举当前网关可用模型（list-models handler 与 set-board-config 模型校验共用）：
+    // llm.listProviders + listModels；llm 服务缺失（老宿主）返回 null——调用方据此降级，不炸。
+    async function enumModels() {
+      var llm = ctx.get('llm'); if (!llm) return null
       var providers = llm.listProviders()
       var out = []
       for (var i = 0; i < providers.length; i++) {
@@ -877,7 +878,13 @@ export function createRpc(ctx, state, deps) {
           for (var j = 0; j < models.length; j++) out.push({ id: providers[i].id + '/' + models[j].id, name: models[j].name || models[j].id, provider: providers[i].name || providers[i].id })
         } catch (_) { /* 某 provider 枚举失败不阻塞整体 */ }
       }
-      return { ok: true, models: out }
+      return out
+    }
+    // 枚举当前网关可用模型（供 Verifier 模型下拉选择）：llm.listProviders + listModels
+    handle('list-models', async function () {
+      var models = await enumModels()
+      if (!models) return { ok: false, error: 'llm service unavailable' }
+      return { ok: true, models: models }
     })
     // ===== 学习飞轮 v1：沉淀推送通道（push-lesson）=====
     // 详情页「沉淀」按钮 → 把结构化候选教训 followup 给主窗口 agent，由它用自己可用的
@@ -905,7 +912,27 @@ export function createRpc(ctx, state, deps) {
     // 史诗拆分总开关 epicSplit（UI「功能」小节）：布尔原样落盘 + **当场回填 epicSplitCache**——Team 提示词
     // 组装是同步函数只能读缓存，不回填就得等下一次 rt() 读盘才生效（关掉后仍按旧的劝拆一轮，体感是开关没生效）。
     // 与 feedbackEnabled 同款双写；机制面（parentId 建子卡/自动收口/hooks）不看这个键。
-    handle('set-board-config', async function (args) { var sid = rpcSessionId(args); return mutateLocked(sid, function (d) { if (args.key === 'maxWorkers') d.maxWorkers = Math.max(1, Math.min(10, args.value || 3)); else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'cleanupRetentionDays') d.cleanupRetentionDays = Math.max(1, Math.min(90, Number(args.value) || 7)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'workerContinuable') d.workerContinuable = !!args.value; else if (args.key === 'verifyUserGuide') d.verifyUserGuide = !!args.value; else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } return { ok: true } }) })
+    handle('set-board-config', async function (args) {
+      var sid = rpcSessionId(args)
+      // ===== 模型字段校验（task-mv73ym2k，实证 n-mv6ezj6vary4：手写显示名当 id → 验收 spawn UNKNOWN_MODEL 秒死×2 + 熔断误报「连续失败」）=====
+      // workerModel/verifierModel 的非空值必须先过合法 id 校验：经 enumModels() 枚举当前网关清单（list-models 同款口径），
+      // 不命中则拒写并返回合法清单样例（前 8 个防刷屏）；空串=清除覆盖，放行。
+      // 降级纪律：llm 服务缺失（老宿主，enumModels 返回 null）跳过校验直接放行——配置面绝不因宿主能力缺失而炸。
+      var mkey = (args.key === 'workerModel' || args.key === 'verifierModel') ? args.key : null
+      var mval = mkey && typeof args.value === 'string' ? args.value.trim() : ''
+      if (mkey && mval) {
+        var legal = await enumModels()
+        if (legal) {
+          var hit = false
+          for (var mi = 0; mi < legal.length; mi++) { if (legal[mi].id === mval) { hit = true; break } }
+          if (!hit) {
+            var sample = legal.slice(0, 8).map(function (m) { return m.id })
+            return { ok: false, error: '非法模型 id: ' + mval + '（不在当前网关可用清单）。合法清单（' + legal.length + ' 个，示前 ' + sample.length + ' 个）：' + (sample.join('、') || '(空)') + '。完整清单见 list-models' }
+          }
+        }
+      }
+      return mutateLocked(sid, function (d) { if (args.key === 'maxWorkers') d.maxWorkers = Math.max(1, Math.min(10, args.value || 3)); else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'cleanupRetentionDays') d.cleanupRetentionDays = Math.max(1, Math.min(90, Number(args.value) || 7)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'workerContinuable') d.workerContinuable = !!args.value; else if (args.key === 'verifyUserGuide') d.verifyUserGuide = !!args.value; else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } return { ok: true } })
+    })
     handle('create-task', async function (args) { var sid = rpcSessionId(args); /* 短 id 防幻影板（task-muuf0o7a）：截断/不完整 sessionId 建出的板永远匹配不到活 root（每 15s 刷屏元凶），显式报错优于静默建幻影板；import- 前缀板由 isFullSessionId 放行 */ if (!isFullSessionId(sid)) return { ok: false, error: 'sessionId 不完整（疑似截断短 id），拒绝创建任务: ' + sid }; var actor = rpcActor(args); /* hooks 只许主窗口设置（角色门禁） */ if (args.hooks !== undefined && hooksDenied(actor)) return { ok: false, error: HOOKS_MAIN_ONLY }; return mutateLocked(sid, function (d) { var nHooks = null; if (args.hooks !== undefined) { var hn = normalizeHooks(args.hooks); if (hn.error) return { ok: false, error: hn.error }; nHooks = hn.hooks } if (args.id && d.tasks.find(function (x) { return x.id === args.id })) return { ok: false, error: 'duplicate id' }; if (args.dependsOn && args.dependsOn.length) { var derr = validateDeps(d, args.id || '(pending)', args.dependsOn); if (derr) return { ok: false, error: derr } }; var now = new Date().toISOString(); /* Team 模式护栏：draft 缺省跟随 teamMode（先补齐依赖/上下文再统一 publish）；显式 draft:false 保留为立即派发的逃生门 */ var asDraft = args.draft === undefined ? !!d.teamMode : !!args.draft; var t = { id: args.id || ('task-' + Date.now().toString(36)), title: args.title || 'Untitled', description: args.description || '', status: asDraft ? 'draft' : 'pending', priority: args.priority || 'medium', tags: args.tags || [], parentId: args.parentId || null, subtaskStrategy: null, assignMode: 'auto', assignee: null, context: { files: (Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : []), docs: [], instructions: args.instructions || '', notes: (typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : ''), relatedTasks: [], prerequisites: '' }, acceptance: args.acceptance || '', dependsOn: args.dependsOn || [], touches: normTouches(args.touches), pipeline: args.pipeline || '', claimedBy: null, claimedAt: null, createdAt: now, resolvedAt: null, verifiedAt: null, verifiedBy: null, archivedAt: null, resolution: null, waitingForTouches: null, messages: [], history: [{ from: 'created', to: asDraft ? 'draft' : 'pending', timestamp: now, actor: actor, note: asDraft ? 'created as draft' : 'created' }] }; if (nHooks && Object.keys(nHooks).length) t.hooks = nHooks; if (!t.pipeline) { t.pipeline = classifyPipeline(t); t.pipelineAuto = true }; d.tasks.push(t); t.lintWarnings = draftLint(t, draftLintIo(sid, d.ownerCwd)); /* 调研门禁 warning 族（与并行 UI 卡约定字段名 warning，core 纯函数统一口径）：空描述/无调研上下文/整树 glob 三类软提示合并为一条（；分隔），不拦截创建；字段可选，老 client 无感 */ var out = withSplitHint({ ok: true, task: t }, t, cfg(d).epicSplit); var warns = createTaskWarnings(t); attachContextSuggestions(out, warns, t.touches, existsInSession(sid)); if (warns.length) out.warning = warns.join('；'); return out }) })
     handle('list-children', async function (args) { var sid = rpcSessionId(args); var subs = ctx.subagents; if (!subs) return { ok: true, children: [] }; try { var list = await subs.listChildren(sid); var children = (list || []).map(function (c) { return { id: String(c.sessionId || c.id || ''), label: String(c.label || c.title || c.mode || '') } }).filter(function (c) { return c.id.length > 0 }); return { ok: true, children: children } } catch (e) { return { ok: true, children: [], error: String(e) } } })
     // ===== #14 批量操作：archive（仅 resolved/cancelled）/ set-priority（全部）/ delete（真删，无 undo）=====
