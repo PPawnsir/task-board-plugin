@@ -113,10 +113,10 @@ dsh plugin --profile web remove dsh-agent-board
 
 ## 功能总览
 
-**核心能力一页速览**（`★` 为 v1.7.5–1.7.9 新栈）：
+**核心能力一页速览**（`★` 为 v1.7.5–1.8.0 新栈）：
 
 - **看板**：六列状态流、拖拽 / 多选批量 / 文本·优先级·标签筛选、归档留档、会话隔离
-- **派发**：一次性 Worker / 独立 Verifier、依赖调度（DFS 环检测）、touches 文件级排他、可续跑 Worker、Team 托管
+- **派发**：一次性 Worker / 独立 Verifier、依赖调度（DFS 环检测）、touches 文件级排他、可续跑 Worker、Team 托管、**spawn 落闸锁内重验**（spawnGateOk：claim 占位与落闸决策读同一把锁的同一份快照，terminate 落在 spawn 在途窗口即弃权——同卡同秒双 run 竞态根治）、**高优干预分态**（intervene 无活跃 run 时区分「续跑窗口，干预随续跑注入」与「真无 run」，返回体带 state 字段）
 - **验收治理** `★`：硬性验收脚本独立复跑、驳回全量带回重派、Verifier 自测指南（userTest）、风险队列「待你过目」、验收时序防护（Verifier 在场时主窗口抢批需显式 `force:true`；有活跃 run 的卡禁止归档；Verifier 迟到结论落 `lateVerdict` 留痕+迟到驳回直投告警，不再静默吞掉）
 - **度量** `★`：Token 消耗（总量 / 有效 / 缓存读，按模型·按任务·按日）+ 记分卡（模型表现 / 质量趋势 / 驳回聚类）
 - **可运维性** `★`：运行时健康自检（派发冻结 / 结算停滞告警）、异常驱动审视（风险队列 / 质量异动告警 / 批次摘要）、起草 lint、数据安全（原子写盘 / 腐坏隔离 / 自动 salvage）、**僵尸 run 留档清扫**（host 重启后「落定卡上的 running 无 endedAt 留档」在派发周期自动关账 `stale-closed` + 清认领位，归档门禁不再被幻影 run 永久拦截）
@@ -203,6 +203,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **任务粒度建议**：单任务 **10~30 分钟**可独立完成为甜区；预计超过 30 分钟的大任务先建一张 **epic 父卡**（`pipeline: direct`，不进池派发），再挂若干 10~30 分钟的子任务（`task_create` 传 `parentId=父卡 id`，有先后顺序用 `dependsOn` 串联），子任务全部完成后父卡自动流转（`checkParentAuto`）——`task_create` 工具描述与 Team 模式提示词都写了这条契约；**容器卡结构性不派发**：凡有子任务的卡（epic）永不进派发候选（与 `pipeline` 字段无关，不再只靠 `direct` 口头约定——手滑建 `full` 档 epic 也不会被派出占 worker 槽），子任务全了结转 verifying 后派 Verifier 验收不受影响
 - **suggestSplit 软提示**：`task_create` / `create-task` 发现描述超 500 字符、或标题/描述命中「全量 / 整体 / 系统级 / 全面 / 重构 / 所有模块 / 整个」等史诗特征词时，返回体附带一行 `suggestSplit` 建议文案（**只提示，不阻断创建与派发**；未命中则不出现该字段，老调用方无感）
 - **开关 `epicSplit`（史诗拆分总开关）**（⚙️ 入池配置弹层「**功能**」小节，默认**开**）：关掉只停**引导**——Team 提示词第 6 条拆分条款整条不注入、`create-task`/`task_create` 响应不再附 `suggestSplit` 软提示；**机制不禁**（显式传 `parentId` 建子卡、史诗自动收口与 hooks 状态机照常工作，明确要拆时不受阻）；老看板文件没有该字段 → 读路径自动补 `true`（与升级前行为一致）。工具描述里的粒度契约是静态工具定义（随 request header 快照），不在开关范围
+- **模型字段写保护**：`set-board-config` 对 `workerModel`/`verifierModel` 的非空值校验当前网关可用清单（`list-models` 同款枚举）——手写非法 id（如把熔断通知里的显示名抄成 id）直接拒写并返回合法清单前 8 个，验收 spawn 不再 UNKNOWN_MODEL 秒死；空串=清除放行；宿主无 llm 服务时降级跳过校验不炸。配套熔断通知分态：`UNKNOWN_MODEL` 类失败报「配置非法（不在可用清单）」，与「验收连续失败」区分——mistake 归 mistake，quality 归 quality
 
 ### 一次性派发（v74 去池化）
 
