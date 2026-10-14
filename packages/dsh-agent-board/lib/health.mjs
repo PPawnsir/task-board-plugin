@@ -216,6 +216,15 @@ export function computeRuntimeHealthHints(board, rt, opts) {
     out.hints.push({ level: 'err', text: '迟到驳回：' + String(lr.taskId) + ' 你批早了但 Verifier 验出红的' })
   }
 
+  // --- ⑥ 终止未生效可见化（terminate 假杀根修②，task-mv8jfu1v，事故实证 n-mv8cfndmvfcv）---
+  // doTerminate 的 interrupt 抛错/宿主无中断能力/无 rec 补杀核验未过 → rt.terminateFailNote
+  // （sticky 不 TTL——host 重启才清）。与 lateRejectNote 同款 err 级：终止假杀 = 僵尸 Worker
+  // 继续写盘的数据安全事故（ae9cf32a 被 terminate 后继续写盘 8 分钟），必须持续亮到人来补刀。
+  var tf = rt.terminateFailNote
+  if (tf && typeof tf === 'object' && tf.taskId) {
+    out.hints.push({ level: 'err', text: '🔴 终止未生效：' + String(tf.taskId) + ' 的 Worker 子会话（' + String(tf.childId || '') + '）可能仍在跑——请用 interrupt_agent 补刀' })
+  }
+
   if (alive) {
     // --- ① 派发循环心跳：有可派卡 + 池有空位 + 上次成功轮 >5min ---
     // poolLastOkAt 缺失时退到 bornAt（首次见到本板的时刻）：host 重启后心跳全断也能在 5min 宽限后亮条，

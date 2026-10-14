@@ -131,6 +131,14 @@ export function createRpc(ctx, state, deps) {
       var ph = state.poolHealth[sid] || (state.poolHealth[sid] = { bornAt: Date.now() })
       ph.lateRejectNote = { taskId: taskId, at: Date.now() }
     }
+    // 终止未生效 healthHint 落点（terminate 假杀根修②，task-mv8jfu1v，事故实证 n-mv8cfndmvfcv）：
+    // doTerminate 的 interrupt 抛错/无中断能力/补杀核验未过时写。与 lateRejectNote 同款 sticky——
+    // 僵尸 Worker 继续写盘是进行中的数据安全事故，亮到人来处理（host 重启才清）。
+    function markTerminateFailHealth(sid, taskId, childId) {
+      if (!state.poolHealth) state.poolHealth = {}
+      var ph = state.poolHealth[sid] || (state.poolHealth[sid] = { bornAt: Date.now() })
+      ph.terminateFailNote = { taskId: taskId, childId: String(childId || ''), at: Date.now() }
+    }
     // archive 门禁（archive-task RPC 与 task_archive 工具同一口径，返回错误串或 null 放行）：
     //   任一 run（含 verifier）仍活跃（outcome running 且无 endedAt / 内存表未 settled）→ 拒绝（先查，宁拦勿漏）
     //   resolved / cancelled         → 放行（既有行为）
@@ -676,21 +684,55 @@ export function createRpc(ctx, state, deps) {
       return { ok: true, delivered: delivered, channel: channel, state: state }
     }
     // 终止执行某任务的 run：一次性 dispose / continuable interrupt 后回 pending（verifying 则保持待审，由新 verifier 接手）
-    async function doTerminate(sid, actor, taskId) {
+    // opts.hold（根修③，task-mv8jfu1v）：true 时同一次 mutateLocked 连带 assignMode='manual'——终止+停派
+    // 原子落账。否则「先 terminate 再 task_update manual」两步之间必撞 terminate→pending→poolCycle 抢派
+    // 竞态（实证：终止后 70ms 内被 Dispatcher 再派新 Worker）；hold 后要再派只能人工 dispatch-task。
+    async function doTerminate(sid, actor, taskId, opts) {
+      var hold = !!(opts && opts.hold)
       var rec = runsFor(sid)[taskId]
       var label = 'no-active-run'
+      // ===== 根修①（task-mv8jfu1v，事故实证 n-mv8cfndmvfcv）：无 rec 也要杀 =====
+      // 旧逻辑 interrupt/closeRunHistory 全在 if(rec) 里——rec 已不在内存表时（结算竞态被先摘 / 清扫器
+      // 先动 / 重启后 reconcile 未跑）terminate 只清认领位，子会话毫发无损继续写盘（ae9cf32a 被 terminate
+      // 后又跑了 8 分钟，险毁已验收资产）。修法：无 rec 时读卡面快照，命中「in-progress + claimedBy 是真实
+      // 子会话 id + 末条 worker 留档 continuable 且仍 running 且 id 与 claimedBy 一致」（与 reconcile 候选
+      // 同口径，状态可疑宁可不动）→ 照样按 claimedBy interrupt 补杀 + 关账卡面 running 留档。
+      var cardT = null
+      if (!rec) {
+        try {
+          var snap0 = await rt(sid)
+          var list0 = (snap0 && Array.isArray(snap0.tasks)) ? snap0.tasks : []
+          for (var fi = 0; fi < list0.length; fi++) { if (list0[fi] && list0[fi].id === taskId) { cardT = list0[fi]; break } }
+        } catch (_) {}
+      }
+      var blindTarget = ''
+      if (!rec && cardT && cardT.status === 'in-progress' && cardT.claimedBy && cardT.claimedBy !== 'spawn-pending') {
+        var bruns = Array.isArray(cardT.runs) ? cardT.runs : []
+        for (var bri = bruns.length - 1; bri >= 0; bri--) {
+          var br = bruns[bri]
+          if (br && br.role === 'worker') { // 只看末条 worker 留档：更早的会话已被取代（与 resumeTarget 同口径）
+            if (br.continuable === true && (!br.outcome || br.outcome === 'running') && !br.endedAt && String(br.id) === String(cardT.claimedBy)) blindTarget = String(cardT.claimedBy)
+            break
+          }
+        }
+      }
+      // ===== 根修②：失败可见化 =====
+      // killFail 非空 = 终止未生效/无法确认（interrupt 抛错 / 宿主无中断能力或无活 root / 补杀核验未过）。
+      // 旧代码全部静默跳过——ae9cf32a 事故的帮凶。现在锁外统一 pushSysNote err 级 + healthHint。
+      var killFail = '', killWhy = ''
       if (rec) {
         delete runsFor(sid)[taskId]; label = rec.role + ':' + taskId
         // 清理：一次性 run 走 dispose（既有语义逐字不变）；continuable 的 rec 没有 run（持久子会话），
         // 卡2 起改走 **interrupt 留存**（task-muw5h2ps）：只打断当前 turn、不销毁子会话——否则「手动终止」
         // 之后旧 Worker 仍在改同一棵树，与新派发的 Worker 并行写盘（终止按钮反而制造双写）。
-        // interrupt 失败（会话已死 / 无 root 可授权）静默跳过：任务照常回 pending 重排，不卡死。
+        // interrupt 失败（会话已死 / 无 root 可授权）：任务照常回 pending 重排，不卡死——但不再静默（根修②）。
         try { if (rec.run) await rec.run.dispose() } catch (_) {}
         if (rec.continuable) {
-          try {
-            var subs = ctx.subagents, rroot = rootForSession(sid)
-            if (subs && typeof subs.interrupt === 'function' && rroot) subs.interrupt(rec.childId, { kind: 'ancestor', agent: rroot })
-          } catch (_) {}
+          var subs = ctx.subagents, rroot = rootForSession(sid)
+          if (subs && typeof subs.interrupt === 'function' && rroot) {
+            try { subs.interrupt(rec.childId, { kind: 'ancestor', agent: rroot }) }
+            catch (e) { killFail = String(rec.childId || ''); killWhy = 'interrupt 抛错: ' + String(e); console.error('[task-board] terminate interrupt 失败 (task ' + taskId + ' child ' + rec.childId + '):', String(e)) }
+          } else { killFail = String(rec.childId || ''); killWhy = '宿主无 interrupt 能力或无活 root 可授权' }
         }
         // 手动终止的 run 不会走 settleRun（runsFor 已摘除，结算路径会早退），
         // 但它确实消耗了 token——在这里补一次结算，避免终止即丢账。
@@ -700,6 +742,39 @@ export function createRpc(ctx, state, deps) {
         // activeRunOf 的卡面兜底会把它误判为活跃 → archive 永久拒（~50ms 结算窗口）。
         // terminated 不满足 resumeTarget 的续跑判据（只认 timeout/error|incomplete）→ 仍不留续跑资格。
         try { await closeRunHistory(sid, taskId, String(rec.id), 'terminated') } catch (_) {}
+      } else if (blindTarget) {
+        label = 'worker:' + taskId // 补杀命中：不再是 no-active-run 空转
+        var subs2 = ctx.subagents, rroot2 = rootForSession(sid)
+        if (subs2 && typeof subs2.interrupt === 'function' && rroot2) {
+          try { subs2.interrupt(blindTarget, { kind: 'ancestor', agent: rroot2 }) }
+          catch (e) { killFail = blindTarget; killWhy = 'interrupt 抛错: ' + String(e); console.error('[task-board] terminate 补杀 interrupt 抛错 (task ' + taskId + ' child ' + blindTarget + '):', String(e)) }
+        } else { killFail = blindTarget; killWhy = '宿主无 interrupt 能力或无活 root 可授权' }
+        // 核验（根修②）：interrupt 是 fire-and-return（信号发出≠对方已停），且此路径无 rec 可观测，
+        // 只能拿 listChildren 目录佐证——子会话已不在目录 = 会话不存在，杀无可杀，核验通过；仍在目录 =
+        // 无法确认它停了（continuable 留存语义下成功的 interrupt 也还在列——宁误报勿漏报）；listChildren
+        // 不可用/超时 = 无法核验，同样摆上台面。核验挂死不能拖住 terminate：3s 超时兜底。
+        if (!killFail) {
+          if (subs2 && typeof subs2.listChildren === 'function') {
+            var kids2 = null
+            try {
+              kids2 = await Promise.race([
+                Promise.resolve(subs2.listChildren(sid, makeSignal())),
+                new Promise(function (_, rej) { setTimeout(function () { rej(new Error('listChildren 核验超时')) }, 3000) })
+              ])
+            } catch (e2) { killFail = blindTarget; killWhy = '核验失败: ' + String(e2) }
+            if (!killFail) {
+              var stillThere = false
+              for (var ki = 0; ki < (kids2 || []).length; ki++) { var kc = kids2[ki]; if (kc && String(kc.sessionId || kc.id || '') === blindTarget) { stillThere = true; break } }
+              if (stillThere) { killFail = blindTarget; killWhy = '核验未过：子会话仍在目录中，无法确认中断已生效' }
+            }
+          } else { killFail = blindTarget; killWhy = '宿主无 listChildren，无法核验' }
+        }
+        // 关账（根修①后半）：不只靠 rec.id——按卡面最后一条 outcome==='running' 且无 endedAt 的留档关
+        // terminated（否则留档停在 running，activeRunOf 卡面兜底误判活跃 → archive 永久拒，巡检也被误导）。
+        var lastRunId = ''
+        var trs0 = Array.isArray(cardT.runs) ? cardT.runs : []
+        for (var ri0 = trs0.length - 1; ri0 >= 0; ri0--) { var r0e = trs0[ri0]; if (r0e && (!r0e.outcome || r0e.outcome === 'running') && !r0e.endedAt) { lastRunId = String(r0e.id); break } }
+        if (lastRunId) { try { await closeRunHistory(sid, taskId, lastRunId, 'terminated') } catch (_) {} }
       }
       await mutateLocked(sid, function (d) {
         var t = d.tasks.find(function (x) { return x.id === taskId })
@@ -716,9 +791,20 @@ export function createRpc(ctx, state, deps) {
         // 无活跃 rec 的 stale 卡（重启/已摘除）也要按状态兜底清认领位：in-progress 清 claimedBy 同口径，
         // 否则卡面 verifierRun 仍指向已死 run 的 running 留档 → archive 永久拒（rec 不存在时 rec.role 无从判定）。
         else if (t.status === 'verifying') { t.verifierRun = null; delete t.verifierRunAt; ah(t, 'verifying', 'verifying', actor, '手动终止审查，等待新 verifier 接手') }
+        // hold 原子化（根修③）：同一次持锁连带 assignMode='manual'——终止+停派一笔落账，
+        // poolCycle 下轮不再自动派发本卡（manual 闸门），堵死 terminate→重派竞态窗。
+        if (hold && t.assignMode !== 'manual') { t.assignMode = 'manual'; ah(t, t.status, t.status, actor, 'hold：连带转手动派发（assignMode=manual），不再自动派发') }
         return t
       })
-      return { ok: true, terminated: label }
+      // 根修②锁外可见化：err 级系统通知（不带 taskId——卡已翻 pending，带 taskId 会在冲刷时按状态过滤
+      // 被丢弃，告警必须送达；任务与子会话 id 写进文案）+ healthHint 红条（sticky，3s 轮询即亮）。
+      if (killFail) {
+        try { if (typeof pushSysNote === 'function') pushSysNote(sid, '🚨 任务（' + taskId + '）终止未生效：' + killWhy + '——Worker 子会话 ' + killFail + ' 可能仍在跑，请用 interrupt_agent（agent_id: ' + killFail + '）补刀') } catch (_) {}
+        markTerminateFailHealth(sid, taskId, killFail)
+      }
+      var ret = { ok: true, terminated: label }
+      if (killFail) ret.killUnconfirmed = killFail // 调用方可直接感知「终止未确认生效」
+      return ret
     }
     // 继续等待：清除卡死标记
     async function doDismiss(sid, actor, taskId) {
@@ -729,9 +815,9 @@ export function createRpc(ctx, state, deps) {
       })
       return { ok: true }
     }
-    handle('terminate-agent', async function (args) { return doTerminate(rpcSessionId(args), rpcActor(args), args.taskId) })
+    handle('terminate-agent', async function (args) { return doTerminate(rpcSessionId(args), rpcActor(args), args.taskId, { hold: args.hold === true }) })
     handle('dismiss-suspect', async function (args) { return doDismiss(rpcSessionId(args), rpcActor(args), args.taskId) })
-    ctx.tools.register(defineTool({ name: 'task_terminate', description: 'Team 模式：终止执行某任务的池中 Agent（卡死/跑偏时）。in-progress 任务回 pending 重派，verifying 由新 verifier 接手。', parameters: { type: 'object', properties: { taskId: { type: 'string' } }, required: ['taskId'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; return doTerminate(toolSessionId(), getActorId(), args.taskId) } }))
+    ctx.tools.register(defineTool({ name: 'task_terminate', description: 'Team 模式：终止执行某任务的池中 Agent（卡死/跑偏时）。in-progress 任务回 pending 重派，verifying 由新 verifier 接手。hold:true 时同一次落账连带 assignMode=manual（终止+停派原子完成，防 terminate→重派竞态）。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, hold: { type: 'boolean', description: 'true 时终止+转手动原子完成：同一次落账连带 assignMode=manual，poolCycle 不再自动派发本卡（再派需人工 dispatch-task）' } }, required: ['taskId'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; return doTerminate(toolSessionId(), getActorId(), args.taskId, { hold: args.hold === true }) } }))
     // 手动触发单任务派发（manual 模式下"派发给 Worker"按钮，或 auto 模式手动补派）
     // touches 文件级排他：默认尊重文件锁——候选与活动任务 touches 冲突时返回
     // { ok:false, error:'touches-conflict', conflicts:[...] }（客户端 confirm 后带 force:true 重发）。

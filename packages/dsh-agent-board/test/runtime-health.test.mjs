@@ -143,6 +143,28 @@ test('组合场景顺序：①冻结 > ②settle > ③幽灵回收', function ()
   assert.equal(r.consumeReapNote, true)
 })
 
+// ===== ⑤b 终止未生效 hint（terminate 假杀根修②，task-mv8jfu1v，事故实证 n-mv8cfndmvfcv）=====
+test('⑤b 终止未生效 hint：terminateFailNote → err 级红条（sticky 不 TTL）；无记录不亮', function () {
+  var now = Date.now()
+  // 无 terminateFailNote → 不亮
+  assert.deepEqual(computeRuntimeHealthHints({ tasks: [] }, { bornAt: now }, { capW: 0, now: now }).hints, [])
+  // 有记录 → err 级 + 🔴 前缀 + 任务/子会话 id + 补刀指引（与 corruptNote/lateRejectNote 同款 sticky：不消费不 TTL）
+  var rt = { bornAt: now, terminateFailNote: { taskId: 'zk1', childId: 'child-zombie', at: now - 60 * 1000 } }
+  var r = computeRuntimeHealthHints({ tasks: [] }, rt, { capW: 0, now: now })
+  assert.equal(r.hints.length, 1)
+  assert.equal(r.hints[0].level, 'err')
+  assert.ok(r.hints[0].text.indexOf('🔴') >= 0)
+  assert.ok(r.hints[0].text.indexOf('终止未生效') >= 0)
+  assert.ok(r.hints[0].text.indexOf('zk1') >= 0)
+  assert.ok(r.hints[0].text.indexOf('child-zombie') >= 0)
+  assert.ok(r.hints[0].text.indexOf('interrupt_agent') >= 0)
+  // sticky：再读仍在（不消费），与 reapNote 的一次性语义相反——事故亮到人来处理
+  var r2 = computeRuntimeHealthHints({ tasks: [] }, rt, { capW: 0, now: now + 60 * 1000 })
+  assert.equal(r2.hints.length, 1)
+  // 缺 taskId 的畸形记录不亮（防御）
+  assert.deepEqual(computeRuntimeHealthHints({ tasks: [] }, { bornAt: now, terminateFailNote: {} }, { capW: 0, now: now }).hints, [])
+})
+
 // ===== ⑥ host 挂点源码断言 =====
 test('⑥ host 挂点源码断言：dispatch 心跳打点 / rpc 接线 / index state 容器', function () {
   var srcDispatch = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')

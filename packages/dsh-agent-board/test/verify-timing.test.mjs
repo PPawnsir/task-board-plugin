@@ -26,11 +26,11 @@ function waitFor(fn, label, ms) {
 }
 
 // ===== RPC/工具直调 harness（board_verdict / task_verify / archive-task / batch-op 三洞行为）=====
-function mkRpcHarness(board, runsTable, extra) {
+function mkRpcHarness(board, runsTable, extra, ctxExtra) {
   const state = { handlers: {}, teamModeCache: {}, feedbackCache: {}, epicSplitCache: {}, poolHealth: {} }
   const tools = {}
   const lateRejects = []
-  const ctx = { tools: { register(t) { tools[t.name] = t } }, effect() {}, webServer: { register() { return () => {} } } }
+  const ctx = Object.assign({ tools: { register(t) { tools[t.name] = t } }, effect() {}, webServer: { register() { return () => {} } } }, ctxExtra || {})
   const deps = Object.assign({
     getActorId: () => 'tester', resolveRoot: (x) => x,
     toolSessionId: () => FULL_SID, rpcSessionId: () => FULL_SID,
@@ -269,6 +269,131 @@ test('settleVerifier 迟到落账：工具通道已落账（verification.by === 
   await new Promise(function (r) { setTimeout(r, 50) }) // 给结算链一点时间跑完，确认不落 lateVerdict
   assert.equal(t.lateVerdict, undefined)
   assert.equal(t.verification.verdict, 'approved') // 原结论不被覆盖
+})
+
+// ===== terminate 假杀根修（task-mv8jfu1v，事故实证 n-mv8cfndmvfcv）=====
+// 三洞：① 无 rec 也杀——in-progress + claimedBy（continuable 末条留档 running 且 id 一致）照样
+//   interrupt 补杀 + 关账卡面 running 留档；② interrupt 抛错/核验未过 → err 级 pushSysNote +
+//   healthHint（poolHealth.terminateFailNote）；③ hold:true → 同一次落账连带 assignMode=manual。
+function mkTermBoard(taskId, childId) {
+  return mkBoard([mkTask({ id: taskId, status: 'in-progress', claimedBy: childId, claimedAt: '2026-01-01T00:00:00Z', runs: [{ role: 'worker', id: childId, at: '2026-01-01T00:00:00Z', outcome: 'running', continuable: true }] })])
+}
+function mkCloseRunHistory(board, closed) {
+  // 与生产 dispatch.closeRunHistory 同口径：只关 outcome==='running' 的条目
+  return async (sid, taskId, runId, outcome) => { closed.push({ taskId: taskId, runId: runId, outcome: outcome }); var tt = board.tasks.find(function (x) { return x.id === taskId }); if (tt && Array.isArray(tt.runs)) { for (var i = tt.runs.length - 1; i >= 0; i--) { var rr = tt.runs[i]; if (rr && rr.id === runId && rr.outcome === 'running') { rr.outcome = outcome; rr.endedAt = '2026-01-01T00:00:01Z'; break } } } }
+}
+
+test('假杀根修①：无 rec 但 in-progress+claimedBy（continuable 留档 running）→ 照样 interrupt 补杀 + 关账 terminated + 核验过零告警', async () => {
+  const parent = { id: FULL_SID }
+  const interrupts = [], closed = [], sysNotes = []
+  const board = mkTermBoard('zk1', 'child-zombie')
+  const h = mkRpcHarness(board, {}, { // 内存表空：rec 已不在（结算竞态/清扫器先摘）——事故原形
+    rootForSession: () => parent,
+    closeRunHistory: mkCloseRunHistory(board, closed),
+    pushSysNote: (sid, text) => sysNotes.push(text),
+  }, { subagents: { interrupt: (id, auth) => interrupts.push({ id: id, auth: auth }), listChildren: async () => [] } })
+  const r = await h['terminate-agent']({ taskId: 'zk1' })
+  assert.equal(r.ok, true); assert.equal(r.terminated, 'worker:zk1') // 补杀命中，不再 no-active-run 空转
+  assert.equal('killUnconfirmed' in r, false)
+  assert.deepEqual(interrupts, [{ id: 'child-zombie', auth: { kind: 'ancestor', agent: parent } }]) // 按 claimedBy 补杀
+  assert.deepEqual(closed, [{ taskId: 'zk1', runId: 'child-zombie', outcome: 'terminated' }]) // 卡面 running 留档被关账
+  assert.equal(board.tasks[0].runs[0].outcome, 'terminated')
+  assert.equal(board.tasks[0].status, 'pending'); assert.equal(board.tasks[0].claimedBy, null)
+  assert.deepEqual(sysNotes, []) // listChildren 核验通过（子会话已不在目录）→ 零告警
+  assert.equal(h.__state.poolHealth[FULL_SID], undefined)
+})
+
+test('假杀根修①边界：状态可疑宁可不动——一次性留档（无 continuable）/ 认领位与留档不一致 / spawn-pending 占位，均不补杀', async () => {
+  const interrupts = []
+  const ctxX = { subagents: { interrupt: (id) => interrupts.push(id), listChildren: async () => [] } }
+  // 一次性 run（无 continuable 标记）：run 随宿主进程生死，无持久会话可补杀
+  const b1 = mkBoard([mkTask({ id: 'os1', status: 'in-progress', claimedBy: 'run-1', runs: [{ role: 'worker', id: 'run-1', outcome: 'running' }] })])
+  const h1 = mkRpcHarness(b1, {}, { rootForSession: () => ({ id: FULL_SID }) }, ctxX)
+  const r1 = await h1['terminate-agent']({ taskId: 'os1' })
+  assert.equal(r1.terminated, 'no-active-run'); assert.deepEqual(interrupts, [])
+  assert.equal(b1.tasks[0].status, 'pending'); assert.equal(b1.tasks[0].claimedBy, null) // 翻卡兜底不变
+  // 认领位与末条留档 id 不一致（状态可疑）→ 不动
+  const b2 = mkBoard([mkTask({ id: 'mm1', status: 'in-progress', claimedBy: 'child-B', runs: [{ role: 'worker', id: 'child-A', outcome: 'running', continuable: true }] })])
+  const h2 = mkRpcHarness(b2, {}, { rootForSession: () => ({ id: FULL_SID }) }, ctxX)
+  const r2 = await h2['terminate-agent']({ taskId: 'mm1' })
+  assert.equal(r2.terminated, 'no-active-run'); assert.deepEqual(interrupts, [])
+  // spawn-pending 在途占位：无会话可杀（在途 spawn 归落闸重验弃权路径管，集成场景 k/m 锁定）
+  const b3 = mkBoard([mkTask({ id: 'sp1', status: 'in-progress', claimedBy: 'spawn-pending' })])
+  const h3 = mkRpcHarness(b3, {}, { rootForSession: () => ({ id: FULL_SID }) }, ctxX)
+  const r3 = await h3['terminate-agent']({ taskId: 'sp1' })
+  assert.equal(r3.terminated, 'no-active-run'); assert.deepEqual(interrupts, [])
+})
+
+test('假杀根修②a：有 rec 的 continuable terminate，interrupt 抛错 → err 通知 + healthHint（不再静默跳过）', async () => {
+  const sysNotes = []
+  const board = mkTermBoard('kf1', 'child-live')
+  const runs = { [FULL_SID]: { 'kf1': { id: 'child-live', childId: 'child-live', continuable: true, ran: true, run: null, role: 'worker', taskId: 'kf1', startedAt: Date.now(), model: '', settled: false } } }
+  const h = mkRpcHarness(board, runs, {
+    rootForSession: () => ({ id: FULL_SID }),
+    pushSysNote: (sid, text) => sysNotes.push(text),
+  }, { subagents: { interrupt: () => { throw new Error('UNAUTHORIZED: not a live descendant') } } })
+  const r = await h['terminate-agent']({ taskId: 'kf1' })
+  assert.equal(r.ok, true); assert.equal(r.terminated, 'worker:kf1')
+  assert.equal(r.killUnconfirmed, 'child-live')
+  assert.equal(sysNotes.length, 1)
+  assert.match(sysNotes[0], /终止未生效/); assert.match(sysNotes[0], /interrupt 抛错/)
+  assert.match(sysNotes[0], /interrupt_agent（agent_id: child-live）补刀/)
+  assert.deepEqual(h.__state.poolHealth[FULL_SID].terminateFailNote.taskId, 'kf1')
+  assert.equal(h.__state.poolHealth[FULL_SID].terminateFailNote.childId, 'child-live')
+})
+
+test('假杀根修②b：无 rec 补杀后核验未过（子会话仍在 listChildren 目录）→ err 通知 + healthHint', async () => {
+  const sysNotes = [], interrupts = []
+  const board = mkTermBoard('kf2', 'child-z2')
+  const h = mkRpcHarness(board, {}, {
+    rootForSession: () => ({ id: FULL_SID }),
+    pushSysNote: (sid, text) => sysNotes.push(text),
+  }, { subagents: { interrupt: (id) => interrupts.push(id), listChildren: async () => [{ id: 'child-z2', mode: 'continuable' }] } })
+  const r = await h['terminate-agent']({ taskId: 'kf2' })
+  assert.equal(r.ok, true); assert.equal(r.terminated, 'worker:kf2')
+  assert.deepEqual(interrupts, ['child-z2']) // 补杀信号已发
+  assert.equal(r.killUnconfirmed, 'child-z2')
+  assert.equal(sysNotes.length, 1); assert.match(sysNotes[0], /核验未过/)
+  assert.equal(h.__state.poolHealth[FULL_SID].terminateFailNote.taskId, 'kf2')
+})
+
+test('假杀根修②c：宿主无 interrupt/listChildren 能力 → 补杀按未生效可见化（老宿主不再静默）', async () => {
+  const sysNotes = []
+  const board = mkTermBoard('kf3', 'child-z3')
+  const h = mkRpcHarness(board, {}, { rootForSession: () => ({ id: FULL_SID }), pushSysNote: (sid, text) => sysNotes.push(text) }, { subagents: {} })
+  const r = await h['terminate-agent']({ taskId: 'kf3' })
+  assert.equal(r.ok, true)
+  assert.equal(r.killUnconfirmed, 'child-z3')
+  assert.equal(sysNotes.length, 1); assert.match(sysNotes[0], /无 interrupt 能力或无活 root/)
+  assert.equal(h.__state.poolHealth[FULL_SID].terminateFailNote.taskId, 'kf3')
+})
+
+test('假杀根修③：hold=true → 同一次落账 pending+assignMode=manual 原子完成（pickDispatch 不再选中本卡）', async () => {
+  // 工具通道（task_terminate hold:true）
+  const board = mkBoard([mkTask({ id: 'hd1', status: 'in-progress', claimedBy: 'run-w', runs: [{ role: 'worker', id: 'run-w', outcome: 'running' }] })])
+  const runs = { [FULL_SID]: { 'hd1': { id: 'run-w', run: { dispose: async () => {} }, role: 'worker', taskId: 'hd1', startedAt: Date.now(), model: '', settled: false } } }
+  const h = mkRpcHarness(board, runs)
+  const r = await h.__tools['task_terminate'].execute({ taskId: 'hd1', hold: true }, {})
+  assert.equal(r.ok, true)
+  const t = board.tasks[0]
+  assert.equal(t.status, 'pending'); assert.equal(t.claimedBy, null)
+  assert.equal(t.assignMode, 'manual') // 同一 mutateLocked 连带转手动——终止+停派原子
+  assert.ok(t.history.some(function (x) { return /hold：连带转手动派发/.test(x.note || '') }))
+  assert.equal(core.pickDispatch({ tasks: [t] }, 1, 0, null).pendings.length, 0, 'manual 闸门：下轮 poolCycle 不派')
+  // RPC 通道（terminate-agent hold:true）同口径
+  const boardR = mkBoard([mkTask({ id: 'hd3', status: 'in-progress', claimedBy: 'run-w3', runs: [{ role: 'worker', id: 'run-w3', outcome: 'running' }] })])
+  const runsR = { [FULL_SID]: { 'hd3': { id: 'run-w3', run: { dispose: async () => {} }, role: 'worker', taskId: 'hd3', startedAt: Date.now(), model: '', settled: false } } }
+  const hR = mkRpcHarness(boardR, runsR)
+  await hR['terminate-agent']({ taskId: 'hd3', hold: true })
+  assert.equal(boardR.tasks[0].assignMode, 'manual')
+  // 对照：不带 hold 的终止仍回 auto（旧行为逐字不破）→ pickDispatch 照常选中
+  const board2 = mkBoard([mkTask({ id: 'hd2', status: 'in-progress', claimedBy: 'run-w2', runs: [{ role: 'worker', id: 'run-w2', outcome: 'running' }] })])
+  const runs2 = { [FULL_SID]: { 'hd2': { id: 'run-w2', run: { dispose: async () => {} }, role: 'worker', taskId: 'hd2', startedAt: Date.now(), model: '', settled: false } } }
+  const h2 = mkRpcHarness(board2, runs2)
+  const r2 = await h2['terminate-agent']({ taskId: 'hd2' })
+  assert.equal(r2.ok, true)
+  assert.equal(board2.tasks[0].assignMode, 'auto')
+  assert.equal(core.pickDispatch({ tasks: [board2.tasks[0]] }, 1, 0, null).pendings.length, 1, '无 hold：回 pending 后照常自动重派')
 })
 
 // ===== 纯函数口径：lateVerdictApply wasApproved 判定 =====
