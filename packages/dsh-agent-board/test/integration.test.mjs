@@ -2,6 +2,8 @@
 //   前半（a-d）：全链路 / 驳回重派 / dependsOn 接续 / touches 排他
 //   后半（e-i，task-muxpgq5b）：仲裁冻结时钟推进 / 回执聚合过滤 / 歧义去抖 / progress / 孤儿回收
 //   竞态根修（k-m，task-mv6c7cdm）：terminate×续跑在途落闸弃权 / 正常续跑不回归 / fresh spawn 在途弃权
+//   依赖后补根修（n-o，task-mv9yupm4）：publish 后补 dependsOn 撞在途 spawn 落闸否决+依赖落定重派 /
+//   update-task 在飞卡写依赖 warning 软提示（pending 卡不带）
 // 九场景全部跑在「真实 index.mjs apply(mockCtx)」上（卡1 harness），不改生产代码；
 // 每用例独立 mockCtx + 独立临时 HOME，互不污染（HOME env 是进程级，顶层用例默认串行，严禁并行）。
 //
@@ -692,5 +694,103 @@ test('集成m·terminate竞态③：fresh spawn 在途被 terminate → 落闸�
     var rep = await env.tools.get('board_report').execute({ taskId: 'task-m1', kind: 'complete', summary: '重跑交付', changes: '改了 m', selfTest: 'npm test 全绿', diffStat: '' })
     assert.equal(rep.ok, true)
     t = await env.waitFor(function () { var x = env.task('task-m1'); return x && x.status === 'resolved' && x.runs[0].outcome === 'completed' ? x : null }, 'resolved 收口且 run 关账')
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 n：dependsOn 后补撞在途 spawn 根修①（task-mv9yupm4，ontology 实证 n-mv8zdii54ajf）=====
+// 竞态时序复刻：B 空依赖 publish → 立即被 claim 占位、spawn 在途挂起 → update-task 后补
+// dependsOn=[F1]（写入成功+warning 软提示，但 F1 未 resolved）→ 放行 spawn。修复前：落闸不验依赖，
+// 卡照跑（depsSatisfied 只闸 pickDispatch 挑候选一刻，闸不到在途窗口）。修复后：落闸锁内重验
+// depsSatisfied=false → 弃权（interrupt 新建子会话 + 不落档不注册）+ 占位回退 pending；F1 落定后
+// 下一轮 cycle 正常派发 B，全程单 run 收口。
+test('集成n·dependsOn后补①：publish 后补依赖撞在途 spawn → 落闸否决回 pending，依赖落定后正常派发', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    // spawn 挂起只针对 B（按 label 过滤）：依赖 F1 的派发不受影响
+    var origStartC = env.ctx.subagents.startContinuable
+    var spawnHold = null
+    var releaseSpawn = null
+    env.ctx.subagents.startContinuable = function (o) {
+      if (o && o.label === 'worker:task-nb' && spawnHold) return spawnHold.then(function () { return origStartC(o) })
+      return origStartC(o)
+    }
+    // 依赖 F1 先建先派（在跑未 resolved → 后补的依赖处于未满足态）
+    await createTask(env, 'task-na', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 1 }, 'F1 spawn 发生')
+    var childF1 = env.continuables[0].childId
+    await env.waitFor(function () { var x = env.task('task-na'); return x && x.status === 'in-progress' && x.claimedBy === childF1 ? x : null }, 'F1 落卡 in-progress')
+    // B 空依赖 publish → 立即被 claim，spawn 在途挂起（在途窗口由测试掌控）
+    spawnHold = new Promise(function (res) { releaseSpawn = res })
+    await createTask(env, 'task-nb', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { var x = env.task('task-nb'); return x && x.status === 'in-progress' && x.claimedBy === 'spawn-pending' ? x : null }, 'B 占位 claim 落卡，spawn 在途')
+    // ===== 在途窗口内后补依赖（撞窗）：写入成功（不拒写）+ warning 软提示（在飞卡）=====
+    var upd = await env.rpc('update-task', { sessionId: env.sid, taskId: 'task-nb', dependsOn: ['task-na'] })
+    assert.equal(upd.ok, true, '后补依赖写入成功（软提示不拒写）')
+    assert.equal(upd.warning, '卡已在执行中，依赖变更不影响本次 run', '在飞卡写依赖带 warning 字段')
+    assert.deepEqual(env.task('task-nb').dependsOn, ['task-na'], '依赖已落卡')
+    // ===== 放行 spawn → 落闸锁内重验 depsSatisfied=false → 否决 =====
+    spawnHold = null
+    releaseSpawn()
+    await env.waitFor(function () { return env.continuables.length >= 2 }, 'B 的被否 spawn 实际建过子会话')
+    var childB1 = env.continuables[1].childId
+    await env.waitFor(function () { return env.interrupts.some(function (x) { return x.childId === childB1 }) }, '被否 spawn 的新建子会话立刻 interrupt（防空跑烧上下文）')
+    var tb = await env.waitFor(function () { var x = env.task('task-nb'); return x && x.status === 'pending' && !x.claimedBy ? x : null }, '依赖否决：占位条件化回退 pending')
+    assert.ok(!tb.runs || tb.runs.length === 0, '被否派发不落 run 留档（在卡面从未存在过）')
+    assert.deepEqual(transitions(tb), ['created→pending', 'pending→in-progress', 'in-progress→pending'], '占位 claim + 否决回退两段历史')
+    // 依赖未落定期间不再重派 B（pickDispatch 的 depsSatisfied 门控接管）
+    await env.clock.advance(50)
+    assert.equal(env.continuables.length, 2, '依赖未满足：B 不再重派')
+    assert.equal(env.sendMessages.length, 0, 'B 无留档可续（续跑通道不触发）')
+    // ===== 依赖落定 → 下一轮正常派发 B（断言②）=====
+    var repF1 = await env.tools.get('board_report').execute({ taskId: 'task-na', kind: 'complete', summary: 'F1 交付', changes: '改了 na', selfTest: 'npm test 全绿', diffStat: '' })
+    assert.equal(repF1.ok, true)
+    await env.waitFor(function () { var x = env.task('task-na'); return x && x.status === 'resolved' ? x : null }, 'F1 resolved（work 档直落）')
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 3 }, '依赖落定后 B 正常派发')
+    var childB2 = env.continuables[2].childId
+    assert.notEqual(childB2, childB1, '重派是新子会话（被弃的已 interrupt 废弃，不留续跑资格）')
+    tb = await env.waitFor(function () { var x = env.task('task-nb'); return x && x.status === 'in-progress' && x.claimedBy === childB2 ? x : null }, 'B 重新落卡 in-progress')
+    assert.equal(tb.runs.length, 1, 'B 只有一条真实落闸留档（被否决的派发零痕迹）')
+    assert.ok(!tb.runs[0].resume, 'fresh spawn 留档（无续跑资格可续）')
+    // B 正常完成 → 全链单 run 收口
+    var repB = await env.tools.get('board_report').execute({ taskId: 'task-nb', kind: 'complete', summary: 'B 交付', changes: '改了 nb', selfTest: 'npm test 全绿', diffStat: '' })
+    assert.equal(repB.ok, true)
+    tb = await env.waitFor(function () { var x = env.task('task-nb'); return x && x.status === 'resolved' && x.runs[0].outcome === 'completed' ? x : null }, 'B resolved 收口且 run 关账')
+    assert.deepEqual(transitions(tb), ['created→pending', 'pending→in-progress', 'in-progress→pending', 'pending→in-progress', 'in-progress→resolved'], '否决回退后重派全流转序列')
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 o：dependsOn 后补根修②（task-mv9yupm4）：update-task warning 边界 =====
+// warning 软提示只在「在飞卡」（in-progress 含 spawn-pending 占位 / verifying）写依赖时出现；
+// pending 卡写依赖是正常编辑路径，不带 warning。verifying 与 in-progress 同一条件分支（场景 n
+// 已覆盖 spawn-pending 形态，本场景补在跑 run 形态 + pending 反例 + 工具/RPC 双通道同口径）。
+test('集成o·dependsOn后补②：update-task 在飞卡写依赖带 warning（pending 卡不带，双通道同口径）', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-oa', { pipeline: 'work' })
+    await createTask(env, 'task-ob', { pipeline: 'work', dependsOn: ['task-oa'] })
+    await env.clock.advance(50)
+    await env.waitFor(function () { var x = env.task('task-oa'); return x && x.status === 'in-progress' ? x : null }, 'oa 落卡 in-progress（真实 run 在跑）')
+    assert.equal(env.task('task-ob').status, 'pending', 'ob 被 depsSatisfied 门控在 pending')
+    // pending 卡写依赖 → 正常编辑，无 warning 字段
+    var r1 = await env.rpc('update-task', { sessionId: env.sid, taskId: 'task-ob', dependsOn: ['task-oa'] })
+    assert.equal(r1.ok, true)
+    assert.ok(!('warning' in r1), 'pending 卡写依赖不带 warning 字段')
+    // in-progress（真实 run 在跑）卡写依赖 → warning（RPC 通道）
+    var r2 = await env.rpc('update-task', { sessionId: env.sid, taskId: 'task-oa', dependsOn: [] })
+    assert.equal(r2.ok, true)
+    assert.equal(r2.warning, '卡已在执行中，依赖变更不影响本次 run', '在飞卡写依赖带 warning（RPC 通道）')
+    // task_update 工具通道同口径（两份内联拷贝行为一致）
+    var r3 = await env.tools.get('task_update').execute({ taskId: 'task-oa', dependsOn: [] })
+    assert.equal(r3.ok, true)
+    assert.equal(r3.warning, '卡已在执行中，依赖变更不影响本次 run', '在飞卡写依赖带 warning（工具通道）')
+    // 收尾：oa 上报完成（ob 留 pending 不派，cleanup 直接拆环境）
+    var rep = await env.tools.get('board_report').execute({ taskId: 'task-oa', kind: 'complete', summary: 'oa 交付', changes: '改了 oa', selfTest: 'npm test 全绿', diffStat: '' })
+    assert.equal(rep.ok, true)
+    await env.waitFor(function () { var x = env.task('task-oa'); return x && x.status === 'resolved' ? x : null }, 'oa resolved 收口')
   } finally { await env.cleanup() }
 })

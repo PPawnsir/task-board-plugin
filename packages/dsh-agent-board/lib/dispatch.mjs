@@ -7,7 +7,7 @@ import { statSync } from 'node:fs'
 import * as core from './core.mjs'
 import { readRunUsage, findRunLog, readLogBytes, readLogFrames } from './usage.mjs'
 import { splitRuleOf, pushRejectLesson } from './policy.mjs'
-const { ah, cfg, claimApply, resolveApply, verifyApply, lateVerdictApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER } = core
+const { ah, cfg, claimApply, resolveApply, verifyApply, lateVerdictApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER } = core
 
 export function createDispatch(ctx, state, deps) {
     // 宿主 fs 句柄与「会话工作区解析根」随预研注入瘦身退役（task-muvjs392）：派发侧不再读盘——
@@ -182,6 +182,10 @@ export function createDispatch(ctx, state, deps) {
     // 一把锁、同一份文档），不能只信锁外快照：
     //   · worker 一律验：卡仍 in-progress 且认领位仍是本轮占位 'spawn-pending'（terminate 会清占位并
     //     翻 pending，两个条件任一失守都说明本轮 claim 已作废）；
+    //   · 依赖补验（task-mv9yupm4，dependsOn 后补不阻断根修）：publish→claim→spawn 在途窗口内
+    //     update-task 后补的 dependsOn 必须一并重验——与 status/claimedBy 读同一份锁内快照；依赖刚被
+    //     补上且未满足（depsSatisfied=false）即否决本轮 spawn（publish 时空依赖抢出的在途 spawn 不
+    //     再漏网；正常路径 pickDispatch 的 depsSatisfied 门控只闸「挑候选」一刻，闸不到在途窗口）；
     //   · 续跑追加验：锁内重算的 resumeTarget 仍指向同一个 childId（terminate 命中活跃 rec 时会把
     //     留档关成 'terminated'，续跑资格随之失效——锁内重算天然覆盖这条）。
     // 用法契约：spawn 返回后**零 await 先登记 rec**（保住事件可见性既有纪律），再过本闸门；
@@ -195,11 +199,32 @@ export function createDispatch(ctx, state, deps) {
       try {
         await mutateLocked(sid, function (d) {
           var t = d.tasks.find(function (x) { return x.id === taskId })
-          ok = !!(t && t.status === 'in-progress' && t.claimedBy === 'spawn-pending' && (!resumeId || resumeTarget(t) === resumeId))
+          ok = !!(t && t.status === 'in-progress' && t.claimedBy === 'spawn-pending' && depsSatisfied(d, t) && (!resumeId || resumeTarget(t) === resumeId))
           return null
         }, true)
       } catch (e) { console.error('[task-board] spawn 闸门重验异常（按弃权处理，宁停勿双）task ' + taskId + ':', String(e)); ok = false }
       return ok
+    }
+
+    // ===== 依赖否决的占位回退（task-mv9yupm4：dependsOn 后补撞在途 spawn 的收口半步）=====
+    // 闸门因「锁内快照 depsSatisfied=false」否决时，卡面仍停在 in-progress + spawn-pending
+    // （update-task 写依赖不动状态机）——不像 terminate 竞态那样有翻卡方顺手清占位，不回退就
+    // 只能干等 2min 占位超时回收。条件化回退：仅当卡面仍停在本轮占位且依赖仍未满足时才翻回
+    // pending（terminate 竞态已翻走 / 非依赖原因的否决 / 依赖恰在闸门后落定——一律不动，零改动
+    // 不写盘，与占位 swap 同纪律）。skipKick：依赖未满足时本也派不出（pickDispatch 的
+    // depsSatisfied 门控），依赖落定那笔写（resolve/archive 走 mutateLocked 默认 kick）自己 kick。
+    async function revertDepsVeto(sid, taskId) {
+      try {
+        await mutateLocked(sid, function (d) {
+          var t2 = d.tasks.find(function (x) { return x.id === taskId })
+          if (!t2) return null
+          if (t2.status !== 'in-progress' || t2.claimedBy !== 'spawn-pending') return null
+          if (depsSatisfied(d, t2)) return null
+          t2.status = 'pending'; t2.claimedBy = null; t2.claimedAt = null
+          ah(t2, 'in-progress', 'pending', 'system', 'spawn 落闸重验：dependsOn 后补且未满足，本轮派发弃权回待办，依赖落定后自动重派')
+          return { ok: true }
+        }, true)
+      } catch (_) {}
     }
 
     async function spawnOneShot(sid, t, role) {
@@ -313,6 +338,9 @@ export function createDispatch(ctx, state, deps) {
             if (useContinuable) { if (typeof subagents.interrupt === 'function') subagents.interrupt(childId, { kind: 'ancestor', agent: parent }) }
             else if (run && typeof run.dispose === 'function') await run.dispose()
           } catch (_) {}
+          // 依赖否决收口（task-mv9yupm4）：dependsOn 后补导致的否决无人翻卡（update-task 不动状态机），
+          // 条件化把仍停在本轮占位的卡翻回 pending；terminate 竞态的翻卡已由 terminate 完成，此调用零改动。
+          await revertDepsVeto(sid, t.id)
           console.error('[task-board] spawn 落闸被锁内重验拒绝（卡面已变更，本次派发弃权）task ' + t.id + ' role ' + role)
           return { vetoed: true }
         }
@@ -482,13 +510,16 @@ export function createDispatch(ctx, state, deps) {
               if (r2.noResume === true) return null
               if (r2.outcome !== 'timeout/error' && r2.outcome !== 'incomplete') return null // 仍 running 等形态归结算/终止路径管
               r2.noResume = true
-              ah(t2, t2.status, t2.status, 'system', '派发落闸重验未通过（terminate 竞态）：续跑弃权，旧子会话不再续跑')
+              ah(t2, t2.status, t2.status, 'system', '派发落闸重验未通过（terminate 竞态/依赖后补）：续跑弃权，旧子会话不再续跑')
               return { ok: true }
             }
             return null
           }, true)
         } catch (_) {}
-        console.error('[task-board] 续跑落闸被锁内重验拒绝（terminate 竞态，已弃权并 interrupt 复活子会话）task ' + t.id + ' child ' + childId)
+        // 依赖否决收口（task-mv9yupm4）：dependsOn 后补导致的否决无人翻卡（update-task 不动状态机），
+        // 条件化把仍停在本轮占位的卡翻回 pending；terminate 竞态的翻卡已由 terminate 完成，此调用零改动。
+        await revertDepsVeto(sid, t.id)
+        console.error('[task-board] 续跑落闸被锁内重验拒绝（terminate 竞态/依赖后补，已弃权并 interrupt 复活子会话）task ' + t.id + ' child ' + childId)
         return { vetoed: true }
       }
       armTimeouts(sid, rec, t, c)
@@ -1567,6 +1598,8 @@ export function createDispatch(ctx, state, deps) {
             // 落闸弃权（task-mv6c7cdm）：卡面已被 terminate 等路径重排，本轮 claim 作废——
             // 占位由翻卡那笔写清掉、被弃的子会话已由闸门 interrupt/dispose 停掉，这里刻意不再动卡面、
             // 不发「启动失败」误报（闸门函数内已各留一行 console 痕迹），等下一轮 cycle 重新决策。
+            // dependsOn 后补导致的否决（task-mv9yupm4）：占位由闸门调用方的 revertDepsVeto 条件化
+            // 翻回 pending（依赖未满足 → pickDispatch 门控不派；依赖落定那笔写 kick 后自动重派）。
           } else if (sp.role === 'worker') {
             // spawn 失败 → 回 pending
             await releaseSpawnPlaceholder(sid, sp, 'spawn 失败，回收重新排队')
