@@ -505,6 +505,33 @@ export function createDispatch(ctx, state, deps) {
     // 无论从哪条入口进来（事件通道 settleContinuable / 上报通道 board_report），run 记录的收尾动作
     // 必须一致：①关 run 结局（closeRunHistory）②usage 落账（seq 水位线增量）③摘除软/硬超时臂。
     // 三条各自幂等：重复结算（idle 事件重入 / 上报与事件双通道先后到达）不二次关账、不二次记账。
+    // ===== 结算≠停止根修（task-mv8wuznb，ontology 实证 2026-10-15：卡 02:02 已 resolved、verdict 已落账，
+    // verifier 子会话却持续写盘空转到 10:16 被主窗口手杀——8 小时空烧）=====
+    // 病根：一次性 run 的 settle 只关账（dispose 只释放本地 run 句柄，不停子会话的 agent loop）——
+    // verifier 调完 board_verdict 后 turn 未结束（继续探索/循环），会话持续空转烧 token。
+    // 一次性子代理「结算即销毁」是设计语义，这里补齐销毁的半步：结算落定后对该 run 的子会话补一枪
+    // interrupt（与 endContinuable 同款 authority 形状，fire-and-return 同步发信号即返回）。
+    // 挂载点取 settleRunRecord 末尾 = 所有一次性落定路径的唯一汇合点（settleRun 的
+    // completed/failed/incomplete、幽灵回收 reapGhostRecs 的收尾都经这里）——含事故原形
+    // 「board_verdict 落账 → 卡 resolved → rec 下轮被幽灵回收」那条（rec 在表外时 settleRun 根本跑不到）。
+    // 边界（零改动）：continuable 豁免——它的 interrupt 在 endContinuable（打断当前 turn、留存会话供
+    // 续跑），语义相反绝不能套；hook 点位不在本卡范围。重复 interrupt 无害（取消信号幂等）。
+    // 失败只 console.error：结算已落定，残留空转只影响 token 不影响正确性（与 terminate 的 killFail
+    // 告警分级不同——那是用户显式要杀，这里是收尾补强）。
+    function stopSettledOneShot(sid, rec) {
+      if (!rec || rec.continuable || !rec.id) return
+      if (rec.role !== 'verifier' && rec.role !== 'worker') return // 只对 verifier 与一次性 worker 动手
+      var subagents = ctx.subagents
+      if (!subagents || typeof subagents.interrupt !== 'function') return // 老宿主/老测试桩无此能力：逐字不变
+      var parent = rootForSession(sid)
+      if (!parent) return // 无活 root 可授权（root 已死/重建窗口）→ 跳过，结算语义不受影响
+      try {
+        subagents.interrupt(String(rec.id), { kind: 'ancestor', agent: parent })
+      } catch (e) {
+        console.error('[task-board] 一次性 run 结算后 interrupt 子会话失败（会话可能仍在空转，只影响 token）task ' + rec.taskId + ' child ' + rec.id + ':', String(e))
+      }
+    }
+
     async function settleRunRecord(sid, rec, opts) {
       // ① 结局落卡：failed → 有 err 记 timeout/error，无 err 记 incomplete（与一次性路径口径一致）；
       //    成功 → completed。noResume 旗随 rec.resumeBlocked（interrupt 失败）落卡。
@@ -520,6 +547,10 @@ export function createDispatch(ctx, state, deps) {
       // ② settle 通道心跳（运行时健康自检）：三件套各自幂等且各自 catch 永不抛，
       // 走到这里即「一次成功结算活动」——rpc 侧据此判定「结算通道 >30min 无活动」黄条。
       poolHealthFor(sid).settleLastOkAt = Date.now()
+      // ④ 结算≠停止根修（task-mv8wuznb）：一次性 run（verifier/非 continuable worker）落定后主动
+      // interrupt 子会话，堵「结算≠停止」空转洞。同步 fire-and-return、闸门与 try/catch 全在函数内，
+      // 绝不阻断/改变结算语义；continuable 与 hook 在函数内被原样放行（豁免边界见头注释）。
+      try { stopSettledOneShot(sid, rec) } catch (e) { console.error('[task-board] 结算后补停子会话异常（不影响结算）task ' + rec.taskId + ':', String(e)) }
     }
 
     async function settleRun(sid, rec, res, err) {
@@ -1038,7 +1069,26 @@ export function createDispatch(ctx, state, deps) {
         if (String(last.id) !== String(t.claimedBy)) continue // 卡上留档与占位不一致：状态可疑，不动
         cands.push(t)
       }
-      if (!cands.length) return
+      // ===== 孤儿一次性子会话补停（task-mv8wuznb ②，重启场景）=====
+      // 卡已落定（resolved/cancelled/archived）而 verifier/一次性 worker 的 run 留档仍 running 无
+      // endedAt：重启把内存 rec 清零后，结算收尾（stopSettledOneShot）的 interrupt 再也打不到它——
+      // 若子会话仍活在宿主目录（下方 listChildren 命中），顺手 interrupt 停掉（「结算即销毁」的重启补课，
+      // 实证：verifier 空转 8h 的会话若中途遇 host 重启，苏醒后照旧空烧）。
+      // 只停会话、不动卡面：running 留档的关账归 sweepZombieRuns（每轮都跑，就排在本函数之后）。
+      // continuable worker 豁免（留存会话供续跑是设计语义；在飞卡的 continuable 由上方候选①重建观测）。
+      var orphans = []
+      for (var oi = 0; oi < list.length; oi++) {
+        var ot = list[oi]
+        if (!ot || (ot.status !== 'resolved' && ot.status !== 'cancelled' && ot.status !== 'archived')) continue
+        var ors = Array.isArray(ot.runs) ? ot.runs : []
+        for (var oj = 0; oj < ors.length; oj++) {
+          var orun = ors[oj]
+          if (!orun || orun.outcome !== 'running' || orun.endedAt) continue
+          if (orun.role !== 'verifier' && !(orun.role === 'worker' && orun.continuable !== true)) continue
+          orphans.push(String(orun.id))
+        }
+      }
+      if (!cands.length && !orphans.length) return
       // 存活判定：listChildren 列出的就是「活的子会话」。带超时保护（查询挂死也不能拖住心跳）。
       var kids = null
       try {
@@ -1098,6 +1148,22 @@ export function createDispatch(ctx, state, deps) {
           }, true)
         } catch (e) { console.error('[task-board] reconcile 死会话回收失败:', String(e)) }
       }
+      // 孤儿一次性子会话补停（task-mv8wuznb ②）：只打「仍在活跃目录」的——不在目录 = 会话已死，
+      // 杀无可杀（留档归 sweepZombieRuns 关账）；无 interrupt 能力/无活 root → 静默跳过；
+      // 单条失败只 console.error，不拖住本轮 reconcile 的其它动作。
+      var stopped = 0
+      if (orphans.length && typeof subagents.interrupt === 'function') {
+        var oroot = rootForSession(sid)
+        if (oroot) {
+          for (var oi2 = 0; oi2 < orphans.length; oi2++) {
+            var oid = orphans[oi2]
+            if (!alive[oid]) continue
+            try { subagents.interrupt(oid, { kind: 'ancestor', agent: oroot }); stopped++ }
+            catch (e) { console.error('[task-board] reconcile 孤儿一次性子会话 interrupt 失败（' + oid + '）:', String(e)) }
+          }
+        }
+      }
+      if (stopped) console.log('[task-board] 重启 reconcile（' + sid + '）：补停落定卡孤儿一次性子会话 ' + stopped + ' 个')
     }
 
     // ===== 僵尸 run 留档清扫（task-mv22z61v）：关账「落定卡上的 running 无 endedAt 留档」+ 清卡面认领位 =====

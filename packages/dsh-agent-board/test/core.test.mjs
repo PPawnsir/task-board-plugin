@@ -3636,7 +3636,7 @@ test('可续跑 Worker⑩（卡2④）：interrupt 失败 → 结算不卡死（
   assert.equal(t.claimedBy, 'child-2')
 })
 
-test('可续跑 Worker⑪（卡2⑤）：workerContinuable=false → 续跑机制整体短路（零 sendMessage/零 interrupt），一次性 dispose 兜底逐字不变', async () => {
+test('可续跑 Worker⑪（卡2⑤）：workerContinuable=false → 续跑机制整体短路（零 sendMessage/零冷复活），一次性 dispose 兜底不变（task-mv8wuznb 起结算补停 interrupt 一枪）', async () => {
   const parent = { id: FULL_SID }
   const sent = []
   const interrupted = []
@@ -3656,7 +3656,10 @@ test('可续跑 Worker⑪（卡2⑤）：workerContinuable=false → 续跑机�
   await h.dispatch.poolCycle(FULL_SID)
   for (let i = 0; i < 4; i++) await flush()
   assert.deepEqual(sent, [])                    // 零冷复活
-  assert.deepEqual(interrupted, [])             // 零 interrupt（一次性路径只 dispose）
+  // task-mv8wuznb 语义修订：一次性 run 结算落定后主动 interrupt 子会话（「结算即销毁」的补停，
+  // 堵「结算≠停止」空转洞——实证 verifier 落账后空转 8h）。这枪是销毁收尾，与续跑机制的
+  // 「interrupt 留存」（endContinuable，打断 turn 留会话）语义相反、互不干扰。
+  assert.deepEqual(interrupted, ['run-1'])       // 一次性结算补停恰一枪（dispose 之外的增量）
   assert.ok(disposed >= 1)                      // 旧兜底照旧（run.dispose）
   assert.equal(t.status, 'pending')             // 失败结算语义不变
   assert.equal(t.retryCount, 1)

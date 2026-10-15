@@ -950,6 +950,22 @@ export function createRpc(ctx, state, deps) {
         if (notifyLateReject) notifyLateReject(sid, result.task)
         markLateRejectHealth(sid, result.task.id)
       }
+      // ===== 结算≠停止根修③（task-mv8wuznb，实证：verifier 迟到交付 verdict 落账后又空转 8h）=====
+      // 迟到落账时该 verifier 的活跃 rec 通常早已被幽灵回收（卡落定即失活），settleRunRecord 的补停
+      // 打不到它——这里按 actor（= 调本工具的 verifier 子会话 id，能调工具即证明它还活着）直接补一枪。
+      // 守卫：actor 非空/非 unknown/非本板 root（主窗口手调 board_verdict 时 actor=root，绝不能打断
+      // 自己）；宿主无 interrupt 能力或无活 root → 静默跳过；interrupt 抛错只 console.error——
+      // 落账已完成，残留空转只影响 token 不影响正确性。与 settle 路径的补停幂等叠加（取消信号可重复发）。
+      if (result && result.ok && result.late) {
+        try {
+          var vsubs = ctx.subagents
+          var vactor = String(actor || '')
+          if (vsubs && typeof vsubs.interrupt === 'function' && vactor && vactor !== 'unknown' && vactor !== String(sid)) {
+            var vroot = rootForSession(sid)
+            if (vroot) vsubs.interrupt(vactor, { kind: 'ancestor', agent: vroot })
+          }
+        } catch (e) { console.error('[task-board] 迟到 verdict 落账后 interrupt verifier 失败（task ' + args.taskId + ' child ' + actor + '）:', String(e)) }
+      }
       return result
     } }))
     // 枚举当前网关可用模型（list-models handler 与 set-board-config 模型校验共用）：
