@@ -2487,12 +2487,16 @@ function apply(ctx) {
       }, [])
       useEffect(function () { setVal(props.value || ''); setDirty(false) }, [props.value])
       function save() { setDirty(false); rpc('set-board-config', { key: cfgKey, value: (val || '').trim() }).then(fetchTasks).catch(function () {}) }
-      function pick(v) { setVal(v); setDirty(false); rpc('set-board-config', { key: cfgKey, value: v }).then(fetchTasks).catch(function () {}) }
+      // 下拉两段式（task-mv9yuq2l，实证 n-mv8ki92qnhdq：巡检戳即点即写 → verifierModel 神隐回退无从审计）：
+      // 选中只改本地草稿态 + 亮 dirty（对比服务端权威值 props.value），点旁边 ✓ 保存键才走 save() 提交 rpc——
+      // 与下方降级文本输入同款两段式语义，巡检路过戳一下不再直接写配置。
+      function pick(v) { setVal(v); setDirty(v !== (props.value || '')) }
       if (models) {
         return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, label,
-          React.createElement('select', { value: val, onChange: function (e) { pick(e.target.value) }, title: label + '（空=继承父级）', style: { width: 150, padding: '0px 4px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
+          React.createElement('select', { value: val, onChange: function (e) { pick(e.target.value) }, title: label + '（空=继承父级；选中后点 ✓ 才保存）', style: { width: 150, padding: '0px 4px', fontSize: 9, border: '1px solid ' + (dirty ? C.brand : C.border), borderRadius: 2, background: C.card, color: C.text } },
             React.createElement('option', { value: '' }, '继承父级'),
-            models.map(function (m) { return React.createElement('option', { key: m.id, value: m.id }, m.name + ' (' + m.provider + ')') })))
+            models.map(function (m) { return React.createElement('option', { key: m.id, value: m.id }, m.name + ' (' + m.provider + ')') })),
+          dirty ? React.createElement('button', { onClick: save, title: '保存 ' + label, style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
       }
       // 降级：文本输入（模型枚举不可用时）
       return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, label,

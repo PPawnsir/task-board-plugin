@@ -6123,6 +6123,98 @@ test('set-board-config 模型校验④b：provider 枚举失败不阻塞，其�
   assert.equal(board.workerModel, 'kimi/kimi-k2')
 })
 
+// ===== 板级配置审计行 + 模型下拉两段式（task-mv9yuq2l，实证 n-mv8ki92qnhdq：verifierModel 神隐回退零留痕无从审计）=====
+// ① set-board-config 成功写入落 {key, from, to, actor, at}；拒写/非白名单不落 ② 截尾 50 条 + get-tasks 透出
+// ③ seed/normalizeBoard 归一兜底 ④ 下拉两段式源码级：选中不调 rpc、点保存才调
+test('配置审计①：set-board-config 成功写入落审计行 {key, from, to, actor, at}；拒写/非白名单不落', async () => {
+  const board = mkBoard([])
+  const h = mkRpcHandlers(board, {}, mkLlmCtx(MOCK_MODELS))
+  await h['set-board-config']({ key: 'maxWorkers', value: 5 })
+  assert.equal(board.configLog.length, 1)
+  const e1 = board.configLog[0]
+  assert.equal(e1.key, 'maxWorkers')
+  assert.equal(e1.from, null) // 老看板首写（无该字段）→ null
+  assert.equal(e1.to, 5)
+  assert.equal(e1.actor, 'tester') // rpcActor → getActorId()
+  assert.ok(typeof e1.at === 'string' && e1.at.length > 0) // ISO 时间戳在位
+  // 二次写入：from 读到上轮落盘值（审计链可追「从什么改成什么」）
+  await h['set-board-config']({ key: 'maxWorkers', value: 8 })
+  assert.equal(board.configLog.length, 2)
+  assert.equal(board.configLog[1].from, 5)
+  assert.equal(board.configLog[1].to, 8)
+  // to 记钳制后的实际落盘真值（入参 999 → 钳到 10），审计关心真值不是入参
+  await h['set-board-config']({ key: 'maxWorkers', value: 999 })
+  assert.equal(board.configLog[2].to, 10)
+  // 模型键（带枚举校验通道）成功也落：from/to 是 trim 后真值
+  await h['set-board-config']({ key: 'verifierModel', value: ' kimi/kimi-k2 ' })
+  const em = board.configLog[3]
+  assert.equal(em.key, 'verifierModel'); assert.equal(em.from, null); assert.equal(em.to, 'kimi/kimi-k2')
+  // 校验拒写（非法模型 id）不落审计行
+  const rBad = await h['set-board-config']({ key: 'verifierModel', value: 'kimi/kimi-k3' })
+  assert.equal(rBad.ok, false)
+  assert.equal(board.configLog.length, 4)
+  // 非白名单键：老契约照返 ok:true，但无实际写入 → 不落审计行
+  const rX = await h['set-board-config']({ key: 'nonsenseKey', value: 1 })
+  assert.equal(rX.ok, true)
+  assert.equal(board.configLog.length, 4)
+})
+
+test('配置审计②：截尾留最新 50 条；get-tasks 透出（老看板缺字段=空数组）', async () => {
+  const board = mkBoard([])
+  const h = mkRpcHandlers(board)
+  for (let i = 0; i < 55; i++) await h['set-board-config']({ key: 'maxWorkers', value: (i % 10) + 1 })
+  assert.equal(board.configLog.length, 50) // 截尾：容量恒定 50
+  assert.equal(board.configLog[49].to, (54 % 10) + 1) // 最新一条 = 第 55 次写入
+  assert.equal(board.configLog[0].to, (5 % 10) + 1)   // 最旧一条 = 第 6 次写入（前 5 条已被裁掉）
+  const got = await h['get-tasks']({})
+  assert.ok(Array.isArray(got.configLog))
+  assert.equal(got.configLog.length, 50)
+  assert.equal(got.configLog[49].key, 'maxWorkers')
+  // 老看板（磁盘文件无 configLog 字段）：透出空数组，不炸
+  const h2 = mkRpcHandlers(mkBoard([]))
+  assert.deepEqual((await h2['get-tasks']({})).configLog, [])
+})
+
+test('配置审计③：seed 初值自带 + normalizeBoard 老看板/脏值兜底（core 层归一）', () => {
+  assert.deepEqual(core.seed('s1').configLog, []) // 新板种子自带
+  const d = { tasks: [] }
+  core.normalizeBoard(d)
+  assert.deepEqual(d.configLog, []) // 老看板缺字段 → 补空数组
+  const d2 = { tasks: [], configLog: 'dirty' }
+  core.normalizeBoard(d2)
+  assert.deepEqual(d2.configLog, []) // 脏值收敛
+  const d3 = { tasks: [], configLog: [{ key: 'maxWorkers', from: 3, to: 5, actor: 'a', at: 't' }] }
+  core.normalizeBoard(d3)
+  assert.equal(d3.configLog.length, 1) // 合法存量原样保留
+})
+
+test('模型下拉两段式④（源码级）：ModelCfg 选中只改草稿态，点 ✓ 保存才调 rpc；组装产物同步', () => {
+  const src = readFileSync(new URL('../lib/client/dashboard.js', import.meta.url), 'utf8')
+  const start = src.indexOf('function ModelCfg(props)')
+  assert.ok(start >= 0, 'dashboard.js 应定义 ModelCfg')
+  const end = src.indexOf('function ZoomCfg(', start)
+  assert.ok(end > start, 'ModelCfg 之后应紧跟 ZoomCfg（切片边界）')
+  const body = src.slice(start, end)
+  // ① pick 只写本地草稿态（setVal + setDirty），函数体不得出现 rpc（即点即写是事故原形，绝不回退）
+  const pickM = body.match(/function pick\(v\) \{[^}]*\}/)
+  assert.ok(pickM, 'ModelCfg 应定义 pick')
+  assert.equal(pickM[0].indexOf('rpc('), -1, 'pick 不得直接调 rpc（两段式红线）')
+  assert.match(pickM[0], /setVal\(v\)/)
+  assert.match(pickM[0], /setDirty\(v !== \(props\.value \|\| ''\)\)/) // dirty 对比服务端权威值
+  // ② 提交唯一入口 = save()（rpc('set-board-config') 只住在 save 里）
+  const saveM = body.match(/function save\(\) \{[^}]*\}/)
+  assert.ok(saveM, 'ModelCfg 应定义 save')
+  assert.match(saveM[0], /rpc\('set-board-config', \{ key: cfgKey, value: \(val \|\| ''\)\.trim\(\)/)
+  // ③ 下拉分支（if (models) 到降级分支之间）：onChange 走 pick；dirty 才渲染保存键（onClick: save）
+  const selBranch = body.slice(body.indexOf('if (models)'), body.indexOf('// 降级'))
+  assert.match(selBranch, /onChange: function \(e\) \{ pick\(e\.target\.value\) \}/)
+  assert.match(selBranch, /dirty \? React\.createElement\('button', \{ onClick: save/)
+  // ④ 组装产物同步：lib/client.js 含两段式 pick，且不再残留「选中即写」的旧 pick
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /function pick\(v\) \{ setVal\(v\); setDirty\(v !== \(props\.value \|\| ''\)\) \}/)
+  assert.equal(built.indexOf("function pick(v) { setVal(v); setDirty(false); rpc('set-board-config'"), -1, '组装产物不得残留即点即写旧 pick')
+})
+
 // 熔断通知分态行为测试 harness：一次性 verifier run 失败，捕获 pushSysNote 文案 + badModels 落账
 async function runVerifierFuseCase(errText) {
   const t = mkTask({ id: 'v-fuse', title: '待验收卡', status: 'verifying' })
