@@ -545,17 +545,41 @@ export function createDispatch(ctx, state, deps) {
     // 挂载点取 settleRunRecord 末尾 = 所有一次性落定路径的唯一汇合点（settleRun 的
     // completed/failed/incomplete、幽灵回收 reapGhostRecs 的收尾都经这里）——含事故原形
     // 「board_verdict 落账 → 卡 resolved → rec 下轮被幽灵回收」那条（rec 在表外时 settleRun 根本跑不到）。
-    // 边界（零改动）：continuable 豁免——它的 interrupt 在 endContinuable（打断当前 turn、留存会话供
-    // 续跑），语义相反绝不能套；hook 点位不在本卡范围。重复 interrupt 无害（取消信号幂等）。
+    // 边界（零改动）：hook 点位不在本卡范围；重复 interrupt 无害（取消信号幂等）。continuable 豁免经
+    // task-mvbeallq 收紧：原「continuable 即跳」过宽（无续跑位的残影借豁免续跑），现仅「续跑位真在
+    // 本 child 手上」才放行，其余 continuable 落定同样补停——收紧细则与竞态论证见函数头注释。
     // 失败只 console.error：结算已落定，残留空转只影响 token 不影响正确性（与 terminate 的 killFail
     // 告警分级不同——那是用户显式要杀，这里是收尾补强）。
-    function stopSettledOneShot(sid, rec) {
-      if (!rec || rec.continuable || !rec.id) return
-      if (rec.role !== 'verifier' && rec.role !== 'worker') return // 只对 verifier 与一次性 worker 动手
+    async function stopSettledOneShot(sid, rec) {
+      if (!rec || !rec.id) return
+      if (rec.role !== 'verifier' && rec.role !== 'worker') return // 只对 verifier 与 worker 动手
       var subagents = ctx.subagents
       if (!subagents || typeof subagents.interrupt !== 'function') return // 老宿主/老测试桩无此能力：逐字不变
       var parent = rootForSession(sid)
       if (!parent) return // 无活 root 可授权（root 已死/重建窗口）→ 跳过，结算语义不受影响
+      // ===== continuable 豁免收紧（task-mvbeallq，残影治理①）=====
+      // 原闸门「rec.continuable 即跳」过宽：continuable 但**已无续跑位**的落定——completed（resumeTarget
+      // 只认超时/失败结局）/ noResume 落旗（reap 失败）/ 卡面最新 worker 留档已被更新的 run 取代
+      // （池故障后主窗口重派了新 Worker）——借豁免续跑就是残影（ontology 实证：旧子会话残影续跑 5 分钟
+      // 逐文件推进，与新 Worker 差点同批文件互踩）。interrupt 对 continuable 只打断 turn、不销毁会话
+      // （endContinuable 同款语义），补停安全。豁免只剩「续跑位真在本 child 手上」两种形态：
+      //   ① 本卡活跃表已有接管**同一子会话**的新 rec——续跑在途，此刻打断会杀掉刚复活的新 turn。
+      //      （续跑路径纪律：sendMessage 返回后**零 await**先登记 rec 再追加续跑留档，故新 turn 全程
+      //      被本形态覆盖；不同 id 的新 rec=fresh spawn 新 Worker，不豁免——旧残影照停。）
+      //   ② 锁外新鲜快照上 resumeTarget 仍指向本 child——续跑位未被消费，下轮重派会冷复活它。
+      //      （豁免判定必须读新鲜快照：结算刚关账，只有自己内存里的 rec 不足以判定留档次序——
+      //      幽灵回收路径上卡面可能已有更新的 worker 留档。）
+      // 两形态之外一律补停；快照读不到（t=null）按「无续跑位」处理——宁停勿留残影。
+      if (rec.continuable) {
+        var cur = runsFor(sid)[rec.taskId]
+        if (cur && String(cur.id) === String(rec.id)) return // ① 续跑在途（新 rec 接管同一子会话）
+        var t = null
+        try {
+          var dsnap = await rt(sid)
+          if (dsnap && Array.isArray(dsnap.tasks)) { for (var ti = 0; ti < dsnap.tasks.length; ti++) { if (dsnap.tasks[ti] && dsnap.tasks[ti].id === rec.taskId) { t = dsnap.tasks[ti]; break } } }
+        } catch (_) { t = null }
+        if (t && resumeTarget(t) === String(rec.id)) return // ② 续跑位在手：留存会话供冷复活
+      }
       try {
         subagents.interrupt(String(rec.id), { kind: 'ancestor', agent: parent })
       } catch (e) {
@@ -578,10 +602,11 @@ export function createDispatch(ctx, state, deps) {
       // ② settle 通道心跳（运行时健康自检）：三件套各自幂等且各自 catch 永不抛，
       // 走到这里即「一次成功结算活动」——rpc 侧据此判定「结算通道 >30min 无活动」黄条。
       poolHealthFor(sid).settleLastOkAt = Date.now()
-      // ④ 结算≠停止根修（task-mv8wuznb）：一次性 run（verifier/非 continuable worker）落定后主动
-      // interrupt 子会话，堵「结算≠停止」空转洞。同步 fire-and-return、闸门与 try/catch 全在函数内，
-      // 绝不阻断/改变结算语义；continuable 与 hook 在函数内被原样放行（豁免边界见头注释）。
-      try { stopSettledOneShot(sid, rec) } catch (e) { console.error('[task-board] 结算后补停子会话异常（不影响结算）task ' + rec.taskId + ':', String(e)) }
+      // ④ 结算≠停止根修（task-mv8wuznb）：落定后主动 interrupt 子会话，堵「结算≠停止」空转洞。
+      // task-mvbeallq 起改 async（continuable 豁免收紧需读锁外快照算 resumeTarget）——interrupt 本身
+      // 仍是同步信号 fire-and-return；闸门与 try/catch 全在函数内/调用处，绝不阻断/改变结算语义；
+      // 续跑位在手的 continuable 与 hook 在函数内被原样放行（豁免边界见函数头注释）。
+      try { await stopSettledOneShot(sid, rec) } catch (e) { console.error('[task-board] 结算后补停子会话异常（不影响结算）task ' + rec.taskId + ':', String(e)) }
     }
 
     async function settleRun(sid, rec, res, err) {
@@ -849,8 +874,9 @@ export function createDispatch(ctx, state, deps) {
     //   · 只认 continuable 且 role==='worker' 的活跃 rec：verifier/hook 是一次性 run。它们的 run.result
     //     落定后 settleRun 会照常收尾；手动终止路径**刻意**不关 run（保留 running = 不留续跑资格），此处不碰。
     //   · 摘除活跃表项：任务已落定，这张卡不该再占 Worker 并发位；否则 poolCycle 的 activeW 会把它算成
-    //     在跑的 Worker（幽灵占位）。子会话本身不销毁也不 interrupt——它与手动终止同源：失联的续跑资格
-    //     留在卡上，之后真要重派走 tryResumeWorker 的 sendMessage 冷复活。
+    //     在跑的 Worker（幽灵占位）。子会话由 settleRunRecord 末尾的 stopSettledOneShot 补停
+    //     （task-mvbeallq：completed 落定天然无续跑位——resumeTarget 只认超时/失败结局——「续跑豁免」
+    //     留下的就是残影续跑窗；补停只打断 turn 不销毁会话，与 endContinuable 同款语义）。
     //   · 幂等：closeRunHistory 只关 outcome==='running' 的条目、accumulateRunUsage 认 usageRecorded 旗、
     //     rec.disarm 幂等——重复上报 / 上报后 idle 事件补到，都不会二次关账或二次记账。
     // 老宿主/没接线的调用方：deps 里没有这个函数时 rpc 侧静默跳过，行为与本次改造前逐字一致。

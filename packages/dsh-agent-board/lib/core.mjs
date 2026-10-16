@@ -756,6 +756,15 @@ export function buildFileOutline(content) {
 // 已经建好的单张卡（要拆也轮不到它拆，真觉得大应走歧义上报）。故 epicSplit=false 时 Worker prompt 字面
 // 与 true 时逐字相同（单测锁定 parity，防止将来有人往这里塞拆分条款而漏接门禁）；buildWorkerPrompt
 // 因此不引入 epicSplit 形参——没有条款可跳过，加个无用参数只会是死代码。
+// 前轮半成品提示的命中判定（task-mvbeallq，残影治理②）：卡 runs[] 里有**已落定**的 worker run
+// （outcome 已写且非 running——running 是僵尸/在跑留档，不构成「有半成品可续作」的依据）。
+// 「非本条 run」天然成立：本条 run 的留档在 spawn 成功后才由 recordRunHistory 追加，buildWorkerPrompt
+// 跑在 spawn 之前，此刻 runs[] 里全是前轮；续跑路径不走本 prompt（tryResumeWorker 自带断点续跑指令）。
+function hasSettledWorkerRun(t) {
+  if (!t || !Array.isArray(t.runs)) return false
+  for (var i = 0; i < t.runs.length; i++) { var r = t.runs[i]; if (r && r.role === 'worker' && r.outcome && r.outcome !== 'running') return true }
+  return false
+}
 export function buildWorkerPrompt(t, pack, feedbackEnabled) {
   var notes = histNotes(t)
   var msgs = buildMessages(t)
@@ -764,6 +773,9 @@ export function buildWorkerPrompt(t, pack, feedbackEnabled) {
   if (t.acceptance) p += '\n硬性验收脚本: ' + t.acceptance + '\n（必须实际运行该命令并在自测情况中粘贴真实输出；未通过不得上报完成）'
   if (notes) p += '\n\n该任务的过程记录（歧义上报/主窗口裁决/驳回/干预，请务必遵循最新裁决方向）：\n' + notes
   if (msgs) p += '\n\n该任务的详细消息（裁决答案/干预指令/歧义原文等，请务必遵循）：\n' + msgs
+  // 前轮半成品提示（task-mvbeallq）：有前轮已落定 worker run → 工作区可能躺着前轮未提交的半成品
+  // （残影被补停/池故障重派/驳回重做等场景），先 git status 盘点、能续作就续作，别盲目从零。
+  if (hasSettledWorkerRun(t)) p += '\n\n本卡有前轮 run 的痕迹——先 git status 看工作区有无未提交的半成品改动，能续作就在其基础上续作，别盲目从零推倒重来。'
   if (pack) p += '\n\n' + pack
   // 学习飞轮 v1 软召回（feedbackEnabled 关闭时不出现）：只提示"先查历史教训"，看板绝不代查——
   // 环境里有没有笔记/记忆类工具、教训库长什么样，都是 Worker 自己判断的事（零耦合）。

@@ -530,6 +530,27 @@ test('buildWorkerPrompt: 大文件交付纪律（write 主体+edit 续块）注�
   assert.doesNotMatch(vBody, /大文件交付纪律/)
 })
 
+test('buildWorkerPrompt: 前轮半成品提示——runs[] 有已落定 worker run 才出现（task-mvbeallq 残影治理②）', () => {
+  // 有前轮已落定 worker run → 提示先 git status 盘点续作（残影被补停/池故障重派后工作区可能有半成品）
+  const t1 = mkTask({ id: 'pr1', runs: [{ role: 'worker', id: 'c1', at: '2026-01-01T00:00:00Z', outcome: 'timeout/error', continuable: true }] })
+  const p1 = core.buildWorkerPrompt(t1)
+  assert.match(p1, /本卡有前轮 run 的痕迹——先 git status 看工作区有无未提交的半成品改动/)
+  assert.match(p1, /能续作就在其基础上续作，别盲目从零推倒重来/)
+  // 无前轮 run（runs 缺省/空数组）→ 不出现
+  assert.doesNotMatch(core.buildWorkerPrompt(mkTask({ id: 'pr2' })), /前轮 run 的痕迹/)
+  assert.doesNotMatch(core.buildWorkerPrompt(mkTask({ id: 'pr2b', runs: [] })), /前轮 run 的痕迹/)
+  // 只有 verifier run → 不出现（只看 worker 痕迹）
+  assert.doesNotMatch(core.buildWorkerPrompt(mkTask({ id: 'pr3', runs: [{ role: 'verifier', id: 'v1', outcome: 'completed' }] })), /前轮 run 的痕迹/)
+  // 前轮 worker 仍 running（僵尸/在跑留档）→ 不出现（已落定才算痕迹）
+  assert.doesNotMatch(core.buildWorkerPrompt(mkTask({ id: 'pr4', runs: [{ role: 'worker', id: 'c2', outcome: 'running' }] })), /前轮 run 的痕迹/)
+  // 各种已落定结局都算痕迹（completed / incomplete / stale-closed / terminated）
+  assert.match(core.buildWorkerPrompt(mkTask({ id: 'pr5', runs: [{ role: 'worker', id: 'c3', outcome: 'completed' }] })), /前轮 run 的痕迹/)
+  assert.match(core.buildWorkerPrompt(mkTask({ id: 'pr6', runs: [{ role: 'worker', id: 'c4', outcome: 'incomplete' }] })), /前轮 run 的痕迹/)
+  assert.match(core.buildWorkerPrompt(mkTask({ id: 'pr7', runs: [{ role: 'worker', id: 'c5', outcome: 'stale-closed' }] })), /前轮 run 的痕迹/)
+  // verifier prompt 不含此提示（提示只进 Worker）
+  assert.doesNotMatch(core.buildVerifierPrompt(t1), /前轮 run 的痕迹/)
+})
+
 // ===== 预研上下文段（瘦身分离形态，task-muvjs392）：笔记全文 + 文件清单，不含文件内容本体 =====
 // 形态：### 主窗口调研笔记（全文 ≤8000 字符）\n…\n\n### 调研文件清单（- 路径:L起-L止 — 一句用途）
 test('buildContextPackSection: 空清单返回空串', () => {

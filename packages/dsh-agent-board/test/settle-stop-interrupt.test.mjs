@@ -5,8 +5,9 @@
 //      收尾的唯一汇合点——事故原形「board_verdict 落账 → 卡 resolved → rec 下轮被幽灵回收」即走这里）；
 //   ② reconcileRoot 重启后扫「落定卡 + running 无 endedAt 留档 + 子会话仍活」的孤儿一次性 run 补停；
 //   ③ board_verdict late 分支（卡已落定后收到 verdict）落账后按 actor（= 调用它的 verifier 子会话）补停。
-// 边界（本文件锁定）：continuable worker 豁免——endContinuable 的 interrupt 是「打断 turn、留存会话
-// 供续跑」，语义相反；hook 点位不在本卡范围。
+// 边界（本文件锁定）：hook 点位不在本卡范围；continuable 豁免经 task-mvbeallq 收紧——仅「续跑位真在
+// 本 child 手上」（活跃表新 rec 接管同会话 / resumeTarget 仍指向它）才豁免；continuable 但无续跑位的
+// 落定（completed / noResume / 卡面留档被更新的 run 取代）同样补停，堵「续跑豁免」留下的残影续跑窗。
 // 用例 A/B/C/F 跑在「真实 index.mjs apply(mockCtx)」上（与 integration.test.mjs 同一 harness），
 // 用例 E 走 rpc 直调 harness（verify-timing.test.mjs 同款薄桩）。
 import { test } from 'node:test'
@@ -29,7 +30,7 @@ function stopsOn(env, childId) { return env.interrupts.filter(function (x) { ret
 var APPROVE_TEXT = 'APPROVED\n\n## 验证概要\n验收脚本独立复跑通过\n\n## 核对项\n- npm test 全绿'
 
 // ===== ① 一次性 run 正常结算（completed，run.result 通道）→ 子会话收到 interrupt 补停 =====
-test('① verifier 一次性 run 正常结算 → interrupt 补停恰一枪；既有 dispose/关账不回归；continuable worker 豁免', async () => {
+test('① verifier 一次性 run 正常结算 → interrupt 补停恰一枪；既有 dispose/关账不回归；continuable worker completed 落定亦补停（task-mvbeallq 收紧）', async () => {
   var env = createMockCtx()
   try {
     plugin.apply(env.ctx)
@@ -38,7 +39,8 @@ test('① verifier 一次性 run 正常结算 → interrupt 补停恰一枪；�
     await env.waitFor(function () { return env.continuables.length >= 1 }, 'worker continuable spawn 发生')
     var child = env.continuables[0]
     await env.waitFor(function () { var x = env.task('task-ss-a'); return x && x.status === 'in-progress' ? x : null }, '落卡 in-progress')
-    // Worker 上报通道完成 → verifying（continuable rec 经 settleReportedRun 收尾——此路必须零补停）
+    // Worker 上报通道完成 → verifying（continuable rec 经 settleReportedRun 收尾——completed 落定
+    // 无续跑位，task-mvbeallq 起同样补停，见下方断言）
     var rep = await env.tools.get('board_report').execute({ taskId: 'task-ss-a', kind: 'complete', summary: '实现', changes: '改了 a', selfTest: 'npm test 全绿', diffStat: '' })
     assert.equal(rep.ok, true)
     await env.clock.advance(50)
@@ -52,8 +54,11 @@ test('① verifier 一次性 run 正常结算 → interrupt 补停恰一枪；�
     assert.ok(vrun.disposed, '既有 dispose 收尾不变（补停是增量不是替代）')
     // 结算流程不回归：卡 resolved + verifier run 关账 completed
     await env.waitFor(function () { var x = env.task('task-ss-a'); return x && x.status === 'resolved' && runsOf(x, 'verifier')[0] && runsOf(x, 'verifier')[0].outcome === 'completed' ? x : null }, 'resolved 且 verifier run 关账 completed')
-    // continuable worker 豁免：board_report 收尾（settleReportedRun→settleRunRecord）不对它补枪
-    assert.equal(stopsOn(env, child.childId).length, 0, 'continuable worker 零 interrupt（续跑语义要留会话）')
+    // continuable worker completed 落定 → 无续跑位 → 补停（task-mvbeallq 豁免收紧直证①）：
+    // 上报即完成，会话留着只会残影空转（resumeTarget 只认超时/失败结局，completed 永不续跑）。
+    await env.waitFor(function () { return stopsOn(env, child.childId).length >= 1 }, 'continuable worker completed 落定补停')
+    assert.equal(stopsOn(env, child.childId).length, 1, '恰好一枪（settleReportedRun→settleRunRecord 尾序补停）')
+    assert.equal(stopsOn(env, child.childId)[0].authority.kind, 'ancestor', 'authority 形状同款')
   } finally { await env.cleanup() }
 })
 
@@ -221,9 +226,10 @@ test('③ 守卫：主窗口手调（actor=root）/ unknown / 无 interrupt 能�
   assert.equal(h4.interrupts.length, 0, '无活 root 不补停')
 })
 
-// ===== 边界：continuable worker 结算零新增 interrupt（豁免直证）=====
-// continuable 的结算收尾只有 endContinuable 那一枪（打断 turn、留存会话）；settleRunRecord 末尾的
-// 补停对它必须原样放行——否则续跑语义（sendMessage 冷复活）被杀掉。
+// ===== 边界：continuable worker 失败结算零新增 interrupt（豁免直证，task-mvbeallq 收紧后不回归）=====
+// 失败落定（incomplete）→ resumeTarget 指向本 child = 续跑位在手 → 豁免成立：结算收尾只有
+// endContinuable 那一枪（打断 turn、留存会话）；settleRunRecord 末尾的补停对它必须原样放行——
+// 否则续跑语义（sendMessage 冷复活）被杀掉。
 test('边界：continuable worker 失败结算仅 endContinuable 一枪（settleRunRecord 补停豁免）', async () => {
   var env = createMockCtx()
   try {
@@ -240,5 +246,37 @@ test('边界：continuable worker 失败结算仅 endContinuable 一枪（settle
     await env.waitFor(function () { return stopsOn(env, child.childId).length >= 1 }, 'endContinuable 的留存 interrupt 到达')
     await new Promise(function (r) { setTimeout(r, 50) }) // 给结算链尾留收敛窗口（补停若有漏网必在此时露头）
     assert.equal(stopsOn(env, child.childId).length, 1, '仍只有 endContinuable 一枪：settleRunRecord 的补停对 continuable 原样放行')
+  } finally { await env.cleanup() }
+})
+
+// ===== ① 收紧（task-mvbeallq）：continuable 旧 run 被重派取代（残影形状）→ 幽灵回收收尾补停旧子会话 =====
+// ontology 残影事故形状：池故障后旧 run 已死，主窗口重派的新 Worker 占了认领位与最新留档；旧
+// continuable 子会话若借「continuable 即跳」豁免续跑 = 残影与新 Worker 同批文件互踩。收紧后：
+// resumeTarget 看最新留档（新 run 仍 running）→ 旧 child 无续跑位 → 幽灵回收收尾补停；
+// 新 Worker 的留档/认领位/卡面状态一律不动。
+test('① 收紧：continuable 旧 run 被重派取代（残影形状）→ 幽灵回收收尾补停旧子会话', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-ss-g', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 1 }, 'continuable spawn 发生')
+    var child = env.continuables[0]
+    await env.waitFor(function () { var x = env.task('task-ss-g'); return x && x.status === 'in-progress' && x.claimedBy === child.childId ? x : null }, '落卡 in-progress（旧 Worker 认领）')
+    // 模拟主窗口重派：认领位易主 + 卡面追加一条更新的 worker 留档（新 run 仍 running）
+    env.patchBoard(function (d) {
+      var t = d.tasks.find(function (x) { return x.id === 'task-ss-g' })
+      t.claimedBy = 'child-new-worker'
+      t.runs.push({ role: 'worker', id: 'child-new-worker', at: new Date().toISOString(), outcome: 'running' })
+    })
+    await env.clock.advance(50) // 下一轮 poolCycle：旧 rec 认领位不符 → 幽灵回收 → settleRunRecord 收尾补停
+    await env.waitFor(function () { return stopsOn(env, child.childId).length >= 1 }, '旧子会话残影被补停')
+    assert.equal(stopsOn(env, child.childId).length, 1, '恰好一枪（回收路径无 endContinuable，唯补停）')
+    assert.equal(stopsOn(env, child.childId)[0].authority.kind, 'ancestor', 'authority 形状同款')
+    assert.equal(stopsOn(env, 'child-new-worker').length, 0, '补停目标只打旧残影，不误伤新 Worker')
+    var t = await env.waitFor(function () { var x = env.task('task-ss-g'); return x && x.runs && x.runs[0] && x.runs[0].outcome === 'incomplete' ? x : null }, '旧留档关账 incomplete')
+    assert.equal(t.status, 'in-progress', '卡面状态不被收尾改动（新 Worker 照常干活）')
+    assert.equal(t.claimedBy, 'child-new-worker', '新 Worker 认领位不动')
+    assert.equal(t.runs[t.runs.length - 1].outcome, 'running', '新 run 留档不被误关')
   } finally { await env.cleanup() }
 })

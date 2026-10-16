@@ -643,7 +643,12 @@ test('集成l·terminate竞态②：正常续跑不回归——无 terminate 时
     var rep = await env.tools.get('board_report').execute({ taskId: 'task-l1', kind: 'complete', summary: '续跑交付', changes: '改了 l', selfTest: 'npm test 全绿', diffStat: '' })
     assert.equal(rep.ok, true)
     t = await env.waitFor(function () { var x = env.task('task-l1'); return x && x.status === 'resolved' && x.runs[1].outcome === 'completed' ? x : null }, '续跑轮交付落 resolved 且关账')
-    assert.equal(env.interrupts.length, interruptBase, '正常续跑路径零新增 interrupt（闸门不误伤）')
+    // task-mvbeallq 豁免收紧：completed 落定无续跑位（resumeTarget 只认超时/失败结局）→ settleRunRecord
+    // 尾序补停一枪（残影治理①）；除此之外续跑全程（闸门/落闸/结算）零新增 interrupt——不误伤仍成立。
+    await env.waitFor(function () { return env.interrupts.length >= interruptBase + 1 }, 'completed 落定补停在位')
+    assert.equal(env.interrupts.length, interruptBase + 1, '续跑全程仅补停一枪（completed 无续跑位），闸门不误伤')
+    assert.equal(env.interrupts[env.interrupts.length - 1].childId, child1, '补停目标=续跑轮子会话（打断 turn 不销毁会话）')
+    assert.equal(env.interrupts[env.interrupts.length - 1].authority.kind, 'ancestor', 'authority 形状同款')
   } finally { await env.cleanup() }
 })
 
