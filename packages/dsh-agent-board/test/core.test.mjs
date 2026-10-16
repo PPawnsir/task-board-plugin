@@ -1454,7 +1454,9 @@ test('create-task RPC: 起草 lint 落卡 lintWarnings[]，get-tasks 透出（�
   const h = mkRpcHandlers(board)
   const r = await h['create-task']({ title: '修复 lint 规则', description: '明确描述', touches: ['src/**'], acceptance: 'node --test' })
   assert.equal(r.ok, true)
-  assert.deepEqual(r.task.lintWarnings, [core.TREE_GLOB_LINT])
+  // task-mvbealtf：自动派发形态的建卡返回体 lintWarnings 尾部带派发预警（瞬态）——
+  // 落卡/get-tasks 透出的持久 lintWarnings 不含该行（详情页不残留过期文案）
+  assert.deepEqual(r.task.lintWarnings, [core.TREE_GLOB_LINT, core.DISPATCH_NOW_LINT])
   const got = await h['get-tasks']({})
   assert.deepEqual(got.tasks[0].lintWarnings, [core.TREE_GLOB_LINT])
 })
@@ -1495,6 +1497,101 @@ test('起草 lint 接线：四入口 draftLint 落卡 + 详情 ⚠️ 行 + READ
   const rootReadme = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')
   assert.equal((pkgReadme.match(/lintWarnings\[\]/g) || []).length, 2)  // 包 README 双处（调研门禁 + 三档通用）
   assert.equal((rootReadme.match(/lintWarnings\[\]/g) || []).length, 2) // 根 README 同步双处
+})
+
+// ===== 建卡派发预警（task-mvbealtf / 巡检反馈 n-mvba2neatqoa）=====
+// 自动派发形态的建卡返回体 lintWarnings 尾部追加 DISPATCH_NOW_LINT（瞬态不落卡）；
+// draft/manual/direct/依赖未满足形态不带。纯函数在 core.mjs，双通道经 rpc.mjs 接线。
+
+test('willAutoDispatch: 自动派发形态矩阵（pending+auto+非direct+依赖满足才 true）', () => {
+  const depDone = mkTask({ id: 'dep', status: 'resolved' })
+  const depOpen = mkTask({ id: 'dep', status: 'pending' })
+  // 命中：pending + auto + full/work + 无依赖（或依赖已 resolved）
+  assert.equal(core.willAutoDispatch(mkBoard([]), mkTask({})), true)
+  assert.equal(core.willAutoDispatch(mkBoard([]), mkTask({ pipeline: 'work' })), true)
+  assert.equal(core.willAutoDispatch(mkBoard([depDone]), mkTask({ dependsOn: ['dep'] })), true)
+  // 不命中：draft / manual / direct / 依赖未满足
+  assert.equal(core.willAutoDispatch(mkBoard([]), mkTask({ status: 'draft' })), false)
+  assert.equal(core.willAutoDispatch(mkBoard([]), mkTask({ assignMode: 'manual' })), false)
+  assert.equal(core.willAutoDispatch(mkBoard([]), mkTask({ pipeline: 'direct' })), false)
+  assert.equal(core.willAutoDispatch(mkBoard([depOpen]), mkTask({ dependsOn: ['dep'] })), false)
+  // 异常入参零炸
+  assert.equal(core.willAutoDispatch(null, null), false)
+  assert.equal(core.willAutoDispatch(mkBoard([]), null), false)
+})
+
+test('appendDispatchWarning: 命中换浅拷贝追加预警（持久本体不动），未命中原样返回', () => {
+  const t = mkTask({})
+  t.lintWarnings = [core.TITLE_NO_VERB_LINT]
+  const out = { ok: true, task: t }
+  const r = core.appendDispatchWarning(out, mkBoard([]), t)
+  assert.deepEqual(r.task.lintWarnings, [core.TITLE_NO_VERB_LINT, core.DISPATCH_NOW_LINT])
+  assert.deepEqual(t.lintWarnings, [core.TITLE_NO_VERB_LINT]) // 持久数组不被污染
+  assert.notEqual(r.task, t)                                  // 响应是浅拷贝，本体不换
+  // 未命中：draft 形态原样返回（同一 task 引用，零字段漂移）
+  const td = mkTask({ status: 'draft' })
+  const outd = { ok: true, task: td }
+  assert.equal(core.appendDispatchWarning(outd, mkBoard([]), td).task, td)
+  // 异常入参原样返回
+  assert.equal(core.appendDispatchWarning(null, mkBoard([]), t), null)
+  assert.equal(core.appendDispatchWarning({ ok: false }, mkBoard([]), t).task, undefined)
+})
+
+test('create-task RPC: 自动派发形态返回体带派发预警；draft/direct 形态不带（双形态断言）', async () => {
+  // ① 自动派发形态（缺省 draft=false + auto + 非 direct + 无依赖）→ 返回体带预警，落卡不带
+  let board = mkBoard([])
+  let h = mkRpcHandlers(board)
+  let r = await h['create-task']({ title: '修复预警', description: '明确描述', acceptance: 'node --test' })
+  assert.equal(r.ok, true)
+  assert.ok(r.task.lintWarnings.includes(core.DISPATCH_NOW_LINT))
+  assert.ok(!board.tasks[0].lintWarnings.includes(core.DISPATCH_NOW_LINT)) // 瞬态不落卡
+  // ② draft:true 占位形态 → 不带
+  board = mkBoard([])
+  h = mkRpcHandlers(board)
+  r = await h['create-task']({ title: '修复预警', description: '明确描述', acceptance: 'node --test', draft: true })
+  assert.equal(r.ok, true)
+  assert.ok(!r.task.lintWarnings.includes(core.DISPATCH_NOW_LINT))
+  // ③ direct 管线形态（不进池）→ 不带
+  board = mkBoard([])
+  h = mkRpcHandlers(board)
+  r = await h['create-task']({ title: '解释一下 lint 是什么', description: '说明一下', pipeline: 'direct' })
+  assert.equal(r.ok, true)
+  assert.ok(!(r.task.lintWarnings || []).includes(core.DISPATCH_NOW_LINT))
+  // ④ 依赖未满足形态（不会立即派发）→ 不带
+  board = mkBoard([mkTask({ id: 'dep', title: '修复前置', status: 'pending' })])
+  h = mkRpcHandlers(board)
+  r = await h['create-task']({ title: '修复预警', description: '明确描述', acceptance: 'node --test', dependsOn: ['dep'] })
+  assert.equal(r.ok, true)
+  assert.ok(!r.task.lintWarnings.includes(core.DISPATCH_NOW_LINT))
+})
+
+test('task_create 工具: 自动派发形态返回体带派发预警；draft:true 不带（工具通道接线）', async () => {
+  // ① 自动派发形态 → 带
+  let board = mkBoard([])
+  let h = mkRpcHandlers(board)
+  let r = await h.__tools['task_create'].execute({ title: '修复预警', description: '明确描述', acceptance: 'node --test' })
+  assert.equal(r.ok, true)
+  assert.ok(r.task.lintWarnings.includes(core.DISPATCH_NOW_LINT))
+  assert.ok(!board.tasks[0].lintWarnings.includes(core.DISPATCH_NOW_LINT)) // 落卡不含
+  // ② draft:true → 不带
+  board = mkBoard([])
+  h = mkRpcHandlers(board)
+  r = await h.__tools['task_create'].execute({ title: '修复预警', description: '明确描述', acceptance: 'node --test', draft: true })
+  assert.equal(r.ok, true)
+  assert.ok(!r.task.lintWarnings.includes(core.DISPATCH_NOW_LINT))
+})
+
+test('建卡派发预警接线：双通道调用 + draft 参数说明加重 + core 三件套（源码级断言）', () => {
+  const host = hostSrc()
+  // 双通道同口径：task_create 工具 + create-task RPC 各一次调用
+  assert.equal((host.match(/appendDispatchWarning\(__out, d, t\)/g) || []).length, 1) // task_create 工具
+  assert.equal((host.match(/appendDispatchWarning\(out, d, t\)/g) || []).length, 1)  // create-task RPC
+  // 工具 draft 参数说明加重：点名占位/测试卡请显式 draft:true
+  assert.match(host, /不派发的占位\/测试卡请显式 draft:true/)
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  assert.match(coreSrc, /export function willAutoDispatch\(d, t\)/)
+  assert.match(coreSrc, /export function appendDispatchWarning\(out, d, t\)/)
+  assert.match(coreSrc, /DISPATCH_NOW_LINT = '此卡将立即进入派发池（约 1s 内被 Worker 领取）；想先占位请 draft:true 建草稿'/)
 })
 
 test('epicPrecheck: 字段有无 + 路径存在性（exists 注入），direct/归档子任务不参与', () => {
@@ -3839,7 +3936,8 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
   // depsSatisfied（task-mv9yupm4，spawn 落闸锁内补验依赖）、
   // Verifier 验收员加餐常量（VERIFIER_PERSONA/VERIFIER_TOOL_FILTER，task-muy3gm03）
   assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER \} = core/)
-  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint \} = core/)
+  // rpc.mjs 解构表尾部再随建卡派发预警（appendDispatchWarning，task-mvbealtf）扩展
+  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint, appendDispatchWarning \} = core/)
   // 既有「全子任务 resolved → 父 verifying」逻辑不动（checkParentAuto 仍在 verifyApply 链路；
   // 但其内部已委托共享 helper maybeAutoCloseParent——单一判定口径，core.mjs 不在 hostSrc 清单，单独读）
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')

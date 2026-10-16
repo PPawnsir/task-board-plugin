@@ -1075,6 +1075,35 @@ export function draftLint(t, io) {
   return out
 }
 
+// ===== 建卡派发预警（task-mvbealtf / 巡检反馈 n-mvba2neatqoa）=====
+// 巡检实证：agent 用 task_create 建「纯占位/测试」卡（非 Team 缺省 draft=false）0.145s 即被
+// 派发、烧 219K token 才终止——建卡响应只有验收/调研类 warning，无任何「将立即派发」提示。
+// 此预警只挂建卡返回体（瞬态提示，不落 task.lintWarnings 持久字段：落盘会在详情页长期残留
+// 过期文案，且 update-task 走 draftLint 重算会把它冲掉、两种口径自相矛盾）。
+// 判定只覆盖「建卡即入池」形态（pending + auto + 非 direct + 依赖满足）；touches 锁/池暂停
+// 只可能延迟领取、不取消入池事实，故文案说「将进入派发池」而非「已被领取」。
+export var DISPATCH_NOW_LINT = '此卡将立即进入派发池（约 1s 内被 Worker 领取）；想先占位请 draft:true 建草稿'
+
+// 将自动派发形态判定：pending（非 draft）且 assignMode=auto 且 pipeline≠direct 且依赖已满足。
+// 纯函数零 IO（复用同文件 depsSatisfied）；t 为刚建好的任务对象。
+export function willAutoDispatch(d, t) {
+  if (!d || !t || typeof t !== 'object') return false
+  if (t.status !== 'pending') return false
+  if ((t.assignMode || 'auto') !== 'auto') return false
+  if ((t.pipeline || 'full') === 'direct') return false
+  return depsSatisfied(d, t)
+}
+
+// 建卡返回体追加派发预警（task_create 工具 / create-task RPC 双通道同口径）：
+// 命中自动派发形态时，把响应里的 task 换成「lintWarnings 追加 DISPATCH_NOW_LINT」的浅拷贝——
+// 持久 task 本体不动（响应瞬态提示，见上方注释）；未命中/异常入参原样返回（返回体形态不变）。
+export function appendDispatchWarning(out, d, t) {
+  if (!out || !out.ok || !out.task || !willAutoDispatch(d, t)) return out
+  var base = Array.isArray(t.lintWarnings) ? t.lintWarnings : []
+  out.task = Object.assign({}, t, { lintWarnings: base.concat([DISPATCH_NOW_LINT]) })
+  return out
+}
+
 // ===== touches → suggestedContextFiles 自动桥接（调研遵循·host 三件套 ①）=====
 // 让遵守成为最省力路径：建卡触发「无调研上下文」warning 时，直接把 touches 里的具体文件
 // 提炼成可一键采纳的 contextFiles 建议（响应挂 suggestedContextFiles 字段）。
