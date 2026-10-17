@@ -113,13 +113,13 @@ dsh plugin --profile web remove dsh-agent-board
 
 ## 功能总览
 
-**核心能力一页速览**（`★` 为 v1.7.5–1.8.0 新栈）：
+**核心能力一页速览**（`★` 为 v1.7.5–1.8.1 新栈）：
 
 - **看板**：六列状态流、拖拽 / 多选批量 / 文本·优先级·标签筛选、归档留档、会话隔离
-- **派发**：一次性 Worker / 独立 Verifier、依赖调度（DFS 环检测）、touches 文件级排他、可续跑 Worker、Team 托管、**spawn 落闸锁内重验**（spawnGateOk：claim 占位与落闸决策读同一把锁的同一份快照，terminate 落在 spawn 在途窗口即弃权——同卡同秒双 run 竞态根治）、**高优干预分态**（intervene 无活跃 run 时区分「续跑窗口，干预随续跑注入」与「真无 run」，返回体带 state 字段）
+- **派发**：一次性 Worker / 独立 Verifier、依赖调度（DFS 环检测）、touches 文件级排他、可续跑 Worker、Team 托管、**spawn 落闸锁内重验**（spawnGateOk：claim 占位与落闸决策读同一把锁的同一份快照，terminate/dependsOn 后补 落在 spawn 在途窗口即弃权——竞态与后补依赖双双根治）、**高优干预分态**（intervene 无活跃 run 时区分「续跑窗口，干预随续跑注入」与「真无 run」，返回体带 state 字段）、**建卡派发预警**（将自动派发时 lintWarnings 瞬态提示「约 1s 内被领取，想占位请 draft:true」）
 - **验收治理** `★`：硬性验收脚本独立复跑、驳回全量带回重派、Verifier 自测指南（userTest）、风险队列「待你过目」、验收时序防护（Verifier 在场时主窗口抢批需显式 `force:true`；有活跃 run 的卡禁止归档；Verifier 迟到结论落 `lateVerdict` 留痕+迟到驳回直投告警，不再静默吞掉）
 - **度量** `★`：Token 消耗（总量 / 有效 / 缓存读，按模型·按任务·按日）+ 记分卡（模型表现 / 质量趋势 / 驳回聚类）
-- **可运维性** `★`：运行时健康自检（派发冻结 / 结算停滞告警）、异常驱动审视（风险队列 / 质量异动告警 / 批次摘要）、起草 lint、数据安全（原子写盘 / 腐坏隔离 / 自动 salvage）、**僵尸 run 留档清扫**（host 重启后「落定卡上的 running 无 endedAt 留档」在派发周期自动关账 `stale-closed` + 清认领位，归档门禁不再被幻影 run 永久拦截）
+- **可运维性** `★`：运行时健康自检（派发冻结 / 结算停滞告警）、异常驱动审视（风险队列 / 质量异动告警 / 批次摘要）、起草 lint、数据安全（原子写盘 / 腐坏隔离 / 自动 salvage）、**僵尸 run 留档清扫**（host 重启后「落定卡上的 running 无 endedAt 留档」在派发周期自动关账 `stale-closed` + 清认领位，归档门禁不再被幻影 run 永久拦截）、**子会话生命周期收口**（一次性 run 落定/迟到 verdict 落账后主动 interrupt 子会话——「结算≠停止」空转根治；continuable 收紧为「续跑位真在本 child 手上」才豁免，残影 Worker 无处藏身）、**terminate 三保险**（no-rec 也按认领位盲杀补刀 + interrupt 失败 err 级可见化 + `hold:true` 原子「终止+转手动」）、**配置审计**（set-board-config 成功写入落板级 configLog {key,from,to,actor,at} 截尾 50 条；模型下拉两段式选中≠保存）
 - **学习反馈**：候选教训信号 → 主窗口沉淀（零耦合，不碰任何笔记 / 记忆工具 API）
 
 以下各节是完整规格。
@@ -189,6 +189,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **硬性验收**：`acceptance` 字段写验收脚本命令，Worker 必须实际运行、Verifier 必须独立复跑
 - **git 纪律红线**：Worker prompt 写死禁止还原命令（`git checkout` / `git restore` / `git reset --hard` / `git clean` 等——会冲掉并行 Worker 与你自己的未提交在途编辑）；只改自己写的文件、别人改了别的文件与你无关，确实需要干净基线时走歧义上报（`board_report` kind=escalate）由主窗口裁决；**提交只允许精确路径 `git add`**（本卡 `touches` 声明的文件，或逐一列出明确改过的文件路径），禁止 `git add -A` / `git add .` / `git add 目录`——并行 Worker 共享暂存区，宽泛 add 会把别卡在途编辑卷进 commit（实证 n-mv6xntg1p6i5：三起暂存吞并）
 - **大文件交付纪律**：Worker prompt 写死分块写入指引——单文件交付预估 >8KB（或 spec 含全量文案/长代码）时禁止单次 `write` 写入全量（单次超长输出会撞模型输出上限、上下文耗尽零产出），先 `write` 落主体骨架、再用 `edit` 追加续块（每块 ≤4KB）逐块落地
+- **前轮半成品提示**：卡片 runs[] 含已落定 worker run 时，Worker prompt 追加「先 `git status` 看工作区有无未提交半成品，能续作就续作，别盲目从零」——重发/重派场景的旧产物先盘点再决定
 - **文件级排他**：`touches` 声明本任务要改的文件/glob（如 `["src/**", "README.md"]`）；持有文件锁的任务（`in-progress`/`verifying`）与候选 touches 重叠就跳过本轮（卡片显示 `🔒 等文件释放`，详情页列出在等谁），**锁随工作态**：状态流转到已完成（`resolved`）即放锁，`cancelled`/归档同样不再持锁（归档回归纯收纳动作、不再是释放点）——锁只护「正在写」的阶段，「验收后-提交前」的窗口期由主窗口「回执到即提交」纪律 + 史诗 post-hook 承接，不用长持锁把整批串行化。避免并行 Worker 改同一批文件互踩；手动「派发」遇到冲突会列出冲突任务，确认后才以 `force` 越权派发
 - **里程碑进展通道**：Worker 每完成一个可验证的里程碑，可调用 `board_report`（`kind: "progress"`，`question` 写一行进展摘要 ≤200 字符）上报——进行中的卡片显示「📈 最近进展 · 相对时间」（覆盖式只留最新一条），详情页消息流保留全部 progress 条目
 - **防表演式汇报**：进展契约只写在 Worker prompt 里、且要求「有实际产物/结论才报」（禁止定时汇报）；progress **静默不通知主窗口**（不进回执聚合），也不写 `history` 流转记录，避免刷屏
