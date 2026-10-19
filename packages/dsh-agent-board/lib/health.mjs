@@ -211,6 +211,8 @@ export function computeRuntimeHealthHints(board, rt, opts) {
   // 主窗口 force 抢批后 Verifier 迟到驳回：err 级 hint（sticky 不 TTL——host 重启才清），
   // 与 corruptNote 同款「进行中的事故优先」语义。rt.lateRejectNote 由 board_verdict/settleVerifier
   // 迟到落账路径写入（dispatch.mjs poolHealthFor / rpc.mjs state.poolHealth）。
+  // 只 rejected 亮（三连根修②⑤，task-mvf7nve8）：approved 迟到结论走 notice 级「✅ 迟到复核」
+  // 直投，绝不写 lateRejectNote——err banner 不为「维持原判」误亮。
   var lr = rt.lateRejectNote
   if (lr && typeof lr === 'object' && lr.taskId) {
     out.hints.push({ level: 'err', text: '迟到驳回：' + String(lr.taskId) + ' 你批早了但 Verifier 验出红的' })

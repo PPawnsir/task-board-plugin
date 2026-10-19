@@ -205,5 +205,17 @@ export function createNotify(ctx, state, deps) {
       } catch (e) { console.error('[task-board] late reject notify failed:', String(e)) }
     }
 
-    return { maybeNotify: maybeNotify, notifyTaskDone: notifyTaskDone, notifyDispatched: notifyDispatched, pushSysNote: pushSysNote, notifyBoardCorrupt: notifyBoardCorrupt, notifyLateReject: notifyLateReject }
+    // ===== 迟到复核通知（迟到 verdict 三连根修②，task-mvf7nve8）：approved 迟到结论 → notice 级直投同通道 =====
+    // 与 notifyLateReject 同纪律（直投 owner、不走开关/聚合），但标题正文如实——「维持原判（全过追认）」，
+    // 不亮 err 级「迟到驳回」（此前 undefined verdict 让全过卡被记驳回的事故形态就此绝迹）。
+    function notifyLateApprove(sid, t) {
+      var root = rootForSession(sid)
+      if (!root) return
+      var lv = (t && t.lateVerdict) || {}
+      try {
+        root.followup(makeMsg('✅ [任务看板] 迟到复核：' + (t.id || '') + ' 维持原判（全过追认）\n\n任务: ' + String(t.title || '') + ' (' + (t.id || '') + ')\n\nVerifier 结论（迟到）: ' + String(lv.summary || '(无)') + '\n核对项: ' + String(lv.checks || '(无)') + '\n\n卡已落定，本次迟到结论与之一致，仅留痕详情页「迟到 Verifier 结论」块。', 'notice', '迟到复核: ' + (t.id || '')))
+      } catch (e) { console.error('[task-board] late approve notify failed:', String(e)) }
+    }
+
+    return { maybeNotify: maybeNotify, notifyTaskDone: notifyTaskDone, notifyDispatched: notifyDispatched, pushSysNote: pushSysNote, notifyBoardCorrupt: notifyBoardCorrupt, notifyLateReject: notifyLateReject, notifyLateApprove: notifyLateApprove }
 }

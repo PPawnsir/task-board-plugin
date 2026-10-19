@@ -71,6 +71,7 @@ export function apply(ctx) {
       withTimeout: session.withTimeout, runsFor: session.runsFor, feedbackOn: session.feedbackOn, epicSplitOn: session.epicSplitOn,
       pushSysNote: notify.pushSysNote, maybeNotify: notify.maybeNotify, notifyTaskDone: notify.notifyTaskDone,
       notifyDispatched: notify.notifyDispatched, notifyLateReject: notify.notifyLateReject,
+      notifyLateApprove: notify.notifyLateApprove, // 迟到复核分态通知（三连根修②，task-mvf7nve8）
     })
     storeDeps.poolCycle = dispatch.poolCycle // 晚绑定收口
     // 僵尸 epic 出清配套（反馈 n-mutma3mmwceq）：archive-task 门禁的活性判定。
@@ -82,6 +83,7 @@ export function apply(ctx) {
       rootForSession: session.rootForSession, deriveWorkMode: session.deriveWorkMode, runsFor: session.runsFor,
       rt: store.rt, mutateLocked: store.mutateLocked,
       maybeNotify: notify.maybeNotify, notifyTaskDone: notify.notifyTaskDone, notifyLateReject: notify.notifyLateReject,
+      notifyLateApprove: notify.notifyLateApprove, // 迟到复核分态通知（三连根修②，task-mvf7nve8）
       pushSysNote: notify.pushSysNote, sessionCwd: session.sessionCwd, // 调研门禁③：epic 发布预检汇总投递 + 预研路径相对解析根
       spawnOneShot: dispatch.spawnOneShot, accumulateRunUsage: dispatch.accumulateRunUsage, readContextPack: dispatch.readContextPack,
       closeRunHistory: dispatch.closeRunHistory, // 手动终止 run 关账（doTerminate 状态无关清理，task-mv1pqy27）

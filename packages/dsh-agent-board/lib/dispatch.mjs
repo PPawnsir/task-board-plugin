@@ -7,7 +7,7 @@ import { statSync } from 'node:fs'
 import * as core from './core.mjs'
 import { readRunUsage, findRunLog, readLogBytes, readLogFrames } from './usage.mjs'
 import { splitRuleOf, pushRejectLesson } from './policy.mjs'
-const { ah, cfg, claimApply, resolveApply, verifyApply, lateVerdictApply, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER } = core
+const { ah, cfg, claimApply, resolveApply, verifyApply, lateVerdictApply, lateNoticeFp, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER } = core
 
 export function createDispatch(ctx, state, deps) {
     // 宿主 fs 句柄与「会话工作区解析根」随预研注入瘦身退役（task-muvjs392）：派发侧不再读盘——
@@ -23,6 +23,7 @@ export function createDispatch(ctx, state, deps) {
     var epicSplitOn = deps.epicSplitOn
     var pushSysNote = deps.pushSysNote, maybeNotify = deps.maybeNotify, notifyTaskDone = deps.notifyTaskDone
     var notifyLateReject = (typeof deps.notifyLateReject === 'function') ? deps.notifyLateReject : null // 迟到驳回 err 级通知（未接线 → 静默跳过）
+    var notifyLateApprove = (typeof deps.notifyLateApprove === 'function') ? deps.notifyLateApprove : null // 迟到复核 notice 级通知（三连根修②，未接线 → 静默跳过）
     // 派发即回执：spawn 成功后入 45s 聚合队列的「🚀 已派发」区（老 host 未注入 → 静默跳过）
     var notifyDispatched = deps.notifyDispatched
     // 共享状态别名（本体由 index.mjs apply 统一构建并逐模块注入）
@@ -997,6 +998,7 @@ export function createDispatch(ctx, state, deps) {
             var lapproved = lvm[1].toUpperCase() === 'APPROVED'
             var lsecs = parseSections(ltrim)
             var lr = lateVerdictApply(t, lapproved ? 'approved' : 'rejected', lsecs.verifySummary || ltrim.slice(0, 600), lsecs.checks || '', lsecs.userTest, new Date().toISOString(), String(rec.id), cfg(d).verifyUserGuide)
+            if (lr && lr.invalid) return { task: t, already: true } // 三连根修①：非法 verdict 零落账（防御——本路径 verdict 恒来自正则解析）
             return { task: t, late: true, lateRejected: lr.lateRejected && lr.wasApproved }
           }
           return { task: t, already: true }
@@ -1044,11 +1046,19 @@ export function createDispatch(ctx, state, deps) {
       if (!result) return
       // already=true：工具通道（board_verdict）已推进状态并已发回执，settle 只负责 dispose，不再重复通知
       if (result.already) return
-      // 迟到驳回（验收时序三洞 ③）：verdict=rejected 且卡已 approved → err 级通知 + healthHint
+      // 迟到通知分态（三连根修②③，task-mvf7nve8）：rejected 且卡已 approved → err 级「🚨 迟到驳回」+
+      // healthHint（banner 只 rejected 亮）；approved → notice 级「✅ 迟到复核：维持原判」。
+      // 同指纹（taskId+by+verdict，poolHealth.lastLateNotice）已投过 → 跳过，零重复通知。
       if (result.late) {
+        var __phL = poolHealthFor(sid)
+        var __fpL = lateNoticeFp(result.task)
+        var __onceL = __phL.lastLateNotice !== __fpL
+        if (__onceL) __phL.lastLateNotice = __fpL
         if (result.lateRejected) {
-          if (notifyLateReject) notifyLateReject(sid, result.task)
-          poolHealthFor(sid).lateRejectNote = { taskId: result.task.id, at: Date.now() }
+          __phL.lateRejectNote = { taskId: result.task.id, at: Date.now() } // banner 幂等 sticky，不受去重闸影响
+          if (__onceL && notifyLateReject) notifyLateReject(sid, result.task)
+        } else if (__onceL && notifyLateApprove && result.task.lateVerdict && result.task.lateVerdict.verdict === 'approved') {
+          notifyLateApprove(sid, result.task)
         }
         return
       }

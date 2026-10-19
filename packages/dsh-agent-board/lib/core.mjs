@@ -602,6 +602,22 @@ export function pushRejection(t, summary, checks, at, by) {
   return true
 }
 
+// ===== verdict 入参校验（迟到 verdict 三连根修①，task-mvf7nve8）=====
+// 事故实证：Verifier 调 board_verdict 漏带 verdict 字段，undefined 直写 lateVerdict/verification，
+// 被 lateRejected=!approved 当驳回 → err 级「迟到驳回」误报 + 重复投递。board_verdict 工具通道与
+// late 落账双闸：缺失/非 'approved'|'rejected' 一律拒收（返回错误串），调用方不落账不通知——
+// 模型拿到错误会带正确字段重调。主窗口 task_verify/verify-task 人工通道不经此闸（schema 已枚举约束）。
+export function verdictErr(verdict) {
+  if (verdict === 'approved' || verdict === 'rejected') return null
+  return 'verdict 必须是 approved 或 rejected（收到：' + String(verdict) + '），请带正确字段重调'
+}
+// 迟到通知同指纹去重（三连根修③）：指纹 = taskId+by+verdict，rpc/dispatch 两调用点共用，
+// 存 poolHealth[sid].lastLateNotice（sticky 内存级，host 重启自然清）——同指纹二次落账零重复通知。
+export function lateNoticeFp(t) {
+  var lv = (t && t.lateVerdict) || {}
+  return String((t && t.id) || '') + '|' + String(lv.by || '') + '|' + String(lv.verdict || '')
+}
+
 // ===== 迟到 verdict 落账（验收时序三洞 ③，用户 n-mv0ebretgv1o）=====
 // 事故：主窗口在 Verifier 活跃期 task_verify 抢批（早 0.4s）+ 归档，Verifier 的独立结论与自测
 // 指南被静默吞掉、无回执。修法：verifier 结论（工具通道 board_verdict / 文本通道 settleVerifier）
@@ -612,6 +628,8 @@ export function pushRejection(t, summary, checks, at, by) {
 // 返回 { lateRejected, wasApproved }：调用方据此决定要不要发 err 级通知 + healthHint
 // （I/O 留在调用方，core 保持零依赖）。wasApproved 必须先算——下方可能覆写 t.verification。
 export function lateVerdictApply(t, verdict, summary, checks, userTest, at, by, verifyUserGuideOn) {
+  var vErr = verdictErr(verdict) // 三连根修①：非法 verdict 零落账（undefined 不再被当驳回）
+  if (vErr) return { ok: false, invalid: true, error: vErr, lateRejected: false, wasApproved: false }
   var approved = verdict === 'approved'
   var wasApproved = t.status === 'resolved' || (t.status === 'archived' && !!(t.verifiedAt || t.verifiedBy || (t.verification && t.verification.verdict === 'approved')))
   t.lateVerdict = { verdict: verdict, summary: summary || '', checks: checks || '', at: at || new Date().toISOString(), by: by || 'system', note: '迟到结论：卡在落定后收到' }

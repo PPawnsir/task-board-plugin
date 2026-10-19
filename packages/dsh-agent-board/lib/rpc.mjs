@@ -14,7 +14,7 @@ import { makeMsg } from './notify.mjs'
 import { computeHealthHints, computeRuntimeHealthHints } from './health.mjs'
 import { isFullSessionId } from './session.mjs' // 幻影板防线口径（纯函数，与 policy.mjs 直引同例）
 import { previewCleanup, runCleanup, SKIP_REASON_TEXT } from './cleanup.mjs' // 已结算会话清理（预览+执行）
-const { ah, isb, gsb, gpt, vt, validateDeps, classifyPipeline, cfg, claimCheck, claimApply, resolveApply, verifyApply, lateVerdictApply, archiveApply, cancelApply, maybeAutoCloseParent, PRIO_RANK, touchesConflict, holdsFiles, boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint, appendDispatchWarning } = core
+const { ah, isb, gsb, gpt, vt, validateDeps, classifyPipeline, cfg, claimCheck, claimApply, resolveApply, verifyApply, lateVerdictApply, verdictErr, lateNoticeFp, archiveApply, cancelApply, maybeAutoCloseParent, PRIO_RANK, touchesConflict, holdsFiles, boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint, appendDispatchWarning } = core
 
 function defineTool(options) {
   var userExecute = options.execute
@@ -84,6 +84,7 @@ export function createRpc(ctx, state, deps) {
     }
     var maybeNotify = deps.maybeNotify, notifyTaskDone = deps.notifyTaskDone
     var notifyLateReject = (typeof deps.notifyLateReject === 'function') ? deps.notifyLateReject : null // 迟到驳回 err 级通知（未接线 → 静默跳过）
+    var notifyLateApprove = (typeof deps.notifyLateApprove === 'function') ? deps.notifyLateApprove : null // 迟到复核 notice 级通知（三连根修②，未接线 → 静默跳过）
     var spawnOneShot = deps.spawnOneShot, accumulateRunUsage = deps.accumulateRunUsage, readContextPack = deps.readContextPack
     // 手动终止的 run 关账（outcome:'terminated'，task-mv1pqy27 死结窗口根修）：与状态无关，
     // 凡 terminate 命中该卡的 run 就关。未注入（老宿主/测试桩）→ 静默跳过，行为与改造前逐字一致。
@@ -130,6 +131,17 @@ export function createRpc(ctx, state, deps) {
       if (!state.poolHealth) state.poolHealth = {}
       var ph = state.poolHealth[sid] || (state.poolHealth[sid] = { bornAt: Date.now() })
       ph.lateRejectNote = { taskId: taskId, at: Date.now() }
+    }
+    // 迟到通知同指纹去重（三连根修③，task-mvf7nve8）：指纹（taskId+by+verdict）记入
+    // poolHealth[sid].lastLateNotice（sticky 内存级），已投过返回 false——同一结论经 RPC+
+    // settle 兜底+模型重调多次落账时零重复通知。
+    function lateNoticeOnce(sid, t) {
+      if (!state.poolHealth) state.poolHealth = {}
+      var ph = state.poolHealth[sid] || (state.poolHealth[sid] = { bornAt: Date.now() })
+      var fp = lateNoticeFp(t)
+      if (ph.lastLateNotice === fp) return false
+      ph.lastLateNotice = fp
+      return true
     }
     // 终止未生效 healthHint 落点（terminate 假杀根修②，task-mv8jfu1v，事故实证 n-mv8cfndmvfcv）：
     // doTerminate 的 interrupt 抛错/无中断能力/补杀核验未过时写。与 lateRejectNote 同款 sticky——
@@ -911,6 +923,11 @@ export function createRpc(ctx, state, deps) {
     } }))
     ctx.tools.register(defineTool({ name: 'board_verdict', description: '[任务看板 Verifier 专用] 提交验收结论。verdict=approved/rejected；summary=测试概要；checks=逐条核对证据。userTest 可选：自测指南四字段 {gist=一句人话, steps=[用户操作步骤], expect=预期看到什么, tier=ui|metric|internal}（板级开关 verifyUserGuide 开启时随结论一并提交；tier=internal 时 steps 可空、expect 写「验证靠测试套件」）。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, verdict: { type: 'string', enum: ['approved', 'rejected'] }, summary: { type: 'string' }, checks: { type: 'string' }, userTest: { type: 'object', properties: { gist: { type: 'string' }, steps: { type: 'array', items: { type: 'string' } }, expect: { type: 'string' }, tier: { type: 'string', enum: ['ui', 'metric', 'internal'] } } } }, required: ['taskId', 'verdict'] }, output: jo(), execute: async function (args) {
       var sid = toolSessionId(); var actor = getActorId()
+      // 入参校验（三连根修①，task-mvf7nve8）：verdict 缺失/非法 → 拒收带指引，不落账不通知
+      // （实证：Verifier 漏带 verdict，undefined 落账被 lateRejected 当驳回 → err 误报+重复投递）。
+      // 只闸本工具的 verifier 通道与 late 分支；主窗口 task_verify/verify-task 人工通道不受此限。
+      var __vErr = verdictErr(args.verdict)
+      if (__vErr) return { ok: false, error: __vErr }
       var approved = args.verdict === 'approved'
       var result = await mutateLocked(sid, function (d) {
         var t = d.tasks.find(function (x) { return x.id === args.taskId })
@@ -948,10 +965,17 @@ export function createRpc(ctx, state, deps) {
         var bt = result.task
         if ((bt.rejectCount || 0) < 3) { await mutateLocked(sid, function (d) { var t2 = d.tasks.find(function (x) { return x.id === bt.id }); if (t2 && t2.status === 'in-progress') { t2.status = 'pending'; t2.claimedBy = null; t2.claimedAt = null }; return t2 }, true) }
       }
-      // 迟到驳回（验收时序三洞 ③）：verdict=rejected 且卡已 approved → err 级通知（回执直投 owner，不走开关）+ healthHint
-      if (result && result.ok && result.late && result.lateRejected) {
-        if (notifyLateReject) notifyLateReject(sid, result.task)
-        markLateRejectHealth(sid, result.task.id)
+      // 迟到通知分态（三连根修②③，task-mvf7nve8）：verdict=rejected 且卡已 approved → err 级
+      // 「🚨 迟到驳回」直投 + healthHint（banner 只 rejected 亮）；verdict=approved → notice 级
+      // 「✅ 迟到复核：维持原判（全过追认）」直投同通道。同指纹（taskId+by+verdict）已投过 → 跳过。
+      if (result && result.ok && result.late) {
+        var __once = lateNoticeOnce(sid, result.task)
+        if (result.lateRejected) {
+          markLateRejectHealth(sid, result.task.id) // banner 幂等 sticky，不受去重闸影响
+          if (__once && notifyLateReject) notifyLateReject(sid, result.task)
+        } else if (__once && notifyLateApprove && result.task.lateVerdict && result.task.lateVerdict.verdict === 'approved') {
+          notifyLateApprove(sid, result.task)
+        }
       }
       // ===== 结算≠停止根修③（task-mv8wuznb，实证：verifier 迟到交付 verdict 落账后又空转 8h）=====
       // 迟到落账时该 verifier 的活跃 rec 通常早已被幽灵回收（卡落定即失活），settleRunRecord 的补停
