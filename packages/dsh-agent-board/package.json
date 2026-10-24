@@ -63,7 +63,7 @@
   },
   "peerDependencies": {
     "react": ">=18",
-    "@deepseek-ai/dsh": "^0.1.7 || 0.2.0-rc.2 || ^0.2.0"
+    "@deepseek-ai/dsh": "^0.1.7 || 0.2.0-rc.2 || 0.2.1-rc.2 || ^0.2.0"
   },
   "license": "MIT"
 }
