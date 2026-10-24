@@ -113,11 +113,11 @@ dsh plugin --profile web remove dsh-agent-board
 
 ## 功能总览
 
-**核心能力一页速览**（`★` 为 v1.7.5–1.8.1 新栈）：
+**核心能力一页速览**（`★` 为 v1.7.5–1.8.2 新栈）：
 
 - **看板**：六列状态流、拖拽 / 多选批量 / 文本·优先级·标签筛选、归档留档、会话隔离
 - **派发**：一次性 Worker / 独立 Verifier、依赖调度（DFS 环检测）、touches 文件级排他、可续跑 Worker、Team 托管、**spawn 落闸锁内重验**（spawnGateOk：claim 占位与落闸决策读同一把锁的同一份快照，terminate/dependsOn 后补 落在 spawn 在途窗口即弃权——竞态与后补依赖双双根治）、**高优干预分态**（intervene 无活跃 run 时区分「续跑窗口，干预随续跑注入」与「真无 run」，返回体带 state 字段）、**建卡派发预警**（将自动派发时 lintWarnings 瞬态提示「约 1s 内被领取，想占位请 draft:true」）
-- **验收治理** `★`：硬性验收脚本独立复跑、驳回全量带回重派、Verifier 自测指南（userTest）、风险队列「待你过目」、验收时序防护（Verifier 在场时主窗口抢批需显式 `force:true`；有活跃 run 的卡禁止归档；Verifier 迟到结论落 `lateVerdict` 留痕+迟到驳回直投告警，不再静默吞掉）
+- **验收治理** `★`：硬性验收脚本独立复跑、驳回全量带回重派、Verifier 自测指南（userTest）、风险队列「待你过目」、验收时序防护（Verifier 在场时主窗口抢批需显式 `force:true`；有活跃 run 的卡禁止归档；Verifier 迟到结论落 `lateVerdict` 留痕+直投告警）、**迟到 verdict 三保险**（①入参校验：`verdict` 非 approved/rejected 拒收并返回重调指引——漏带字段不再被当驳回落账；②通知分态：approved 迟到=「✅ 迟到复核·全过追认」notice 级，🚨「迟到驳回」只留给真 rejected；③指纹去重：同 taskId+by+verdict 只投一次，重复落账零重复通知）
 - **度量** `★`：Token 消耗（总量 / 有效 / 缓存读，按模型·按任务·按日）+ 记分卡（模型表现 / 质量趋势 / 驳回聚类）
 - **可运维性** `★`：运行时健康自检（派发冻结 / 结算停滞告警）、异常驱动审视（风险队列 / 质量异动告警 / 批次摘要）、起草 lint、数据安全（原子写盘 / 腐坏隔离 / 自动 salvage）、**僵尸 run 留档清扫**（host 重启后「落定卡上的 running 无 endedAt 留档」在派发周期自动关账 `stale-closed` + 清认领位，归档门禁不再被幻影 run 永久拦截）、**子会话生命周期收口**（一次性 run 落定/迟到 verdict 落账后主动 interrupt 子会话——「结算≠停止」空转根治；continuable 收紧为「续跑位真在本 child 手上」才豁免，残影 Worker 无处藏身）、**terminate 三保险**（no-rec 也按认领位盲杀补刀 + interrupt 失败 err 级可见化 + `hold:true` 原子「终止+转手动」）、**配置审计**（set-board-config 成功写入落板级 configLog {key,from,to,actor,at} 截尾 50 条；模型下拉两段式选中≠保存）
 - **学习反馈**：候选教训信号 → 主窗口沉淀（零耦合，不碰任何笔记 / 记忆工具 API）
