@@ -228,6 +228,35 @@ export function createDispatch(ctx, state, deps) {
       } catch (_) {}
     }
 
+    // ===== 新旧宿主 spawn 双兼容（DSH v0.2.1 宿主 API 重构实证 2026-10-24）=====
+    // v0.2.1 把 subagents.start(provider,req) 与 subagents.startContinuable(spec) 统一替换为
+    // subagents.startActivation(spec)：
+    //   spec = { provider, label, childId?, request: Omit<SubagentStartRequest,'label'|'signal'>, signal,
+    //            delivery: 'parent'|'caller' } → 返回 SubagentActivation { childId, messageId?, result, dispose() }
+    // delivery 语义：'parent'=子会话结算时向父会话投递结果消息（continuable 的「完成留言」旧行为）；
+    //               'caller'=只回 result promise、不惊动父会话（一次性 run 的旧行为）。
+    // 能力探测一次性缓存：同一 host 生命周期内契约不变；老宿主无 startActivation → 走旧路径。
+    var _hasActivationApi = null
+    function hasActivationApi(subagents) {
+      if (_hasActivationApi === null) _hasActivationApi = !!(subagents && typeof subagents.startActivation === 'function')
+      return _hasActivationApi
+    }
+    // Activation → 旧 SubagentRun 同形适配 {id,result,dispose}：一次性路径下游消费面（settleRun/
+    // armTimeouts/资源清理）零改动。
+    function activationAsRun(act) {
+      return { id: act.childId, result: act.result, dispose: function () { return act.dispose() } }
+    }
+    // 新契约 request 组装（Omit<label|signal>）：只带 prompt/parent/agentOptions/cwd。
+    // persona/toolFilter 不在新契约面（v0.2.1 将其收进 agentPreset 体系——spawn-in-process 源码实证
+    // 「The selected preset owns persona and tool composition」），新路径不携带；
+    // 老路径仍挂在 req 上由旧 provider 消费，两条路径各自完整。
+    function activationRequestOf(req) {
+      var r = { prompt: req.prompt, parent: req.parent }
+      if (req.agentOptions) r.agentOptions = req.agentOptions
+      if (req.cwd) r.cwd = req.cwd
+      return r
+    }
+
     async function spawnOneShot(sid, t, role) {
       var subagents = ctx.subagents; if (!subagents) return null
       // 兜底保留（真异常时有用）：poolCycle 入口已有 root 存活早闸门，正常派发路径不会到达这里；
@@ -287,11 +316,23 @@ export function createDispatch(ctx, state, deps) {
       var childId = ''
       try {
         if (useContinuable) {
-          var cs = await subagents.startContinuable({ provider: providerName, label: req.label, request: req, signal: req.signal })
-          childId = String(cs && cs.childId || '')
-          if (!childId) throw new Error('startContinuable 未返回 childId')
+          if (hasActivationApi(subagents)) {
+            // 新契约：continuable 走 startActivation delivery='parent'（结算留言父会话，旧 startContinuable 行为）
+            var act0 = await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'parent' })
+            childId = String(act0 && act0.childId || '')
+            if (!childId) throw new Error('startActivation 未返回 childId')
+          } else {
+            var cs = await subagents.startContinuable({ provider: providerName, label: req.label, request: req, signal: req.signal })
+            childId = String(cs && cs.childId || '')
+            if (!childId) throw new Error('startContinuable 未返回 childId')
+          }
         } else {
-          run = await subagents.start(providerName, req)
+          if (hasActivationApi(subagents)) {
+            // 新契约：一次性走 startActivation delivery='caller'（只回 result，不惊动父会话），适配成旧 run 形状
+            run = activationAsRun(await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'caller' }))
+          } else {
+            run = await subagents.start(providerName, req)
+          }
         }
       } catch (e) {
         // 外挂参数回退（既有模型覆盖通道，task-muy3gm03 起并入 verifier 加餐 persona/toolFilter）：
@@ -302,9 +343,17 @@ export function createDispatch(ctx, state, deps) {
           delete req.agentOptions; delete req.persona; delete req.toolFilter
           try {
             if (useContinuable) {
-              var cs2 = await subagents.startContinuable({ provider: providerName, label: req.label, request: req, signal: req.signal })
-              childId = String(cs2 && cs2.childId || '')
-              if (!childId) throw new Error('startContinuable 未返回 childId')
+              if (hasActivationApi(subagents)) {
+                var act1 = await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'parent' })
+                childId = String(act1 && act1.childId || '')
+                if (!childId) throw new Error('startActivation 未返回 childId')
+              } else {
+                var cs2 = await subagents.startContinuable({ provider: providerName, label: req.label, request: req, signal: req.signal })
+                childId = String(cs2 && cs2.childId || '')
+                if (!childId) throw new Error('startContinuable 未返回 childId')
+              }
+            } else if (hasActivationApi(subagents)) {
+              run = activationAsRun(await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'caller' }))
             } else run = await subagents.start(providerName, req)
           } catch (e2) { console.error('[task-board] spawn ' + role + ' failed:', String(e2)); return null }
         } else { console.error('[task-board] spawn ' + role + ' failed:', String(e)); return null }
