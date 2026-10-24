@@ -113,7 +113,7 @@ dsh plugin --profile web remove dsh-agent-board
 
 ## 功能总览
 
-**核心能力一页速览**（`★` 为 v1.7.5–1.8.3 新栈）：
+**核心能力一页速览**（`★` 为 v1.7.5–1.8.4 新栈）：
 
 - **看板**：六列状态流、拖拽 / 多选批量 / 文本·优先级·标签筛选、归档留档、会话隔离
 - **派发**：一次性 Worker / 独立 Verifier、依赖调度（DFS 环检测）、touches 文件级排他、可续跑 Worker、Team 托管、**spawn 落闸锁内重验**（spawnGateOk：claim 占位与落闸决策读同一把锁的同一份快照，terminate/dependsOn 后补 落在 spawn 在途窗口即弃权——竞态与后补依赖双双根治）、**高优干预分态**（intervene 无活跃 run 时区分「续跑窗口，干预随续跑注入」与「真无 run」，返回体带 state 字段）、**建卡派发预警**（将自动派发时 lintWarnings 瞬态提示「约 1s 内被领取，想占位请 draft:true」）、**宿主 spawn API 双兼容**（v0.2.1 宿主把 `subagents.start/startContinuable` 统一重构为 `startActivation(spec)`——能力探测自动选路：新契约按 `delivery` 语义分发（continuable=`parent` 结算留言 / 一次性=`caller` 只回 result），Activation 适配旧 run 形状下游零改动；老宿主逐字走旧双路径）+ **continuable 结算兜底臂**（`activation.result` 在子会话被宿主拆除时落定即接失败结算——rate-limit/模型崩溃的死子不再挂到硬超时）
