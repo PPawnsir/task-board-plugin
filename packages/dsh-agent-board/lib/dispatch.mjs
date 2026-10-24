@@ -314,11 +314,13 @@ export function createDispatch(ctx, state, deps) {
       var useContinuable = role === 'worker' && c.workerContinuable !== false
       var run
       var childId = ''
+      var actForSettle = null // 新契约 activation 留存（continuable 结算兜底臂用，见 rec 创建后）
       try {
         if (useContinuable) {
           if (hasActivationApi(subagents)) {
             // 新契约：continuable 走 startActivation delivery='parent'（结算留言父会话，旧 startContinuable 行为）
             var act0 = await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'parent' })
+            actForSettle = act0
             childId = String(act0 && act0.childId || '')
             if (!childId) throw new Error('startActivation 未返回 childId')
           } else {
@@ -345,6 +347,7 @@ export function createDispatch(ctx, state, deps) {
             if (useContinuable) {
               if (hasActivationApi(subagents)) {
                 var act1 = await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'parent' })
+                actForSettle = act1
                 childId = String(act1 && act1.childId || '')
                 if (!childId) throw new Error('startActivation 未返回 childId')
               } else {
@@ -365,6 +368,25 @@ export function createDispatch(ctx, state, deps) {
       var rec = useContinuable
         ? { id: childId, childId: childId, continuable: true, ran: false, run: null, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, settled: false }
         : { id: String(run.id), run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, settled: false }
+      // ===== 新宿主 continuable 结算兜底臂（v0.2.1 实证 2026-10-24：activation.result 只认拆除落定）=====
+      // 原形：rate-limit 子会话 turn/end error → 管理器拆除 activation → result 落定——
+      // 但 agent/status 事件面在 v0.2.1 的 Scoped 事件体系下对插件全局订阅不再可达（子会话死亡 8 分钟零结算实证），
+      // rec 挂 running 直到 120 分钟硬超时。activation.result 恰好在「子会话被拆除」这一刻落定
+      // （正常完成 parked-idle 不落定、不误伤续跑）——把它接上就是失败/拆除场景的零事件依赖结算通道。
+      // rec.settled 首胜旗与事件/超时/上报三通道共用：先到先结，后到被挡。
+      if (useContinuable && actForSettle && actForSettle.result && typeof actForSettle.result.then === 'function') {
+        actForSettle.result.then(function (res) {
+          if (rec.settled) return
+          rec.settled = true // 先立旗：与事件/超时臂同一纪律
+          var stopReason = (res && res.stopReason) || 'error'
+          var errText = '子会话被宿主拆除（stopReason: ' + stopReason + (res && res.diagnostic ? '，' + String(res.diagnostic).slice(0, 120) : '') + '）'
+          settleWorker(sid, rec, '', true, errText).catch(function (e) { console.error('[task-board] activation 拆除结算失败 (task ' + rec.taskId + '):', String(e)) })
+        }, function (err) {
+          if (rec.settled) return
+          rec.settled = true
+          settleWorker(sid, rec, '', true, '子会话 activation 异常：' + String(err && err.message || err).slice(0, 200)).catch(function (e) { console.error('[task-board] activation 异常结算失败 (task ' + rec.taskId + '):', String(e)) })
+        })
+      }
       // ⚠️ spawn 返回 → 登记 rec 必须**零 await**（既有纪律）：continuable 子会话的 running→idle 事件
       // 随时可能到达，事件通道必须马上能在活跃表里看到它——否则 idle 被 rec.ran 守卫挡下，结算干等硬超时。
       runsFor(sid)[t.id] = rec

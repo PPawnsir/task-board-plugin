@@ -135,6 +135,46 @@ test('startActivation⑤：老宿主桩（无 startActivation）仍走 start/sta
   assert.deepEqual(used, ['startContinuable', 'start'], '老宿主逐字走旧双路径')
 })
 
+test('startActivation⑤b：continuable 兜底臂——activation.result 拆除落定 → settleWorker 失败结算（rate-limit 原形）', async () => {
+  var board = mkBoard([mkTask({ status: 'in-progress', claimedBy: 'spawn-pending' })])
+  var settle = null
+  var actResult = new Promise(function (res) { settle = res })
+  var subagents = {
+    list: function () { return ['p1'] },
+    getProvider: function () { return { inheritsParentContext: false } },
+    startActivation: async function () {
+      return { childId: 'child-1', messageId: 'm1', result: actResult, dispose: async function () {} }
+    },
+    interrupt: function () {},
+  }
+  var dispatch = createDispatch(
+    { fs: {}, effect: function () {}, get: function () { return null }, subagents: subagents },
+    { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: {} },
+    {
+      rt: async () => board,
+      wt: async () => {},
+      mutateLocked: async (sid, fn) => fn(board),
+      kickCycle: () => {},
+      rootForSession: () => ({ id: SID }),
+      sessionCwd: () => '', withTimeout: (p) => p, runsFor: () => ({}), feedbackOn: () => true,
+      pushSysNote: () => {}, maybeNotify: () => {}, notifyTaskDone: () => {},
+    })
+  var sr = await dispatch.spawnOneShot(SID, board.tasks[0], 'worker')
+  assert.ok(sr, 'spawn 成功')
+  // 模拟宿主拆除（rate-limit turn/end error）：result 以 stopReason=error 落定
+  settle({ output: [], stopReason: 'error', diagnostic: '429 RATE_LIMIT' })
+  await new Promise(function (r) { setTimeout(r, 30) })
+  var t = board.tasks[0]
+  assert.ok((t.retryCount || 0) >= 1, '失败结算落 retryCount（settleWorker 失败臂实证）')
+  assert.ok(t.lastError && String(t.lastError).indexOf('拆除') >= 0, 'lastError 记拆除原因')
+  assert.equal(t.status, 'pending', '失败回收重新排队（retryCount<3 回 pending）')
+  // 幂等：同 rec 再落定不再二次结算
+  var rc = t.retryCount
+  settle({ output: [], stopReason: 'error' })
+  await new Promise(function (r) { setTimeout(r, 30) })
+  assert.equal(t.retryCount, rc, 'settled 首胜旗挡重复落定')
+})
+
 test('startActivation⑥：新契约路径在源码层接线（startActivation 调用点 + 双 delivery 常量）', async () => {
   var { readFileSync } = await import('node:fs')
   var src = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
