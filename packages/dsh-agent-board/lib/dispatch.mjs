@@ -146,7 +146,7 @@ export function createDispatch(ctx, state, deps) {
     // 若 sendMessage 的登记被重试一次，就会出现两条同 id 且都停在 running 的记录（续跑资格与 usage 水位线
     // 双双错乱）——故「同 id 已有未落定的条目」时不再追加；而**首派/续跑回退 fresh spawn 一律追加新条目**
     // （同一 childId 的多次派发各占一条，这是 usage 水位线分段的前提，见 seekSeqOf）。
-    async function recordRunHistory(sid, taskId, role, runId, model, hardMin, continuable, resume, modelSource) {
+    async function recordRunHistory(sid, taskId, role, runId, model, hardMin, continuable, resume, modelSource, laneSize) {
       try {
         await mutateLocked(sid, function (d) {
           var t = d.tasks.find(function (x) { return x.id === taskId })
@@ -161,6 +161,8 @@ export function createDispatch(ctx, state, deps) {
           var e = { role: role, id: runId, at: new Date().toISOString(), model: model || '', outcome: 'running', hardMin: hardMin || 120 }
           // 力度路由（task-mvnemvf5）：本次实际取模来源 card/lane/board/parent 随 run 留档，便于审计
           if (modelSource) e.modelSource = modelSource
+          // 力度档位留档（task-mvneq4mw）：记分卡 bySize 聚合的数据源；hook 不传（恒父模型，不进档位统计）
+          if (laneSize) e.size = laneSize
           if (continuable) e.continuable = true
           if (resume) e.resume = true
           t.runs.push(e)
@@ -319,6 +321,9 @@ export function createDispatch(ctx, state, deps) {
       // hook run（hook-pre/hook-post）不进链：维持现状恒用父模型（板级 worker/verifier 模型对 hook 无语义）。
       var modelOverride = ''
       var modelSource = 'parent'
+      // 力度档位留档（task-mvneq4mw）：worker/verifier 归一到三档（缺省/脏值=标档语义），
+      // 随 rec 与 run 留档（recordRunHistory），记分卡 bySize 聚合按它归桶；hook 不进链不留档。
+      var laneSize = ''
       var dsnap = await rt(sid)
       if (role === 'worker' || role === 'verifier') {
         var roleKey = role === 'verifier' ? 'verifier' : 'worker'
@@ -326,6 +331,7 @@ export function createDispatch(ctx, state, deps) {
         var tm = typeof t.model === 'string' ? t.model.trim() : ''
         if (tm) cands.push([tm, 'card'])
         var sz = typeof t.size === 'string' ? t.size : ''
+        laneSize = core.TASK_SIZES.indexOf(sz) >= 0 ? sz : 'standard'
         var laneCfg = cfg(dsnap).laneModels
         if (sz && laneCfg[sz]) { var lv = typeof laneCfg[sz][roleKey] === 'string' ? laneCfg[sz][roleKey].trim() : ''; if (lv) cands.push([lv, 'lane']) }
         var bm = role === 'verifier' ? dsnap.verifierModel : dsnap.workerModel
@@ -488,8 +494,8 @@ export function createDispatch(ctx, state, deps) {
       // rec.run 只在一次性路径存在（dispose/result 的来源）；continuable 路径 rec.continuable=true，
       // 用 rec.childId 定位 host 事件、dispose 走 drain（卡1 先不 interrupt，见 settleContinuable）。
       var rec = useContinuable
-        ? { id: childId, childId: childId, continuable: true, ran: false, run: null, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, settled: false }
-        : { id: String(run.id), run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, settled: false }
+        ? { id: childId, childId: childId, continuable: true, ran: false, run: null, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, size: laneSize || undefined, settled: false }
+        : { id: String(run.id), run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, size: laneSize || undefined, settled: false }
       // ===== 新宿主 continuable 结算兜底臂（v0.2.1 实证 2026-10-24：activation.result 只认拆除落定）=====
       // 原形：rate-limit 子会话 turn/end error → 管理器拆除 activation → result 落定——
       // 但 agent/status 事件面在 v0.2.1 的 Scoped 事件体系下对插件全局订阅不再可达（子会话死亡 8 分钟零结算实证），
@@ -546,7 +552,7 @@ export function createDispatch(ctx, state, deps) {
       // **必须 await**（task-muwkhqf8）：上报通道的收尾（settleReportedRun → closeRunHistory）要求在
       // 「记录已落卡」之后才能关账——fire-and-forget 下极短任务（worker 秒级 board_report）会撞上竞态：
       // 关账先落地 → 找不到条目 → closeRunHistory 空转，run 记录依旧停在 running。
-      await recordRunHistory(sid, t.id, role, String(rec.id), modelOverride, c.hardTimeoutMin, !!rec.continuable, false, modelSource)
+      await recordRunHistory(sid, t.id, role, String(rec.id), modelOverride, c.hardTimeoutMin, !!rec.continuable, false, modelSource, laneSize)
       // ===== 两级超时臂（软提醒 + 硬超时结算）：本体在 armTimeouts，fresh spawn 与续跑共用 =====
       armTimeouts(sid, rec, t, c)
       return rec
@@ -674,7 +680,7 @@ export function createDispatch(ctx, state, deps) {
       }
       // ⚠️ sendMessage 返回 → 登记 rec 必须**零 await**（既有纪律）：冷复活子会话的 running→idle
       // 随时可能到达，事件通道必须马上能在活跃表里看到它——否则 idle 被 rec.ran 守卫挡下，结算干等硬超时。
-      var rec = { id: childId, childId: childId, continuable: true, resumed: true, ran: false, run: null, role: 'worker', taskId: t.id, startedAt: Date.now(), model: '', settled: false, baselineBytes: logSizeOf(childId) }
+      var rec = { id: childId, childId: childId, continuable: true, resumed: true, ran: false, run: null, role: 'worker', taskId: t.id, startedAt: Date.now(), model: '', size: (core.TASK_SIZES.indexOf(t && t.size) >= 0 ? t.size : 'standard'), settled: false, baselineBytes: logSizeOf(childId) }
       runsFor(sid)[t.id] = rec
       if (!dispatchedEver[sid]) dispatchedEver[sid] = {}
       dispatchedEver[sid][childId] = true
@@ -723,7 +729,7 @@ export function createDispatch(ctx, state, deps) {
       // 详情页可区分首派/续跑，且它成为续跑资格判定的最新依据。
       // 这条**必须 await**：竞速下（冷复活子会话立刻 idle）closeRunHistory 可能先落地，
       // 那会找不到条目、结局留在 running → 该 run 永久失去续跑资格。
-      await recordRunHistory(sid, t.id, 'worker', childId, '', c.hardTimeoutMin, true, true)
+      await recordRunHistory(sid, t.id, 'worker', childId, '', c.hardTimeoutMin, true, true, '', (core.TASK_SIZES.indexOf(t && t.size) >= 0 ? t.size : 'standard'))
       return { rec: rec }
     }
 

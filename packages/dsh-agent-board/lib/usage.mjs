@@ -547,6 +547,14 @@ export function runRoleOf(r) {
   return 'other'
 }
 
+// 力度档位归一（task-mvneq4mw 记分卡 bySize 维度）：run.size 留档值 → 'light' | 'standard' | 'heavy'。
+// 无 size 的老 run / 脏值一律归 'standard'（缺省=标档语义，存量零迁移，与取模链同口径）；
+// hook 等角色本就不留 size，但聚合端按 role 先行剔除，这里不需要再区分。
+export function runLaneOf(r) {
+  var s = r && r.size
+  return (s === 'light' || s === 'standard' || s === 'heavy') ? s : 'standard'
+}
+
 // run 条目完备性体检（卡1①）：continuable 时代一条「已落定」的 run 应齐 model/at/endedAt/outcome/usage
 // 五组分（usage 以 total>0 为一次有效结算，与 runUsageOf 同口径；分量缺省视为 0，老形态只有 total 不判缺）。
 //   · outcome==='running'（在飞/手动终止残留）：只核 at——model 要等结算时回填、endedAt/usage 结算才落，
@@ -721,9 +729,11 @@ function buildScoreRecs(tasks) {
         model: String(r.model || ''),
         role: runRoleOf(r),
         size: size,
+        lane: runLaneOf(r), // 力度档位（task-mvneq4mw bySize 维度）：run.size 留档归一，老 run 缺省标档
         day: dayKeyOf(r.at),
         durMs: (isFinite(aMs) && isFinite(eMs) && eMs >= aMs) ? (eMs - aMs) : null,
         eff: ru ? effectiveTokens(ru) : null,
+        tot: ru ? numOr0(ru.total) : null, // token 合计（含缓存读）；null=无 usage 留账不伪造 0
         inp: ru ? ru.input : null,
         cr: ru ? ru.cacheRead : null,
         outcome: oc,
@@ -738,14 +748,15 @@ function buildScoreRecs(tasks) {
       stamp = scoreProbeMax(stamp, m.at)
       var attr = attributeRejection(t, m.at) // null = 无 worker run 可归（direct 档/老卡无 runs 留账）
       var rDay = ''
+      var rLane = '' // 归因 run 的力度档位（task-mvneq4mw bySize 驳回列）：'' = 无 run 可归
       if (attr) {
         for (var ri2 = 0; ri2 < trs.length; ri2++) {
-          if (trs[ri2] && String(trs[ri2].id) === attr.runId) { rDay = dayKeyOf(trs[ri2].at); break }
+          if (trs[ri2] && String(trs[ri2].id) === attr.runId) { rDay = dayKeyOf(trs[ri2].at); rLane = runLaneOf(trs[ri2]); break }
         }
       }
       // text/mDay（卡5 驳回聚类）：驳回原文与驳回消息自身日落点随 rejRec 带出——
       // messages 只增不改（pushRejection 判重后只 push，无编辑路径），缓存键已含驳回 at，无陈账风险。
-      rejRecs.push({ taskId: tid, runId: attr ? attr.runId : '', model: attr ? attr.model : '', size: size, rDay: rDay, mDay: dayKeyOf(m.at), text: String(m.text || '') })
+      rejRecs.push({ taskId: tid, runId: attr ? attr.runId : '', model: attr ? attr.model : '', size: size, lane: rLane, rDay: rDay, mDay: dayKeyOf(m.at), text: String(m.text || '') })
     }
   }
   return { stamp: stamp, runRecs: runRecs, taskRecs: taskRecs, rejRecs: rejRecs }
@@ -768,6 +779,15 @@ function assembleScoreboard(recs, range) {
   var bTasks = {} // bucketKey -> { taskId: true }（桶内任务级指标的分母来源）
   var meta = { tasks: recs.taskRecs.length, runsSettled: recs.runRecs.length, bucketed: 0, roleOther: 0, noModel: 0, noSize: 0, rejUnattributed: 0 }
   var tr = { firstPassByDay: {}, durationBuckets: { lt10m: 0, m10to30: 0, m30to60: 0, gt60m: 0 }, timeoutByDay: {}, rejectByDay: {}, resume: { runs: 0, completed: 0, rate: null } }
+  // ===== bySize 档位维度（task-mvneq4mw）：light/standard/heavy × runs/驳回/异常/超时/token =====
+  // 三档恒在（空档全 0，客户端小表不需要判空）；归桶键 = run.size 留档归一（runLaneOf：老 run 缺省标档）。
+  // failed=跑崩落定（incomplete/error/failed，与八指标失败率同口径）；timeouts 单列（UI 合并显示为「异常」）；
+  // tokSum=总量（含缓存读）/ effSum=有效（输入+输出+缓存写），无 usage 留账的 run 不进两个 token 口径（不伪造 0）。
+  var bySize = {
+    light: { lane: 'light', runs: 0, rejected: 0, failed: 0, timeouts: 0, tokSum: 0, effSum: 0 },
+    standard: { lane: 'standard', runs: 0, rejected: 0, failed: 0, timeouts: 0, tokSum: 0, effSum: 0 },
+    heavy: { lane: 'heavy', runs: 0, rejected: 0, failed: 0, timeouts: 0, tokSum: 0, effSum: 0 }
+  }
   // ===== 任务级趋势：一次通过率 byDay（resolved 任务按落定日）+ 卡时长分布四桶 =====
   var tById = {}
   for (var ti = 0; ti < recs.taskRecs.length; ti++) {
@@ -808,7 +828,14 @@ function assembleScoreboard(recs, range) {
       // 范围外 run 不进趋势也不进桶（meta 计数保持范围口径：裁剪后还剩多少进了桶）
       if (hasRange) continue
     }
-    if (q.role === 'other') { meta.roleOther++; continue } // hook/缺省角色不进 worker/verifier 对比桶（卡1口径）
+    if (q.role === 'other') { meta.roleOther++; continue } // hook/缺省角色不进 worker/verifier 对比桶（卡1口径）；力度路由只路由 worker/verifier，bySize 同口径剔除
+    // bySize 档位桶：只要求档位（恒有归一值），不要求模型/规模段——无模型老 run 照样烧了该档 token，档位成本视图不漏
+    var lb = bySize[q.lane]
+    lb.runs++
+    if (q.outcome === 'timeout/error' || q.outcome === 'timeout') lb.timeouts++
+    if (q.outcome === 'incomplete' || q.outcome === 'error' || q.outcome === 'failed') lb.failed++
+    if (q.tot !== null) lb.tokSum += q.tot
+    if (q.eff !== null) lb.effSum += q.eff
     if (!q.model) { meta.noModel++; continue }             // 老 run 缺模型名：如实计数，不硬塞「(未知)」桶
     if (!q.size) { meta.noSize++; continue }               // 任务未结算出有效消耗：规模不可知，不进桶
     var key = q.model + '|' + q.role + '|' + q.size
@@ -834,6 +861,9 @@ function assembleScoreboard(recs, range) {
   // ===== 驳回率：归因到桶（卡1 attributeRejection 已在提取层跑完，这里只按桶累加）=====
   for (var ji = 0; ji < recs.rejRecs.length; ji++) {
     var j = recs.rejRecs[ji]
+    // bySize 档位驳回（task-mvneq4mw）：归因 run 档位已知即计（不要求模型/规模段——老 run 缺模型也不漏档级驳回）；
+    // 裁剪与被驳回 run 同一日落口径（rDay：run 被范围裁掉，其驳回也随之裁掉）。
+    if (j.lane && (!hasRange || dayInRange(j.rDay, range))) bySize[j.lane].rejected++
     // 无 run 可归 / 归因 run 缺模型 / 任务规模不可知 → 如实计 rejUnattributed，不塞进任何桶
     if (!j.runId || !j.model || !j.size) { meta.rejUnattributed++; continue }
     // 与被驳回 run 的桶归属同一裁剪口径：run 被范围裁掉，其驳回也随之裁掉（聚合体不自相矛盾）
@@ -911,7 +941,7 @@ function assembleScoreboard(recs, range) {
     if (rcj.mDay) { var rbd = tr.rejectByDay[rcj.mDay] || (tr.rejectByDay[rcj.mDay] = { rejects: 0 }); rbd.rejects++ }
     rejTexts.push(rcj.text)
   }
-  return { buckets: out, trends: tr, meta: meta, rejectionClusters: clusterRejections(rejTexts) }
+  return { buckets: out, trends: tr, meta: meta, bySize: bySize, rejectionClusters: clusterRejections(rejTexts) }
 }
 
 // 记分卡聚合入口（get-tasks 内组装到 usageSummary.scoreboard）。

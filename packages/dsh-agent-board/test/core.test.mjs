@@ -3672,7 +3672,7 @@ test('可续跑 Worker 接线（源码级）：事件订阅走 ctx.effect 回收
   //    失败回退 fresh spawn）+ 三连败计数不受续跑影响（续跑同样走 settleWorker 的 retryCount 口径）
   assert.match(dsp, /await subagents\.sendMessage\(parent, childId, \[\{ type: 'text', text: text \}\], \{ signal: makeSignal\(\) \}\)/)
   assert.match(dsp, /【断点续跑】你之前执行此任务被中断（第 ' \+ attempt \+ ' 次尝试）/)
-  assert.match(dsp, /await recordRunHistory\(sid, t\.id, 'worker', childId, '', c\.hardTimeoutMin, true, true\)/)
+  assert.match(dsp, /await recordRunHistory\(sid, t\.id, 'worker', childId, '', c\.hardTimeoutMin, true, true, '', \(core\.TASK_SIZES\.indexOf\(t && t\.size\) >= 0 \? t\.size : 'standard'\)\)/) // 续跑留档同带力度档位（task-mvneq4mw）
   assert.match(dsp, /if \(sp\.role === 'worker' && c\.workerContinuable !== false\) \{/)
   assert.match(dsp, /kind: 'resume-fallback'/)
   assert.match(dsp, /if \(r\.continuable !== true \|\| r\.noResume === true\) return ''/) // 续跑资格：一次性 run/已标 noResume 一律不够格
@@ -6485,10 +6485,11 @@ test('模型下拉两段式④（源码级）：ModelCfg 选中只改草稿态�
   assert.equal(pickM[0].indexOf('rpc('), -1, 'pick 不得直接调 rpc（两段式红线）')
   assert.match(pickM[0], /setVal\(v\)/)
   assert.match(pickM[0], /setDirty\(v !== \(props\.value \|\| ''\)\)/) // dirty 对比服务端权威值
-  // ② 提交唯一入口 = save()（rpc('set-board-config') 只住在 save 里）
-  const saveM = body.match(/function save\(\) \{[^}]*\}/)
+  // ② 提交唯一入口 = save()（rpc('set-board-config') 只住在 save 里；力度路由档位槽分支同纪律——task-mvneq4mw）
+  const saveM = body.match(/function save\(\) \{[\s\S]*?\n      \}/)
   assert.ok(saveM, 'ModelCfg 应定义 save')
   assert.match(saveM[0], /rpc\('set-board-config', \{ key: cfgKey, value: \(val \|\| ''\)\.trim\(\)/)
+  assert.match(saveM[0], /rpc\('set-board-config', \{ key: 'laneModels', value: patch \}\)/) // 档位槽走 laneModels 部分合并
   // ③ 下拉分支（if (models) 到降级分支之间）：onChange 走 pick；dirty 才渲染保存键（onClick: save）
   const selBranch = body.slice(body.indexOf('if (models)'), body.indexOf('// 降级'))
   assert.match(selBranch, /onChange: function \(e\) \{ pick\(e\.target\.value\) \}/)

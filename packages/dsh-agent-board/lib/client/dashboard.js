@@ -508,6 +508,44 @@
       { k: 'resumeRate', label: '续跑率', title: '续跑率 = resume:true 续跑记录 / 桶内 runs', fmt: function (b) { return mpPct(b.resumeRate) } },
       { k: 'cacheHitRate', label: '缓存命中率', title: '缓存命中率 = cacheRead / (input + cacheRead)；⚠️ 跨 provider 口径可能不一（input 是否含缓存读各家不同），对比前先核口径；无 usage 样本 → —', fmt: function (b) { return mpPct(b.cacheHitRate) } }
     ]
+    // ===== 按档位小表（task-mvneq4mw）：行=力度三档（轻/标/重），列=runs/驳回/异常/token =====
+    // 数据源 sb.bySize（host 装配层 assembleScoreboard 按 run.size 留档归桶；无 size 老 run 归标档，零迁移）。
+    // 口径：驳回 = 归因到该档 worker run 的验收驳回；异常 = 超时落定 + 跑崩落定（行 title 拆分）；
+    // token = 有效口径（输入+输出+缓存写，与本区八指标同），行 title 附总量（含缓存读）；随统计范围裁剪。
+    // 只认 worker/verifier run（hook 恒父模型、不进档位统计）；全部档位零 runs 时整块不渲染（不画空表）。
+    var LANE_LABEL = { light: '轻档', standard: '标档', heavy: '重档' }
+    function LaneTable(props) {
+      var bySize = props.bySize
+      if (!bySize) return null
+      var lanes = ['light', 'standard', 'heavy']
+      var totalRuns = 0
+      for (var li = 0; li < lanes.length; li++) totalRuns += (bySize[lanes[li]] && bySize[lanes[li]].runs) || 0
+      if (!totalRuns) return null
+      var thL2 = { fontSize: 9, color: C.text2, fontWeight: 600, textAlign: 'left', padding: '2px 4px', borderBottom: '1px solid ' + C.border, whiteSpace: 'nowrap' }
+      var thR2 = { fontSize: 9, color: C.text2, fontWeight: 600, textAlign: 'right', padding: '2px 4px', borderBottom: '1px solid ' + C.border, whiteSpace: 'nowrap', cursor: 'help' }
+      var tdL2 = { fontSize: 10, color: C.text, textAlign: 'left', padding: '3px 4px', borderBottom: '1px solid ' + C.nested, whiteSpace: 'nowrap' }
+      var tdR2 = { fontSize: 10, color: C.text, textAlign: 'right', padding: '3px 4px', borderBottom: '1px solid ' + C.nested, whiteSpace: 'nowrap' }
+      return React.createElement('div', { style: { marginTop: 8 } },
+        React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '按档位'),
+        React.createElement('table', { style: { width: '100%', borderCollapse: 'collapse' } },
+          React.createElement('thead', null, React.createElement('tr', null,
+            React.createElement('th', { style: thL2 }, '档位'),
+            React.createElement('th', { style: thR2, title: '该档已落定 Worker/Verifier run 数（hook 不计入）' }, 'runs'),
+            React.createElement('th', { style: thR2, title: '驳回 = 归因到该档 worker run 的验收驳回次数' }, '驳回'),
+            React.createElement('th', { style: thR2, title: '异常 = 超时落定（timeout/error）+ 跑崩落定（incomplete/error/failed）的 run 数；terminated 人工终止不计入' }, '异常'),
+            React.createElement('th', { style: thR2, title: 'token = 有效口径合计（输入+输出+缓存写，不含缓存读）；行悬浮见总量（含缓存读）' }, 'token'))),
+          React.createElement('tbody', null, lanes.map(function (ln) {
+            var b = bySize[ln] || { runs: 0, rejected: 0, failed: 0, timeouts: 0, tokSum: 0, effSum: 0 }
+            var tip = LANE_LABEL[ln] + '：runs=' + b.runs + '；驳回 ' + b.rejected + '；异常 ' + (b.failed + b.timeouts) + '（超时 ' + b.timeouts + ' + 跑崩 ' + b.failed + '）；token 有效 ' + fmtTokens(b.effSum) + ' · 总量 ' + fmtTokens(b.tokSum) + '（含缓存读）；老 run 无 size 归标档'
+            return React.createElement('tr', { key: ln, title: tip },
+              React.createElement('td', { style: tdL2 }, LANE_LABEL[ln]),
+              React.createElement('td', { style: tdR2 }, String(b.runs)),
+              React.createElement('td', { style: tdR2 }, String(b.rejected)),
+              React.createElement('td', { style: tdR2 }, String(b.failed + b.timeouts)),
+              React.createElement('td', { style: tdR2 }, fmtTokens(b.effSum)))
+          }))),
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 4, lineHeight: 1.5 } }, '口径：行 = 力度档位（run.size 派发留档，老 run 无 size 归标档）；只计 Worker/Verifier run（hook 恒父模型不计入）；驳回 = 归因到该档 worker run 的验收驳回；异常 = 超时 + 跑崩；token = 有效口径（悬浮行看总量）；随统计范围裁剪'))
+    }
     function ModelPerf(props) {
       var _R = React; var useState = _R.useState
       var _a = useState(state.mpRole || ''), roleF = _a[0], setRoleF = _a[1]
@@ -522,8 +560,9 @@
         tgOn ? React.createElement('span', { style: { fontSize: 9, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '本区桶数据已按统计范围过滤（与 Token 区同一 range 口径）：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
       var sb = props.sb
       var buckets = (sb && Array.isArray(sb.buckets)) ? sb.buckets : []
-      // 空态：无 scoreboard（老 host）/ 无入桶 run → 一句话空态（锚 id 照挂，Token 区链接始终可达）
-      if (!buckets.length) return React.createElement('div', { id: 'tskb-model-perf', style: box }, head, React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无足够 run 数据（还没有可入桶的已落定 Worker/Verifier run 留账）'))
+      // 空态：无 scoreboard（老 host）/ 无入桶 run → 一句话空态（锚 id 照挂，Token 区链接始终可达）；
+      // 按档位小表仍渲染（它不要求学模型名——无模型老 run 也烧了档位 token，档位视图可能恰好还有数据）
+      if (!buckets.length) return React.createElement('div', { id: 'tskb-model-perf', style: box }, head, React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无足够 run 数据（还没有可入桶的已落定 Worker/Verifier run 留账）'), React.createElement(LaneTable, { bySize: sb && sb.bySize }))
       // 本地筛选：角色 × 规模段，纯数组 pass 不重拉
       var shown = buckets.filter(function (b) { return (!roleF || b.role === roleF) && (!sizeF || b.size === sizeF) })
       function chip(cur, setter, v, label) {
@@ -561,7 +600,9 @@
                 React.createElement('td', { style: tdR }, String(b.runs)),
                 MP_COLS.map(function (c) { return React.createElement('td', { key: c.k, style: tdR }, c.fmt(b)) }))
             })))),
-        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：每行 = 模型 × 角色 × 规模段桶（规模按任务有效 token：小 <1M / 中 1~10M / 大 >10M）；率类分母为桶内 runs，一次通过率分母为桶内 resolved 任务；失败率 = 跑崩落定（outcome 为 incomplete/error/failed）的 run / 桶内 runs，terminated 人工终止不计入；runs<5 行灰显 = 样本不足仅供参考；随统计范围裁剪（与 Token 区同一 range）'))
+        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：每行 = 模型 × 角色 × 规模段桶（规模按任务有效 token：小 <1M / 中 1~10M / 大 >10M）；率类分母为桶内 runs，一次通过率分母为桶内 resolved 任务；失败率 = 跑崩落定（outcome 为 incomplete/error/failed）的 run / 桶内 runs，terminated 人工终止不计入；runs<5 行灰显 = 样本不足仅供参考；随统计范围裁剪（与 Token 区同一 range）'),
+        // 按档位小表（task-mvneq4mw）：三档 × runs/驳回/异常/token，挂在八指标表下方
+        React.createElement(LaneTable, { bySize: sb && sb.bySize }))
     }
 
     // ===== 质量趋势区（记分卡卡4，task-muxhtgil）：一次通过率趋势 / 卡时长分布 / 超时率走势 / 续跑成功率 =====
@@ -942,6 +983,12 @@
       var _m = useState(null), models = _m[0], setModels = _m[1]
       var cfgKey = props.cfgKey || 'verifierModel'
       var label = props.label || 'Verifier 模型'
+      // 力度路由档位槽（task-mvneq4mw）：props.lane + props.laneRole 双存在时，写通道改走
+      // set-board-config key='laneModels' 部分合并（host 逐槽位校验，非法模型整体拒写——C1 地基通道），
+      // 空串=清槽恢复继承；空选项文案由 props.inheritLabel 覆盖（档位槽=「继承板级」，板级行=「继承父级」）。
+      var lane = props.lane || ''
+      var laneRole = props.laneRole || ''
+      var inhLabel = props.inheritLabel || '继承父级'
       // 下拉列出当前网关可用模型（host list-models RPC）；枚举失败降级为文本输入
       useEffect(function () {
         var cancelled = false
@@ -949,21 +996,29 @@
         return function () { cancelled = true }
       }, [])
       useEffect(function () { setVal(props.value || ''); setDirty(false) }, [props.value])
-      function save() { setDirty(false); rpc('set-board-config', { key: cfgKey, value: (val || '').trim() }).then(fetchTasks).catch(function () {}) }
+      function save() {
+        setDirty(false)
+        if (lane && laneRole) {
+          var patch = {}; patch[lane] = {}; patch[lane][laneRole] = (val || '').trim()
+          rpc('set-board-config', { key: 'laneModels', value: patch }).then(fetchTasks).catch(function () {})
+          return
+        }
+        rpc('set-board-config', { key: cfgKey, value: (val || '').trim() }).then(fetchTasks).catch(function () {})
+      }
       // 下拉两段式（task-mv9yuq2l，实证 n-mv8ki92qnhdq：巡检戳即点即写 → verifierModel 神隐回退无从审计）：
       // 选中只改本地草稿态 + 亮 dirty（对比服务端权威值 props.value），点旁边 ✓ 保存键才走 save() 提交 rpc——
       // 与下方降级文本输入同款两段式语义，巡检路过戳一下不再直接写配置。
       function pick(v) { setVal(v); setDirty(v !== (props.value || '')) }
       if (models) {
         return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, label,
-          React.createElement('select', { value: val, onChange: function (e) { pick(e.target.value) }, title: label + '（空=继承父级；选中后点 ✓ 才保存）', style: { width: 150, padding: '0px 4px', fontSize: 9, border: '1px solid ' + (dirty ? C.brand : C.border), borderRadius: 2, background: C.card, color: C.text } },
-            React.createElement('option', { value: '' }, '继承父级'),
+          React.createElement('select', { value: val, onChange: function (e) { pick(e.target.value) }, title: label + '（空=' + inhLabel + '；选中后点 ✓ 才保存）', style: { width: 150, padding: '0px 4px', fontSize: 9, border: '1px solid ' + (dirty ? C.brand : C.border), borderRadius: 2, background: C.card, color: C.text } },
+            React.createElement('option', { value: '' }, inhLabel),
             models.map(function (m) { return React.createElement('option', { key: m.id, value: m.id }, m.name + ' (' + m.provider + ')') })),
           dirty ? React.createElement('button', { onClick: save, title: '保存 ' + label, style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
       }
       // 降级：文本输入（模型枚举不可用时）
       return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, label,
-        React.createElement('input', { value: val, onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== (props.value || '')) }, onBlur: function () { if (dirty) save() }, onKeyDown: function (e) { if (e.key === 'Enter') save() }, placeholder: '空=同父级', style: { width: 110, padding: '0px 4px', fontSize: 9, border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text } }),
+        React.createElement('input', { value: val, onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== (props.value || '')) }, onBlur: function () { if (dirty) save() }, onKeyDown: function (e) { if (e.key === 'Enter') save() }, placeholder: '空=' + inhLabel, style: { width: 110, padding: '0px 4px', fontSize: 9, border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text } }),
         dirty ? React.createElement('button', { onClick: save, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
     }
 
@@ -1027,6 +1082,18 @@
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
             React.createElement(ModelCfg, { label: 'Verifier 模型', cfgKey: 'verifierModel', value: props.verifierModel }),
             React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Verifier 异构审查）')),
+          // ===== 力度路由（task-mvneq4mw）：三档 × Worker/Verifier 共 6 槽 =====
+          // 读写通道 = set-board-config key='laneModels' 部分合并（C1 task-mvnemvf5 地基：host 逐槽位
+          // 合法清单校验，任一非法整体拒写 + configLog 审计行）；读 = props.laneModels（kernel fetchTasks 透传）。
+          // 空串槽位 = 继承上方板级 Worker/Verifier 模型行（取模链：卡级 model → 档位 lane → 板级 → 父模型）。
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '力度路由'),
+          [['light', '轻档'], ['standard', '标档'], ['heavy', '重档']].map(function (ln) {
+            var laneObj = (props.laneModels && props.laneModels[ln[0]]) || {}
+            return React.createElement('div', { key: ln[0], style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 3 } },
+              React.createElement(ModelCfg, { label: ln[1] + ' Worker', lane: ln[0], laneRole: 'worker', inheritLabel: '继承板级', value: laneObj.worker || '' }),
+              React.createElement(ModelCfg, { label: ln[1] + ' Verifier', lane: ln[0], laneRole: 'verifier', inheritLabel: '继承板级', value: laneObj.verifier || '' }))
+          }),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 1, whiteSpace: 'normal', maxWidth: 340 } }, '空 = 继承上方 Worker/Verifier 模型行（取模链：卡级特例 → 档位 → 板级 → 父模型）；卡档位走对话 task_update size=light/standard/heavy'),
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '两级超时（软超时只提醒主窗口，由你决定继续等待或终止）'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
             React.createElement(MinCfg, { label: '软超时', cfgKey: 'softTimeoutMin', value: props.softT, min: 1, max: 480, tip: '超过后在看板提醒主窗口，不终止 run（1~480 分钟）' }),
