@@ -10,6 +10,12 @@
 //     驳回归档 / 异常(超时+跑崩)/token 合计 / 范围裁剪；run.size 派发留档（dispatch.mjs）
 //   ④ build-client 产物含标记（改完源必须重组装）
 //   ⑤ README 双份逐字一致 + 含「力度路由」「按档位」说明
+//   ⑥ 模型路由独立弹层（task-mvnyc8vo）：ModelRoutePopover 三区（板级/六槽/备用链）+
+//      池配置弹层搬离断言（不再含模型区）
+//   ⑦ 备用链 GUI：fallbackModels 文本编辑（逗号/换行分隔、失焦保存）→ 数组写入通道 +
+//      kernel fetchTasks/cfgKnobs/TopPanel 透传订阅
+//   ⑧ 在跑子代理模型可见：成员卡 + 池状态条渲染 model 与取模来源角标；dispatch poolStatus 带 modelSource
+//   ⑨ 产物含模型路由弹层标记
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -228,4 +234,76 @@ test('③b：run.size 留档——worker/verifier 归一到档（缺省/脏值=�
   var b5 = { version: 12, tasks: [mkTask({ size: 'heavy', hooks: { pre: { enabled: true, prompt: 'p' } } })], workerModel: 'bw/board-w' }
   await mkDispatch(b5, { subagents: mkActivationSubagents([]) }).spawnOneShot(SID, b5.tasks[0], 'hook-pre')
   assert.equal('size' in b5.tasks[0].runs[0], false, 'hook run 不留 size')
+})
+
+// ===== ⑥ 模型路由独立弹层（task-mvnyc8vo）：三区齐全 + 池配置弹层搬离断言 =====
+test('⑥模型路由弹层：板级/六槽/备用链三区齐全，池配置弹层不再含模型区（搬离非复制）', () => {
+  const iMr = src.indexOf('function ModelRoutePopover(props)')
+  const iPc = src.indexOf('function PoolCfgPopover(props)')
+  const iTv = src.indexOf('function TeamView()')
+  assert.ok(iMr >= 0, '缺 ModelRoutePopover 组件')
+  assert.ok(iPc > iMr, 'ModelRoutePopover 须定义在 PoolCfgPopover 之前（旧断言①时序：力度路由在两级超时之前）')
+  assert.ok(iTv > iPc)
+  // 三区：板级模型 / 力度路由六槽 / 备用模型链 + 取模口径说明
+  const mrBody = src.slice(iMr, iPc)
+  assert.ok(mrBody.indexOf("'板级模型'") >= 0, '弹层缺「板级模型」区标题')
+  assert.ok(mrBody.indexOf("cfgKey: 'workerModel'") >= 0 && mrBody.indexOf("cfgKey: 'verifierModel'") >= 0, '板级 Worker/Verifier 模型行未搬入')
+  assert.ok(mrBody.indexOf("'力度路由'") >= 0, '弹层缺「力度路由」区标题')
+  assert.match(mrBody, /\[\['light', '轻档'\], \['standard', '标档'\], \['heavy', '重档'\]\]\.map\(function \(ln\)/, '六槽三档表未搬入')
+  assert.ok(mrBody.indexOf('继承板级') >= 0, '六槽「继承板级」语义未随区搬入')
+  assert.ok(mrBody.indexOf("'备用模型链'") >= 0, '弹层缺「备用模型链」区标题')
+  assert.ok(mrBody.indexOf('取模口径') >= 0, '缺取模链口径说明一句')
+  // 工具栏按钮：cpu 图标 + 弹层 fixed 定位模式复用
+  assert.match(mrBody, /ic\('cpu', 13\)/, '缺模型路由工具栏按钮（cpu 图标）')
+  assert.match(mrBody, /position: 'fixed', top: pos\.top \+ 'px'/, '弹层未复用 fixed 定位模式')
+  // 搬离断言：池配置弹层体内不再有模型区（PoolCfgPopover → TeamView 区间）
+  const pcBody = src.slice(iPc, iTv)
+  assert.ok(pcBody.indexOf('ModelCfg') < 0, '池配置弹层仍引用 ModelCfg（模型区应搬走）')
+  assert.ok(pcBody.indexOf("'力度路由'") < 0, '池配置弹层仍含「力度路由」区（应搬走）')
+  assert.ok(pcBody.indexOf('继承板级') < 0, '池配置弹层仍含六槽继承语义（应搬走）')
+  // 池配置弹层保留区未动：并发/超时/开关
+  assert.ok(pcBody.indexOf('并发上限') >= 0 && pcBody.indexOf('两级超时') >= 0 && pcBody.indexOf('学习反馈') >= 0, '池配置弹层保留区（并发/超时/开关）被误伤')
+  // 工具栏接线：kernel 同挂两个弹层
+  assert.ok(ksrc.indexOf('React.createElement(ModelRoutePopover, { workerModel: workerModel, verifierModel: verifierModel, laneModels: laneMs, fbModels: fbMs })') >= 0, '工具栏缺 ModelRoutePopover 接线')
+  assert.ok(ksrc.indexOf("var _fbm = useState(state.fallbackModels), fbMs = _fbm[0], setFbMs = _fbm[1]") >= 0, 'TopPanel 缺 fbMs state')
+})
+
+// ===== ⑦ 备用链 GUI：文本编辑 → 数组写入通道 + kernel 透传 =====
+test('⑦备用链：FallbackCfg 逗号/换行分隔 + 失焦保存 + set-board-config fallbackModels 数组写通道 + kernel 透传', () => {
+  assert.ok(src.indexOf('function FallbackCfg(props)') >= 0, '缺 FallbackCfg 组件')
+  assert.match(src, /val\.split\(\/\[\\n,，;；\]\+\/\)/, '缺逗号/换行（含全角）分隔解析')
+  assert.match(src, /onBlur: save/, '失焦保存（onBlur）缺失')
+  assert.match(src, /rpc\('set-board-config', \{ key: 'fallbackModels', value: arr \}\)/, '缺 fallbackModels 数组写通道')
+  assert.match(src, /r && r\.ok === false/, 'host 拒写（ok:false）未展示（不静默吞）')
+  assert.ok(src.indexOf("React.createElement(FallbackCfg, { value: props.fbModels })") >= 0, 'ModelRoutePopover 未接 FallbackCfg')
+  // kernel 透传：fetchTasks 回读 + cfgKnobs 快照/比对 + TopPanel 订阅
+  assert.ok(ksrc.indexOf('state.fallbackModels = (d && d.fallbackModels) || null') >= 0, 'fetchTasks 缺 fallbackModels 回读')
+  assert.match(ksrc, /laneModels: null, fallbackModels: null/, 'state 初始缺 fallbackModels: null')
+  assert.match(ksrc, /fallbackModels: state\.fallbackModels \|\| null/, 'cfgKnobs 快照缺 fallbackModels（原值形态）')
+  assert.match(ksrc, /JSON\.stringify\(a\.fallbackModels \|\| null\) !== JSON\.stringify\(b\.fallbackModels \|\| null\)/, 'cfgKnobsChanged 缺 fallbackModels 比对（hash 不变分支补 notify 前提）')
+  assert.ok(ksrc.indexOf('setFbMs(state.fallbackModels)') >= 0, 'TopPanel update() 缺 fallbackModels 订阅')
+})
+
+// ===== ⑧ 在跑子代理模型可见：成员卡 + 池状态条渲染 model 与取模来源角标 =====
+test('⑧在跑模型可见：modelSourceBadge 角标（档/备/降/卡）+ 成员卡/池状态条渲染 + dispatch poolStatus 带 modelSource', () => {
+  // 角标映射与闸口（board/parent=常规继承不标）
+  assert.match(src, /var MODEL_SRC_BADGE = \{ card: '卡', lane: '档', fallback: '备', 'cooldown-downgrade': '降' \}/, '缺来源→角标映射')
+  assert.match(src, /function modelSourceBadge\(src\) \{/, '缺 modelSourceBadge 组件')
+  assert.ok(src.indexOf("src === 'board' || src === 'parent'") >= 0, 'board/parent 不标闸口缺失')
+  // 成员卡（TeamView memberCard）渲染 model + 角标
+  assert.match(src, /'🧬 ' \+ m\.model/, '成员卡缺 model 渲染')
+  assert.match(src, /modelSourceBadge\(m\.modelSource\)/, '成员卡/池状态条缺来源角标渲染')
+  // 池状态条（PoolStatus）在跑条目芯片
+  assert.ok(src.indexOf('在跑模型：') >= 0, 'PoolStatus 缺在跑模型芯片')
+  assert.match(src, /wBusy\.concat\(vBusy\)\.filter\(function \(m\) \{ return !!m\.model \}\)/, 'PoolStatus 缺 busy 条目收集')
+  // 数据面：dispatch poolStatus 条目带 modelSource（缺则 GUI 角标无源）
+  const dsrc = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  assert.ok(dsrc.indexOf("modelSource: rc.modelSource || ''") >= 0, 'dispatch poolStatus 条目缺 modelSource 透出')
+})
+
+// ===== ⑨ 产物含模型路由弹层标记 =====
+test('⑨产物：lib/client.js 已重组装且含模型路由弹层/在跑模型可见标记', () => {
+  for (const m of ['ModelRoutePopover', 'FallbackCfg', '备用模型链', '板级模型', 'modelSourceBadge', '在跑模型：', "state.fallbackModels = (d && d.fallbackModels) || null", "'cpu'"]) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺标记：' + m + '（需 npm run build-client 重组装）')
+  }
 })

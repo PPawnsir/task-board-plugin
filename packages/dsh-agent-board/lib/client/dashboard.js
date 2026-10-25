@@ -2,7 +2,7 @@
 // dashboard —— 仪表盘域：统计（computeStats/TrendChart/StatCard/BarRow/ResearchRoiRow）· 范围筛选（RangeFilter）
 //   · 全局总览（GlobalBoards）· 报告（buildReport/ReportButton）· Token 消耗（TokenUsage）
 //   · 架构健康（HealthHints，架构自省 L1）
-//   · 团队池（TeamView/PoolStatus）· 设置（WorkModeSwitch/PoolCfg/MinCfg/ModelCfg/PoolCfgPopover）
+//   · 团队池（TeamView/PoolStatus）· 设置（WorkModeSwitch/PoolCfg/MinCfg/ModelCfg/PoolCfgPopover/ModelRoutePopover/FallbackCfg）
 // 本文件是 apply(ctx) 函数体片段，不可独立运行；由 scripts/build-client.cjs 按序拼接生成 lib/client.js。
 // ============================================================================
 
@@ -962,20 +962,41 @@
         dirty ? React.createElement('button', { onClick: function () { commit(val) }, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
     }
 
+    // ===== 取模来源角标（task-mvnyc8vo，用户「能看到子 agent 当前在用什么模型跑」）=====
+    // board/parent=常规继承路径不标（绝大多数，标了反成噪音）；其余路径给小角标，一眼看出本次取模走了哪条路：
+    // card=卡级特例「卡」/ lane=档位路由「档」/ fallback=备用模型链「备」/ cooldown-downgrade=冷却降档「降」。
+    var MODEL_SRC_BADGE = { card: '卡', lane: '档', fallback: '备', 'cooldown-downgrade': '降' }
+    var MODEL_SRC_LABEL = { card: '卡级特例', lane: '档位路由', board: '板级模型', parent: '继承父模型', fallback: '备用模型链', 'cooldown-downgrade': '冷却降档' }
+    function modelSourceBadge(src) {
+      if (!src || src === 'board' || src === 'parent') return null
+      return React.createElement('span', { title: '取模来源：' + (MODEL_SRC_LABEL[src] || src), style: { fontSize: 8, padding: '0 3px', borderRadius: 3, border: '1px solid ' + C.warn, color: C.warn, lineHeight: '11px', flexShrink: 0 } }, MODEL_SRC_BADGE[src] || src)
+    }
+
     function PoolStatus() {
       var ps = state.poolStatus
       if (!ps) return null
-      var wActive = (ps.workers || []).filter(function (w) { return w.busy }).length
+      var wBusy = (ps.workers || []).filter(function (w) { return w.busy })
+      var vBusy = (ps.verifiers || []).filter(function (v) { return v.busy })
+      var wActive = wBusy.length
       var wTotal = state.maxWorkers // 分母=并发上限而非当前池实例数，空闲也显示 0/上限
-      var vActive = (ps.verifiers || []).filter(function (v) { return v.busy }).length
+      var vActive = vBusy.length
       var vTotal = state.maxVerifiers
+      // 在跑子代理模型可见（task-mvnyc8vo）：每个 busy run 渲染 model 小芯片 + 取模来源角标，
+      // 与执行池成员卡同口径；缺 model 字段的老数据条目不渲染芯片。
+      var chips = wBusy.concat(vBusy).filter(function (m) { return !!m.model })
       return React.createElement('span', { style: { fontSize: 9, color: C.text2, display: 'inline-flex', gap: 4, alignItems: 'center' } },
         // 池水位标注（反馈 n-mut9rzoq3flu / n-muyg4wl9208c）：裸数字第一屏无解，补可见文字标签 + title
         React.createElement('span', { title: '活跃 Worker 数/上限（⚡ = 在跑）', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('zap', 10), 'Worker ' + wActive + '/' + wTotal),
-        React.createElement('span', { title: '活跃 Verifier 数/上限（✓ = 在跑）', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('check', 10), 'Verifier ' + vActive + '/' + vTotal))
+        React.createElement('span', { title: '活跃 Verifier 数/上限（✓ = 在跑）', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('check', 10), 'Verifier ' + vActive + '/' + vTotal),
+        chips.map(function (m) {
+          return React.createElement('span', { key: m.id, title: '在跑模型：' + m.model + '（任务 ' + (m.taskId || '-') + (m.modelSource ? '，取模来源：' + (MODEL_SRC_LABEL[m.modelSource] || m.modelSource) : '') + '）', style: { display: 'inline-flex', alignItems: 'center', gap: 2, padding: '0 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, maxWidth: 150 } },
+            React.createElement('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, m.model),
+            modelSourceBadge(m.modelSource))
+        }))
     }
 
-    // #11 头部减负：池配置收纳进 ⚙️ 弹出层（含 #17 verifier 异构模型设置）
+    // #11 头部减负：池配置收纳进 ⚙️ 弹出层（并发/超时/开关）；模型区（含 #17 verifier 异构模型设置、
+    // 力度路由六槽、备用链）2026-10-25 起搬至「模型路由」独立弹层 ModelRoutePopover（task-mvnyc8vo）
     // 档位槽读侧口径（task-mvnxckhq 同档优先序）：槽位=有序数组（第一位=首选），GUI 只展示/编辑首选；
     // 完整排序（次选及以后）走对话/RPC。容错：老 host 透出的单字符串形态按首选直读（host 归一后恒为数组，本分支只是防御）。
     function laneFirst(x) { return Array.isArray(x) ? (x[0] || '') : (typeof x === 'string' ? x : '') }
@@ -1062,6 +1083,73 @@
         React.createElement('button', { onClick: reopen, title: '重新显示首用引导横幅（board 视图顶部定位行）', style: { padding: '0px 5px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text, cursor: 'pointer', lineHeight: '14px' } }, '重新显示'))
     }
 
+    // 备用模型链编辑（task-mvnyc8vo GUI / task-mvnqxlpn 数据面）：fallbackModels 有序字符串数组 ↔
+    // 逗号/换行分隔文本。失焦保存（onBlur），经 set-board-config key='fallbackModels' 既有通道——
+    // host 逐项合法清单校验，非法项整体拒写并回 error（这里把 error 短暂展示，不静默吞）。空=清链不启用。
+    function FallbackCfg(props) {
+      var _R = React; var useState = _R.useState, useEffect = _R.useEffect
+      function toText(arr) { return (Array.isArray(arr) ? arr : []).join('\n') }
+      var _a = useState(toText(props.value)), val = _a[0], setVal = _a[1]
+      var _b = useState(''), msg = _b[0], setMsg = _b[1]
+      useEffect(function () { setVal(toText(props.value)) }, [JSON.stringify(props.value || [])])
+      function save() {
+        var arr = val.split(/[\n,，;；]+/).map(function (s) { return s.trim() }).filter(function (s) { return !!s })
+        if (JSON.stringify(arr) === JSON.stringify(Array.isArray(props.value) ? props.value : [])) return // 无变化不写
+        rpc('set-board-config', { key: 'fallbackModels', value: arr }).then(function (r) {
+          if (r && r.ok === false) { setMsg('⚠️ ' + (r.error || '保存失败')); setTimeout(function () { setMsg('') }, 5000); return }
+          setMsg('✅ 已保存'); setTimeout(function () { setMsg('') }, 2000); fetchTasks()
+        }).catch(function () { setMsg('⚠️ 保存失败'); setTimeout(function () { setMsg('') }, 3000) })
+      }
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'flex-start', gap: 4, fontSize: 9, color: C.text2 } },
+        React.createElement('textarea', { value: val, rows: 3, onChange: function (e) { setVal(e.target.value) }, onBlur: save, placeholder: 'provider/model，逗号或换行分隔；空=不启用', title: '备用模型链（有序）：取模候选冷却/熔断时按链顺序找首个健康替代模型；空=不启用', style: { width: 300, padding: '2px 4px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text, fontFamily: 'inherit', resize: 'vertical', whiteSpace: 'pre' } }),
+        msg ? React.createElement('span', { style: { color: msg.indexOf('✅') === 0 ? C.ok : C.err, whiteSpace: 'normal', maxWidth: 140 } }, msg) : null)
+    }
+
+    // ===== 模型路由独立弹层（task-mvnyc8vo，用户 2026-10-25「模型配置独立弹出卡片」）=====
+    // 模型相关全部配置从池配置弹层**搬走**（不是复制）到本弹层：①板级 Worker/Verifier 模型（ModelCfg
+    // 复用）②力度路由六槽 ③fallbackModels 备用链文本编辑（FallbackCfg）；池配置弹层只留并发/超时/开关。
+    // 弹层样式复用 PoolCfgPopover 的 fixed 定位模式（脱离面板 overflow 裁剪 + uiZoom 档位补偿）。
+    function ModelRoutePopover(props) {
+      var _R = React; var useState = _R.useState, useEffect = _R.useEffect, useRef = _R.useRef
+      var _a = useState(false), open = _a[0], setOpen = _a[1]
+      var _p = useState(null), pos = _p[0], setPos = _p[1]
+      var ref = useRef(null); var btnRef = useRef(null)
+      useEffect(function () { if (!open) return; function onDown(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }; document.addEventListener('mousedown', onDown); return function () { document.removeEventListener('mousedown', onDown) } }, [open])
+      function toggle() {
+        // 与 PoolCfgPopover 同口径：fixed + 视口坐标（面板 overflow:hidden 会裁 absolute 弹层）；
+        // 界面缩放补偿——zoom 子树内 getBoundingClientRect 返回缩放后坐标，各项除以档位还原 CSS px。
+        var z = state.uiZoom || 1
+        if (!open && btnRef.current) { var r = btnRef.current.getBoundingClientRect(); setPos({ top: (r.bottom + 4) / z, right: Math.max(8, window.innerWidth - r.right) / z, maxH: Math.max(140, (window.innerHeight - r.bottom - 16) / z) }) }
+        setOpen(!open)
+      }
+      return React.createElement('span', { ref: ref, style: { position: 'relative', display: 'inline-flex' } },
+        React.createElement('button', { ref: btnRef, onClick: toggle, title: '模型路由（板级模型 / 力度路由六槽 / 备用模型链）', style: { fontSize: 12, padding: '3px 8px', border: '1px solid ' + (open ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: open ? C.nested : 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('cpu', 13)),
+        open && pos ? React.createElement('div', { style: { position: 'fixed', top: pos.top + 'px', right: pos.right + 'px', padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: (pos.maxH || 300) + 'px', overflowY: 'auto' } },
+          // ① 板级模型（从池配置弹层搬入，组件与写通道逐字不变）
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 5 } }, '板级模型'),
+          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
+            React.createElement(ModelCfg, { label: 'Worker 模型', cfgKey: 'workerModel', value: props.workerModel }),
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Worker 执行模型）')),
+          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+            React.createElement(ModelCfg, { label: 'Verifier 模型', cfgKey: 'verifierModel', value: props.verifierModel }),
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Verifier 异构审查）')),
+          // ② 力度路由六槽（从池配置弹层搬入）：三档 × Worker/Verifier，读写通道不变
+          // （set-board-config key='laneModels' 部分合并；空槽=继承上方板级模型行；
+          // 槽位=有序数组，GUI 只编辑首选，完整排序走对话/RPC）。
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '力度路由'),
+          [['light', '轻档'], ['standard', '标档'], ['heavy', '重档']].map(function (ln) {
+            var laneObj = (props.laneModels && props.laneModels[ln[0]]) || {}
+            return React.createElement('div', { key: ln[0], style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 3 } },
+              React.createElement(ModelCfg, { label: ln[1] + ' Worker', lane: ln[0], laneRole: 'worker', inheritLabel: '继承板级', value: laneFirst(laneObj.worker), laneList: laneObj.worker }),
+              React.createElement(ModelCfg, { label: ln[1] + ' Verifier', lane: ln[0], laneRole: 'verifier', inheritLabel: '继承板级', value: laneFirst(laneObj.verifier), laneList: laneObj.verifier }))
+          }),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 1, whiteSpace: 'normal', maxWidth: 340 } }, '空 = 继承上方 Worker/Verifier 模型行（取模链：卡级特例 → 档位 → 板级 → 父模型）；档位槽支持有序数组=同档优先序，此处只编辑首选（数组第一位），完整排序走对话/RPC；卡档位走对话 task_update size=light/standard/heavy'),
+          // ③ 备用模型链：文本编辑（逗号/换行分隔，失焦保存），v1 不做排序拖拽器
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '备用模型链'),
+          React.createElement(FallbackCfg, { value: props.fbModels }),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 340 } }, '取模口径：卡级特例 → 档位路由 → 板级模型；候选模型冷却/熔断时按备用链顺序找首个健康替代，链尽再走降档/父模型兜底')) : null)
+    }
+
     function PoolCfgPopover(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect, useRef = _R.useRef
       var _a = useState(false), open = _a[0], setOpen = _a[1]
@@ -1099,26 +1187,8 @@
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
             React.createElement(PoolCfg, { label: 'Worker 并发', cfgKey: 'maxWorkers', value: props.maxW }),
             React.createElement(PoolCfg, { label: 'Verifier 并发', cfgKey: 'maxVerifiers', value: props.maxV })),
-          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
-            React.createElement(ModelCfg, { label: 'Worker 模型', cfgKey: 'workerModel', value: props.workerModel }),
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Worker 执行模型）')),
-          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-            React.createElement(ModelCfg, { label: 'Verifier 模型', cfgKey: 'verifierModel', value: props.verifierModel }),
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Verifier 异构审查）')),
-          // ===== 力度路由（task-mvneq4mw）：三档 × Worker/Verifier 共 6 槽 =====
-          // 读写通道 = set-board-config key='laneModels' 部分合并（C1 task-mvnemvf5 地基：host 逐槽位
-          // 合法清单校验，任一非法整体拒写 + configLog 审计行）；读 = props.laneModels（kernel fetchTasks 透传）。
-          // 空槽位 = 继承上方板级 Worker/Verifier 模型行（取模链：卡级 model → 档位 lane → 板级 → 父模型）。
-          // 槽位=有序数组（task-mvnxckhq 同档优先序）：下拉只编辑首选（数组第一位，laneFirst 读、
-          // laneList 整槽写回 [首选, ...其余原样]）；完整排序走对话/RPC，GUI 不做多值排序编辑器。
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '力度路由'),
-          [['light', '轻档'], ['standard', '标档'], ['heavy', '重档']].map(function (ln) {
-            var laneObj = (props.laneModels && props.laneModels[ln[0]]) || {}
-            return React.createElement('div', { key: ln[0], style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 3 } },
-              React.createElement(ModelCfg, { label: ln[1] + ' Worker', lane: ln[0], laneRole: 'worker', inheritLabel: '继承板级', value: laneFirst(laneObj.worker), laneList: laneObj.worker }),
-              React.createElement(ModelCfg, { label: ln[1] + ' Verifier', lane: ln[0], laneRole: 'verifier', inheritLabel: '继承板级', value: laneFirst(laneObj.verifier), laneList: laneObj.verifier }))
-          }),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 1, whiteSpace: 'normal', maxWidth: 340 } }, '空 = 继承上方 Worker/Verifier 模型行（取模链：卡级特例 → 档位 → 板级 → 父模型）；档位槽支持有序数组=同档优先序，此处只编辑首选（数组第一位），完整排序走对话/RPC；卡档位走对话 task_update size=light/standard/heavy'),
+          // 模型相关配置（板级 Worker/Verifier 模型行 + 力度路由六槽）已搬至「模型路由」独立弹层
+          //（task-mvnyc8vo，ModelRoutePopover）——本弹层只留并发/超时/开关。
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '两级超时（软超时只提醒主窗口，由你决定继续等待或终止）'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
             React.createElement(MinCfg, { label: '软超时', cfgKey: 'softTimeoutMin', value: props.softT, min: 1, max: 480, tip: '超过后在看板提醒主窗口，不终止 run（1~480 分钟）' }),
@@ -1182,7 +1252,7 @@
             React.createElement('span', { style: { display: 'inline-flex', color: isW ? C.brand : C.warn } }, ic(isW ? 'zap' : 'clipboard-check', 13)),
             React.createElement('span', { style: { fontSize: 12, fontWeight: 700, color: C.text } }, (isW ? 'Worker' : 'Verifier') + ' · 执行中'),
             React.createElement('span', { style: { marginLeft: 'auto', fontSize: 9, padding: '1px 6px', borderRadius: 3, background: C.brand, color: C_INV } }, '忙碌')),
-          m.model ? React.createElement('div', { style: { fontSize: 9, color: C.warn, marginBottom: 3 }, title: '异构模型审查' }, '🧬 ' + m.model) : null,
+          m.model ? React.createElement('div', { style: { fontSize: 9, color: C.text2, marginBottom: 3, display: 'flex', alignItems: 'center', gap: 3 }, title: '本次取模：' + m.model + (m.modelSource ? '（' + (MODEL_SRC_LABEL[m.modelSource] || m.modelSource) + '）' : '') }, React.createElement('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '🧬 ' + m.model), modelSourceBadge(m.modelSource)) : null,
           curTask ? React.createElement('div', { onClick: function () { state.detailId = curTask.id; state.view = 'board'; notify() }, style: { fontSize: 10, color: C.brand, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: curTask.title }, '→ ' + curTask.title) : React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '→ ' + m.taskId),
           React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3 }, title: '一次性子代理会话：' + (m.runId || '') }, '会话 ' + String(m.runId || '').slice(0, 8) + '…（用完即销毁）'))
       }

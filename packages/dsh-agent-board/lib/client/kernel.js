@@ -162,6 +162,19 @@
         ['path', { d: 'M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z' }],
         ['circle', { cx: 12, cy: 12, r: 3 }]
       ],
+      // 模型路由弹层按钮图标（task-mvnyc8vo）：芯片语义（lucide cpu）
+      'cpu': [
+        ['rect', { x: 4, y: 4, width: 16, height: 16, rx: 2 }],
+        ['rect', { x: 9, y: 9, width: 6, height: 6 }],
+        ['path', { d: 'M15 2v2' }],
+        ['path', { d: 'M15 20v2' }],
+        ['path', { d: 'M2 15h2' }],
+        ['path', { d: 'M2 9h2' }],
+        ['path', { d: 'M20 15h2' }],
+        ['path', { d: 'M20 9h2' }],
+        ['path', { d: 'M9 2v2' }],
+        ['path', { d: 'M9 20v2' }]
+      ],
       'rocket': [
         ['path', { d: 'M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z' }],
         ['path', { d: 'm12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z' }],
@@ -247,7 +260,7 @@
     // '1'=用户已 ✕ 关闭、不再渲染；读取异常一律视为未关闭（横幅照常渲染，下次 ✕ 写入成功即持久）。
     var ONBOARD_DISMISS_KEY = 'dsh-agent-board-onboard-dismissed'
     function readOnboardDismissed() { try { return localStorage.getItem(ONBOARD_DISMISS_KEY) === '1' } catch (_) { return false } }
-    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', laneModels: null, softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, verifyUserGuide: true, uiZoom: readUiZoom(), onboardDismissed: readOnboardDismissed(), lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', filterReview: false, selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', mpRole: '', mpSize: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
+    var state = { sessionId: null, tasks: [], boardMode: 'auto', teamMode: false, workMode: 'auto', minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', laneModels: null, fallbackModels: null, softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, verifyUserGuide: true, uiZoom: readUiZoom(), onboardDismissed: readOnboardDismissed(), lessonPushed: {}, isRoot: true, isRootEverTrue: false, isRootFalseN: 0, isRootStable: true, open: false, detailId: null, children: [], dragOver: null, dragTask: null, dispatchInfo: '', view: 'board', layoutLeft: 280, layoutRight: 0, poolStatus: null, escalatedIds: [], filterQ: '', filterPrio: [], filterTag: '', filterReview: false, selectMode: false, selected: {}, undoSnapshot: null, cardHover: '', archSort: 'time-desc', dateRange: { from: '', to: '' }, rfOpen: false, gboOpen: false, activity: {}, archived: [], archQ: '', globalBoards: [], createOpen: false, createFlash: '', mpRole: '', mpSize: '', usageSummary: null, childStats: {}, tasksErr: '', tasksHash: '' }
 
     // #16 快捷键：Esc 逐级关闭（详情→看板→面板）；输入框聚焦时不劫持
     try {
@@ -317,7 +330,7 @@
     // 「缺字段/脏值=开，只有显式 false 才关」，与 host core.cfg 同口径——单点定义，避免纠偏把脏值当真值。
     function cfgKnobOf(src, key) { return !(src && src[key] === false) }
     // 变更检测：与 notify 同类的轻量浅比较（只看这几个布尔开关；settings 无嵌套对象）。
-    function cfgKnobsChanged(a, b) { return a.feedbackEnabled !== b.feedbackEnabled || a.notifyDispatch !== b.notifyDispatch || a.notifyDone !== b.notifyDone || a.epicSplit !== b.epicSplit || a.verifyUserGuide !== b.verifyUserGuide || JSON.stringify(a.laneModels || null) !== JSON.stringify(b.laneModels || null) }
+    function cfgKnobsChanged(a, b) { return a.feedbackEnabled !== b.feedbackEnabled || a.notifyDispatch !== b.notifyDispatch || a.notifyDone !== b.notifyDone || a.epicSplit !== b.epicSplit || a.verifyUserGuide !== b.verifyUserGuide || JSON.stringify(a.laneModels || null) !== JSON.stringify(b.laneModels || null) || JSON.stringify(a.fallbackModels || null) !== JSON.stringify(b.fallbackModels || null) }
 
     function fetchTasks() {
       if (!state.sessionId) return
@@ -360,7 +373,7 @@
         // 快照 laneModels 存**原值**（非 JSON 串）：比较器 cfgKnobsChanged 已对双侧各做一次 stringify，
         // 快照侧若先 stringify 一次则类型不对称（串 vs 对象/null 恒不等 → null→null 也判变化），
         // 3s 轮询每轮补 notify、tasksHash 渲染节约当场作废（验收驳回回归，task-mvneq4mw）。
-        var cfgKnobs = { feedbackEnabled: state.feedbackEnabled, notifyDispatch: state.notifyDispatch, notifyDone: state.notifyDone, epicSplit: state.epicSplit, verifyUserGuide: state.verifyUserGuide, laneModels: state.laneModels || null }
+        var cfgKnobs = { feedbackEnabled: state.feedbackEnabled, notifyDispatch: state.notifyDispatch, notifyDone: state.notifyDone, epicSplit: state.epicSplit, verifyUserGuide: state.verifyUserGuide, laneModels: state.laneModels || null, fallbackModels: state.fallbackModels || null }
         if (tasksChanged) {
           state.tasksHash = newHash
           state.tasks = (d && d.tasks) || []
@@ -379,6 +392,10 @@
         // 力度路由表（task-mvneq4mw GUI）：cfg 归一形态 {light/standard/heavy:{worker,verifier}} 透传进 state，
         // 池配置弹层「力度路由」小节 6 槽下拉读它；老 host 不返回 → null（弹层按全空槽渲染，与板级模型行同语义）
         state.laneModels = (d && d.laneModels) || null
+        // 备用模型链（task-mvnyc8vo GUI 透传 / task-mvnqxlpn 数据面）：cfg 归一后的有序数组透传进 state，
+        // 模型路由弹层「备用模型链」文本框读它；老 host 不返回 → null（按空链渲染）。写通道=既有
+        // set-board-config key='fallbackModels'（host 逐项合法清单校验，非法整体拒写）。
+        state.fallbackModels = (d && d.fallbackModels) || null
         state.softTimeoutMin = (d && d.softTimeoutMin) || 30
         state.hardTimeoutMin = (d && d.hardTimeoutMin) || 120
         state.poolStatus = (d && d.poolStatus) || null
@@ -626,7 +643,8 @@
       var _m = useState(state.minWorkers), minW = _m[0], setMinW = _m[1]; var _n = useState(state.maxWorkers), maxW = _n[0], setMaxW = _n[1]; var _o = useState(state.minVerifiers), minV = _o[0], setMinV = _o[1]; var _p = useState(state.maxVerifiers), maxV = _p[0], setMaxV = _p[1]; var _wm = useState(state.workerModel), workerModel = _wm[0], setWorkerModel = _wm[1]; var _vm = useState(state.verifierModel), verifierModel = _vm[0], setVerifierModel = _vm[1]
       var _q = useState(state.teamMode), teamMode = _q[0], setTeamMode = _q[1]; var _dr = useState(state.dateRange), setDR = _dr[1]
       var _wmo = useState(state.workMode), workMode = _wmo[0], setWorkModeState = _wmo[1]
-      var _lms = useState(state.laneModels), laneMs = _lms[0], setLaneMs = _lms[1] // 力度路由表（设置弹层「力度路由」小节 6 槽下拉数据源）
+      var _lms = useState(state.laneModels), laneMs = _lms[0], setLaneMs = _lms[1] // 力度路由表（模型路由弹层「力度路由」小节 6 槽下拉数据源）
+      var _fbm = useState(state.fallbackModels), fbMs = _fbm[0], setFbMs = _fbm[1] // 备用模型链（模型路由弹层「备用模型链」文本框数据源）
       var _cro = useState(state.createOpen), createOpen = _cro[0], setCreateOpen = _cro[1]; var _crf = useState(state.createFlash), createFlash = _crf[0], setCreateFlash = _crf[1]
       var _te = useState(state.tasksErr), tasksErr = _te[0], setTasksErr = _te[1] // 读路径错误条（无错不渲染）
       var _sto = useState(state.softTimeoutMin), softT = _sto[0], setSoftT = _sto[1]; var _hto = useState(state.hardTimeoutMin), hardT = _hto[0], setHardT = _hto[1]
@@ -638,7 +656,7 @@
       var _uzm = useState(state.uiZoom), uiZoom = _uzm[0], setUiZoom = _uzm[1] // 界面缩放档位（设置区「界面」，zoom 挂面板根容器）
       var _obd = useState(state.onboardDismissed), obd = _obd[0], setObd = _obd[1] // 首用引导横幅关闭态（✕ 写 localStorage 持久化，仅 board 视图 content 内渲染）
       var _usg = useState(state.usageSummary), setUsage = _usg[1] // Token 区聚合订阅（task-mv10lvud 根修）：usageSummary 换新对象即触发渲染
-      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setLaneMs(state.laneModels); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setNdOn(state.notifyDispatch); setNnOn(state.notifyDone); setEsOn(state.epicSplit); setVugOn(state.verifyUserGuide); setCrd(state.cleanupRetentionDays); setUiZoom(state.uiZoom); setObd(state.onboardDismissed); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr); setUsage(state.usageSummary) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
+      useEffect(function () { function update() { setOpen(state.open); setTasksState(state.tasks); setModeState(state.boardMode); setDetailId(state.detailId); setDragOver(state.dragOver); setDispatchInfo(state.dispatchInfo); setViewState(state.view); setLayL(state.layoutLeft); setLayR(state.layoutRight); setMinW(state.minWorkers); setMaxW(state.maxWorkers); setMinV(state.minVerifiers); setMaxV(state.maxVerifiers); setWorkerModel(state.workerModel); setVerifierModel(state.verifierModel); setLaneMs(state.laneModels); setFbMs(state.fallbackModels); setTeamMode(state.teamMode); setWorkModeState(state.workMode); setDR(state.dateRange); setSoftT(state.softTimeoutMin); setHardT(state.hardTimeoutMin); setFbEnabled(state.feedbackEnabled); setNdOn(state.notifyDispatch); setNnOn(state.notifyDone); setEsOn(state.epicSplit); setVugOn(state.verifyUserGuide); setCrd(state.cleanupRetentionDays); setUiZoom(state.uiZoom); setObd(state.onboardDismissed); setCreateOpen(state.createOpen); setCreateFlash(state.createFlash); setTasksErr(state.tasksErr); setUsage(state.usageSummary) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       if (!open) return null
       if (!state.isRootStable) return null // 子代理会话不渲染看板面板（读 isRootStable：瞬态 false 不闪，见 isRoot 蝶变防抖）
       var active = tasks.filter(function (t) { return t.status !== 'archived' }); var archived = tasks.filter(function (t) { return t.status === 'archived' })
@@ -669,7 +687,9 @@
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', borderBottom: '1px solid ' + C.border, flexShrink: 0, flexWrap: 'wrap', gap: 4 } },
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } }, React.createElement('span', { style: { fontWeight: 600, fontSize: 13, color: C.text, display: 'inline-flex', alignItems: 'center', gap: 5 } }, ic('clipboard-list', 15), '智能看板'), React.createElement(ViewTab, null), React.createElement(PoolStatus, null)),
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' } },
-            React.createElement(PoolCfgPopover, { minW: minW, maxW: maxW, minV: minV, maxV: maxV, workerModel: workerModel, verifierModel: verifierModel, laneModels: laneMs, softT: softT, hardT: hardT, feedbackEnabled: fbEnabled, notifyDispatch: ndOn, notifyDone: nnOn, epicSplit: esOn, verifyUserGuide: vugOn, retentionDays: crd }),
+            React.createElement(PoolCfgPopover, { minW: minW, maxW: maxW, minV: minV, maxV: maxV, softT: softT, hardT: hardT, feedbackEnabled: fbEnabled, notifyDispatch: ndOn, notifyDone: nnOn, epicSplit: esOn, verifyUserGuide: vugOn, retentionDays: crd }),
+            // 模型路由独立弹层（task-mvnyc8vo）：板级模型 + 力度路由六槽 + 备用链，从池配置弹层搬走
+            React.createElement(ModelRoutePopover, { workerModel: workerModel, verifierModel: verifierModel, laneModels: laneMs, fbModels: fbMs }),
             dispatchInfo ? React.createElement('span', { style: { fontSize: 9, color: C.brand, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: dispatchInfo }, dispatchInfo) : null,
             React.createElement('button', { onClick: function () { state.createOpen = true; notify() }, title: '新建任务（可存为草稿）', style: { fontSize: 11, padding: '3px 8px', border: '1px solid ' + C.border, borderRadius: 6, cursor: 'pointer', background: 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('plus', 11), '新建任务'),
             createFlash ? React.createElement('span', { style: { fontSize: 10, color: C.ok } }, createFlash) : null,
