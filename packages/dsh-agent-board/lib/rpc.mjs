@@ -938,12 +938,39 @@ export function createRpc(ctx, state, deps) {
       if (appended) res.planGateNotify = '⚠️ ' + t.id + ' 计划改动越界：' + oobText + ' 不在 touches 内——可 task_intervene 纠正或放行'
       return res
     }
-    ctx.tools.register(defineTool({ name: 'board_report', description: '[任务看板 Worker 专用] 上报任务结果。kind=complete 时填 summary/changes/selfTest/diffStat（git 仓库内改动附 git diff --stat 概要）；kind=escalate 时填 question（歧义上报，等待主窗口裁决）；kind=progress 时填 question（一行里程碑进展摘要，≤200 字符）——只在有实际产物/结论时报，禁止定时或表演式汇报，静默不通知主窗口。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, kind: { type: 'string', enum: ['complete', 'escalate', 'progress'] }, summary: { type: 'string' }, changes: { type: 'string' }, selfTest: { type: 'string' }, diffStat: { type: 'string', description: '变更概要：git diff --stat（含 git status --short）输出，≤1500 字符' }, question: { type: 'string', description: 'kind=escalate：歧义原文；kind=progress：一行里程碑进展摘要（≤200 字符）' } }, required: ['taskId', 'kind'] }, output: jo(), execute: async function (args) {
+    ctx.tools.register(defineTool({ name: 'board_report', description: '[任务看板 Worker 专用] 上报任务结果。kind=complete 时填 summary/changes/selfTest/diffStat（git 仓库内改动附 git diff --stat 概要）；kind=escalate 时填 question（歧义上报，等待主窗口裁决）；kind=progress 时填 question（一行里程碑进展摘要，≤200 字符）——只在有实际产物/结论时报，禁止定时或表演式汇报，静默不通知主窗口。可选 sizeHint（light/standard/heavy）：执行中/验收中自报档位修正——仅 in-progress/verifying 受理，与现档不同才写入（history+messages 双留痕审计）；当前 run 模型不变，修正对失败重试/续跑/验收的下一次派发生效。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, kind: { type: 'string', enum: ['complete', 'escalate', 'progress'] }, summary: { type: 'string' }, changes: { type: 'string' }, selfTest: { type: 'string' }, diffStat: { type: 'string', description: '变更概要：git diff --stat（含 git status --short）输出，≤1500 字符' }, question: { type: 'string', description: 'kind=escalate：歧义原文；kind=progress：一行里程碑进展摘要（≤200 字符）' }, sizeHint: { type: 'string', enum: ['light', 'standard', 'heavy'], description: '档位自修正（可选）：light/standard/heavy；仅 in-progress/verifying 受理，同值幂等跳过，不同则写入并双留痕（history+messages），对下一次派发生效' } }, required: ['taskId', 'kind'] }, output: jo(), execute: async function (args) {
       var sid = toolSessionId(); var actor = getActorId()
       var result = await mutateLocked(sid, function (d) {
         var t = d.tasks.find(function (x) { return x.id === args.taskId })
         if (!t) return { ok: false, error: 'not found' }
-        if (t.status !== 'in-progress') return { ok: false, error: 'not in-progress (状态: ' + t.status + ')' }
+        // ===== 档位自修正（task-mvnesb3j）：board_report.sizeHint 可选字段 =====
+        // 受理窗口：in-progress（Worker 执行中）/ verifying（Verifier 验收中）——resolved/archived 等落定态拒收。
+        // 枚举口径复用 TASK_SIZES（与 task_update size 同款）；sizeHint 与现档（缺省=standard 语义）不同才写入：
+        // t.size=sizeHint + history 一条（actor=上报者，note 记档位变迁与判定来源）+ 卡 messages 一行同款（双留痕审计）；
+        // 同值幂等跳过（零写入零留痕，防刷屏）。生效面零接线：spawnOneShot 每次 spawn 现读 t.size（rt 新鲜快照），
+        // 修正对失败重试/续跑/验收的下一次派发自动生效；当前 run 不换模型（宿主不支持中途换）。
+        // 自肥风险（Worker 给自己升档要更强模型）只靠留痕+可见性约束，不设审批（额度治理是另一个 epic 的事）。
+        var sizeFix = null
+        if (args.sizeHint !== undefined && args.sizeHint !== null && String(args.sizeHint).trim() !== '') {
+          var hint = String(args.sizeHint).trim()
+          if (TASK_SIZES.indexOf(hint) < 0) return { ok: false, error: '非法 sizeHint: ' + String(args.sizeHint) + '（合法值: light/standard/heavy）' }
+          if (t.status !== 'in-progress' && t.status !== 'verifying') return { ok: false, error: 'sizeHint 仅 in-progress/verifying 受理（当前状态: ' + t.status + '）' }
+          var curSize = TASK_SIZES.indexOf(t.size) >= 0 ? t.size : 'standard'
+          if (hint === curSize) sizeFix = { skipped: true, size: curSize }
+          else {
+            var who = t.status === 'verifying' ? 'Verifier 验收中判定' : 'Worker 执行中判定'
+            t.size = hint
+            ah(t, t.status, t.status, actor, '档位自修正：' + curSize + '→' + hint + '（' + who + '）')
+            if (!Array.isArray(t.messages)) t.messages = []
+            t.messages.push({ kind: 'size-hint', text: '🎚 档位自修正：' + curSize + '→' + hint + '（' + who + '；当前 run 模型不变，对下一次派发生效）', at: new Date().toISOString(), by: actor })
+            sizeFix = { applied: true, from: curSize, to: hint }
+          }
+        }
+        if (t.status !== 'in-progress') {
+          // verifying 卡的 sizeHint 专报通道（Verifier 侧，kind=progress）：只受理 sizeHint 部分，不进 Worker 进展流
+          if (sizeFix && args.kind === 'progress') return { ok: true, sizeHint: sizeFix }
+          return { ok: false, error: 'not in-progress (状态: ' + t.status + ')' }
+        }
         if (!Array.isArray(t.messages)) t.messages = []
         // ===== 里程碑进展通道（kind=progress）=====
         // 定位：长任务执行期间的「还在正确路上」的轻量证明；不进回执聚合、不通知主窗口（纯静默可见）。
@@ -954,19 +981,19 @@ export function createRpc(ctx, state, deps) {
           // 计划清单是多行路径（天然超 200 字），放宽到 2000（与歧义上报同档）；普通进展仍 200。
           var planFiles = core.parsePlanFiles(rawQ)
           var ptext = rawQ.slice(0, planFiles ? 2000 : 200)
-          if (!ptext) return { ok: false, error: 'question required for progress (一行进展摘要)' }
+          if (!ptext) { if (sizeFix) return { ok: true, sizeHint: sizeFix }; return { ok: false, error: 'question required for progress (一行进展摘要)' } } // 纯档位自修正（sizeHint 不带进展文案）：受理 sizeHint 即可，不强制补 question
           var pat = new Date().toISOString()
           t.messages.push({ kind: 'progress', text: ptext, at: pat, by: actor })
           t.lastProgress = { text: ptext, at: pat } // 覆盖式：卡片只展示最新一条
-          if (planFiles) return planGateApply(t, planFiles, actor, pat)
-          return { ok: true, progress: t.lastProgress }
+          if (planFiles) { var pgr = planGateApply(t, planFiles, actor, pat); if (sizeFix) pgr.sizeHint = sizeFix; return pgr }
+          var pr = { ok: true, progress: t.lastProgress }; if (sizeFix) pr.sizeHint = sizeFix; return pr
         }
         if (args.kind === 'escalate') {
           var at = new Date().toISOString()
           t.escalation = { question: (args.question || '').slice(0, 2000), at: at, by: actor }
           t.messages.push({ kind: 'escalation', text: (args.question || '').slice(0, 4000), at: at, by: actor })
           ah(t, 'in-progress', 'in-progress', actor, '上报歧义（工具通道），待主窗口裁决')
-          return { ok: true, escalated: true, task: t }
+          var er = { ok: true, escalated: true, task: t }; if (sizeFix) er.sizeHint = sizeFix; return er
         }
         delete t.escalation
         delete t.retryCount // v72：成功完成清零超时重试计数（工具直报路径）
@@ -974,6 +1001,7 @@ export function createRpc(ctx, state, deps) {
         t.deliverable = { summary: args.summary || '', changes: args.changes || '', selfTest: args.selfTest || '', diff: (args.diffStat || '').slice(0, 4000), at: new Date().toISOString(), by: actor }
         var r = resolveApply(d, t, actor, 'verifying', (args.summary || '') + (args.selfTest ? '\n\n自测: ' + args.selfTest.slice(0, 300) : ''), 'worker 工具上报完成')
         r.ok = true; r.task = t
+        if (sizeFix) r.sizeHint = sizeFix
         return r
       })
       // 计划闸口越界警示（task-mvneoyba）：走系统异常通道（带 taskId，投递时按任务现状过滤——

@@ -894,6 +894,10 @@ export function buildWorkerPrompt(t, pack, feedbackEnabled) {
   // write×1 + edit×2 分块落地同一 spec 一次过）：固定段写死「预估 >8KB 禁止单次 write 全量」。
   // 纯 prompt 层指引段，零逻辑风险；只进 Worker prompt，不进 verifier/hook（与 git 纪律段同例）。
   p += '\n\n大文件交付纪律：单文件交付预估 >8KB（或 spec 含全量文案/长代码）时，禁止单次 write 写入全量——单次超长输出会撞模型输出上限、上下文耗尽零产出。先 write 落主体骨架，再用 edit 追加续块（每块 ≤4KB）逐块落地，直至写完。'
+  // 档位自修正契约（task-mvnesb3j）：拆解官定的是预估档；Worker 执行中发现实际力度不符应能自报修正。
+  // 语义写死三条：①通道=board_report.sizeHint（light/standard/heavy）；②当前 run 不换模型（宿主不支持
+  // 中途换）；③生效面=失败重试/续跑/验收的下一次派发（spawnOneShot 每次 spawn 现读 t.size，零接线）。
+  p += '\n\n档位自修正：执行中发现任务实际力度与本卡档位不符（如标准档的活实际是跨模块大改，或反过来），通过 board_report 的 sizeHint 字段（light/standard/heavy）上报修正——当前 run 的模型不变，修正对失败重试/续跑/验收的下一次派发生效。'
   p += '\n\n完成契约（双模，工具优先）：\n1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + t.id + '，summary=开发描述/changes=改动清单/selfTest=自测情况/diffStat=变更概要）；工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况 / ## diff 概要）。\n   diffStat 要求：若本次改动发生在 git 仓库内，运行 git diff --stat（含 git status --short），把输出贴进 diffStat（≤1500 字符）；关键逻辑变更可附 ≤20 行核心片段。非代码任务/无 git 仓库可省略。\n   **board_report 调用成功即任务终点：立即结束输出，不要再修改/验证任何文件**。上报后任务即刻进入验收，你继续改动会让代码在验收口径之外漂移、且阻塞 Verifier 派发（实测有 Worker 上报后又自测 16 分钟）；上报后发现新问题的，写进 selfTest 备注交由 Verifier/主窗口裁决。\n2. 歧义/信息不足/需用户决策时：优先调用 board_report（kind=escalate, taskId=' + t.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测。上报歧义后直接结束本轮——裁决后会有新 Worker 带着裁决答案接手。\n3. 进展汇报（较大任务）：按里程碑推进，每完成一个可验证的里程碑调用一次 board_report（kind="progress", taskId=' + t.id + ', question=一行进展摘要，≤200 字符）。只在有实际产物/结论时报；禁止定时汇报或表演式汇报。'
   return p
 }
@@ -944,6 +948,9 @@ export function buildVerifierPrompt(t, pack, userGuide) {
   // 写死进 prompt 的硬纪律 + 事后兜底威慑（touches 审计：Worker 交付的 diff 概要与任务声明的
   // touches 即改动范围基线，越界即驳回——这层审计对 verifier 自己同样生效）。
   p += '\n文件纪律：验收时可以写必要的临时/测试文件（放 _scratch 或测试目录，验收结束后自行清理干净）；禁止改动工程代码与文档（README 等）。事后有 touches 审计兜底：Worker 交付的 diff 概要与任务声明的 touches 是改动范围基线，发现越界改动（含你自己留下的改动痕迹）一律驳回。'
+  // 档位自修正（task-mvnesb3j）：验收中发现的档位误判同样值得修正——影响驳回重派的下一任 Worker 档位。
+  // Verifier 侧通道=board_report（kind=progress，sizeHint=light/standard/heavy）：verifying 态受理，双留痕审计。
+  p += '\n档位自修正：发现卡的力度档判定明显失误时可用 board_report（kind=progress，sizeHint=light/standard/heavy）修正（影响后续重派档位）。'
   p += '\n\n结论契约（双模，工具优先）：\n1. 优先调用 board_verdict 工具（taskId=' + t.id + ', verdict=approved/rejected, summary=测试概要, checks=逐条核对证据含行号）。\n2. 工具不可用则首行 APPROVED: <结论> 或 REJECTED: <结论>，然后 ## 测试概要 / ## 核对项 分段。'
   // 自测指南段（verifyUserGuide 开关门禁，缺省开）：整段追加在 prompt 末尾；关掉 = 逐字无此段（省 token），
   // 落账侧（settleVerifier/board_verdict）同开关门禁——关时即使输出带了段也不挂 userTest 字段。
