@@ -67,6 +67,64 @@ export function overlapsTouches(mine, theirs) {
   return false
 }
 
+// ===== 开工计划闸口（task-mvneoyba）：Worker 动笔前报「计划改动：」清单，host 比对 touches 边界 =====
+// 背景：防约束漂移——主窗口指定的 touches 文件边界 Worker 不严格遵守，漂移在「调研完成、动笔之前」
+// 的零代价时刻拦截最省。机制：Worker 以 board_report kind=progress + question『计划改动：』前缀上报
+// 计划文件清单，host 逐条做「touch 模式 ⊇ 计划文件」单向覆盖判定；越界只警示不阻断
+//（卡 messages + 主窗口通知 + 工具返回体 warning 三通道，接线在 rpc.mjs board_report progress 分支）。
+export var PLAN_GATE_PREFIX = '计划改动：'
+// 「计划改动：」前缀识别 + 路径清单解析：换行/逗号/分号/顿号分隔（中英文逗号都认），兼容 markdown
+// 列表符（- / * / •）与行内代码反引号包裹；每条过 normTouch 归一（Windows 反斜杠、./ 前缀、尾斜杠），
+// 去重保序。全角/半角冒号都识别。
+// 返回 null = 非计划闸口上报（普通进展）；返回数组 = 计划清单（空数组 = 有前缀但没解析到路径）。
+export function parsePlanFiles(question) {
+  var q = String(question == null ? '' : question).trim()
+  var m = /^计划改动[：:]/.exec(q)
+  if (!m) return null
+  var parts = q.slice(m[0].length).split(/[\n,，;；、]+/)
+  var out = []
+  for (var i = 0; i < parts.length; i++) {
+    var v = normTouch(parts[i].trim().replace(/^[-*•]\s+/, '').replace(/^`+|`+$/g, ''))
+    if (v && out.indexOf(v) < 0) out.push(v)
+  }
+  return out
+}
+// touch 模式单向覆盖判定：pattern 的声明范围是否 ⊇ 计划文件 file。
+// ⚠️ 与 matchOne 的区别：matchOne 对称（目录锁两个方向都试，服务「冲突保守判定」——宁误拦不漏拦）；
+// 计划闸口必须单向——file 侧更宽（如 file='src/**' 而 pattern 只是其中一个具体文件）不算覆盖，
+// 否则越界计划会被反向匹配误放。其余规则（目录锁 / *.ext / 父目录链 / 裸名纪律）与 matchOne 同款。
+export function touchCovers(pattern, file) {
+  var p = normTouch(pattern), f = normTouch(file)
+  if (!p || !f) return false
+  if (p === f) return true
+  // 目录锁：'dir/**' 覆盖 dir 下任意路径（含更窄的子目录锁——'src/**' 覆盖 'src/lib/**'）
+  var pfx = dirLockPrefix(p); if (pfx && f.indexOf(pfx) === 0) return true
+  // 通配扩展名：'*.ext' 覆盖以该扩展名结尾的具体文件（f 也是 '*.ext' 时上面已判完全相等）
+  if (isStarDot(p)) return f.length > p.length - 1 && f.slice(-(p.length - 1)) === p.slice(1)
+  // 任一侧含 '/' 走目录链判定（与 matchOne 同口径）：p 是 f 的父目录链（'lib'、'src/lib' 都覆盖
+  // 'src/lib/core.mjs' 形态的后代文件）；只此一个方向——f 是 p 的父级不算（方向敏感）
+  if (p.indexOf('/') >= 0 || f.indexOf('/') >= 0) return f.indexOf(p + '/') === 0
+  // 两侧都无 '/' 才是裸名对裸名：同名即覆盖（f 含 '/' 时上面目录链分支已处理，裸名 'core.mjs'
+  // 盖不到 'a/core.mjs'——与 matchOne 裸名纪律同款）
+  return baseOf(p) === baseOf(f)
+}
+// 计划清单 vs touches 的反向判定：返回未被任何 touch 模式覆盖的越界文件清单（归一后，保序）。
+// 注意：touches 为空时本函数语义是「全部越界」——「卡无 touches → 跳过比对」是调用方的分支
+//（rpc progress 分支先判 touches 非空调用本函数），别在调用方把空 touches 当「全合规」短路进来。
+export function planOutsideTouches(touches, files) {
+  var th = Array.isArray(touches) ? touches : []
+  var out = []
+  var list = Array.isArray(files) ? files : []
+  for (var i = 0; i < list.length; i++) {
+    var f = normTouch(list[i])
+    if (!f) continue
+    var covered = false
+    for (var j = 0; j < th.length; j++) { if (touchCovers(th[j], f)) { covered = true; break } }
+    if (!covered) out.push(f)
+  }
+  return out
+}
+
 // ===== 依赖校验（#18）=====
 // 存在性 + 自引用 + DFS 环检测；返回错误消息或 null
 export function validateDeps(d, taskId, deps) {
@@ -821,6 +879,10 @@ export function buildWorkerPrompt(t, pack, feedbackEnabled) {
   // 学习飞轮 v1 软召回（feedbackEnabled 关闭时不出现）：只提示"先查历史教训"，看板绝不代查——
   // 环境里有没有笔记/记忆类工具、教训库长什么样，都是 Worker 自己判断的事（零耦合）。
   if (feedbackEnabled !== false) p += '\n\n' + LESSON_RECALL_HINT
+  // 开工计划闸口（task-mvneoyba）：防约束漂移——touches 边界在「动笔前」的零代价时刻拦截，
+  // 比提交后才发现越界返工便宜得多。语义三条缺一不可：时机=动笔前、格式=『计划改动：』前缀、
+  // 后果=越界会被纠正。host 侧比对接线在 rpc.mjs board_report progress 分支（只警示不阻断）。
+  p += '\n\n开工计划闸口：调研完成后、动笔写代码前，先 board_report（kind=progress），question 以『' + PLAN_GATE_PREFIX + '』开头列出你将要修改/新建的文件清单（每行一个路径）。这一步是硬闸口：主窗口会比对你的计划与本卡 touches 边界，越界会被立即纠正——想清楚再报。'
   // git 纪律红线（n-muyaaoo7cqnd 实证事故：并行 Worker 跑 git checkout HEAD -- package.json
   // 把另一 Worker 的在途编辑冲掉）：禁止还原命令，只改自己写的文件，要干净基线走 escalate 上报。
   // 精确路径 add 条款（n-mv6xntg1p6i5 实证：并行 Worker 共享 worktree+暂存区，宽泛 git add

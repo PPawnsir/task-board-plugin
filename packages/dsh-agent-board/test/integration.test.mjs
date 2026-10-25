@@ -4,6 +4,8 @@
 //   竞态根修（k-m，task-mv6c7cdm）：terminate×续跑在途落闸弃权 / 正常续跑不回归 / fresh spawn 在途弃权
 //   依赖后补根修（n-o，task-mv9yupm4）：publish 后补 dependsOn 撞在途 spawn 落闸否决+依赖落定重派 /
 //   update-task 在飞卡写依赖 warning 软提示（pending 卡不带）
+//   开工计划闸口（p，task-mvneoyba）：『计划改动：』前缀 progress 自动比对 touches 边界——
+//   全合规/部分越界/无 touches 三路径 + 越界三通道警示（卡 messages+主窗口通知+返回体 warning）+ 幂等
 // 九场景全部跑在「真实 index.mjs apply(mockCtx)」上（卡1 harness），不改生产代码；
 // 每用例独立 mockCtx + 独立临时 HOME，互不污染（HOME env 是进程级，顶层用例默认串行，严禁并行）。
 //
@@ -797,5 +799,94 @@ test('集成o·dependsOn后补②：update-task 在飞卡写依赖带 warning（
     var rep = await env.tools.get('board_report').execute({ taskId: 'task-oa', kind: 'complete', summary: 'oa 交付', changes: '改了 oa', selfTest: 'npm test 全绿', diffStat: '' })
     assert.equal(rep.ok, true)
     await env.waitFor(function () { var x = env.task('task-oa'); return x && x.status === 'resolved' ? x : null }, 'oa resolved 收口')
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 p：开工计划闸口（task-mvneoyba）——『计划改动：』前缀 progress 自动比对 touches 边界 =====
+// 三路径：全合规（记过闸行，不打扰主窗口）/ 部分越界（卡 messages + 主窗口通知 + 返回体 warning 三通道，
+// 只警示不阻断）/ 无 touches（跳过比对直接过）。幂等：同一越界计划重复上报，闸口行与通知都不重复。
+test('集成p·开工计划闸口：全合规/部分越界/无 touches 三路径 + 三通道警示 + 幂等', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-p1', { pipeline: 'work', touches: ['lib/core.mjs', 'test/**'] })
+    await createTask(env, 'task-p2', { pipeline: 'work' }) // 无 touches 卡
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 2 }, '两卡同轮派发')
+    await env.waitFor(function () { var x = env.task('task-p1'); return x && x.status === 'in-progress' ? x : null }, 'p1 落卡 in-progress')
+    await env.waitFor(function () { var x = env.task('task-p2'); return x && x.status === 'in-progress' ? x : null }, 'p2 落卡 in-progress')
+
+    // ===== ① 全合规：计划文件均在 touches 内 =====
+    var planText = '计划改动：lib/core.mjs\ntest/core.test.mjs'
+    var g1 = await env.tools.get('board_report').execute({ taskId: 'task-p1', kind: 'progress', question: planText })
+    assert.equal(g1.ok, true)
+    assert.ok(!('warning' in g1), '全合规不带 warning')
+    assert.deepEqual(g1.planGate, { files: 2, outside: [] }, '全合规 planGate 视图')
+    assert.equal(g1.progress.text, planText, '计划上报放宽 200 字限制（清单全文落卡）')
+    var t1 = env.task('task-p1')
+    var gates1 = (t1.messages || []).filter(function (m) { return m.kind === 'plan-gate' })
+    assert.equal(gates1.length, 1, '过闸记一行 plan-gate')
+    assert.match(gates1[0].text, /计划闸口已过（2 个文件均在 touches 内）/)
+    assert.equal(t1.status, 'in-progress', '闸口比对不推进状态')
+
+    // ===== ② 部分越界：三通道警示，只警示不阻断 =====
+    var g2 = await env.tools.get('board_report').execute({ taskId: 'task-p1', kind: 'progress', question: '计划改动：lib/core.mjs\nlib/rpc.mjs' })
+    assert.equal(g2.ok, true, '越界不阻断执行（工具调用照常成功）')
+    assert.deepEqual(g2.planGate.outside, ['lib/rpc.mjs'], '越界清单落返回体')
+    assert.match(g2.warning, /计划改动越界：lib\/rpc\.mjs 不在本卡 touches 内/, '通道③：返回体 warning（Worker 直接可见）')
+    assert.ok(!g2.planGateNotify, '通知字段锁外带出后即删，不进返回体')
+    t1 = env.task('task-p1')
+    var oobLines = (t1.messages || []).filter(function (m) { return m.kind === 'plan-gate' && m.text.indexOf('计划改动越界') >= 0 })
+    assert.equal(oobLines.length, 1, '通道①：卡 messages 追加 ⚠️ 警示行')
+    assert.match(oobLines[0].text, /⚠️ 计划改动越界：lib\/rpc\.mjs 不在 touches（lib\/core\.mjs、test\/\*\*）内/)
+    assert.equal(t1.status, 'in-progress', '越界警示不阻断——任务照常执行')
+
+    // ===== 幂等：同一越界计划重复上报，闸口行不重复记、不二次通知 =====
+    var g2b = await env.tools.get('board_report').execute({ taskId: 'task-p1', kind: 'progress', question: '计划改动：lib/core.mjs\nlib/rpc.mjs' })
+    assert.equal(g2b.ok, true)
+    assert.match(g2b.warning, /计划改动越界/, '重复上报返回体仍带 warning（Worker 每次都能自纠）')
+    t1 = env.task('task-p1')
+    oobLines = (t1.messages || []).filter(function (m) { return m.kind === 'plan-gate' && m.text.indexOf('计划改动越界') >= 0 })
+    assert.equal(oobLines.length, 1, '同内容闸口行幂等防刷屏')
+
+    // ===== 通道②：主窗口通知（系统异常通道，随 45s 回执聚合窗投递，带任务现状过滤）=====
+    await env.clock.advance(45000)
+    await env.waitFor(function () { return env.sent.length >= 1 }, '聚合窗到点投递')
+    var delivered = env.sent.map(function (m) { return m.content[0].text }).join('\n')
+    assert.ok(delivered.indexOf('⚠️ task-p1 计划改动越界：lib/rpc.mjs 不在 touches 内——可 task_intervene 纠正或放行') >= 0, '主窗口通知含越界明细与处置入口')
+    assert.ok(delivered.indexOf('（投递时状态：进行中）') >= 0, '带 taskId 的警示标注投递时任务现状')
+    assert.equal(delivered.split('计划改动越界：lib/rpc.mjs 不在 touches 内').length - 1, 1, '幂等：同一越界只通知一次')
+
+    // ===== 空清单：有前缀没解析到路径 → 返回体 warning 自纠正，不通知主窗口 =====
+    var g3 = await env.tools.get('board_report').execute({ taskId: 'task-p1', kind: 'progress', question: '计划改动：' })
+    assert.equal(g3.ok, true)
+    assert.equal(g3.planGate.files, 0)
+    assert.match(g3.warning, /计划改动清单为空/)
+
+    // ===== ③ 无 touches 卡：跳过比对直接过 =====
+    var g4 = await env.tools.get('board_report').execute({ taskId: 'task-p2', kind: 'progress', question: '计划改动：any/where.mjs' })
+    assert.equal(g4.ok, true)
+    assert.equal(g4.planGate.skipped, true, '无 touches → skipped 标记')
+    assert.ok(!('warning' in g4), '跳过比对不带 warning')
+    var t2 = env.task('task-p2')
+    var gates2 = (t2.messages || []).filter(function (m) { return m.kind === 'plan-gate' })
+    assert.equal(gates2.length, 1)
+    assert.match(gates2[0].text, /本卡未声明 touches，跳过比对直接过（1 个文件）/)
+
+    // ===== 普通 progress 不受闸口影响：无 planGate 字段、200 字限制照旧 =====
+    var longText = '里程碑：' + 'x'.repeat(300)
+    var g5 = await env.tools.get('board_report').execute({ taskId: 'task-p1', kind: 'progress', question: longText })
+    assert.equal(g5.ok, true)
+    assert.ok(!('planGate' in g5), '非『计划改动：』前缀不进闸口比对')
+    assert.equal(g5.progress.text.length, 200, '普通进展仍按 200 字截断')
+
+    // ===== 路径归一：./ 前缀 + Windows 反斜杠归一后去重并合规 =====
+    var g6 = await env.tools.get('board_report').execute({ taskId: 'task-p1', kind: 'progress', question: '计划改动：./lib/core.mjs，lib\\core.mjs' })
+    assert.equal(g6.ok, true)
+    assert.deepEqual(g6.planGate, { files: 1, outside: [] }, '归一后去重为 1 个文件且合规')
+    t1 = env.task('task-p1')
+    var passLines = (t1.messages || []).filter(function (m) { return m.kind === 'plan-gate' && m.text.indexOf('计划闸口已过') >= 0 })
+    assert.equal(passLines.length, 2, '两次不同清单的过闸各记一行（2 文件 + 1 文件）')
+    assert.equal(t1.status, 'in-progress', '全程不阻断执行')
   } finally { await env.cleanup() }
 })

@@ -898,6 +898,46 @@ export function createRpc(ctx, state, deps) {
     ctx.tools.register(defineTool({ name: 'task_arbitrate', description: 'Team 模式：裁决 Worker 上报的歧义（escalation）。action=resume（默认）裁决后任务回派发池立即重派；action=hold 任务挂起冻结、不参与自动派发（留给主窗口补 dependsOn/上下文，补完后用 task_update unfreeze:true 解冻）。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, answer: { type: 'string' }, action: { type: 'string', enum: ['resume', 'hold'], description: 'resume（默认）=裁决后重新派发；hold=挂起冻结不派发' } }, required: ['taskId', 'answer'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; return doResolveEscalation(toolSessionId(), getActorId(), args.taskId, args.answer, args.action) } }))
     ctx.tools.register(defineTool({ name: 'task_intervene', description: 'Team 模式：向执行某任务的池中 Agent 发起高优先级指令（steer 通道，当前 step 结束即响应；无活跃 run 时记录随下次派发注入——run 刚结算/续跑窗口内随续跑注入，真无 run 随下次派发注入，返回体 state 字段区分：delivered / redispatch / resume-pending / no-run）。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, message: { type: 'string' } }, required: ['taskId', 'message'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; return doIntervene(toolSessionId(), getActorId(), args.taskId, args.message) } }))
     // ===== 池中 Agent 结构化回报工具（双模：工具优先，文本分段为降级路径）=====
+    // 开工计划闸口比对（task-mvneoyba）：board_report progress 分支命中『计划改动：』前缀时调用。
+    // 只警示不阻断（阻断会把 Worker 卡死在工具调用里）；三通道=①卡 messages 警示行 ②主窗口通知
+    //（planGateNotify 字段带出锁外 pushSysNote，投递随回执聚合窗）③工具返回体 warning（Worker 自己最直接看到）。
+    // messages 幂等防刷屏：同内容闸口行不重复记（重复上报同一计划不产生第二条）；通知也跟着去重——
+    // 闸口行被幂等吞掉时不再重复惊动主窗口。
+    function planGateMsg(t, text, at, by) {
+      for (var i = 0; i < t.messages.length; i++) { var m = t.messages[i]; if (m && m.kind === 'plan-gate' && m.text === text) return false }
+      t.messages.push({ kind: 'plan-gate', text: text, at: at, by: by })
+      return true
+    }
+    function planGateApply(t, planFiles, actor, pat) {
+      var touches = Array.isArray(t.touches) ? t.touches : []
+      // 卡无 touches → 无边界可比，跳过比对直接过（记 messages 留痕）
+      if (!touches.length) {
+        planGateMsg(t, '计划闸口：本卡未声明 touches，跳过比对直接过（' + planFiles.length + ' 个文件）', pat, actor)
+        return { ok: true, progress: t.lastProgress, planGate: { skipped: true, files: planFiles.length } }
+      }
+      // 有前缀但没解析到路径 → 不通知主窗口，返回体 warning 让 Worker 自纠正重报
+      if (!planFiles.length) {
+        planGateMsg(t, '计划闸口：未解析到文件路径——以『计划改动：』开头、每行一个路径重报', pat, actor)
+        return { ok: true, progress: t.lastProgress, planGate: { files: 0, outside: [] }, warning: '计划改动清单为空——请以『计划改动：』开头、每行一个路径列出将要修改/新建的文件后重报' }
+      }
+      var outside = core.planOutsideTouches(touches, planFiles)
+      // 全合规 → 记一行过闸（幂等），不打扰主窗口
+      if (!outside.length) {
+        planGateMsg(t, '计划闸口已过（' + planFiles.length + ' 个文件均在 touches 内）', pat, actor)
+        return { ok: true, progress: t.lastProgress, planGate: { files: planFiles.length, outside: [] } }
+      }
+      // 越界 → 三通道警示
+      var oobText = outside.join('、')
+      var appended = planGateMsg(t, '⚠️ 计划改动越界：' + oobText + ' 不在 touches（' + touches.join('、') + '）内——主窗口可 task_intervene 纠正或放行', pat, actor)
+      var res = {
+        ok: true,
+        progress: t.lastProgress,
+        planGate: { files: planFiles.length, outside: outside },
+        warning: '计划改动越界：' + oobText + ' 不在本卡 touches 内——请修正计划（只改 touches 范围内的文件），或 board_report kind=escalate 请主窗口放行'
+      }
+      if (appended) res.planGateNotify = '⚠️ ' + t.id + ' 计划改动越界：' + oobText + ' 不在 touches 内——可 task_intervene 纠正或放行'
+      return res
+    }
     ctx.tools.register(defineTool({ name: 'board_report', description: '[任务看板 Worker 专用] 上报任务结果。kind=complete 时填 summary/changes/selfTest/diffStat（git 仓库内改动附 git diff --stat 概要）；kind=escalate 时填 question（歧义上报，等待主窗口裁决）；kind=progress 时填 question（一行里程碑进展摘要，≤200 字符）——只在有实际产物/结论时报，禁止定时或表演式汇报，静默不通知主窗口。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, kind: { type: 'string', enum: ['complete', 'escalate', 'progress'] }, summary: { type: 'string' }, changes: { type: 'string' }, selfTest: { type: 'string' }, diffStat: { type: 'string', description: '变更概要：git diff --stat（含 git status --short）输出，≤1500 字符' }, question: { type: 'string', description: 'kind=escalate：歧义原文；kind=progress：一行里程碑进展摘要（≤200 字符）' } }, required: ['taskId', 'kind'] }, output: jo(), execute: async function (args) {
       var sid = toolSessionId(); var actor = getActorId()
       var result = await mutateLocked(sid, function (d) {
@@ -909,11 +949,16 @@ export function createRpc(ctx, state, deps) {
         // 定位：长任务执行期间的「还在正确路上」的轻量证明；不进回执聚合、不通知主窗口（纯静默可见）。
         // 防表演式汇报：只在有实际产物/结论时报（契约写在 buildWorkerPrompt 里），且不写 ah() 历史（避免刷屏）。
         if (args.kind === 'progress') {
-          var ptext = String(args.question || '').trim().slice(0, 200)
+          var rawQ = String(args.question || '').trim()
+          // 开工计划闸口（task-mvneoyba）：『计划改动：』前缀的 progress 进入 touches 边界比对。
+          // 计划清单是多行路径（天然超 200 字），放宽到 2000（与歧义上报同档）；普通进展仍 200。
+          var planFiles = core.parsePlanFiles(rawQ)
+          var ptext = rawQ.slice(0, planFiles ? 2000 : 200)
           if (!ptext) return { ok: false, error: 'question required for progress (一行进展摘要)' }
           var pat = new Date().toISOString()
           t.messages.push({ kind: 'progress', text: ptext, at: pat, by: actor })
           t.lastProgress = { text: ptext, at: pat } // 覆盖式：卡片只展示最新一条
+          if (planFiles) return planGateApply(t, planFiles, actor, pat)
           return { ok: true, progress: t.lastProgress }
         }
         if (args.kind === 'escalate') {
@@ -931,6 +976,12 @@ export function createRpc(ctx, state, deps) {
         r.ok = true; r.task = t
         return r
       })
+      // 计划闸口越界警示（task-mvneoyba）：走系统异常通道（带 taskId，投递时按任务现状过滤——
+      // 任务已落定的过期警示直接丢弃），锁外调用不拖长写锁；字段带出后即删，不进工具返回体。
+      if (result && result.ok && result.planGateNotify) {
+        try { if (typeof pushSysNote === 'function') pushSysNote(sid, result.planGateNotify, args.taskId) } catch (_) {}
+        delete result.planGateNotify
+      }
       if (result && result.ok && result.escalated) maybeNotify(sid, result.task)
       if (result && result.ok && result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved') // 工具直报路径也要回执（work 档 board_report 直接落 resolved）
       // ===== 上报通道收尾（task-muwkhqf8）=====

@@ -510,6 +510,28 @@ test('buildWorkerPrompt: git 纪律红线（禁还原命令 + 精确路径 add�
   assert.doesNotMatch(vBody, /精确路径 git add/)
 })
 
+test('buildWorkerPrompt: 开工计划闸口条款注入（动笔前+『计划改动：』前缀+越界纠正三语义），verifier prompt 不注入（源码断言）', () => {
+  const t = mkTask({ id: 'pg1' })
+  const p = core.buildWorkerPrompt(t)
+  assert.match(p, /开工计划闸口/)
+  assert.match(p, /动笔写代码前/)                                    // 时机：动笔前
+  assert.match(p, /kind=progress/)                                   // 通道：progress 上报
+  assert.match(p, /『计划改动：』开头/)                                // 格式：计划改动：前缀
+  assert.match(p, /主窗口会比对你的计划与本卡 touches 边界，越界会被立即纠正/) // 后果：越界会被纠正
+  // verifier prompt 不动（闸口只约束干活的 Worker）
+  const pv = core.buildVerifierPrompt(t)
+  assert.doesNotMatch(pv, /开工计划闸口/)
+  assert.doesNotMatch(pv, /计划改动：/)
+  // 源码级：条款只在 buildWorkerPrompt 体内（切片边界到 buildVerifierPrompt 之前），不在 buildVerifierPrompt 体内
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  const wBody = coreSrc.slice(coreSrc.indexOf('export function buildWorkerPrompt'), coreSrc.indexOf('export function buildVerifierPrompt'))
+  assert.ok(wBody.length > 500, 'buildWorkerPrompt 切片成功')
+  assert.match(wBody, /开工计划闸口/)
+  assert.match(wBody, /计划改动：/)
+  const vBody = coreSrc.slice(coreSrc.indexOf('export function buildVerifierPrompt'), coreSrc.indexOf('export function buildHookPrompt'))
+  assert.doesNotMatch(vBody, /开工计划闸口/)
+})
+
 test('buildWorkerPrompt: 大文件交付纪律（write 主体+edit 续块）注入，verifier prompt 不注入（源码断言）', () => {
   const t = mkTask({ id: 'lf1' })
   const p = core.buildWorkerPrompt(t)
@@ -967,6 +989,62 @@ test('touchesConflict: 与锁持有者逐条比对，返回冲突持有者 id', 
   assert.deepEqual(core.touchesConflict({ id: 'w4' }, holds), [])          // 没声明 touches = 不参与排他
   assert.deepEqual(core.touchesConflict({ id: 'h1', touches: ['src/a.js'] }, holds), []) // 不和自己冲突
 })
+
+// ===== 开工计划闸口（task-mvneoyba）：计划清单解析 / 单向覆盖判定 / 越界比对 =====
+test('parsePlanFiles: 前缀识别（全角/半角冒号），非前缀返回 null', () => {
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs'), ['lib/core.mjs'])
+  assert.deepEqual(core.parsePlanFiles('计划改动:lib/core.mjs'), ['lib/core.mjs'])   // 半角冒号
+  assert.equal(core.parsePlanFiles('里程碑一：骨架已落地'), null)                       // 普通进展
+  assert.equal(core.parsePlanFiles(''), null)
+  assert.equal(core.parsePlanFiles(null), null)
+  assert.equal(core.parsePlanFiles(undefined), null)
+  assert.equal(core.parsePlanFiles('x计划改动：lib/core.mjs'), null)                   // 前缀必须行首
+})
+
+test('parsePlanFiles: 换行/逗号/分号分隔 + normTouch 归一（反斜杠、./ 前缀、尾 /）+ 去重', () => {
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs\ntest/core.test.mjs'), ['lib/core.mjs', 'test/core.test.mjs'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs，test/core.test.mjs'), ['lib/core.mjs', 'test/core.test.mjs']) // 中文逗号
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs, test/core.test.mjs; lib/rpc.mjs'), ['lib/core.mjs', 'test/core.test.mjs', 'lib/rpc.mjs'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：./lib/core.mjs\nlib\\rpc.mjs\nlib/'), ['lib/core.mjs', 'lib/rpc.mjs', 'lib']) // 归一
+  assert.deepEqual(core.parsePlanFiles('计划改动：./lib/core.mjs\nlib\\core.mjs'), ['lib/core.mjs']) // 归一后去重
+  assert.deepEqual(core.parsePlanFiles('计划改动：\n- lib/core.mjs\n* test/x.mjs'), ['lib/core.mjs', 'test/x.mjs']) // markdown 列表符
+  assert.deepEqual(core.parsePlanFiles('计划改动：`lib/core.mjs`、`test/x.mjs`'), ['lib/core.mjs', 'test/x.mjs'])   // 行内代码反引号
+  assert.deepEqual(core.parsePlanFiles('计划改动：'), [])                               // 有前缀无路径
+  assert.deepEqual(core.parsePlanFiles('计划改动：\n\n'), [])
+})
+
+test('touchCovers: 单向覆盖——touch 模式 ⊇ 计划文件（与 matchOne 对称语义方向相反）', () => {
+  assert.equal(core.touchCovers('lib/core.mjs', 'lib/core.mjs'), true)   // 精确
+  assert.equal(core.touchCovers('lib/core.mjs', 'lib/rpc.mjs'), false)
+  assert.equal(core.touchCovers('lib/**', 'lib/core.mjs'), true)         // 目录锁覆盖具体文件
+  assert.equal(core.touchCovers('lib/**', 'lib/deep/x.mjs'), true)
+  assert.equal(core.touchCovers('lib/**', 'lib2/core.mjs'), false)       // 前缀必须带 /
+  assert.equal(core.touchCovers('lib/**', 'lib/sub/**'), true)           // 目录锁覆盖更窄子目录锁
+  assert.equal(core.touchCovers('lib', 'lib/core.mjs'), true)            // 父目录链覆盖
+  assert.equal(core.touchCovers('*.mjs', 'lib/core.mjs'), true)          // *.ext 覆盖具体文件
+  assert.equal(core.touchCovers('*.mjs', 'lib/core.ts'), false)          // 扩展名不同不覆盖
+  assert.equal(core.touchCovers('core.mjs', 'core.mjs'), true)           // 裸名同名
+  assert.equal(core.touchCovers('core.mjs', 'lib/core.mjs'), false)      // 裸名纪律：具体路径不参与
+  // 方向敏感反例（matchOne 会判冲突、touchCovers 必须判不覆盖）
+  assert.equal(core.touchCovers('lib/core.mjs', 'lib/**'), false)        // 具体文件不覆盖整棵树
+  assert.equal(core.touchCovers('lib/core.mjs', 'lib'), false)           // 反向父目录不算
+  assert.equal(core.touchCovers('lib/core.mjs', '*.mjs'), false)         // 具体文件不覆盖通配
+  assert.equal(core.touchCovers('', 'lib/core.mjs'), false)
+  assert.equal(core.touchCovers('lib/core.mjs', ''), false)
+})
+
+test('planOutsideTouches: 反向判定——计划文件不被任何 touches 模式覆盖 = 越界', () => {
+  const touches = ['lib/core.mjs', 'test/**', '*.test.mjs']
+  assert.deepEqual(core.planOutsideTouches(touches, ['lib/core.mjs', 'test/x.mjs', 'lib/a.test.mjs']), []) // 全合规
+  assert.deepEqual(core.planOutsideTouches(touches, ['lib/core.mjs', 'lib/rpc.mjs']), ['lib/rpc.mjs'])     // 部分越界
+  assert.deepEqual(core.planOutsideTouches(touches, ['docs/x.md', 'lib/rpc.mjs']), ['docs/x.md', 'lib/rpc.mjs']) // 全越界保序
+  assert.deepEqual(core.planOutsideTouches(touches, []), [])                                             // 空计划
+  assert.deepEqual(core.planOutsideTouches(['./lib/core.mjs'], ['lib\\core.mjs']), [])                   // 两侧都归一
+  assert.deepEqual(core.planOutsideTouches(null, ['a.js']), ['a.js'])                                    // touches 空 = 全越界（跳过比对是调用方分支）
+  assert.deepEqual(core.planOutsideTouches(['src/**'], ['src/**']), [])                                  // 整树计划被同宽整树覆盖
+  assert.deepEqual(core.planOutsideTouches(['src/lib/**'], ['src/**']), ['src/**'])                      // 计划比声明宽 = 越界
+})
+
 
 test('holdsFiles: in-progress(claimedBy) / verifying 两态持有文件锁，resolved/cancelled/归档即放', () => {
   const tasks = [
