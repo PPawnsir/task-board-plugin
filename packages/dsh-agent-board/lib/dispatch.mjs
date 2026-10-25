@@ -6,7 +6,7 @@
 import { statSync } from 'node:fs'
 import * as core from './core.mjs'
 import { readRunUsage, findRunLog, readLogBytes, readLogFrames } from './usage.mjs'
-import { splitRuleOf, pushRejectLesson } from './policy.mjs'
+import { splitRuleOf, pushRejectLesson, DECOMPOSE_SCHEMA, buildDecomposerPrompt, applyDecomposeProposal } from './policy.mjs'
 const { ah, cfg, claimApply, resolveApply, verifyApply, lateVerdictApply, lateNoticeFp, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER } = core
 
 export function createDispatch(ctx, state, deps) {
@@ -256,6 +256,7 @@ export function createDispatch(ctx, state, deps) {
       var r = { prompt: req.prompt, parent: req.parent }
       if (req.agentOptions) r.agentOptions = req.agentOptions
       if (req.cwd) r.cwd = req.cwd
+      if (req.outputSchema) r.outputSchema = req.outputSchema // outputSchema 透传（task-mvnenrwk 拆解官结构化提案）
       return r
     }
 
@@ -303,12 +304,14 @@ export function createDispatch(ctx, state, deps) {
       // pack = 瘦身清单本体（调研笔记全文 + 文件清单），由 buildWorkerPrompt/buildVerifierPrompt 直接拼进
       // 首条 prompt 一次性注入——不再是「一行指引 + 随快照每轮重发的上下文注入区块」。
       // hook 分支现读一次看板只为拿子任务清单；读失败退化为空清单（prompt 仍成立，绝不因此不 spawn）。
+      // decomposer（task-mvnenrwk 拆解官）：buildDecomposerPrompt 契约 + 源卡上下文包（pack 同源注入）。
       var promptText
       if (role === 'hook-pre' || role === 'hook-post') {
         var kids = []
         try { var hsnap = await rt(sid); kids = gsb(t.id, (hsnap && hsnap.tasks) || []) } catch (_) {}
         promptText = buildHookPrompt(t, role === 'hook-pre' ? 'pre' : 'post', kids)
-      } else promptText = role === 'worker' ? buildWorkerPrompt(t, pack, cfg(dsnap).feedbackEnabled) : buildVerifierPrompt(t, pack, cfg(dsnap).verifyUserGuide)
+      } else if (role === 'decomposer') promptText = buildDecomposerPrompt(t, pack)
+      else promptText = role === 'worker' ? buildWorkerPrompt(t, pack, cfg(dsnap).feedbackEnabled) : buildVerifierPrompt(t, pack, cfg(dsnap).verifyUserGuide)
       var req = { label: role + ':' + t.id, prompt: [{ type: 'text', text: promptText }], parent: parent, signal: makeSignal() }
       // ===== Verifier 验收员加餐（task-muy3gm03）：persona + toolFilter 只挂 verifier =====
       // ① persona = 固定验收员人设（scoped deployment:persona-prefix 影子段，只覆盖该子代理）；
@@ -319,6 +322,13 @@ export function createDispatch(ctx, state, deps) {
       // 故挂在这里即覆盖全部 verifier spawn（含手动「派发验收」与自动派发两条入口，共用 spawnOneShot）。
       // worker 请求不挂任何加餐（spawn 参数逐字 parity，单测锁定）。
       if (role === 'verifier') { req.persona = VERIFIER_PERSONA; req.toolFilter = VERIFIER_TOOL_FILTER }
+      // ===== 拆解官加餐（task-mvnenrwk）：outputSchema 强箍结构化提案 =====
+      // 拆解官=一次性 run（useContinuable 只对 worker 开 → 这里恒走一次性面，delivery caller），
+      // 唯一交付物是 result.structured 里的提案（verdict/children/rationale）——不拿任何建卡工具，
+      // 物化由 host 做（权限口子彻底绕开）。模型不进四级取模链（同 hook：拆解语义无 lane 设定，
+      // 恒用父模型）。老宿主/provider 不支持 outputSchema 时由下方「剥外挂参数重试」兜底——剥掉后
+      // 拆解官退化为自由文本输出，structured 缺失走 settleDecompose 失败臂落源卡消息，不炸主流程。
+      if (role === 'decomposer') req.outputSchema = DECOMPOSE_SCHEMA
       if (modelOverride) {
         // list-models 返回的 id 是 "provider/model" 复合格式（如 "cmss/zhanlu/glm-5.2"），
         // 但 AgentOptions 的 provider 和 model 是分开的——整串塞进 model 会报 UNKNOWN_MODEL
@@ -360,12 +370,13 @@ export function createDispatch(ctx, state, deps) {
           }
         }
       } catch (e) {
-        // 外挂参数回退（既有模型覆盖通道，task-muy3gm03 起并入 verifier 加餐 persona/toolFilter）：
+        // 外挂参数回退（既有模型覆盖通道，task-muy3gm03 起并入 verifier 加餐 persona/toolFilter，
+        // task-mvnenrwk 起再并入 decomposer 加餐 outputSchema）：
         // provider 不支持某能力 / toolFilter 命中未知名时服务面 fail-loud 拒收（绝不静默忽略）——
         // 剥光外挂参数用裸请求再试一次（文件纪律条款在 prompt 里，加餐剥掉纪律不丢），仍失败才放弃本轮。
-        if (modelOverride || req.persona !== undefined || req.toolFilter !== undefined) {
-          console.error('[task-board] spawn extras failed (model/persona/toolFilter), fallback to bare request:', String(e))
-          delete req.agentOptions; delete req.persona; delete req.toolFilter
+        if (modelOverride || req.persona !== undefined || req.toolFilter !== undefined || req.outputSchema !== undefined) {
+          console.error('[task-board] spawn extras failed (model/persona/toolFilter/outputSchema), fallback to bare request:', String(e))
+          delete req.agentOptions; delete req.persona; delete req.toolFilter; delete req.outputSchema
           try {
             if (useContinuable) {
               if (hasActivationApi(subagents)) {
@@ -704,6 +715,40 @@ export function createDispatch(ctx, state, deps) {
       try { await stopSettledOneShot(sid, rec) } catch (e) { console.error('[task-board] 结算后补停子会话异常（不影响结算）task ' + rec.taskId + ':', String(e)) }
     }
 
+    // ===== 拆解官结算（task-mvnenrwk）：host 读 result.structured 物化 draft 子卡 =====
+    // 三分支：verdict=split → applyDecomposeProposal 物化（幂等清旧批 draft 提案）+ 源卡摘要消息 + 通知；
+    //         verdict=keep → 源卡记「无需拆分：rationale」；
+    //         run 失败 / structured 缺失 / 提案畸形 → 源卡记失败原因 + 通知（源卡与旧提案批都不动）。
+    // 通知走 pushSysNote 且**不带 taskId**：源卡停在 draft/pending，带 taskId 的系统通知会在回执冲刷时
+    // 被「任务仍在执行中」过滤器整行丢弃（notify.mjs deliver 段）——提案到位是必须送达的信号。
+    async function settleDecompose(sid, rec, res, err) {
+      var failed = !!err || (res && res.stopReason && res.stopReason !== 'completed')
+      var errText = err ? String(err) : (res && (res.diagnostic || res.stopReason) || '')
+      var structured = (res && res.structured && typeof res.structured === 'object') ? res.structured : null
+      var applied = null
+      try {
+        applied = await mutateLocked(sid, function (d) {
+          var t = d.tasks.find(function (x) { return x.id === rec.taskId })
+          if (!t) return null
+          if (!Array.isArray(t.messages)) t.messages = []
+          if (failed) {
+            t.messages.push({ kind: 'decompose', text: '🧩 拆解官 run 失败（' + String(errText || '未知错误').slice(0, 200) + '）——源卡未改动，可重试 task_decompose', at: new Date().toISOString(), by: 'system' })
+            return { ok: false, failed: true }
+          }
+          if (!structured) {
+            t.messages.push({ kind: 'decompose', text: '🧩 拆解官未返回结构化提案（structured 缺失，可能宿主/provider 不支持 outputSchema）——源卡未改动，可重试 task_decompose', at: new Date().toISOString(), by: 'system' })
+            return { ok: false, failed: true }
+          }
+          return applyDecomposeProposal(d, t, structured, new Date().toISOString())
+        }, true) // skipKick：物化的是 draft 子卡（不参与派发），无需踢 poolCycle
+      } catch (e) { console.error('[task-board] settle decompose failed (task ' + rec.taskId + '):', String(e)); applied = null }
+      try {
+        if (applied && applied.ok && applied.verdict === 'split') pushSysNote(sid, '🧩 拆解提案已就位（' + applied.children.length + ' 张草稿子卡，源卡 ' + rec.taskId + '），确认后逐张 publish')
+        else if (applied && applied.ok && applied.verdict === 'keep') pushSysNote(sid, '🧩 拆解官判定源卡（' + rec.taskId + '）无需拆分，理由已落源卡消息')
+        else pushSysNote(sid, '🚨 拆解官 run 未产出可用提案（源卡 ' + rec.taskId + '）：' + String((applied && applied.error) || errText || 'structured 缺失').slice(0, 200))
+      } catch (e) { console.error('[task-board] decompose notify failed:', String(e)) }
+    }
+
     async function settleRun(sid, rec, res, err) {
       if (runsFor(sid)[rec.taskId] !== rec) return // 已被 terminate 等路径处理
       delete runsFor(sid)[rec.taskId]
@@ -720,6 +765,7 @@ export function createDispatch(ctx, state, deps) {
       try {
         if (rec.role === 'worker') await settleWorker(sid, rec, output, failed, errText)
         else if (rec.role === 'hook-pre' || rec.role === 'hook-post') await settleHook(sid, rec, output, failed, errText)
+        else if (rec.role === 'decomposer') await settleDecompose(sid, rec, res, err)
         else await settleVerifier(sid, rec, output, failed, errText)
       } catch (e) { console.error('[task-board] settle ' + rec.role + ' failed (task ' + rec.taskId + '):', String(e)) }
       // 历史会话留档 + usage + 超时臂收尾：三件套抽到 settleRunRecord（上报通道共用同一实现）。
@@ -1428,6 +1474,9 @@ export function createDispatch(ctx, state, deps) {
       }
       if (rec.role === 'hook-pre') return t.status === 'in-progress' && hookOn(t, 'pre') && t.hooks.pre.state === 'running'
       if (rec.role === 'hook-post') return t.status === 'in-progress' && hookOn(t, 'post') && t.hooks.post.state === 'running'
+      // 拆解官（task-mvnenrwk）：挂在 draft/pending 源卡上且全程不动卡面状态——源卡仍在草稿/待办即真在跑；
+      // 卡被删除/翻走（如人工强制派发进 in-progress）→ 表项失效，按幽灵回收（迟到结算被 settled 旗挡下）。
+      if (rec.role === 'decomposer') return t.status === 'draft' || t.status === 'pending'
       // 未知角色（前向兼容）：只要卡还在跑态就留着，等卡落定后由这里回收——不在未知形态上做激进判定
       return t.status === 'in-progress' || t.status === 'verifying'
     }
@@ -1589,7 +1638,13 @@ export function createDispatch(ctx, state, deps) {
         try {
           var capW = isAuto ? Math.max(0, c.maxWorkers - activeW) : 0
           var picked = pickDispatch(d, capW, Math.max(0, c.maxVerifiers - activeV), runs)
-          picked.pendings.forEach(function (t) { claimApply(d, t, 'spawn-pending', 'dispatch'); if (parentKickOnDispatch(d, t)) info.push('epic-kick ' + t.parentId); toSpawn.push({ role: 'worker', t: t }); info.push('dispatch ' + t.id) })
+          picked.pendings.forEach(function (t) {
+            // 拆解官在跑期间源卡不派 Worker（task-mvnenrwk）：pending 源卡 claimedBy 为空会被当作可派候选，
+            // 拆解结论未落地就派 Worker 整坨执行与「先拆再干」的意图直接冲突——活跃 decomposer rec 在跑即跳过本轮。
+            var __drec = runs[t.id]
+            if (__drec && __drec.role === 'decomposer' && !__drec.settled) { info.push('skip-decomposing ' + t.id); return }
+            claimApply(d, t, 'spawn-pending', 'dispatch'); if (parentKickOnDispatch(d, t)) info.push('epic-kick ' + t.parentId); toSpawn.push({ role: 'worker', t: t }); info.push('dispatch ' + t.id)
+          })
           picked.verifs.forEach(function (t) { t.verifierRun = 'spawn-pending'; t.verifierRunAt = new Date().toISOString(); toSpawn.push({ role: 'verifier', t: t }); info.push('verify ' + t.id) })
         } catch (e) { console.error('[task-board] 派发决策异常（本轮跳过派发，池状态照常写）:', String(e)) }
         // ③ hooks=agent run：pre 闸门占用 + post 收口补 spawn（接线①③）

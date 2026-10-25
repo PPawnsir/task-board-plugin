@@ -987,7 +987,10 @@ export function pickDispatch(d, capW, capV, busyTaskIds) {
   // 防止同一轮 cycle 派出的两个任务声明重叠 touches。
   var holds = holdsFiles(d)
   if (capW > 0) {
-    var cands = d.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && !t.frozen && t.assignMode !== 'manual' && t.pipeline !== 'direct' && !d.tasks.some(function (x) { return x.parentId === t.id }) && depsSatisfied(d, t) && !t.escalation && preHookGate(gpt(t, d.tasks)).pass })
+    // busyTaskIds（=活跃 run 表）同样闸 pendings（task-mvnenrwk）：有活跃 run 的 pending 卡
+    // 不再入候选——拆解官（decomposer rec 挂在 draft/pending 源卡上）在跑期间，源卡若照常入候选
+    // 会白吃掉 capW 槽位（派发前守卫再跳过 = 本轮槽位空转，其他卡饿死），必须在候选层就排除。
+    var cands = d.tasks.filter(function (t) { return t.status === 'pending' && !t.claimedBy && !t.frozen && t.assignMode !== 'manual' && t.pipeline !== 'direct' && !(busyTaskIds && busyTaskIds[t.id]) && !d.tasks.some(function (x) { return x.parentId === t.id }) && depsSatisfied(d, t) && !t.escalation && preHookGate(gpt(t, d.tasks)).pass })
       .sort(function (a, b) { var p = (PRIO_RANK[b.priority] || 2) - (PRIO_RANK[a.priority] || 2); return p !== 0 ? p : (a.createdAt || '').localeCompare(b.createdAt || '') })
     for (var i = 0; i < cands.length && pendings.length < capW; i++) {
       var conflicts = touchesConflict(cands[i], holds)

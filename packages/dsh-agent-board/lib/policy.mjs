@@ -2,7 +2,7 @@
 // 纯函数、零状态、零 IO：任务粒度治理（软闸门文案与判定）+ 学习飞轮候选教训生成。
 // index.mjs 薄壳 re-export 粒度治理导出（对外契约不变）；dispatch/rpc 模块按需 import。
 import * as core from './core.mjs'
-const { cfg, lessonText, pushLesson } = core
+const { cfg, lessonText, pushLesson, ah, classifyPipeline } = core
 
 // ===== 任务粒度治理（全软方案：只引导/提示，绝不阻断创建与派发）=====
 // 背景：agent 容易把史诗级大任务整坨塞进看板（长程 + 跑偏风险 + 返工成本高）。
@@ -67,3 +67,158 @@ export function pushArbitrationLesson(d, t, question, answer, at) {
       if (!cfg(d).feedbackEnabled) return false
       return pushLesson(t, lessonText('任务「' + String(t.title || '') + '」(' + t.id + ') 的歧义裁决', [['疑问', question], ['裁决结论', answer]], lessonSource(t)), at, 'system')
     }
+
+// ===== 拆解官（task-mvnenrwk，epic task-mvnem59t 子卡 2/6）：outputSchema 强箍提案 + host 物化 =====
+// 核心设计（需求讨论定稿，勿改架构）：拆解官=一次性 run，**不拿任何建卡工具**——提案由 host 读
+// result.structured 后物化成 draft 子卡（权限口子=根本不需要开）。本层只放三样纯定义/纯函数：
+//   DECOMPOSE_SCHEMA                       outputSchema（仅 type/properties/required/items/enum 白名单字段）
+//   buildDecomposerPrompt(t, pack)         拆解官契约（写死纪律，与 buildWorkerPrompt/buildVerifierPrompt 同风格）
+//   applyDecomposeProposal(d, t, proposal, now)   host 物化：提案 → draft 子卡（幂等清旧批）
+// ⚠️ 宿主硬性规则（task-mvnenrwk 驳回实证，dsh-tools lib/types/json-schema.js:223-228）：enum 必须伴
+//    type/oneOf——缺 type 的 enum 会在 startActivation 内被 assertObjectJsonSchema 同步抛 JsonSchemaError
+//    拒收 → 命中「剥外挂参数裸重试」回退 → 运行期永远拿不到 result.structured → host 物化生产不可达。
+//    回归锁：test/decompose.test.mjs ①b（宿主子集校验镜像 + 破形反证）。
+export var DECOMPOSE_MAX_CHILDREN = 8
+export var DECOMPOSE_SCHEMA = {
+  type: 'object',
+  required: ['verdict', 'children'],
+  properties: {
+    verdict: { type: 'string', enum: ['split', 'keep'] },
+    children: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['title', 'size', 'touches', 'acceptance', 'description'],
+        properties: {
+          title: { type: 'string' },
+          description: { type: 'string' },
+          size: { type: 'string', enum: ['light', 'standard', 'heavy'] },
+          modelHint: { type: 'string' },
+          touches: { type: 'array', items: { type: 'string' } },
+          acceptance: { type: 'string' },
+          dependsOnIdx: { type: 'array', items: { type: 'number' } },
+        },
+      },
+    },
+    rationale: { type: 'string' },
+  },
+}
+// 拆解官 prompt 契约（写死纪律）：
+// ① 第一步必须 read contextFiles 清单里的文件再动手拆（实现侧拆解，禁止需求侧转述）；
+// ② 每张子卡 10~30 分钟可独立验收、touches 精确到文件、acceptance 是可执行命令；
+// ③ size 判档语义：light=单点小改/文档/配置，standard=常规模块改动（缺省），heavy=跨模块/高风险/需强推理；
+//    modelHint 仅在有特殊理由时填（如超长上下文）；
+// ④ children 上限 DECOMPOSE_MAX_CHILDREN 张；verdict=keep 表示源卡不用拆；
+// ⑤ dependsOnIdx 只许引用本批**前排**子卡下标（0 起）——物化侧据此翻译成本批真实 id，按构造天然无环。
+export function buildDecomposerPrompt(t, pack) {
+  var p = '你是任务看板的拆解官（一次性 run）。你的唯一交付物是**结构化拆解提案**（由 outputSchema 强箍：verdict/children/rationale），提案落定后本会话即销毁。\n\n'
+  p += '源卡：' + t.id + ' · ' + String(t.title || '') + '\n'
+  p += '状态：' + String(t.status || '') + '\n'
+  p += '描述：\n' + String(t.description || '(无)').slice(0, 8000) + '\n'
+  if (t.acceptance) p += '源卡验收脚本：' + String(t.acceptance) + '\n'
+  if (t.context && t.context.instructions) p += '指引：' + String(t.context.instructions).slice(0, 1000) + '\n'
+  if (Array.isArray(t.touches) && t.touches.length) p += '源卡 touches：' + t.touches.join('、') + '\n'
+  if (pack) p += '\n' + pack + '\n'
+  p += '\n拆解纪律（硬约束）：\n'
+  p += '1. 第一步必须先用 read 工具读上面文件清单里的文件（按所给行号范围），从**实现侧**拆（按模块/文件边界切分）；禁止不读代码就拍脑袋拆，禁止只做需求侧转述。\n'
+  p += '2. 每张子卡必须 10~30 分钟可独立完成并验收：touches 精确到文件（文件级排他锁，同批子卡 touches 不得互相重叠），acceptance 必须是可执行命令（如 "node --test test/xxx.test.mjs"）。\n'
+  p += '3. size 判档：light=单点小改/文档/配置；standard=常规模块改动（缺省）；heavy=跨模块/高风险/需强推理。modelHint 仅在有特殊理由时填（如某子卡需超长上下文模型），否则留空。\n'
+  p += '4. children 上限 ' + DECOMPOSE_MAX_CHILDREN + ' 张；有先后顺序的用 dependsOnIdx 标注（只许引用本批**前排**子卡的下标，0 起）。\n'
+  p += '5. 源卡本身不大、不必拆时：verdict=keep，并在 rationale 写清理由。\n'
+  p += '\n权限边界：你没有任何建卡工具——不要尝试创建/修改看板任务。提案由宿主读结构化结果后自动物化为 draft 子卡（源卡状态不变，由主窗口确认后逐张 publish）。\n'
+  return p
+}
+// 子卡 id 分配：parentId-N 派生（可读、可溯源）；与存量卡撞号时追加 rN 后缀（重拆撞已发布子卡的场景）。
+function decomposeChildId(d, parentId, n) {
+  var id = parentId + '-' + n
+  var bump = 0
+  while (d.tasks.some(function (x) { return x && x.id === id })) { bump++; id = parentId + '-' + n + 'r' + bump }
+  return id
+}
+// host 物化：拆解提案 → draft 子卡（在 mutateLocked 锁内调用的纯函数）。
+// 纪律：
+//   · 校验先于清理——提案畸形/run 失败时**绝不清**旧批提案（失败不毁已有资产）；
+//   · 幂等：提案有效才清旧批（proposalOf===源卡 id 且仍 draft 的提案子卡整批移除；已 publish/落定的绝不碰）；
+//   · 子卡落位：status=draft、parentId=源卡、size（合法才落）、model=modelHint（空不落）、touches/acceptance/
+//     description 落位、dependsOnIdx → 本批真实 id（只收前排下标，天然无环）、上限 DECOMPOSE_MAX_CHILDREN 截断；
+//   · 源卡自身状态不变（仍 draft/pending，由用户处置），只追加 messages 提案摘要行 + history 审计行。
+// 返回 { ok, verdict, children?:[{id,title}], error? }——非空返回值驱动 mutateLocked 写盘。
+export function applyDecomposeProposal(d, t, proposal, now) {
+  if (!d || !Array.isArray(d.tasks) || !t) return { ok: false, error: '板/源卡缺失' }
+  if (!Array.isArray(t.messages)) t.messages = []
+  var stamp = now || new Date().toISOString()
+  var verdict = proposal && typeof proposal === 'object' ? proposal.verdict : ''
+  if (verdict !== 'split' && verdict !== 'keep') {
+    t.messages.push({ kind: 'decompose', text: '🧩 拆解提案无效（verdict 缺失/非法：' + String(verdict || '(空)') + '）——源卡未改动，可重试 task_decompose', at: stamp, by: 'decomposer' })
+    return { ok: false, error: '提案 verdict 缺失/非法' }
+  }
+  var kids = []
+  if (verdict === 'split') {
+    var raw = Array.isArray(proposal.children) ? proposal.children : []
+    for (var i = 0; i < raw.length && kids.length < DECOMPOSE_MAX_CHILDREN; i++) {
+      var c0 = raw[i]
+      if (!c0 || typeof c0 !== 'object') continue
+      if (!String(c0.title == null ? '' : c0.title).trim()) continue
+      kids.push(c0)
+    }
+    if (!kids.length) {
+      t.messages.push({ kind: 'decompose', text: '🧩 拆解提案无效（children 为空或无一条带 title）——源卡未改动，可重试 task_decompose', at: stamp, by: 'decomposer' })
+      return { ok: false, error: '提案 children 为空' }
+    }
+  }
+  // 幂等点：提案有效才清旧批——上次未发布（仍 draft）的提案子卡整批移除。
+  d.tasks = d.tasks.filter(function (x) { return !(x && x.proposalOf === t.id && x.status === 'draft') })
+  if (verdict === 'keep') {
+    var rationale = String(proposal.rationale == null ? '' : proposal.rationale).trim().slice(0, 1500)
+    t.messages.push({ kind: 'decompose', text: '🧩 拆解官判定无需拆分：' + (rationale || '（未给理由）'), at: stamp, by: 'decomposer' })
+    ah(t, t.status, t.status, 'system', '拆解官判定无需拆分（rationale 落源卡消息）')
+    return { ok: true, verdict: 'keep', children: [] }
+  }
+  // 物化：先分配整批 id（dependsOnIdx → 真实 id 翻译要求全员 id 已知），再逐张落 draft 子卡。
+  var ids = []
+  for (var k = 0; k < kids.length; k++) ids.push(decomposeChildId(d, t.id, k + 1))
+  var created = []
+  for (var k2 = 0; k2 < kids.length; k2++) {
+    var c = kids[k2]
+    var deps = []
+    var di = Array.isArray(c.dependsOnIdx) ? c.dependsOnIdx : []
+    for (var dj = 0; dj < di.length; dj++) {
+      var idx = di[dj]
+      if (typeof idx === 'number' && isFinite(idx) && idx >= 0 && idx < k2 && deps.indexOf(ids[idx]) < 0) deps.push(ids[idx])
+    }
+    var child = {
+      id: ids[k2],
+      title: String(c.title).trim().slice(0, 200),
+      description: String(c.description == null ? '' : c.description).slice(0, 8000),
+      status: 'draft',
+      priority: t.priority || 'medium',
+      tags: Array.isArray(t.tags) ? t.tags.slice() : [],
+      parentId: t.id,
+      subtaskStrategy: null,
+      assignMode: 'auto',
+      assignee: null,
+      context: { files: [], docs: [], instructions: '', notes: '', relatedTasks: [], prerequisites: '' },
+      acceptance: String(c.acceptance == null ? '' : c.acceptance).slice(0, 2000),
+      dependsOn: deps,
+      touches: Array.isArray(c.touches) ? c.touches.filter(function (x) { return typeof x === 'string' && x.trim() }).slice(0, 20).map(function (x) { return x.trim() }) : [],
+      pipeline: '',
+      claimedBy: null, claimedAt: null, createdAt: stamp,
+      resolvedAt: null, verifiedAt: null, verifiedBy: null, archivedAt: null, resolution: null, waitingForTouches: null,
+      messages: [],
+      history: [{ from: 'created', to: 'draft', timestamp: stamp, actor: 'decomposer', note: '拆解官提案物化（源卡 ' + t.id + '）' }],
+      proposalOf: t.id,
+    }
+    // 与 create-task 同口径：未显式给 pipeline 时按卡面分类（含 acceptance 的通常落 full）
+    child.pipeline = classifyPipeline(child); child.pipelineAuto = true
+    var sz = typeof c.size === 'string' ? c.size.trim() : ''
+    if (sz === 'light' || sz === 'standard' || sz === 'heavy') child.size = sz
+    var mh = typeof c.modelHint === 'string' ? c.modelHint.trim() : ''
+    if (mh) child.model = mh
+    d.tasks.push(child)
+    created.push(child)
+  }
+  var summary = created.map(function (x) { return x.id + '·' + x.title }).join('、').slice(0, 900)
+  t.messages.push({ kind: 'decompose', text: '🧩 拆解提案已就位（' + created.length + ' 张草稿子卡）：' + summary + '——确认后逐张 publish（task_update publish=true）', at: stamp, by: 'decomposer' })
+  ah(t, t.status, t.status, 'system', '拆解官提案物化 ' + created.length + ' 张草稿子卡（draft，待主窗口确认发布）')
+  return { ok: true, verdict: 'split', children: created.map(function (x) { return { id: x.id, title: x.title } }) }
+}
