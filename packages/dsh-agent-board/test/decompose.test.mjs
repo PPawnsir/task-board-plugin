@@ -8,9 +8,12 @@
 //   ⑤ 幂等重拆：旧 draft 提案批清除、已发布旧提案保留、失败不毁旧批、keep 清残留 draft
 //   ⑥ decomposer 不占 activeW（poolCycle：活跃 decomposer rec 下 pending 卡照常派 Worker）
 //      + 拆解期源卡不被派 Worker（skip-decomposing 守卫）+ recIsLive 不回收在跑 decomposer
+//   ⑦ 物化子卡自带调研包（task-mvnrtpxo）：context.files 自动 = touches（拆解官调研结论），
+//      epic 发布预检 epicPrecheck 不再对拆解子卡报「无调研包」missing
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { DECOMPOSE_SCHEMA, DECOMPOSE_MAX_CHILDREN, buildDecomposerPrompt, applyDecomposeProposal } from '../lib/policy.mjs'
+import { epicPrecheck, epicPrecheckNote } from '../lib/core.mjs'
 import { createDispatch } from '../lib/dispatch.mjs'
 import { createRpc } from '../lib/rpc.mjs'
 
@@ -285,6 +288,12 @@ test('③ 全链：startActivation(caller + outputSchema) → structured=split �
   assert.equal('model' in a, false, 'modelHint 空不落 model 字段')
   assert.deepEqual(a.dependsOn, [])
   assert.equal(a.pipeline, 'full'); assert.equal(a.pipelineAuto, true)
+  // 物化子卡自带调研包（task-mvnrtpxo）：context.files 自动 = touches（拆解官定的 touches 就是它的调研结论），
+  // context.notes 留空（description 已含实现侧结论，不重复复制）
+  assert.deepEqual(a.context.files, ['lib/a.mjs'], '物化子卡 context.files === touches')
+  assert.deepEqual(b.context.files, ['lib/b.mjs'])
+  assert.equal(a.context.notes, '', 'notes 留空不重复 description')
+  assert.equal(b.context.notes, '')
   assert.equal(b.size, 'heavy'); assert.equal(b.model, 'kimi/kimi-k3', 'modelHint 落 model')
   assert.deepEqual(b.dependsOn, [a.id], 'dependsOnIdx[0] 翻译成本批真实 id')
   assert.equal(b.history[0].actor, 'decomposer')
@@ -429,4 +438,34 @@ test('⑥ poolCycle：decomposer 计 activeV 不占 worker 位 + 源卡拆解期
   assert.equal(board.poolStatus.workers.length, 0, 'workers 区不含 decomposer')
   assert.equal(board.poolStatus.verifiers.length, 1)
   assert.equal(board.poolStatus.verifiers[0].taskId, 'src1')
+})
+
+// ===== ⑦ 物化子卡自带调研包（task-mvnrtpxo，task-mvnnkv7x epic 发布预检「无调研包」误报实证）=====
+test('⑦ 物化子卡 context.files 自动 = touches；epicPrecheck 不再报 missing', function () {
+  var src = mkTask({ id: 'p1', status: 'draft' })
+  var board = mkBoard([src])
+  var r = applyDecomposeProposal(board, src, { verdict: 'split', children: [
+    { title: '子甲', description: '做甲', size: 'standard', touches: ['lib/a.mjs', 'test/a.test.mjs'], acceptance: 'x' },
+    { title: '子乙', description: '做乙', size: 'standard', touches: [], acceptance: 'y' },
+  ] }, '2026-01-01T01:00:00Z')
+  assert.equal(r.ok, true)
+  var ka = board.tasks.find(function (x) { return x.title === '子甲' })
+  var kb = board.tasks.find(function (x) { return x.title === '子乙' })
+  assert.deepEqual(ka.context.files, ['lib/a.mjs', 'test/a.test.mjs'], 'context.files === touches（保序）')
+  assert.deepEqual(kb.context.files, [], 'touches 空则 files 空（不捏造）')
+  assert.equal(ka.context.notes, '', 'notes 留空——description 已含实现侧结论')
+  // 预检口径（core.mjs epicPrecheck）：files 非空即不算「无 contextFiles/contextNotes」——带 touches 的子甲出 missing 名单
+  var pre = epicPrecheck(board.tasks, 'p1')
+  assert.equal(pre.total, 2)
+  assert.deepEqual(pre.missing.map(function (m) { return m.id }), [kb.id], '只有 touches 也为空的子乙仍报 missing')
+  // 全部带 touches 时预检全绿：warning 文案为空串（task-mvnnkv7x 两张子卡误报不再触发）
+  var board2 = mkBoard([mkTask({ id: 'p2', status: 'draft' })])
+  applyDecomposeProposal(board2, board2.tasks[0], { verdict: 'split', children: [
+    { title: '甲', description: '', size: 'standard', touches: ['lib/a.mjs'], acceptance: 'x' },
+    { title: '乙', description: '', size: 'standard', touches: ['lib/b.mjs'], acceptance: 'y' },
+  ] }, '2026-01-01T02:00:00Z')
+  var pre2 = epicPrecheck(board2.tasks, 'p2')
+  assert.equal(pre2.total, 2)
+  assert.equal(pre2.missing.length, 0, '物化子卡自带 touches 调研包 → 预检零 missing')
+  assert.equal(epicPrecheckNote(pre2), '', '预检全绿不产生 warning 文案')
 })

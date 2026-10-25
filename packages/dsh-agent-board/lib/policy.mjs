@@ -212,6 +212,11 @@ export function applyDecomposeProposal(d, t, proposal, now) {
       history: [{ from: 'created', to: 'draft', timestamp: stamp, actor: 'decomposer', note: '拆解官提案物化（源卡 ' + t.id + '）' }],
       proposalOf: t.id,
     }
+    // 拆解官定的 touches 就是它的调研结论（task-mvnrtpxo，task-mvnnkv7x epic 发布预检「无调研包」误报实证）：
+    // 物化时 context.files 自动 = touches（文件级路径，Worker 可按需 read 自取；touches 已过滤+截 20，与
+    // contextFiles 上限同口径），预检 epicPrecheck 不再对拆解子卡报 missing。context.notes 留空——
+    // child.description 本身已含实现侧结论，不重复复制。
+    child.context.files = child.touches.slice()
     // 与 create-task 同口径：未显式给 pipeline 时按卡面分类（含 acceptance 的通常落 full）
     child.pipeline = classifyPipeline(child); child.pipelineAuto = true
     var sz = typeof c.size === 'string' ? c.size.trim() : ''

@@ -1013,6 +1013,29 @@ test('parsePlanFiles: 换行/逗号/分号分隔 + normTouch 归一（反斜杠�
   assert.deepEqual(core.parsePlanFiles('计划改动：\n\n'), [])
 })
 
+// 行尾注释剥离（task-mvnrtpxo，task-mvnnkv7x-2 误报实证：「path（L663 语义注释）」整行被当路径 → 假越界）
+test('parsePlanFiles: 剥行尾注释——全角/半角括号尾巴 + 「 — 」说明尾巴；裸路径不受影响；剥光空串丢弃', () => {
+  // 全角括号注释（task-mvnnkv7x-2 实证形态）：剥尾后正确归一，与 touches 逐字相同不再误报
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs（L75-L91 计划闸口解析器）'), ['lib/core.mjs'])
+  // 半角括号注释
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs (L663 语义注释)'), ['lib/core.mjs'])
+  // 括号前无空白也剥
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs（注释）\ntest/core.test.mjs(断言)'), ['lib/core.mjs', 'test/core.test.mjs'])
+  // 行内「 — 」说明尾巴（与 contextFiles 条目写法同款的用途后缀）
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs — 解析器现状'), ['lib/core.mjs'])
+  // 注释剥离发生在归一之前：带注释的 ./ 前缀与反斜杠形态同样归一去重
+  assert.deepEqual(core.parsePlanFiles('计划改动：./lib/core.mjs（注释）\nlib\\core.mjs'), ['lib/core.mjs'])
+  // 裸路径行不受影响（无括号无破折号时行为与旧版完全一致）
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs\ntest/core.test.mjs'), ['lib/core.mjs', 'test/core.test.mjs'])
+  // 剥光后空串条目被丢弃（整行都是注释），其余条目保留
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs\n（整行都是注释）\ntest/core.test.mjs'), ['lib/core.mjs', 'test/core.test.mjs'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：（只有注释）'), [])
+  // 混合：markdown 列表符 + 行内代码 + 注释 叠加
+  assert.deepEqual(core.parsePlanFiles('计划改动：\n- `lib/core.mjs`（闸口）\n* test/x.mjs — 断言'), ['lib/core.mjs', 'test/x.mjs'])
+  // 下游联动：剥离后的计划与 touches 逐字比对不再假越界（planOutsideTouches 口径）
+  assert.deepEqual(core.planOutsideTouches(['lib/core.mjs'], core.parsePlanFiles('计划改动：lib/core.mjs（L75-L91 语义注释）')), [])
+})
+
 test('touchCovers: 单向覆盖——touch 模式 ⊇ 计划文件（与 matchOne 对称语义方向相反）', () => {
   assert.equal(core.touchCovers('lib/core.mjs', 'lib/core.mjs'), true)   // 精确
   assert.equal(core.touchCovers('lib/core.mjs', 'lib/rpc.mjs'), false)

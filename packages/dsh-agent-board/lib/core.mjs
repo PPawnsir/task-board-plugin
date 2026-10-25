@@ -74,8 +74,12 @@ export function overlapsTouches(mine, theirs) {
 //（卡 messages + 主窗口通知 + 工具返回体 warning 三通道，接线在 rpc.mjs board_report progress 分支）。
 export var PLAN_GATE_PREFIX = '计划改动：'
 // 「计划改动：」前缀识别 + 路径清单解析：换行/逗号/分号/顿号分隔（中英文逗号都认），兼容 markdown
-// 列表符（- / * / •）与行内代码反引号包裹；每条过 normTouch 归一（Windows 反斜杠、./ 前缀、尾斜杠），
+// 列表符（- / * / •）与行内代码反引号包裹；每条先剥行尾注释再过 normTouch 归一（Windows 反斜杠、./ 前缀、尾斜杠），
 // 去重保序。全角/半角冒号都识别。
+// 行尾注释剥离（task-mvnrtpxo，task-mvnnkv7x-2 误报实证）：Worker 自然写法「path（L663 语义注释）」
+// 整行被当路径 → 与 touches 不匹配 → 假越界警示。每条目截掉首个全角/半角括号起始的尾巴（/[（(].*$/），
+// 顺带兼容行内「 — 」说明尾巴；剥光后空串条目丢弃。边界：括号内含路径分隔符的极端形态不处理
+//（Windows 路径带括号罕见，接受）。
 // 返回 null = 非计划闸口上报（普通进展）；返回数组 = 计划清单（空数组 = 有前缀但没解析到路径）。
 export function parsePlanFiles(question) {
   var q = String(question == null ? '' : question).trim()
@@ -84,7 +88,10 @@ export function parsePlanFiles(question) {
   var parts = q.slice(m[0].length).split(/[\n,，;；、]+/)
   var out = []
   for (var i = 0; i < parts.length; i++) {
-    var v = normTouch(parts[i].trim().replace(/^[-*•]\s+/, '').replace(/^`+|`+$/g, ''))
+    // 顺序：列表符 → 行尾注释 → 反引号 → trim → 归一（注释须先于反引号剥，否则「`path`（注释）」形态残留尾反引号）
+    var v = parts[i].trim().replace(/^[-*•]\s+/, '')
+    v = v.replace(/[（(].*$/, '').replace(/\s+—\s+.*$/, '').trim() // 剥行尾注释再归一
+    v = normTouch(v.replace(/^`+|`+$/g, '').trim())
     if (v && out.indexOf(v) < 0) out.push(v)
   }
   return out
