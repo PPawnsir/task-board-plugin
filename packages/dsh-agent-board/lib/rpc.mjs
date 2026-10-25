@@ -332,6 +332,9 @@ export function createRpc(ctx, state, deps) {
       // 力度路由表（task-mvnemvf5）：cfg 归一后透出确定形态（三档×双角色，空串槽位=继承下一级），
       // 老看板缺字段也透出全空缺省——客户端不需要各自猜兜底（与上方开关系列同纪律）。
       d.laneModels = cfg(d).laneModels
+      // 备用模型链（task-mvnqxlpn）：cfg 归一后透出（空数组=未启用），与 laneModels 同纪律——
+      // 读路径归一不落盘，老看板缺字段透空数组；GUI v1 不消费本字段（配置先走 set-board-config 对话/RPC）。
+      d.fallbackModels = cfg(d).fallbackModels
       // 工作模式派生字段：UI 只读这一个字段决定三档选中态（不落盘，写入仍走 boardMode/teamMode）
       d.workMode = deriveWorkMode(d)
       // ===== board 级 token 消耗聚合（现算，不落盘）：总量 + 输入/输出/缓存读 + 按模型 + 任务 Top8 =====
@@ -1205,6 +1208,21 @@ export function createRpc(ctx, state, deps) {
         }
         if (__lmErr) return { ok: false, error: __lmErr }
       }
+      // ===== fallbackModels 备用模型链（task-mvnqxlpn）：有序字符串数组 + 逐项合法清单校验 =====
+      // value 形态为字符串数组（有序备用链，跨供应商同档替代；空数组=清链不启用）；逐项必须字符串且
+      // trim 后非空，非空项走与 workerModel 同款 enumModels 校验，**任一项非法整包拒写**（不落半截数组，
+      // 错误文案带合法清单样例）；非数组形态 fail-loud 拒写。llm 缺失（老宿主）由 cardModelErr 内部降级放行。
+      if (args.key === 'fallbackModels') {
+        if (!Array.isArray(args.value)) return { ok: false, error: 'fallbackModels 需为字符串数组（有序备用链，如 ["gsmoma/kimi/kimi-k3","kimi-coding/k3.1-pro"]；空数组=清链）' }
+        for (var __fi = 0; __fi < args.value.length; __fi++) {
+          var __fv = args.value[__fi]
+          if (typeof __fv !== 'string') return { ok: false, error: 'fallbackModels[' + __fi + '] 需为字符串（provider/model 复合格式）' }
+          var __fvt = __fv.trim()
+          if (!__fvt) return { ok: false, error: 'fallbackModels[' + __fi + '] 为空串（清链请传空数组 []）' }
+          var __fe = await cardModelErr(__fvt)
+          if (__fe) return { ok: false, error: __fe }
+        }
+      }
       // ===== 板级配置审计行（task-mv9yuq2l，实证 n-mv8ki92qnhdq：verifierModel 神隐回退 flash 零留痕无从审计）=====
       // 白名单键成功写入即追加一行 {key, from, to, actor, at} 到 d.configLog（随看板落盘），截尾留最新 50 条——
       // 审计是「近期谁动了什么」的线索面，不做无限增长。from/to 取 d 的平铺顶层字段（白名单键全是顶层字段），
@@ -1213,7 +1231,7 @@ export function createRpc(ctx, state, deps) {
       return mutateLocked(sid, function (d) {
         var __from = d[args.key] === undefined ? null : d[args.key] // 写前留旧值（JSON 落盘不容 undefined，归一成 null）
         var __hit = true
-        if (args.key === 'maxWorkers') d.maxWorkers = Math.max(1, Math.min(10, args.value || 3)); else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'cleanupRetentionDays') d.cleanupRetentionDays = Math.max(1, Math.min(90, Number(args.value) || 7)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'workerContinuable') d.workerContinuable = !!args.value; else if (args.key === 'verifyUserGuide') d.verifyUserGuide = !!args.value; else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } else if (args.key === 'laneModels') { var __base = cfg(d).laneModels; for (var __pi = 0; __pi < TASK_SIZES.length; __pi++) { var __pl = args.value[TASK_SIZES[__pi]]; if (!__pl) continue; if (__pl.worker !== undefined) __base[TASK_SIZES[__pi]].worker = __pl.worker.trim(); if (__pl.verifier !== undefined) __base[TASK_SIZES[__pi]].verifier = __pl.verifier.trim() } d.laneModels = __base } else __hit = false
+        if (args.key === 'maxWorkers') d.maxWorkers = Math.max(1, Math.min(10, args.value || 3)); else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'cleanupRetentionDays') d.cleanupRetentionDays = Math.max(1, Math.min(90, Number(args.value) || 7)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'workerContinuable') d.workerContinuable = !!args.value; else if (args.key === 'verifyUserGuide') d.verifyUserGuide = !!args.value; else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } else if (args.key === 'laneModels') { var __base = cfg(d).laneModels; for (var __pi = 0; __pi < TASK_SIZES.length; __pi++) { var __pl = args.value[TASK_SIZES[__pi]]; if (!__pl) continue; if (__pl.worker !== undefined) __base[TASK_SIZES[__pi]].worker = __pl.worker.trim(); if (__pl.verifier !== undefined) __base[TASK_SIZES[__pi]].verifier = __pl.verifier.trim() } d.laneModels = __base } else if (args.key === 'fallbackModels') { d.fallbackModels = core.normalizeFallbackModels(args.value) } else __hit = false
         if (__hit) {
           if (!Array.isArray(d.configLog)) d.configLog = []
           d.configLog.push({ key: String(args.key), from: __from, to: d[args.key] === undefined ? null : d[args.key], actor: actor, at: new Date().toISOString() })

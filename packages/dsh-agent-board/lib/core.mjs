@@ -214,6 +214,23 @@ export function normalizeLaneModels(v) {
   }
   return out
 }
+// ===== 备用模型链（task-mvnqxlpn）：fallbackModels 有序数组（板级，每板供应商组合不同）=====
+// 原形事故：2026-10-24 glm 撞 5h 限额（429 带重置时间），重派还是 glm 继续撞——C5 只做了同表降档，
+// 缺跨供应商备用链。语义：取模候选被判「冷却中/熔断中」时，先按本链顺序找第一个健康模型
+// （同档替代，保住能力水位），链尽才走原降级路径（降档/降跳），最后 parent 兜底。
+// 形态固定为字符串数组（provider/model 复合格式）；缺省 [] = 不启用（行为与现状逐字一致）。
+// 脏值收敛：非数组→[]；逐项非字符串丢弃、字符串 trim、空串丢弃——消费面（spawnOneShot 取模链、
+// get-tasks 透出、set-board-config 写入）只认这一个形态，不各自兜底。
+export function normalizeFallbackModels(v) {
+  if (!Array.isArray(v)) return []
+  var out = []
+  for (var i = 0; i < v.length; i++) {
+    if (typeof v[i] !== 'string') continue
+    var s = v[i].trim()
+    if (s) out.push(s)
+  }
+  return out
+}
 export function cfg(d) {
   var soft = Math.max(1, Math.min(480, d.softTimeoutMin || 30))
   var hard = Math.max(soft, Math.min(1440, d.hardTimeoutMin || 120))
@@ -221,7 +238,7 @@ export function cfg(d) {
   var crd = d.cleanupRetentionDays
   if (typeof crd !== 'number' || !(crd >= 1)) crd = 7
   crd = Math.max(1, Math.min(90, Math.round(crd)))
-  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, cleanupRetentionDays: crd, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false, workerContinuable: d.workerContinuable !== false, verifyUserGuide: d.verifyUserGuide !== false, laneModels: normalizeLaneModels(d.laneModels) }
+  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, cleanupRetentionDays: crd, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false, workerContinuable: d.workerContinuable !== false, verifyUserGuide: d.verifyUserGuide !== false, laneModels: normalizeLaneModels(d.laneModels), fallbackModels: normalizeFallbackModels(d.fallbackModels) }
 }
 
 // ===== 看板数据目录（跨重启继承用）=====
@@ -238,7 +255,7 @@ export function boardHome() { return path.join(boardDirName(), '.dsh') }
 // ownerCwd（跨重启继承）：创建该看板的会话工作区路径，继承判定全靠它——取不到就省略字段
 // （绝不落空串，否则「路径读不到的多个会话」会被误判成同一工作区）。
 export function seed(sid, ownerCwd) {
-  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', laneModels: normalizeLaneModels(null), softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, poolStatus: { workers: [], verifiers: [] }, tasks: [], configLog: [], opsLog: [] }
+  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', laneModels: normalizeLaneModels(null), fallbackModels: [], softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, poolStatus: { workers: [], verifiers: [] }, tasks: [], configLog: [], opsLog: [] }
   if (typeof ownerCwd === 'string' && ownerCwd) d.ownerCwd = ownerCwd
   return d
 }
@@ -263,6 +280,8 @@ export function normalizeBoard(d) {
     // 力度路由表（task-mvnemvf5）：缺字段/脏值 → 归一同形（空串=继承下一级），老看板读入即满足透出形态。
     // 刻意只动板级 laneModels：卡级 t.size/t.model 不在此补字段——缺字段=标档语义，存量卡零迁移。
     d.laneModels = normalizeLaneModels(d.laneModels)
+    // 备用模型链（task-mvnqxlpn）：缺字段/脏值 → 归一空数组（缺省不启用，取模行为与现状逐字一致）。
+    d.fallbackModels = normalizeFallbackModels(d.fallbackModels)
     // 配置审计行（实证 n-mv8ki92qnhdq：verifierModel 神隐回退零留痕无从审计）：老看板缺字段/脏值 → 补空数组；
     // 写入由 set-board-config 成功时追加 {key, from, to, actor, at}（截尾 50 条），此处只兜底形态。
     if (!Array.isArray(d.configLog)) d.configLog = []

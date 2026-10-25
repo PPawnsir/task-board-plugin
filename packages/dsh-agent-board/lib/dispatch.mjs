@@ -74,6 +74,23 @@ export function createDispatch(ctx, state, deps) {
       console.error('[task-board] 模型 ' + model + ' 命中 RATE_LIMIT 限流，冷却至 ' + new Date(modelCooldown[model]).toISOString() + '（' + (hit.parsed ? '重置时间解析' : '缺省 30min') + '）')
       return modelCooldown[model]
     }
+    // ===== 备用模型链健康判定（task-mvnqxlpn）：不在 badModels 熔断名单且不在 modelCooldown 冷却期 =====
+    // 两张表各管各的（熔断=连续失败布尔，冷却=额度窗口时间戳），任一命中即不健康。
+    // 消费点=spawnOneShot 取模链：候选被判不健康时先扫板级 fallbackModels 找首个健康者（链本身逐项过本检查）。
+    function healthyModel(sid, modelId) {
+      if (!modelId) return false
+      if (badModels[modelKey(sid, modelId)]) return false
+      if (cooldownLive(modelId)) return false
+      return true
+    }
+    // 扫备用链找首个健康模型（保持链序=主窗口配置的能力水位优先级）；链尽/空链返回 ''。
+    function pickHealthyFallback(sid, fbList) {
+      if (!Array.isArray(fbList)) return ''
+      for (var fi = 0; fi < fbList.length; fi++) {
+        if (healthyModel(sid, fbList[fi])) return fbList[fi]
+      }
+      return ''
+    }
     // 「上下文注入」区块通道的按子代理会话缓存表 + 首轮竞速认领队列随该通道一起退役（task-muvjs392）：
     // 瘦身清单直接进首条 prompt，不再需要注入段命中与父子归属认领（并行 spawn 认领错包的潜伏 bug 一并消灭）。
     var knownSessions = state.knownSessions
@@ -340,8 +357,31 @@ export function createDispatch(ctx, state, deps) {
         var bm = role === 'verifier' ? dsnap.verifierModel : dsnap.workerModel
         bm = typeof bm === 'string' ? bm.trim() : ''
         if (bm) cands.push([bm, 'board'])
+        // ===== 备用模型链（task-mvnqxlpn）：板级 fallbackModels 有序链 =====
+        // 取模候选被判「熔断中/冷却中」时的跳过顺序：先按链找首个健康模型（同档替代、跨供应商，
+        // 保住能力水位）→ 链尽才走原降级路径（熔断=降下一跳 / 冷却=C5 降档链）→ 最后 parent 兜底。
+        // 缺省 []：两个判定点均不触发（零回归——无配置时行为与现状逐字一致）。
+        // 留痕：命中即 run.modelSource='fallback' + 卡 messages 记「原模型 X 冷却/熔断，切备用 Y」。
+        var fbList = cfg(dsnap).fallbackModels
         for (var mi = 0; mi < cands.length; mi++) {
-          if (badModels[modelKey(sid, cands[mi][0])]) { console.error('[task-board] model ' + cands[mi][0] + ' (' + cands[mi][1] + ' 级) circuited, trying next level'); continue }
+          if (badModels[modelKey(sid, cands[mi][0])]) {
+            // 熔断候选：先扫备用链找首个健康者（链本身逐项过健康检查），命中即切备用（不再降下一跳）
+            var fbHit = pickHealthyFallback(sid, fbList)
+            if (fbHit) {
+              console.error('[task-board] model ' + cands[mi][0] + ' (' + cands[mi][1] + ' 级) circuited, switch to fallback ' + fbHit)
+              try {
+                await mutateLocked(sid, function (d) {
+                  var t2 = d.tasks.find(function (x) { return x.id === t.id })
+                  if (!t2) return null
+                  if (!Array.isArray(t2.messages)) t2.messages = []
+                  t2.messages.push({ kind: 'fallback', text: '🔀 原模型 ' + cands[mi][0] + ' 熔断中，切备用 ' + fbHit, at: new Date().toISOString(), by: 'system' })
+                  return { ok: true }
+                }, true) // skipKick：只是留痕，不踢 poolCycle
+              } catch (_) {}
+              modelOverride = fbHit; modelSource = 'fallback'; break
+            }
+            console.error('[task-board] model ' + cands[mi][0] + ' (' + cands[mi][1] + ' 级) circuited, trying next level'); continue
+          }
           modelOverride = cands[mi][0]; modelSource = cands[mi][1]; break
         }
         // ===== 额度冷却降档（task-mvneq4kk）：解析出的候选在冷却期 → 沿 heavy→standard→light 降档再试 =====
@@ -350,10 +390,28 @@ export function createDispatch(ctx, state, deps) {
         // 由它兜底过一遍）。当前档取 t.size（缺省=标档语义 standard）；严格只降不升。
         // 实际降档留痕：run 落档 modelSource='cooldown-downgrade' + 卡 messages 记
         // 「原档模型 X 冷却中（至 HH:mm），本 run 降档为 Y」。modelOverride=''（parent 命中）无模型可归因，不参与。
+        // task-mvnqxlpn 起冷却候选先扫备用链（同档替代保住水位），链尽才进本降档链。
+        // fallback 命中的模型已过健康双闸（必不在冷却期），下方的冷却检查对它恒不触发。
         if (modelOverride) {
           var cdUntil = cooldownLive(modelOverride)
           if (cdUntil) {
             var cdFrom = modelOverride
+            // 冷却候选：同样先扫备用链找首个健康者，链尽才走 C5 降档链
+            var fbCd = pickHealthyFallback(sid, fbList)
+            if (fbCd) {
+              modelOverride = fbCd
+              modelSource = 'fallback'
+              console.error('[task-board] 模型 ' + cdFrom + ' 冷却中（至 ' + hhmmOf(cdUntil) + '），切备用 ' + fbCd)
+              try {
+                await mutateLocked(sid, function (d) {
+                  var t2 = d.tasks.find(function (x) { return x.id === t.id })
+                  if (!t2) return null
+                  if (!Array.isArray(t2.messages)) t2.messages = []
+                  t2.messages.push({ kind: 'fallback', text: '🔀 原模型 ' + cdFrom + ' 冷却中（至 ' + hhmmOf(cdUntil) + '），切备用 ' + fbCd, at: new Date().toISOString(), by: 'system' })
+                  return { ok: true }
+                }, true) // skipKick：只是留痕，不踢 poolCycle
+              } catch (_) {}
+            } else {
             var laneOrder = ['heavy', 'standard', 'light']
             var curLane = laneOrder.indexOf(sz) >= 0 ? sz : 'standard'
             var cdPicked = ''
@@ -378,6 +436,7 @@ export function createDispatch(ctx, state, deps) {
                 return { ok: true }
               }, true) // skipKick：只是留痕，不踢 poolCycle
             } catch (_) {}
+            }
           }
         }
       }

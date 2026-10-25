@@ -250,3 +250,201 @@ test('地基⑤：get-tasks 透出 laneModels（老看板缺字段透全空缺�
   assert.deepEqual(d2.laneModels, { light: { worker: '', verifier: '' }, standard: { worker: '', verifier: '' }, heavy: { worker: 'a/b', verifier: '' } }, '脏形态读出即归一')
 })
 
+// ===== 备用模型链（task-mvnqxlpn）：板级 fallbackModels 有序链（额度到顶跨供应商切换）=====
+// 原形事故：2026-10-24 glm 撞 5h 限额，重派还是 glm 继续撞——C5 只做同表降档，缺跨供应商备用链。
+// 断言清单（对应任务验收口径）：
+//   F1 cfg/seed/normalizeBoard 的 fallbackModels 缺省 [] 与脏值收敛（非数组/非字符串项/空串）
+//   F2 set-board-config fallbackModels 数组校验 + 非法模型整包拒写（带清单）+ configLog 审计行
+//   F3 候选冷却/熔断 → 切首个健康备用（agentOptions + modelSource='fallback' + 卡 messages 留痕）；
+//      备用链逐项过健康检查（跳过不健康项）；verifier 角色同链
+//   F4 备用链全不健康 → 原 C5 降档链 → parent 兜底完整回退序
+//   F5 无 fallbackModels（缺字段/显式空链）时行为与现状逐字一致（零回归）
+
+// ===== F1 cfg/seed/normalizeBoard 缺省与脏值 =====
+test('备用链F1：seed/cfg/normalizeBoard 的 fallbackModels 缺省 [] 与脏值收敛', function () {
+  assert.deepEqual(seed(SID).fallbackModels, [], 'seed 落空数组缺省')
+  assert.deepEqual(cfg({}).fallbackModels, [], '老看板缺字段 → cfg 补空数组')
+  assert.deepEqual(cfg({ fallbackModels: 'junk' }).fallbackModels, [], '非数组 → 空数组')
+  assert.deepEqual(cfg({ fallbackModels: [' gsmoma/kimi/kimi-k3 ', 42, '', null, 'kimi-coding/k3.1-pro'] }).fallbackModels, ['gsmoma/kimi/kimi-k3', 'kimi-coding/k3.1-pro'], 'trim + 非字符串/空串丢弃，保序')
+  var d = { version: 12, tasks: [], fallbackModels: 'junk' }
+  normalizeBoard(d)
+  assert.deepEqual(d.fallbackModels, [], 'normalizeBoard 脏值收敛为空数组')
+  var d2 = { version: 12, tasks: [], fallbackModels: ['x/y'] }
+  normalizeBoard(d2)
+  assert.deepEqual(d2.fallbackModels, ['x/y'], 'normalizeBoard 保留合法链')
+})
+
+// ===== F2 set-board-config fallbackModels：数组校验 + 整包拒写 + 审计 =====
+test('备用链F2：set-board-config fallbackModels 数组校验 + 非法整包拒写 + configLog 审计行', async function () {
+  var board = { version: 12, tasks: [], configLog: [], fallbackModels: [] }
+  var h = mkRpcHandlers(board, {}, mkLlmCtx(MOCK_MODELS))
+  // 合法数组写入（逐项 trim 落盘）
+  var r = await h['set-board-config']({ key: 'fallbackModels', value: ['deepseek/deepseek-chat', ' kimi/kimi-k2 '] })
+  assert.equal(r.ok, true)
+  assert.deepEqual(board.fallbackModels, ['deepseek/deepseek-chat', 'kimi/kimi-k2'], '逐项 trim 落盘保序')
+  var log = board.configLog[board.configLog.length - 1]
+  assert.equal(log.key, 'fallbackModels')
+  assert.deepEqual(log.to, ['deepseek/deepseek-chat', 'kimi/kimi-k2'], '审计 to 记落盘值')
+  assert.equal(log.actor, 'tester')
+  // 空数组=清链
+  var r2 = await h['set-board-config']({ key: 'fallbackModels', value: [] })
+  assert.equal(r2.ok, true)
+  assert.deepEqual(board.fallbackModels, [], '空数组=清链')
+  // 任一非法模型 → 整包拒写（不落半截，错误带合法清单）
+  var r3 = await h['set-board-config']({ key: 'fallbackModels', value: ['kimi/kimi-k2', 'kimi/kimi-k3'] })
+  assert.equal(r3.ok, false)
+  assert.match(r3.error, /非法模型 id: kimi\/kimi-k3/)
+  assert.match(r3.error, /合法清单/, '拒写带合法清单')
+  assert.deepEqual(board.fallbackModels, [], '整包拒写不污染现值')
+  // 非数组 / 非字符串项 / 空串项 → fail-loud
+  var r4 = await h['set-board-config']({ key: 'fallbackModels', value: 'kimi/kimi-k2' })
+  assert.equal(r4.ok, false); assert.match(r4.error, /字符串数组/)
+  var r5 = await h['set-board-config']({ key: 'fallbackModels', value: ['kimi/kimi-k2', 42] })
+  assert.equal(r5.ok, false); assert.match(r5.error, /fallbackModels\[1\] 需为字符串/)
+  var r6 = await h['set-board-config']({ key: 'fallbackModels', value: ['  '] })
+  assert.equal(r6.ok, false); assert.match(r6.error, /为空串/)
+  // llm 缺失（老宿主）降级放行
+  var board2 = { version: 12, tasks: [] }
+  var hNo = mkRpcHandlers(board2, {}, { get: function () { return null } })
+  var r7 = await hNo['set-board-config']({ key: 'fallbackModels', value: ['whatever/display'] })
+  assert.equal(r7.ok, true)
+  assert.deepEqual(board2.fallbackModels, ['whatever/display'])
+  // get-tasks 透出归一形态（缺字段透空数组）
+  var g1 = await h['get-tasks']({})
+  assert.deepEqual(g1.fallbackModels, [], 'get-tasks 透出空数组')
+})
+
+// ===== F3 候选冷却/熔断 → 切首个健康备用 =====
+test('备用链F3a：候选冷却中 → 切首个健康备用（agentOptions + modelSource=\'fallback\' + messages 留痕）', async function () {
+  var board = laneBoard({ size: 'heavy' }, { fallbackModels: ['fb/fb-a', 'fb/fb-b'] })
+  var state = { modelCooldown: { 'lw/lane-w': Date.now() + 3600000 } } // heavy 档 lane 候选冷却 1h
+  var calls = []
+  var origErr = console.error; console.error = function () {}
+  try {
+    var sr = await mkDispatch(board, { subagents: mkActivationSubagents(calls) }, state).spawnOneShot(SID, board.tasks[0], 'worker')
+    assert.ok(sr)
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'fb', model: 'fb-a' }, '冷却 → 切首个健康备用（不降档）')
+    assert.equal(sr.modelSource, 'fallback', 'run 留档 modelSource=fallback')
+    assert.equal(board.tasks[0].runs[0].modelSource, 'fallback', '卡上 run 条目同留痕')
+    var fb = (board.tasks[0].messages || []).filter(function (m) { return m.kind === 'fallback' })
+    assert.equal(fb.length, 1, '卡 messages 记一条切备用留痕')
+    assert.match(fb[0].text, /原模型 lw\/lane-w 冷却中（至 \d{2}:\d{2}），切备用 fb\/fb-a/, '留痕含原模型+冷却截止+备用目标')
+    assert.equal((board.tasks[0].messages || []).filter(function (m) { return m.kind === 'cooldown' }).length, 0, '不再走降档链（无 cooldown 留痕）')
+  } finally { console.error = origErr }
+})
+
+test('备用链F3b：候选熔断中 → 切首个健康备用（不再降下一跳）', async function () {
+  var bad = {}
+  bad[SID + '|cm/card-m'] = true // card 级特例熔断
+  var board = laneBoard({ model: 'cm/card-m', size: 'heavy' }, { fallbackModels: ['fb/fb-a'] })
+  var calls = []
+  var origErr = console.error; console.error = function () {}
+  try {
+    var sr = await mkDispatch(board, { subagents: mkActivationSubagents(calls) }, { badModels: bad }).spawnOneShot(SID, board.tasks[0], 'worker')
+    assert.ok(sr)
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'fb', model: 'fb-a' }, 'card 熔断 → 切备用（不再降 lane 级）')
+    assert.equal(sr.modelSource, 'fallback')
+    var fb = (board.tasks[0].messages || []).filter(function (m) { return m.kind === 'fallback' })
+    assert.equal(fb.length, 1)
+    assert.match(fb[0].text, /原模型 cm\/card-m 熔断中，切备用 fb\/fb-a/)
+  } finally { console.error = origErr }
+})
+
+test('备用链F3c：备用链逐项过健康检查——跳过冷却/熔断项取下一个健康者（保序）', async function () {
+  var board = laneBoard({ size: 'heavy' }, { fallbackModels: ['fb/fb-a', 'fb/fb-b', 'fb/fb-c'] })
+  var bad = {}
+  bad[SID + '|fb/fb-b'] = true // 链第二项熔断
+  var state = { badModels: bad, modelCooldown: { 'lw/lane-w': Date.now() + 3600000, 'fb/fb-a': Date.now() + 3600000 } } // 原候选与链首项都冷却
+  var calls = []
+  var origErr = console.error; console.error = function () {}
+  try {
+    var sr = await mkDispatch(board, { subagents: mkActivationSubagents(calls) }, state).spawnOneShot(SID, board.tasks[0], 'worker')
+    assert.ok(sr)
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'fb', model: 'fb-c' }, '跳过冷却 fb-a 与熔断 fb-b，取 fb-c')
+    assert.equal(sr.modelSource, 'fallback')
+  } finally { console.error = origErr }
+})
+
+test('备用链F3d：verifier 角色同走备用链（板级 verifierModel 冷却 → 切备用）', async function () {
+  var board = laneBoard({}, { fallbackModels: ['fb/fb-v'] })
+  var state = { modelCooldown: { 'bv/board-v': Date.now() + 3600000 } } // 板级 verifierModel 冷却
+  var calls = []
+  var origErr = console.error; console.error = function () {}
+  try {
+    var sr = await mkDispatch(board, { subagents: mkActivationSubagents(calls) }, state).spawnOneShot(SID, board.tasks[0], 'verifier')
+    assert.ok(sr)
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'fb', model: 'fb-v' }, 'verifier 候选冷却 → 切备用')
+    assert.equal(sr.modelSource, 'fallback')
+    assert.equal(board.tasks[0].runs[0].modelSource, 'fallback')
+  } finally { console.error = origErr }
+})
+
+// ===== F4 备用链全不健康 → 原降档链 → parent 兜底完整回退序 =====
+var FULL_LANES = { light: { worker: 'lw/light-w', verifier: '' }, standard: { worker: 'sw/std-w', verifier: '' }, heavy: { worker: 'hw/heavy-w', verifier: '' } }
+test('备用链F4a：备用链全不健康 → 回原 C5 降档链（命中 standard + cooldown-downgrade 留痕）', async function () {
+  var board = laneBoard({ size: 'heavy' }, { laneModels: JSON.parse(JSON.stringify(FULL_LANES)), fallbackModels: ['fb/fb-a'] })
+  var state = { modelCooldown: { 'hw/heavy-w': Date.now() + 3600000, 'fb/fb-a': Date.now() + 3600000 } } // 原档与备用都冷却
+  var calls = []
+  var origErr = console.error; console.error = function () {}
+  try {
+    var sr = await mkDispatch(board, { subagents: mkActivationSubagents(calls) }, state).spawnOneShot(SID, board.tasks[0], 'worker')
+    assert.ok(sr)
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'sw', model: 'std-w' }, '备用链尽 → 降档命中 standard 槽')
+    assert.equal(sr.modelSource, 'cooldown-downgrade', '链尽走原降档留痕（非 fallback）')
+    var fb = (board.tasks[0].messages || []).filter(function (m) { return m.kind === 'fallback' })
+    assert.equal(fb.length, 0, '无备用命中 → 无 fallback 留痕')
+    var cm = (board.tasks[0].messages || []).filter(function (m) { return m.kind === 'cooldown' })
+    assert.equal(cm.length, 1, '降档留痕照旧')
+    assert.match(cm[0].text, /本 run 降档为 sw\/std-w/)
+  } finally { console.error = origErr }
+})
+
+test('备用链F4b：备用链+降档链全尽 → parent 兜底（不挂 agentOptions）', async function () {
+  var board = laneBoard({ size: 'heavy' }, { laneModels: JSON.parse(JSON.stringify(FULL_LANES)), fallbackModels: ['fb/fb-a', 'fb/fb-b'] })
+  var cd = { 'hw/heavy-w': Date.now() + 3600000, 'sw/std-w': Date.now() + 3600000, 'lw/light-w': Date.now() + 3600000, 'fb/fb-a': Date.now() + 3600000 }
+  var bad = {}
+  bad[SID + '|fb/fb-b'] = true // 链尾熔断（覆盖「冷却+熔断混合链尽」）
+  var state = { modelCooldown: cd, badModels: bad }
+  var calls = []
+  var origErr = console.error; console.error = function () {}
+  try {
+    var sr = await mkDispatch(board, { subagents: mkActivationSubagents(calls) }, state).spawnOneShot(SID, board.tasks[0], 'worker')
+    assert.ok(sr)
+    assert.equal(calls[0].request.agentOptions, undefined, '备用链+降档链全尽 → 父模型兜底')
+    assert.equal(sr.modelSource, 'cooldown-downgrade')
+    var cm = (board.tasks[0].messages || []).filter(function (m) { return m.kind === 'cooldown' })
+    assert.equal(cm.length, 1)
+    assert.match(cm[0].text, /本 run 降档为 父模型/)
+  } finally { console.error = origErr }
+})
+
+// ===== F5 无 fallbackModels（缺字段/显式空链）时行为与现状逐字一致（零回归）=====
+test('备用链F5：无备用链配置时冷却降档/熔断降跳与现状逐字一致', async function () {
+  var origErr = console.error; console.error = function () {}
+  try {
+    // 形态1：板无 fallbackModels 字段（老看板）+ heavy 冷却 → 降 standard（与冷却③a 同形态）
+    var board = laneBoard({ size: 'heavy' }, { laneModels: JSON.parse(JSON.stringify(FULL_LANES)) })
+    var state = { modelCooldown: { 'hw/heavy-w': Date.now() + 3600000 } }
+    var calls = []
+    var sr = await mkDispatch(board, { subagents: mkActivationSubagents(calls) }, state).spawnOneShot(SID, board.tasks[0], 'worker')
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'sw', model: 'std-w' }, '缺字段：冷却照旧降档')
+    assert.equal(sr.modelSource, 'cooldown-downgrade')
+    assert.equal((board.tasks[0].messages || []).filter(function (m) { return m.kind === 'fallback' }).length, 0, '无备用链留痕')
+    // 形态2：显式空链 fallbackModels: [] → 同上（空链=无链）
+    var board2 = laneBoard({ size: 'heavy' }, { laneModels: JSON.parse(JSON.stringify(FULL_LANES)), fallbackModels: [] })
+    var calls2 = []
+    var sr2 = await mkDispatch(board2, { subagents: mkActivationSubagents(calls2) }, { modelCooldown: { 'hw/heavy-w': Date.now() + 3600000 } }).spawnOneShot(SID, board2.tasks[0], 'worker')
+    assert.deepEqual(calls2[0].request.agentOptions, { provider: 'sw', model: 'std-w' }, '显式空链：冷却照旧降档')
+    assert.equal(sr2.modelSource, 'cooldown-downgrade')
+    // 形态3：无备用链时熔断降跳照旧（card 熔断 → lane，不切备用）
+    var bad = {}
+    bad[SID + '|cm/card-m'] = true
+    var board3 = laneBoard({ model: 'cm/card-m', size: 'heavy' }, { laneModels: JSON.parse(JSON.stringify(FULL_LANES)) })
+    var calls3 = []
+    var sr3 = await mkDispatch(board3, { subagents: mkActivationSubagents(calls3) }, { badModels: bad }).spawnOneShot(SID, board3.tasks[0], 'worker')
+    assert.deepEqual(calls3[0].request.agentOptions, { provider: 'hw', model: 'heavy-w' }, 'card 熔断降 lane（现状不变）')
+    assert.equal(sr3.modelSource, 'lane')
+    assert.equal((board3.tasks[0].messages || []).filter(function (m) { return m.kind === 'fallback' }).length, 0)
+  } finally { console.error = origErr }
+})
+
