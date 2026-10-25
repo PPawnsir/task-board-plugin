@@ -238,7 +238,7 @@ export function boardHome() { return path.join(boardDirName(), '.dsh') }
 // ownerCwd（跨重启继承）：创建该看板的会话工作区路径，继承判定全靠它——取不到就省略字段
 // （绝不落空串，否则「路径读不到的多个会话」会被误判成同一工作区）。
 export function seed(sid, ownerCwd) {
-  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', laneModels: normalizeLaneModels(null), softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, poolStatus: { workers: [], verifiers: [] }, tasks: [], configLog: [] }
+  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', laneModels: normalizeLaneModels(null), softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, poolStatus: { workers: [], verifiers: [] }, tasks: [], configLog: [], opsLog: [] }
   if (typeof ownerCwd === 'string' && ownerCwd) d.ownerCwd = ownerCwd
   return d
 }
@@ -266,6 +266,9 @@ export function normalizeBoard(d) {
     // 配置审计行（实证 n-mv8ki92qnhdq：verifierModel 神隐回退零留痕无从审计）：老看板缺字段/脏值 → 补空数组；
     // 写入由 set-board-config 成功时追加 {key, from, to, actor, at}（截尾 50 条），此处只兜底形态。
     if (!Array.isArray(d.configLog)) d.configLog = []
+    // 人工/外部操作留痕（task-mvnf3gly）：HTTP 通道写集成功时追加 {at, op, taskId, summary, actor}
+    // （截尾 50 条，rpc.mjs HTTP 单点钩子）；老看板缺字段/脏值 → 补空数组，此处只兜底形态。
+    if (!Array.isArray(d.opsLog)) d.opsLog = []
     // 清理保留天数（卡龄主闸）：缺字段/脏值（非数或 <1）→ 7；合法值四舍五入并钳 1-90。
     if (typeof d.cleanupRetentionDays !== 'number' || !(d.cleanupRetentionDays >= 1)) d.cleanupRetentionDays = 7
     else d.cleanupRetentionDays = Math.max(1, Math.min(90, Math.round(d.cleanupRetentionDays)))
@@ -277,6 +280,18 @@ export function normalizeBoard(d) {
     }
   }
   return d
+}
+
+// ===== 人工/外部操作留痕单行摘要（task-mvnf3gly）：task_list recentOps 与 Team 注入段共用同一口径 =====
+// 形如「- 10-25 16:03 update-task title/size task-mvnf3gly」（taskId 缺省不附）。
+// 纯函数零 IO；at 取 ISO 串的 MM-DD HH:MM 段（不落时区换算——留痕给人对齐盘面用，原始 at 仍在条目里）。
+export function opsLogLine(o) {
+  if (!o || typeof o !== 'object') return ''
+  var at = String(o.at || '')
+  var hm = /^\d{4}-(\d{2}-\d{2})T(\d{2}:\d{2})/.exec(at)
+  var s = '- ' + (hm ? hm[1] + ' ' + hm[2] : (at || '?')) + ' ' + String(o.summary || o.op || '?')
+  if (o.taskId) s += ' ' + String(o.taskId)
+  return s
 }
 
 // ===== 状态流转 =====

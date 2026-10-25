@@ -38,6 +38,7 @@ export function createStore(ctx, state, deps) {
     var teamModeCache = state.teamModeCache
     var feedbackCache = state.feedbackCache
     var epicSplitCache = state.epicSplitCache
+    var opsCache = state.opsCache // 人工/外部操作留痕缓存（task-mvnf3gly）：rt() 同步尾部 5 条，Team 注入段读取
     var fileLocks = state.fileLocks
     var cyclePending = state.cyclePending
     var poolHealth = state.poolHealth || (state.poolHealth = {})   // 腐坏隔离/抢救 hint 落这里（与 runtime health 同表）
@@ -174,6 +175,7 @@ export function createStore(ctx, state, deps) {
         var d = JSON.parse(r)
         if (vt(d) && d.ownerSession === sid) {
           teamModeCache[sid] = !!d.teamMode; var nd = normalizeBoard(d); feedbackCache[sid] = nd.feedbackEnabled !== false; epicSplitCache[sid] = nd.epicSplit !== false
+          opsCache[sid] = nd.opsLog.slice(-5) // normalizeBoard 已兜底为数组；尾部 5 条即 Team 注入小节的数据源
           // ownerCwd 回填（只改内存，随下一次写盘落盘）：老看板文件没有该字段，而继承判定靠它——
           // 不写盘就永远不能匿名继承。这里不额外做 IO，避免把只读路径变成写路径。
           if (!nd.ownerCwd) { var cw = sessionCwd(sid); if (cw) nd.ownerCwd = cw }
@@ -214,6 +216,7 @@ export function createStore(ctx, state, deps) {
             teamModeCache[sid] = !!salvaged.teamMode
             feedbackCache[sid] = salvaged.feedbackEnabled !== false
             epicSplitCache[sid] = salvaged.epicSplit !== false
+            opsCache[sid] = Array.isArray(salvaged.opsLog) ? salvaged.opsLog.slice(-5) : []
           } catch (e) { console.error('[task-board] 抢救写回失败（原始文件已留档 ' + corruptPath + '）:', String(e)) }
           recordCorruptNote(sid, { at: ts, salvage: true, kept: kept, file: path.basename(corruptPath) })
           console.error('[task-board] board file corrupt, salvaged (kept ' + kept + ' tasks), original quarantined: ' + corruptPath)

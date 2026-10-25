@@ -7,7 +7,7 @@ import { statSync } from 'node:fs'
 import * as core from './core.mjs'
 import { readRunUsage, findRunLog, readLogBytes, readLogFrames } from './usage.mjs'
 import { splitRuleOf, pushRejectLesson, DECOMPOSE_SCHEMA, buildDecomposerPrompt, applyDecomposeProposal, TEAM_DECOMPOSE_FLOW } from './policy.mjs'
-const { ah, cfg, claimApply, resolveApply, verifyApply, lateVerdictApply, lateNoticeFp, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER } = core
+const { ah, cfg, claimApply, resolveApply, verifyApply, lateVerdictApply, lateNoticeFp, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER, opsLogLine } = core
 
 // ===== RATE_LIMIT 额度限流嗅探（task-mvneq4kk）=====
 // 纯函数：中英文限流报错识别 + 「重置时间」解析。命中 /429|RATE_LIMIT|rate.?limit|限额|额度/i 才返回对象；
@@ -78,6 +78,9 @@ export function createDispatch(ctx, state, deps) {
     // 瘦身清单直接进首条 prompt，不再需要注入段命中与父子归属认领（并行 spawn 认领错包的潜伏 bug 一并消灭）。
     var knownSessions = state.knownSessions
     var teamModeCache = state.teamModeCache
+    // 人工/外部操作留痕缓存（task-mvnf3gly）：rt() 同步 d.opsLog 尾部 5 条，Team 注入段「最近人工/外部操作」
+    // 小节读取——section text() 是同步函数不能读文件，与 teamModeCache 同源同生命周期。测试桩无此字段时就地补。
+    var opsCache = state.opsCache || (state.opsCache = {})
 
     // ===== 运行时健康自检（task-muxhrkbg）心跳打点 =====
     // 本模块是三处心跳的唯一写入方：poolCycle 成功轮 / settleRunRecord 成功结算 / 幽灵回收 >0 / spawn 成功。
@@ -1942,7 +1945,13 @@ export function createDispatch(ctx, state, deps) {
           // 显式 parentId 建子卡 / 史诗自动收口 / hooks 状态机全部照常（机制不禁）。
           // 第 9 条（需求卡→拆解官→确认发布工作流，task-mvneoy1u）**不受 epicSplit 门禁**——
           // 它是流程引导不是劝拆，恒拼接在 splitRuleOf(...) 之后（teamMode 总闸仍由上面 teamModeCache 把守）。
-          return '【任务看板 Team 模式已开启】\n本会话的任务看板处于 Team 模式。请遵循以下工作方式：\n1. 涉及代码改动、文件创建、命令执行等实质性工作时，优先用 task_create 提交为看板任务（由一次性 Worker/Verifier 子代理执行与验收），不要自己直接动手实现。\n2. 你仍保有全部工具能力——调研、读代码、讨论方案、回答问题时直接进行，无需提交任务。\n3. 创建任务时，务必在 description 里写清任务目标和约束；调研结论/原始需求/思路用 contextNotes 带上，调研时读过的关键文件用 contextFiles 把路径带上（可写「路径:L1-L2 — 一句用途」，只给行号不给正文）——两者都会随子代理的首条 prompt 一次性注入（调研笔记全文 + 文件清单），文件内容由子代理按需用 read 工具按行号范围自取。子代理是全新会话、无你的会话记忆，上下文不够它需要从零自行调研，效率大打折扣甚至跑偏方向——开发类任务（代码改动/修复/特性）务必带文件调研，实测可省 Worker 10~15 分钟自行 grep 定位；未带调研上下文的开发类任务返回会附 warning。\n4. Worker 上报歧义时会通过 task_arbitrate 等待你裁决，请及时响应。驳回重派时同样：新 Worker 没有上一轮的记忆，驳回原因会在 prompt 里，但额外上下文需你在 description 里补上。\n5. Team 模式下 task_create 默认建为草稿（草稿不会被派发领取）。把所有任务的 dependsOn 依赖关系、contextNotes/contextFiles 都补完后，再逐个 task_update publish=true 统一发布。确实需要立即派发的单个任务才显式传 draft:false。' + splitRuleOf(epicSplitOn(String(agent.id))) + '\n' + TEAM_DECOMPOSE_FLOW + (feedbackOn(String(agent.id)) ? '\n' + LESSON_RECALL_HINT + '把检索到的相关历史教训写进任务的 contextNotes，让子代理少踩重复的坑。' : '')
+          // ===== 「最近人工/外部操作」小节（task-mvnf3gly）：opsCache 尾部 5 条单行，LESSON_RECALL_HINT 之前 =====
+          // 无操作时不出现该节（零噪音）；section text() 同步纪律——只读 opsCache 缓存（rt() 同步点与 teamModeCache 同点），
+          // 每轮 prompt 组装现算现拼，不扫注册表、不读文件。
+          var __ops = opsCache[String(agent.id)]
+          var __opsLines = (Array.isArray(__ops) ? __ops : []).map(opsLogLine).filter(function (s) { return s.length > 0 })
+          var __opsSec = __opsLines.length ? '\n【最近人工/外部操作】HTTP 通道写集留痕（GUI/脚本等「非 agent 工具通道」的盘面改动）——人动了什么，规划下一步前先对齐：\n' + __opsLines.join('\n') : ''
+          return '【任务看板 Team 模式已开启】\n本会话的任务看板处于 Team 模式。请遵循以下工作方式：\n1. 涉及代码改动、文件创建、命令执行等实质性工作时，优先用 task_create 提交为看板任务（由一次性 Worker/Verifier 子代理执行与验收），不要自己直接动手实现。\n2. 你仍保有全部工具能力——调研、读代码、讨论方案、回答问题时直接进行，无需提交任务。\n3. 创建任务时，务必在 description 里写清任务目标和约束；调研结论/原始需求/思路用 contextNotes 带上，调研时读过的关键文件用 contextFiles 把路径带上（可写「路径:L1-L2 — 一句用途」，只给行号不给正文）——两者都会随子代理的首条 prompt 一次性注入（调研笔记全文 + 文件清单），文件内容由子代理按需用 read 工具按行号范围自取。子代理是全新会话、无你的会话记忆，上下文不够它需要从零自行调研，效率大打折扣甚至跑偏方向——开发类任务（代码改动/修复/特性）务必带文件调研，实测可省 Worker 10~15 分钟自行 grep 定位；未带调研上下文的开发类任务返回会附 warning。\n4. Worker 上报歧义时会通过 task_arbitrate 等待你裁决，请及时响应。驳回重派时同样：新 Worker 没有上一轮的记忆，驳回原因会在 prompt 里，但额外上下文需你在 description 里补上。\n5. Team 模式下 task_create 默认建为草稿（草稿不会被派发领取）。把所有任务的 dependsOn 依赖关系、contextNotes/contextFiles 都补完后，再逐个 task_update publish=true 统一发布。确实需要立即派发的单个任务才显式传 draft:false。' + splitRuleOf(epicSplitOn(String(agent.id))) + '\n' + TEAM_DECOMPOSE_FLOW + __opsSec + (feedbackOn(String(agent.id)) ? '\n' + LESSON_RECALL_HINT + '把检索到的相关历史教训写进任务的 contextNotes，让子代理少踩重复的坑。' : '')
         },
       })
       ctx.effect(function () { return disposeSection })

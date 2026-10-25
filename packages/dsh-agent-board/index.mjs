@@ -33,6 +33,8 @@ export function apply(ctx) {
       teamModeCache: {},   // rt()/set-*-mode 同步，systemPrompt 引导段读取
       feedbackCache: {},   // 学习飞轮开关缓存（rt()/set-board-config 同步）
       epicSplitCache: {},  // 史诗拆分总开关缓存（rt()/set-board-config 同步，Team 引导段读取）
+      opsCache: {},        // 人工/外部操作留痕缓存（task-mvnf3gly）：rt() 同步 d.opsLog 尾部 5 条，
+                           //   Team 注入段「最近人工/外部操作」小节读取（同步函数不能读文件，与上三缓存同纪律）
       fileLocks: {},       // 每会话一条 promise 链，串行化所有 读-改-写
       cyclePending: {},    // kickCycle 50ms 去抖
       activeRuns: {},      // sid -> { taskId: { id, run, role, taskId, startedAt, model, settled, continuable?, childId?, ran? } }

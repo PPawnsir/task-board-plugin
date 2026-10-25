@@ -14,7 +14,7 @@ import { makeMsg } from './notify.mjs'
 import { computeHealthHints, computeRuntimeHealthHints } from './health.mjs'
 import { isFullSessionId } from './session.mjs' // 幻影板防线口径（纯函数，与 policy.mjs 直引同例）
 import { previewCleanup, runCleanup, SKIP_REASON_TEXT } from './cleanup.mjs' // 已结算会话清理（预览+执行）
-const { ah, isb, gsb, gpt, vt, validateDeps, classifyPipeline, cfg, claimCheck, claimApply, resolveApply, verifyApply, lateVerdictApply, verdictErr, lateNoticeFp, archiveApply, cancelApply, maybeAutoCloseParent, PRIO_RANK, touchesConflict, holdsFiles, boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint, appendDispatchWarning, TASK_SIZES } = core
+const { ah, isb, gsb, gpt, vt, validateDeps, classifyPipeline, cfg, claimCheck, claimApply, resolveApply, verifyApply, lateVerdictApply, verdictErr, lateNoticeFp, archiveApply, cancelApply, maybeAutoCloseParent, PRIO_RANK, touchesConflict, holdsFiles, boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint, appendDispatchWarning, TASK_SIZES, opsLogLine } = core
 
 function defineTool(options) {
   var userExecute = options.execute
@@ -235,7 +235,7 @@ export function createRpc(ctx, state, deps) {
     }
 
     // ===== Tools =====
-    ctx.tools.register(defineTool({ name: 'task_list', description: '列出当前会话任务。', parameters: { type: 'object', properties: { status: { type: 'string', enum: ['pending', 'in-progress', 'verifying', 'resolved', 'blocked', 'cancelled'] }, priority: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] }, tag: { type: 'string' }, parentId: { type: 'string' }, includeArchived: { type: 'boolean' }, limit: { type: 'number' } }, required: [] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var d = await rt(sid); var a = d.tasks; var ts = a; if (!args.includeArchived) ts = ts.filter(function (x) { return x.status !== 'archived' }); if (args.status) ts = ts.filter(function (x) { return x.status === args.status }); if (args.priority) ts = ts.filter(function (x) { return x.priority === args.priority }); if (args.tag) ts = ts.filter(function (x) { return (x.tags || []).indexOf(args.tag) >= 0 }); if (args.parentId === 'null') ts = ts.filter(function (x) { return !isb(x) }); else if (args.parentId) ts = ts.filter(function (x) { return x.parentId === args.parentId }); var po = PRIO_RANK; ts.sort(function (a, b) { var dd = (po[b.priority] || 0) - (po[a.priority] || 0); return dd !== 0 ? dd : (a.createdAt || '').localeCompare(b.createdAt || '') }); var lim = Math.min(args.limit || 20, 100); var res = ts.slice(0, lim).map(function (x) { var e = Object.assign({}, x); if (isb(x)) { var p = gpt(x, a); if (p) e.parentSummary = { id: p.id, title: p.title, status: p.status } }; var ch = gsb(x.id, a); if (ch.length) { e.subtaskCount = ch.length; e.subtaskResolved = ch.filter(function (y) { return y.status === 'resolved' }).length }; return e }); var out = { tasks: res, total: ts.length, session: sid, actor: getActorId(), boardMode: d.boardMode || 'auto', teamMode: !!d.teamMode, poolStatus: d.poolStatus }; if (d.teamMode) out.teamHint = 'Team 模式已开启：实质性改动请优先 task_create 提交看板由池执行；调研/读取/讨论可直接进行；Worker 歧义会上报等你裁决。'; return out } }))
+    ctx.tools.register(defineTool({ name: 'task_list', description: '列出当前会话任务。返回体 recentOps=最近人工/外部操作尾部 5 条单行摘要（HTTP 通道写集留痕，Team 模式下对齐「人动了什么」）。', parameters: { type: 'object', properties: { status: { type: 'string', enum: ['pending', 'in-progress', 'verifying', 'resolved', 'blocked', 'cancelled'] }, priority: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] }, tag: { type: 'string' }, parentId: { type: 'string' }, includeArchived: { type: 'boolean' }, limit: { type: 'number' } }, required: [] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var d = await rt(sid); var a = d.tasks; var ts = a; if (!args.includeArchived) ts = ts.filter(function (x) { return x.status !== 'archived' }); if (args.status) ts = ts.filter(function (x) { return x.status === args.status }); if (args.priority) ts = ts.filter(function (x) { return x.priority === args.priority }); if (args.tag) ts = ts.filter(function (x) { return (x.tags || []).indexOf(args.tag) >= 0 }); if (args.parentId === 'null') ts = ts.filter(function (x) { return !isb(x) }); else if (args.parentId) ts = ts.filter(function (x) { return x.parentId === args.parentId }); var po = PRIO_RANK; ts.sort(function (a, b) { var dd = (po[b.priority] || 0) - (po[a.priority] || 0); return dd !== 0 ? dd : (a.createdAt || '').localeCompare(b.createdAt || '') }); var lim = Math.min(args.limit || 20, 100); var res = ts.slice(0, lim).map(function (x) { var e = Object.assign({}, x); if (isb(x)) { var p = gpt(x, a); if (p) e.parentSummary = { id: p.id, title: p.title, status: p.status } }; var ch = gsb(x.id, a); if (ch.length) { e.subtaskCount = ch.length; e.subtaskResolved = ch.filter(function (y) { return y.status === 'resolved' }).length }; return e }); var out = { tasks: res, total: ts.length, session: sid, actor: getActorId(), boardMode: d.boardMode || 'auto', teamMode: !!d.teamMode, poolStatus: d.poolStatus, recentOps: (Array.isArray(d.opsLog) ? d.opsLog : []).slice(-5).map(opsLogLine).filter(function (s) { return s.length > 0 }) }; if (d.teamMode) out.teamHint = 'Team 模式已开启：实质性改动请优先 task_create 提交看板由池执行；调研/读取/讨论可直接进行；Worker 歧义会上报等你裁决。'; return out } }))
     ctx.tools.register(defineTool({ name: 'task_context', description: '获取任务完整上下文。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, expandFiles: { type: 'boolean' }, includeParent: { type: 'boolean' }, includeSubtasks: { type: 'boolean' } }, required: ['taskId'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var d = await rt(sid); var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found: ' + args.taskId }; return { ok: true, context: { task: t, inheritedContext: t.context || {} } } } }))
     ctx.tools.register(defineTool({ name: 'task_preview_context', description: '派发前上下文预览：预演 task_create 的 contextFiles/contextNotes 将注入给子代理的瘦身清单形态（调研笔记全文 + 文件清单行「路径:L行号 — 一句用途」；文件内容本体不进 prompt，由子代理按需 read 自取），用于确认材料是否足够。不创建任务。返回 ok=false/empty=true 说明无可注入内容。', parameters: { type: 'object', properties: { contextFiles: { type: 'array', items: { type: 'string' }, description: '预演的文件路径列表；支持「路径:L1-L2」锚点与可选「 — 一句用途」写法' }, contextNotes: { type: 'string', description: '预演的调研笔记' } }, required: [] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; toolSessionId(); /* 副作用：注册已知会话（心跳集合）；清单组装不依赖会话 id */ var files = Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : []; var notes = typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : ''; if (!files.length && !notes.trim()) return { ok: false, error: 'contextFiles/contextNotes 至少提供一个' }; try { var pack = readContextPack({ context: { files: files, notes: notes } }); return { ok: true, empty: !pack, pack: pack } } catch (e) { return { ok: false, error: String(e).slice(0, 200) } } } }))
     ctx.tools.register(defineTool({ name: 'task_claim', description: '领取待办任务→in-progress。', parameters: { type: 'object', properties: { taskId: { type: 'string' }, reason: { type: 'string' } }, required: ['taskId'] }, output: jo(), execute: async function (args) { var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }; var sid = toolSessionId(); var actor = getActorId(); return mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === args.taskId }); if (!t) return { ok: false, error: 'not found' }; var err = claimCheck(d, t, actor); if (err) return { ok: false, error: err }; claimApply(d, t, actor, args.reason || 'claimed'); return { ok: true, task: t, context: { task: t, inheritedContext: t.context || {} } } }) } }))
@@ -321,6 +321,11 @@ export function createRpc(ctx, state, deps) {
       // 板级配置审计行（task-mv9yuq2l）透出：轻量卡外字段，set-board-config 成功写入时落
       // {key, from, to, actor, at}（截尾 50 条）；老看板缺字段透出空数组（读路径归一，不落盘）。
       d.configLog = Array.isArray(d.configLog) ? d.configLog.slice(-50) : []
+      // 人工/外部操作留痕（task-mvnf3gly）透出：HTTP 写集成功时落 {at, op, taskId, summary, actor}
+      // （截尾 50 落盘，这里透尾部 20 条）；老看板缺字段透出空数组（读路径归一，不落盘）。
+      // 与 configLog 同纪律：不进 tasksHash 序列化口径（hash 一致轮询轮会跳过本字段更新，可接受——
+      // 消费面是 task_list/Team 注入段现算，GUI v1 不渲染本字段）。
+      d.opsLog = Array.isArray(d.opsLog) ? d.opsLog.slice(-20) : []
       // 清理保留天数（设置区「存储清理」小节）：cfg 归一（缺字段/脏值=7，钳 1-90）后透出确定数值，
       // 客户端设置区天数输入与 StorageCleanup 文案都读这一个字段（口径单一，不各自猜缺省）。
       d.cleanupRetentionDays = cfg(d).cleanupRetentionDays
@@ -1327,6 +1332,44 @@ export function createRpc(ctx, state, deps) {
     })
 
     // ===== client ↔ host RPC：POST /dsh-agent-board { method, args } → JSON =====
+    // ===== 人工/外部操作留痕（task-mvnf3gly）：HTTP 写集成功即落 d.opsLog（截尾 50，仿 configLog）=====
+    // 通道边界：HTTP 入口=人/外部（GUI 面板、脚本），ctx.tools=agent（agent 自己的操作本就在它上下文里，不记）。
+    // 「人工/外部」是诚实的近似——HTTP 通道也可能是脚本，语义就是「非 agent 工具通道」。
+    // 写集=改变盘面/运行态的方法（任务书列举 ∪ 实际 GUI 写方法名：terminate-task→terminate-agent、
+    // publish 走 update-task）；读集（get-tasks/list-children 等）不记，ok:false 不记；
+    // mark-reviewed（详情页自动触发，噪音）/set-board-config（configLog 专道）/cleanup-run（cleanupLog 专道）不记。
+    var OPS_WRITE_SET = { 'create-task': 1, 'update-task': 1, 'delete-task': 1, 'archive-task': 1, 'restore-task': 1, 'publish-task': 1, 'dispatch-task': 1, 'terminate-task': 1, 'terminate-agent': 1, 'batch-op': 1, 'batch-undo': 1, 'resolve-escalation': 1, 'intervene-agent': 1, 'verify-task': 1, 'claim-task': 1, 'resolve-task': 1, 'cancel-task': 1, 'unfreeze-task': 1, 'dismiss-suspect': 1, 'set-board-mode': 1, 'set-team-mode': 1, 'set-work-mode': 1, 'push-lesson': 1 }
+    // 一句话摘要（单行，供 task_list recentOps / Team 注入段共用 opsLogLine 渲染）
+    function opSummary(method, a) {
+      a = a || {}
+      if (method === 'update-task') { var ks = Object.keys(a).filter(function (k) { return k !== 'sessionId' && k !== 'taskId' && a[k] !== undefined }); return 'update-task ' + (ks.slice(0, 4).join('/') || '(无字段)') + (ks.length > 4 ? '…' : '') }
+      if (method === 'batch-op') return 'batch-op ' + String(a.op || '?') + ' ×' + (Array.isArray(a.ids) ? a.ids.length : 0)
+      if (method === 'batch-undo') return 'batch-undo ×' + (a.snapshot && Array.isArray(a.snapshot.items) ? a.snapshot.items.length : 0)
+      if (method === 'verify-task') return 'verify-task ' + String(a.verdict || '?')
+      if (method === 'resolve-task') return 'resolve-task →' + String(a.status || '?')
+      if (method === 'resolve-escalation') return 'resolve-escalation ' + String(a.action || 'resume')
+      if (method === 'create-task') return 'create-task 「' + String(a.title || '').slice(0, 30) + '」'
+      if (method === 'dispatch-task') return 'dispatch-task' + (a.role ? ' ' + String(a.role) : '') + (a.force === true ? '（force）' : '')
+      if (method === 'set-board-mode' || method === 'set-work-mode') return method + ' ' + String(a.mode)
+      if (method === 'set-team-mode') return 'set-team-mode ' + (a.enabled ? 'on' : 'off')
+      if (method === 'terminate-agent') return 'terminate-agent' + (a.hold === true ? '（hold 停派）' : '')
+      return String(method)
+    }
+    // 留痕钩子：命中写集且 ok!==false 才追加；sid 解析不出（unknown/短 id）跳过——不为留痕造幻影板。
+    // 返回 promise 由路由 await（测试确定性：响应落定=留痕已落盘）；任何失败静默不反噬业务响应。
+    function logOp(method, args) {
+      try {
+        var sid = rpcSessionId(args || {})
+        if (!sid || sid === 'unknown' || !isFullSessionId(sid)) return null
+        var taskId = String((args && args.taskId) || (args && Array.isArray(args.ids) ? args.ids.join(',') : '') || '')
+        return mutateLocked(sid, function (d) {
+          if (!Array.isArray(d.opsLog)) d.opsLog = []
+          d.opsLog.push({ at: new Date().toISOString(), op: String(method), taskId: taskId, summary: opSummary(method, args), actor: sid })
+          if (d.opsLog.length > 50) d.opsLog = d.opsLog.slice(-50) // 截尾 50 条：只留最新，防无限增长（仿 configLog）
+          return { ok: true }
+        }).catch(function () {})
+      } catch (_) { return null }
+    }
     function readBody(req, limit) {
       return new Promise(function (resolve, reject) {
         var chunks = [], size = 0
@@ -1350,7 +1393,7 @@ export function createRpc(ctx, state, deps) {
         try { payload = JSON.parse(await readBody(req, 4 * 1024 * 1024)) } catch (e) { res.writeHead(400); res.end(JSON.stringify({ ok: false, message: 'bad request' })); return }
         var fn = payload && handlers[payload.method]
         if (!fn) { res.writeHead(404); res.end(JSON.stringify({ ok: false, message: 'unknown method: ' + payload.method })); return }
-        try { var out = await fn(payload.args); res.writeHead(200); res.end(JSON.stringify(out === undefined ? null : out)) } catch (e) { res.writeHead(500); res.end(JSON.stringify({ ok: false, message: String(e) })) }
+        try { var out = await fn(payload.args); if (out && out.ok !== false && OPS_WRITE_SET[payload.method]) await logOp(payload.method, payload.args); res.writeHead(200); res.end(JSON.stringify(out === undefined ? null : out)) } catch (e) { res.writeHead(500); res.end(JSON.stringify({ ok: false, message: String(e) })) }
       },
       })
     })
