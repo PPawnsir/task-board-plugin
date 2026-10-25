@@ -8,11 +8,11 @@ const { cfg, lessonText, pushLesson } = core
 // 背景：agent 容易把史诗级大任务整坨塞进看板（长程 + 跑偏风险 + 返工成本高）。
 // 落地三件套（都不带硬闸门）：
 //   1) task_create 工具描述里的粒度契约 TASK_SIZE_CONTRACT；
-//   2) Team 模式系统提示词第 6 条 TEAM_SPLIT_RULE（epic 父卡 + 子任务 + checkParentAuto 收尾）；
+//   2) Team 模式系统提示词第 6~8 条拆分 doctrine（流程 + 决策树 + 上下文装配）；
 //   3) create-task RPC / task_create 工具返回体命中时附加 suggestSplit 一行建议（不落盘、不改状态）。
 // 板级总开关 epicSplit（缺省 true，UI 在入池配置弹层「功能」小节）：**只关引导，不禁机制**。
 //   false 时的两个生效点＝上面第 2、3 条（本文件 splitRuleOf / withSplitHint 统一收口）：
-//     · splitRuleOf(false) → ''：Team 提示词第 6 条整条不注入；
+//     · splitRuleOf(false) → ''：Team 提示词第 6~8 条整条不注入；
 //     · withSplitHint(out, t, false) → 原样返回：不再附 suggestSplit 软提示。
 //   机制面一律不看这个开关：显式传 parentId 建子卡、检查/收口父子流转、hooks 状态机照常工作——
 //   关的是「主动劝你拆」，不是「不许你拆」。
@@ -22,11 +22,15 @@ export var TASK_SIZE_CONTRACT = '建议粒度：单任务 10~30 分钟可独立�
 export var SUGGEST_SPLIT_TEXT = '任务看起来偏大（建议单任务 10~30 分钟）：考虑拆分子任务（parentId）或收窄边界'
 // Team 模式提示词第 6 条：大任务的 epic 拆分流程（父卡 pipeline=direct 不派发，子任务全 resolved 后父卡由 checkParentAuto 自动转 verifying）
 export var TEAM_SPLIT_RULE = '6. 大任务必须拆分：预计超过 30 分钟的任务，先建一张 epic 父卡（pipeline 传 direct，不派发），再拆成若干 10~30 分钟的子任务（task_create 传 parentId=父卡 id，有先后顺序的用 dependsOn 串联）。子任务全部完成后父卡会自动标记完成（checkParentAuto）。'
-// Team 提示词第 6 条的注入出口（含前导换行，调用方直接字符串相加）：
-//   epicSplit 缺省/true → '\n' + TEAM_SPLIT_RULE（与开关落地前逐字相同，零变化）；
-//   epicSplit === false → ''（条款整条不出现，编号 1~5 连续不受影响）。
+// Team 提示词第 7 条：命中任一信号即拆，按可独立验收的子卡与文件族切边界。
+export var TEAM_DECISION_TREE = '7. 拆解决策树（命中任一信号就该拆）：预计超 30 分钟；涉及 3+ 个文件/模块族；需求描述含「然后/接着/再/最后」等多阶段词；交付物超 2 类。拆法：按「每张子卡可独立验收」（自带可运行的 acceptance）切边界；按文件族/touches 切分还能天然避开文件锁互踩。'
+// Team 提示词第 8 条：子代理零记忆，每张子卡都要独立带齐公共背景与调研包。
+export var TEAM_CONTEXT_PACKING = '8. 拆解后的上下文装配：每张子卡独立带齐调研包（description 写目标约束 + contextNotes 写结论思路 + contextFiles 带行号）——子代理零记忆，epic 父卡上的背景不会自动传给子卡，公共背景要逐卡复制进 contextNotes。执行中 Worker 发现任务比预估大时会 escalate 上报，此时拆分重派，别让 Worker 硬跑整坨。'
+// Team 提示词第 6~8 条拆分 doctrine 的注入出口（每条含前导换行，调用方直接字符串相加）：
+//   epicSplit 缺省/true → 第 6 条拆分流程 + 第 7 条决策树 + 第 8 条上下文装配；
+//   epicSplit === false → ''（第 6~8 条整条不出现，编号 1~5 连续不受影响）。
 // 纯函数：只看传入布尔，不读配置、不碰 IO——dispatch 侧从缓存取 cfg(d).epicSplit 后传进来。
-export function splitRuleOf(epicSplit) { return epicSplit === false ? '' : '\n' + TEAM_SPLIT_RULE }
+export function splitRuleOf(epicSplit) { return epicSplit === false ? '' : '\n'+TEAM_SPLIT_RULE+'\n'+TEAM_DECISION_TREE+'\n'+TEAM_CONTEXT_PACKING }
 // 史诗特征词：命中即视为"整坨塞进来"的典型信号（与 TASK_SIZE_CONTRACT 配套；无 /g，可安全复用）
 var EPIC_WORDS = /全量|整体|系统级|全面|重构|所有模块|整个/
 // description 长度阈值（字符）：超过它说明描述密度远超"10~30 分钟单任务"应有体量

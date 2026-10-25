@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process'
 import * as core from '../lib/core.mjs'
 // 粒度治理（软闸门）住在 lib/policy.mjs（策略层，纯函数）、usage 聚合住在 lib/usage.mjs，
 // 均由 index.mjs 薄壳 re-export（对外契约不变），这里仍从 index.mjs 导入直接断言
-import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE, splitRuleOf } from '../index.mjs'
+import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE, TEAM_DECISION_TREE, TEAM_CONTEXT_PACKING, splitRuleOf } from '../index.mjs'
 import { aggregateUsageSummary, readRunUsage, findRunLog, effectiveTokens, taskEffectiveTokens } from '../index.mjs'
 import { createRpc } from '../lib/rpc.mjs'
 // no-root 刷屏根治（task-muuf0o7a）专项：会话层幻影板防线 + 派发层 root 闸门直调断言
@@ -1294,8 +1294,14 @@ test('粒度治理接线：工具描述/Team 提示词/双出口返回体均已�
   assert.match(TEAM_SPLIT_RULE, /pipeline 传 direct/)
   assert.match(TEAM_SPLIT_RULE, /parentId=父卡 id/)
   assert.match(TEAM_SPLIT_RULE, /checkParentAuto/)
+  assert.match(TEAM_DECISION_TREE, /拆解决策树/)
+  assert.match(TEAM_DECISION_TREE, /3\+ 个文件/)
+  assert.match(TEAM_DECISION_TREE, /可独立验收/)
+  assert.match(TEAM_CONTEXT_PACKING, /零记忆/)
+  assert.match(TEAM_CONTEXT_PACKING, /不会自动传给子卡/)
+  assert.match(TEAM_CONTEXT_PACKING, /escalate/)
   assert.ok(src.includes("' + TASK_SIZE_CONTRACT")) // task_create 工具描述已拼接契约
-  // Team 提示词第 6 条改经 epicSplit 门禁出口注入（task-muuxcj6y）：缺省 true 时逐字回到开关前形态
+  // Team 提示词第 6~8 条统一经 epicSplit 门禁出口注入，dispatch 仍只调用 splitRuleOf
   assert.ok(src.includes('splitRuleOf(epicSplitOn(String(agent.id)))'))
   assert.equal((src.match(/withSplitHint\(\{ ok: true, task: t \}, t, cfg\(d\)\.epicSplit\)/g) || []).length, 2) // task_create 工具 + create-task RPC
   assert.match(src, /全量\|整体\|系统级\|全面\|重构\|所有模块\|整个/) // 史诗特征词表在位
@@ -4829,7 +4835,7 @@ test('README 双份同步记录 hooks UI 口径（相位徽章 / 详情编辑区
 })
 
 // ===== 史诗拆分总开关（epicSplit，板级；口径：只关「引导」不禁「机制」）=====
-// false 时两个生效点：① Team 提示词第 6 条 TEAM_SPLIT_RULE 整条不注入（policy.splitRuleOf）
+// false 时两个生效点：① Team 提示词第 6~8 条拆分 doctrine 整条不注入（policy.splitRuleOf）
 // ② create-task RPC / task_create 工具返回体不再附 suggestSplit（policy.withSplitHint 第三参）。
 // 机制面（显式 parentId 建子卡 / 史诗自动收口 / hooks 状态机）一律不看这个开关。
 test('cfg/seed/normalizeBoard: epicSplit 缺省开（缺字段/脏值都算开），只有显式 false 才关', () => {
@@ -4844,17 +4850,18 @@ test('cfg/seed/normalizeBoard: epicSplit 缺省开（缺字段/脏值都算开�
   assert.equal(core.normalizeBoard({ tasks: [], epicSplit: 'x' }).epicSplit, true)         // 脏值收敛成默认开
 })
 
-test('splitRuleOf: 第 6 条注入出口——缺省/true 与开关落地前逐字相同，显式 false 整条不出现', () => {
-  assert.equal(splitRuleOf(undefined), '\n' + TEAM_SPLIT_RULE) // 老调用方/缺省 → 零变化
-  assert.equal(splitRuleOf(true), '\n' + TEAM_SPLIT_RULE)
+test('splitRuleOf: 第 6~8 条注入出口——缺省/true 拼接完整 doctrine，显式 false 整条不出现', () => {
+  const expected = '\n' + TEAM_SPLIT_RULE + '\n' + TEAM_DECISION_TREE + '\n' + TEAM_CONTEXT_PACKING
+  assert.equal(splitRuleOf(undefined), expected) // 老调用方/缺省 → 默认开启
+  assert.equal(splitRuleOf(true), expected)
   assert.equal(splitRuleOf(false), '')
-  assert.doesNotMatch(splitRuleOf(false), /大任务必须拆分|parentId|checkParentAuto/)
+  assert.doesNotMatch(splitRuleOf(false), /大任务必须拆分|拆解决策树|上下文装配/)
   // 拼接形态：第 5 条末尾直接接出口——关掉时编号 1~5 连续、不留空行尾巴
-  assert.ok(('5. 尾部。' + splitRuleOf(true)).endsWith('\n' + TEAM_SPLIT_RULE))
+  assert.equal('5. 尾部。' + splitRuleOf(true), '5. 尾部。' + expected)
   assert.equal('5. 尾部。' + splitRuleOf(false), '5. 尾部。')
 })
 
-test('epicSplit 行为①：Team 提示词第 6 条随门禁注入/消失（真跑一次 section 组装，不是源码断言）', () => {
+test('epicSplit 行为①：Team 提示词第 6~8 条随门禁注入/消失（真跑一次 section 组装，不是源码断言）', () => {
   const SID = FULL_SID
   const sections = []
   const ctx = {
@@ -4882,11 +4889,14 @@ test('epicSplit 行为①：Team 提示词第 6 条随门禁注入/消失（真�
   }
   const on = textOf(true)
   assert.ok(on.includes(TEAM_SPLIT_RULE)); assert.match(on, /大任务必须拆分/); assert.match(on, /checkParentAuto/)
+  assert.ok(on.includes(TEAM_DECISION_TREE)); assert.match(on, /拆解决策树/)
+  assert.ok(on.includes(TEAM_CONTEXT_PACKING)); assert.match(on, /上下文装配/)
   const off = textOf(false)
-  // 条款整条消失（连 parentId/checkParentAuto 都不再出现），基础 1~5 条引导一字不少
-  assert.doesNotMatch(off, /大任务必须拆分|parentId=父卡 id|checkParentAuto|epic 父卡/)
+  // 第 6~8 条整条消失（连 parentId/checkParentAuto 都不再出现），基础 1~5 条引导一字不少
+  assert.doesNotMatch(off, /大任务必须拆分|拆解决策树|上下文装配/)
+  assert.doesNotMatch(off, /parentId=父卡 id|checkParentAuto|epic 父卡/)
   assert.match(off, /Team 模式已开启/); assert.match(off, /5\. Team 模式下 task_create 默认建为草稿/)
-  assert.equal(on.replace(splitRuleOf(true), ''), off.replace(splitRuleOf(false), '')) // 除第 6 条外逐字相同
+  assert.equal(on.replace(splitRuleOf(true), ''), off.replace(splitRuleOf(false), '')) // 除第 6~8 条外逐字相同
 })
 
 test('withSplitHint: epicSplit=false 不附 suggestSplit（与未命中同形），缺省/true 零变化', () => {

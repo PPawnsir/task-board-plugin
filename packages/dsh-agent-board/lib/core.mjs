@@ -119,7 +119,7 @@ export function classifyPipeline(t) {
 //   notifyDone=false     → 完成回执（任务完成/阻塞时聚合播报）不入聚合队列。
 // 只闸「回执」两条入口；歧义裁决通知（notifyMainWindow）是裁决通道不是回执，不接入开关。
 // 史诗拆分总开关 epicSplit（入池配置弹层「功能」小节，缺省 true = 现状不变）：**只关引导，不禁机制**——
-//   false → ① Team 提示词第 6 条 TEAM_SPLIT_RULE 整条不注入（policy.splitRuleOf）；② create-task RPC 与
+//   false → ① Team 提示词第 6~8 条拆分 doctrine 整条不注入（policy.splitRuleOf）；② create-task RPC 与
 //           task_create 工具的返回体不再附 suggestSplit 软提示（policy.withSplitHint 第三参门禁）。
 //   机制照常：显式传 parentId 建子卡、史诗自动收口（checkParentAuto）、hooks 状态机都不看这个开关——
 //   用户/主窗口明确要拆的时候不受阻（关的是"主动劝你拆"，不是"不许你拆"）。
