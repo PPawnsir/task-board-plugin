@@ -770,7 +770,7 @@ export function buildFileOutline(content) {
   return out
 }
 // 口径说明（epicSplit 总开关审计）：Worker prompt **不含任何拆分引导条款**——拆分引导只出现在主窗口侧
-// 两处动态面（Team 提示词第 6 条 + create-task/task_create 的 suggestSplit 软提示），Worker 拿到的是
+// 两处动态面（Team 提示词第 6~8 条 + create-task/task_create 的 suggestSplit 软提示），Worker 拿到的是
 // 已经建好的单张卡（要拆也轮不到它拆，真觉得大应走歧义上报）。故 epicSplit=false 时 Worker prompt 字面
 // 与 true 时逐字相同（单测锁定 parity，防止将来有人往这里塞拆分条款而漏接门禁）；buildWorkerPrompt
 // 因此不引入 epicSplit 形参——没有条款可跳过，加个无用参数只会是死代码。

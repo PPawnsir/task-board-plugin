@@ -2599,7 +2599,7 @@ function apply(ctx) {
             React.createElement('input', { type: 'checkbox', checked: props.verifyUserGuide !== false, onChange: function (e) { setCfg('verifyUserGuide', e.target.checked) } }),
             React.createElement('span', null, '📋 自测指南（验收结论附用户自测步骤，详情页与报告展示）')),
           // 史诗拆分总开关（板级 epicSplit，缺省 true）：**只关引导，不禁机制**——关掉后 Team 提示词不再
-          // 注入「大任务必须拆分」第 6 条、create-task 响应不再附 suggestSplit 软提示；显式传 parentId 建
+          // 注入「大任务必须拆分」第 6~8 条拆分 doctrine、create-task 响应不再附 suggestSplit 软提示；显式传 parentId 建
           // 子卡、史诗自动收口/hooks 状态机照常（用户/主窗口明确要拆时不受阻）。勾选态缺字段=开，与 host 同口径。
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '功能'),
           React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },

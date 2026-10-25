@@ -4981,7 +4981,7 @@ test('epicSplit 接线（源码级）：缓存同步 / Team 引导段门禁 / �
   assert.match(src, /epicSplitOn: session\.epicSplitOn/)
   assert.match(src, /var epicSplitOn = deps\.epicSplitOn/)
   assert.match(src, /else if \(args\.key === 'epicSplit'\) \{ d\.epicSplit = !!args\.value; epicSplitCache\[sid\] = d\.epicSplit \}/)
-  // ① Team 提示词第 6 条经门禁出口注入
+  // ① Team 提示词第 6~8 条经门禁出口注入
   assert.match(src, /splitRuleOf\(epicSplitOn\(String\(agent\.id\)\)\)/)
   // ② 双出口（RPC + 工具）都传第三参
   assert.equal((src.match(/withSplitHint\(\{ ok: true, task: t \}, t, cfg\(d\)\.epicSplit\)/g) || []).length, 2)
