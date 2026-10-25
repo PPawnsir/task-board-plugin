@@ -1,7 +1,9 @@
 // ===== 力度路由 GUI + 记分卡 bySize 档位维度（task-mvneq4mw）=====
 // 断言清单（对应任务验收口径）：
 //   ① 池配置弹层「力度路由」小节：三档 × Worker/Verifier 共 6 个 ModelCfg 下拉，
-//     写走 set-board-config key='laneModels' 部分合并，空串=「继承板级」语义
+//     写走 set-board-config key='laneModels' 部分合并，空串=「继承板级」语义；
+//     槽位=有序数组（task-mvnxckhq 同档优先序）：GUI 只编辑首选（laneFirst 读第一位、
+//     写回 [首选, ...其余原样] 不清空已有序），完整排序走对话/RPC
 //   ② laneModels state 透传：kernel fetchTasks 回读 + TopPanel 订阅 + PoolCfgPopover props 接线
 //   ②b cfgKnobs 快照类型对称（验收驳回回归修复）：快照存原值，null→null 恒 false、真变化才 true
 //   ③ 记分卡 bySize 聚合（usage.mjs）：三档归桶 / 无 size 老 run 归标档 / hook 剔除 /
@@ -19,8 +21,8 @@ const src = readFileSync(new URL('../lib/client/dashboard.js', import.meta.url),
 const ksrc = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
 const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
 
-// ===== ① GUI 源码断言：6 个下拉 + 继承语义 + laneModels 部分合并写通道 =====
-test('①力度路由小节：三档×双角色 6 个 ModelCfg 下拉 + 空=继承板级 + laneModels 部分合并写通道', () => {
+// ===== ① GUI 源码断言：6 个下拉 + 继承语义 + laneModels 部分合并写通道 + 首选编辑（task-mvnxckhq）=====
+test('①力度路由小节：三档×双角色 6 个 ModelCfg 下拉 + 空=继承板级 + laneModels 部分合并写通道（首选编辑写回 [首选,...其余原样]）', () => {
   // 小节标题在模型行之后
   assert.ok(src.indexOf("'力度路由'") >= 0, '缺「力度路由」小节标题')
   const iVer = src.indexOf("cfgKey: 'verifierModel'")
@@ -29,13 +31,20 @@ test('①力度路由小节：三档×双角色 6 个 ModelCfg 下拉 + 空=继�
   assert.ok(iVer >= 0 && iLane > iVer && iTimeout > iLane, '力度路由小节必须在模型行之后、两级超时之前')
   // 6 个下拉：三档表 × 双角色 map 展开（3 档 × worker/verifier = 6 实例，源码层为一张三档表 + 双角色两行）
   assert.match(src, /\[\['light', '轻档'\], \['standard', '标档'\], \['heavy', '重档'\]\]\.map\(function \(ln\)/)
-  assert.match(src, /React\.createElement\(ModelCfg, \{ label: ln\[1\] \+ ' Worker', lane: ln\[0\], laneRole: 'worker', inheritLabel: '继承板级', value: laneObj\.worker \|\| '' \}\)/)
-  assert.match(src, /React\.createElement\(ModelCfg, \{ label: ln\[1\] \+ ' Verifier', lane: ln\[0\], laneRole: 'verifier', inheritLabel: '继承板级', value: laneObj\.verifier \|\| '' \}\)/)
+  // 槽位=有序数组（同档优先序，第一位=首选）：读侧 laneFirst 取第一位，整槽原数组走 laneList 传入（写回保序用）
+  assert.match(src, /function laneFirst\(x\) \{ return Array\.isArray\(x\) \? \(x\[0\] \|\| ''\) : \(typeof x === 'string' \? x : ''\) \}/, '缺 laneFirst 首选读侧helper')
+  assert.match(src, /React\.createElement\(ModelCfg, \{ label: ln\[1\] \+ ' Worker', lane: ln\[0\], laneRole: 'worker', inheritLabel: '继承板级', value: laneFirst\(laneObj\.worker\), laneList: laneObj\.worker \}\)/)
+  assert.match(src, /React\.createElement\(ModelCfg, \{ label: ln\[1\] \+ ' Verifier', lane: ln\[0\], laneRole: 'verifier', inheritLabel: '继承板级', value: laneFirst\(laneObj\.verifier\), laneList: laneObj\.verifier \}\)/)
   // 继承语义：空选项文案「继承板级」（继承上方 Worker/Verifier 模型行）
   assert.equal((src.match(/inheritLabel: '继承板级'/g) || []).length, 2, 'map 内 worker/verifier 两槽位空选项均为「继承板级」')
   assert.ok(src.indexOf('空 = 继承上方 Worker/Verifier 模型行') >= 0, '缺「空=继承板级模型行」注一句')
-  // 写通道：ModelCfg lane 分支走 set-board-config key='laneModels' 部分合并对象
-  assert.match(src, /patch\[lane\] = \{\}; patch\[lane\]\[laneRole\] = \(val \|\| ''\)\.trim\(\)/)
+  // 注释：GUI 只编辑首选，完整排序走对话/RPC
+  assert.ok(src.indexOf('完整排序走对话/RPC') >= 0, '缺「完整排序走对话/RPC」注释')
+  // 写通道：ModelCfg lane 分支走 set-board-config key='laneModels' 部分合并对象；
+  // 首选编辑写回 [首选, ...其余原样]（不清空已有序——laneList.slice(1) 保留次选及以后），空串=清整槽
+  assert.match(src, /var first = \(val \|\| ''\)\.trim\(\)/)
+  assert.match(src, /var rest = Array\.isArray\(props\.laneList\) \? props\.laneList\.slice\(1\) : \[\]/, '缺「其余原样」保留逻辑（slice(1)）')
+  assert.match(src, /patch\[lane\] = \{\}; patch\[lane\]\[laneRole\] = first \? \[first\]\.concat\(rest\) : \[\]/, '缺「[首选, ...其余原样]」写回形态')
   assert.match(src, /rpc\('set-board-config', \{ key: 'laneModels', value: patch \}\)/)
   // 读侧：下拉值取 props.laneModels[档][角色]
   assert.match(src, /\(props\.laneModels && props\.laneModels\[ln\[0\]\]\) \|\| \{\}/)

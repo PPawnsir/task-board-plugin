@@ -202,20 +202,35 @@ export function classifyPipeline(t) {
 //           ③ client 详情页自测指南块与报告「本版自测清单」段整块不渲染。
 //   消费点同为 spawn/结算时读 cfg 快照，无需热路径缓存。
 // ===== 力度路由表（task-mvnemvf5 地基）：laneModels 三档 × 双角色 =====
-// 形态固定为 { light/standard/heavy: { worker, verifier } }，空串槽位 = 继承下一级
-// （取模链：卡级 t.model → laneModels[t.size][role] → 板级 workerModel/verifierModel → 父模型）。
-// 脏值收敛：非对象/未知档/未知角色键/非字符串槽位一律归一为同形空串——消费面（spawnOneShot 取模链、
-// get-tasks 透出、set-board-config 部分合并基座）只认这一个形态，不各自兜底。
+// 形态固定为 { light/standard/heavy: { worker, verifier } }，**槽位=有序字符串数组**
+// （task-mvnxckhq 同档优先序：第一位=首选，取模按序取首个健康模型——偏好序非故障序）；
+// 空数组槽位 = 继承下一级（取模链：卡级 t.model → laneModels[t.size][role] → 板级 workerModel/verifierModel → 父模型）。
+// 兼容零迁移：老看板/老调用方的单字符串槽位归一为单元素数组（空串→空数组，语义与旧空串逐字一致）；
+// 脏值收敛：非对象/未知档/未知角色键一律归一为同形空数组；槽位内非字符串项丢弃、字符串 trim、空串项丢弃（保序）。
+// 消费面（spawnOneShot 取模链、get-tasks 透出、set-board-config 部分合并基座）只认这一个形态，不各自兜底。
 // 卡级字段 t.size（∈ TASK_SIZES，可缺省）与 t.model（可缺省字符串）不动存量卡：缺字段=标档语义，零迁移。
 export var TASK_SIZES = ['light', 'standard', 'heavy']
+// 档位槽单槽归一（set-board-config 写入与读路径归一共用同一口径）：
+// 字符串 → trim 后非空则单元素数组、空串 → 空数组（=清槽/继承下一级）；数组 → 逐项滤脏保序；其他 → 空数组。
+export function normalizeLaneSlot(v) {
+  if (typeof v === 'string') { var s = v.trim(); return s ? [s] : [] }
+  if (!Array.isArray(v)) return []
+  var out = []
+  for (var i = 0; i < v.length; i++) {
+    if (typeof v[i] !== 'string') continue
+    var s2 = v[i].trim()
+    if (s2) out.push(s2)
+  }
+  return out
+}
 export function normalizeLaneModels(v) {
-  var out = { light: { worker: '', verifier: '' }, standard: { worker: '', verifier: '' }, heavy: { worker: '', verifier: '' } }
+  var out = { light: { worker: [], verifier: [] }, standard: { worker: [], verifier: [] }, heavy: { worker: [], verifier: [] } }
   if (v && typeof v === 'object' && !Array.isArray(v)) {
     for (var i = 0; i < TASK_SIZES.length; i++) {
       var lane = v[TASK_SIZES[i]]
       if (lane && typeof lane === 'object' && !Array.isArray(lane)) {
-        if (typeof lane.worker === 'string') out[TASK_SIZES[i]].worker = lane.worker.trim()
-        if (typeof lane.verifier === 'string') out[TASK_SIZES[i]].verifier = lane.verifier.trim()
+        out[TASK_SIZES[i]].worker = normalizeLaneSlot(lane.worker)
+        out[TASK_SIZES[i]].verifier = normalizeLaneSlot(lane.verifier)
       }
     }
   }
@@ -284,7 +299,8 @@ export function normalizeBoard(d) {
     if (typeof d.epicSplit !== 'boolean') d.epicSplit = true
     if (typeof d.workerContinuable !== 'boolean') d.workerContinuable = true
     if (typeof d.verifyUserGuide !== 'boolean') d.verifyUserGuide = true
-    // 力度路由表（task-mvnemvf5）：缺字段/脏值 → 归一同形（空串=继承下一级），老看板读入即满足透出形态。
+    // 力度路由表（task-mvnemvf5）：缺字段/脏值 → 归一同形（空数组=继承下一级），老看板读入即满足透出形态。
+    // 槽位有序数组化（task-mvnxckhq）：老看板的单字符串槽位在此归一为单元素数组，零迁移。
     // 刻意只动板级 laneModels：卡级 t.size/t.model 不在此补字段——缺字段=标档语义，存量卡零迁移。
     d.laneModels = normalizeLaneModels(d.laneModels)
     // 备用模型链（task-mvnqxlpn）：缺字段/脏值 → 归一空数组（缺省不启用，取模行为与现状逐字一致）。

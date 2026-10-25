@@ -382,7 +382,17 @@ export function createDispatch(ctx, state, deps) {
         var sz = typeof t.size === 'string' ? t.size : ''
         laneSize = core.TASK_SIZES.indexOf(sz) >= 0 ? sz : 'standard'
         var laneCfg = cfg(dsnap).laneModels
-        if (sz && laneCfg[sz]) { var lv = typeof laneCfg[sz][roleKey] === 'string' ? laneCfg[sz][roleKey].trim() : ''; if (lv) cands.push([lv, 'lane']) }
+        if (sz && laneCfg[sz]) {
+          // 档位槽=有序数组（task-mvnxckhq 同档优先序，第一位=首选）：槽内按序取第一个**健康**模型
+          // （healthyModel 双闸：不过 badModels 熔断、不在 modelCooldown 冷却期；偏好序非故障序——
+          // 首选病即次选赢，不降级不绕链）。槽内全病 → 以首项为代表照常入链，由既有熔断/冷却分支
+          // 照旧消费 fallbackModels → 降档 → parent（既有链逐字不动）；空数组槽位=不命中，降下一级。
+          var lvList = Array.isArray(laneCfg[sz][roleKey]) ? laneCfg[sz][roleKey] : []
+          var lv = ''
+          for (var li = 0; li < lvList.length; li++) { if (healthyModel(sid, lvList[li])) { lv = lvList[li]; break } }
+          if (!lv && lvList.length) lv = lvList[0] // 槽内全病：首项代表入链（既有熔断/冷却分支照旧兜底）
+          if (lv) cands.push([lv, 'lane'])
+        }
         var bm = role === 'verifier' ? dsnap.verifierModel : dsnap.workerModel
         bm = typeof bm === 'string' ? bm.trim() : ''
         if (bm) cands.push([bm, 'board'])
@@ -446,11 +456,15 @@ export function createDispatch(ctx, state, deps) {
             var cdPicked = ''
             for (var di = laneOrder.indexOf(curLane) + 1; di < laneOrder.length; di++) {
               var dl = laneCfg[laneOrder[di]]
-              var dm = dl && typeof dl[roleKey] === 'string' ? dl[roleKey].trim() : ''
-              if (!dm) continue
-              if (badModels[modelKey(sid, dm)]) { console.error('[task-board] cooldown 降档候选 ' + dm + ' 熔断中，继续降档'); continue }
-              if (cooldownLive(dm)) { console.error('[task-board] cooldown 降档候选 ' + dm + ' 同在冷却期，继续降档'); continue }
-              cdPicked = dm; break
+              // 降档目标槽同为有序数组（task-mvnxckhq）：槽内按序取首个健康候选；空槽/槽内全病 → 继续降下一档
+              var dmList = dl && Array.isArray(dl[roleKey]) ? dl[roleKey] : []
+              for (var dmi = 0; dmi < dmList.length; dmi++) {
+                var dm = dmList[dmi]
+                if (badModels[modelKey(sid, dm)]) { console.error('[task-board] cooldown 降档候选 ' + dm + ' 熔断中，继续降档'); continue }
+                if (cooldownLive(dm)) { console.error('[task-board] cooldown 降档候选 ' + dm + ' 同在冷却期，继续降档'); continue }
+                cdPicked = dm; break
+              }
+              if (cdPicked) break
             }
             modelOverride = cdPicked // 空串 = 到底，父模型兜底
             modelSource = 'cooldown-downgrade'

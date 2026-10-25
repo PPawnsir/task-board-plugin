@@ -2528,6 +2528,9 @@ function apply(ctx) {
     }
 
     // #11 头部减负：池配置收纳进 ⚙️ 弹出层（含 #17 verifier 异构模型设置）
+    // 档位槽读侧口径（task-mvnxckhq 同档优先序）：槽位=有序数组（第一位=首选），GUI 只展示/编辑首选；
+    // 完整排序（次选及以后）走对话/RPC。容错：老 host 透出的单字符串形态按首选直读（host 归一后恒为数组，本分支只是防御）。
+    function laneFirst(x) { return Array.isArray(x) ? (x[0] || '') : (typeof x === 'string' ? x : '') }
     function ModelCfg(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
       var _a = useState(props.value || ''), val = _a[0], setVal = _a[1]
@@ -2538,6 +2541,8 @@ function apply(ctx) {
       // 力度路由档位槽（task-mvneq4mw）：props.lane + props.laneRole 双存在时，写通道改走
       // set-board-config key='laneModels' 部分合并（host 逐槽位校验，非法模型整体拒写——C1 地基通道），
       // 空串=清槽恢复继承；空选项文案由 props.inheritLabel 覆盖（档位槽=「继承板级」，板级行=「继承父级」）。
+      // 槽位有序数组化（task-mvnxckhq）：props.value=首选（数组第一位，laneFirst 取），props.laneList=整槽
+      // 原数组——写回 [首选, ...其余原样]，不清空已有序；完整排序走对话/RPC，GUI 不做多值排序编辑器。
       var lane = props.lane || ''
       var laneRole = props.laneRole || ''
       var inhLabel = props.inheritLabel || '继承父级'
@@ -2551,7 +2556,11 @@ function apply(ctx) {
       function save() {
         setDirty(false)
         if (lane && laneRole) {
-          var patch = {}; patch[lane] = {}; patch[lane][laneRole] = (val || '').trim()
+          // 档位槽=有序数组：GUI 只编辑首选（第一位），写回 [首选, ...其余原样]（不清空已有序）；
+          // 空串=清整槽（继承板级，与空选项文案语义一致）。
+          var first = (val || '').trim()
+          var rest = Array.isArray(props.laneList) ? props.laneList.slice(1) : []
+          var patch = {}; patch[lane] = {}; patch[lane][laneRole] = first ? [first].concat(rest) : []
           rpc('set-board-config', { key: 'laneModels', value: patch }).then(fetchTasks).catch(function () {})
           return
         }
@@ -2651,15 +2660,17 @@ function apply(ctx) {
           // ===== 力度路由（task-mvneq4mw）：三档 × Worker/Verifier 共 6 槽 =====
           // 读写通道 = set-board-config key='laneModels' 部分合并（C1 task-mvnemvf5 地基：host 逐槽位
           // 合法清单校验，任一非法整体拒写 + configLog 审计行）；读 = props.laneModels（kernel fetchTasks 透传）。
-          // 空串槽位 = 继承上方板级 Worker/Verifier 模型行（取模链：卡级 model → 档位 lane → 板级 → 父模型）。
+          // 空槽位 = 继承上方板级 Worker/Verifier 模型行（取模链：卡级 model → 档位 lane → 板级 → 父模型）。
+          // 槽位=有序数组（task-mvnxckhq 同档优先序）：下拉只编辑首选（数组第一位，laneFirst 读、
+          // laneList 整槽写回 [首选, ...其余原样]）；完整排序走对话/RPC，GUI 不做多值排序编辑器。
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '力度路由'),
           [['light', '轻档'], ['standard', '标档'], ['heavy', '重档']].map(function (ln) {
             var laneObj = (props.laneModels && props.laneModels[ln[0]]) || {}
             return React.createElement('div', { key: ln[0], style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 3 } },
-              React.createElement(ModelCfg, { label: ln[1] + ' Worker', lane: ln[0], laneRole: 'worker', inheritLabel: '继承板级', value: laneObj.worker || '' }),
-              React.createElement(ModelCfg, { label: ln[1] + ' Verifier', lane: ln[0], laneRole: 'verifier', inheritLabel: '继承板级', value: laneObj.verifier || '' }))
+              React.createElement(ModelCfg, { label: ln[1] + ' Worker', lane: ln[0], laneRole: 'worker', inheritLabel: '继承板级', value: laneFirst(laneObj.worker), laneList: laneObj.worker }),
+              React.createElement(ModelCfg, { label: ln[1] + ' Verifier', lane: ln[0], laneRole: 'verifier', inheritLabel: '继承板级', value: laneFirst(laneObj.verifier), laneList: laneObj.verifier }))
           }),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 1, whiteSpace: 'normal', maxWidth: 340 } }, '空 = 继承上方 Worker/Verifier 模型行（取模链：卡级特例 → 档位 → 板级 → 父模型）；卡档位走对话 task_update size=light/standard/heavy'),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 1, whiteSpace: 'normal', maxWidth: 340 } }, '空 = 继承上方 Worker/Verifier 模型行（取模链：卡级特例 → 档位 → 板级 → 父模型）；档位槽支持有序数组=同档优先序，此处只编辑首选（数组第一位），完整排序走对话/RPC；卡档位走对话 task_update size=light/standard/heavy'),
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '两级超时（软超时只提醒主窗口，由你决定继续等待或终止）'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
             React.createElement(MinCfg, { label: '软超时', cfgKey: 'softTimeoutMin', value: props.softT, min: 1, max: 480, tip: '超过后在看板提醒主窗口，不终止 run（1~480 分钟）' }),

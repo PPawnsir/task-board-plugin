@@ -329,7 +329,8 @@ export function createRpc(ctx, state, deps) {
       // 清理保留天数（设置区「存储清理」小节）：cfg 归一（缺字段/脏值=7，钳 1-90）后透出确定数值，
       // 客户端设置区天数输入与 StorageCleanup 文案都读这一个字段（口径单一，不各自猜缺省）。
       d.cleanupRetentionDays = cfg(d).cleanupRetentionDays
-      // 力度路由表（task-mvnemvf5）：cfg 归一后透出确定形态（三档×双角色，空串槽位=继承下一级），
+      // 力度路由表（task-mvnemvf5）：cfg 归一后透出确定形态（三档×双角色，槽位=有序数组——
+      // task-mvnxckhq 同档优先序，第一位=首选；空数组槽位=继承下一级），
       // 老看板缺字段也透出全空缺省——客户端不需要各自猜兜底（与上方开关系列同纪律）。
       d.laneModels = cfg(d).laneModels
       // 备用模型链（task-mvnqxlpn）：cfg 归一后透出（空数组=未启用），与 laneModels 同纪律——
@@ -1181,14 +1182,15 @@ export function createRpc(ctx, state, deps) {
         }
       }
       // ===== laneModels 三档路由表（task-mvnemvf5）：部分合并对象 + 逐槽位合法清单校验 =====
-      // value 形态 { light?/standard?/heavy?: { worker?, verifier? } }——只合显式给出的槽位，未给槽位保留现值；
-      // 空串=清槽（恢复继承下一级）；非空 id 走与 workerModel 同款 enumModels 校验，**任一槽位非法整体拒写**
-      // （不落半截合并结果）。未知档位/角色键、非对象形态一律 fail-loud 拒写（防手滑写废整张表）；
-      // llm 缺失（老宿主）由 cardModelErr 内部降级放行。
+      // value 形态 { light?/standard?/heavy?: { worker?, verifier? } }——只合显式给出的槽位，未给槽位保留现值。
+      // 槽位值允许**字符串或有序字符串数组**（task-mvnxckhq 同档优先序：第一位=首选，字符串归一为单元素数组，
+      // 空串/空数组=清槽恢复继承下一级）；非空 id（数组逐项）走与 workerModel 同款 enumModels 校验，
+      // **任一槽位/任一项非法整体拒写**（不落半截合并结果）。未知档位/角色键、非对象形态一律 fail-loud
+      // 拒写（防手滑写废整张表）；llm 缺失（老宿主）由 cardModelErr 内部降级放行。
       if (args.key === 'laneModels') {
         var __lmErr = null
         var __lv = args.value
-        if (!__lv || typeof __lv !== 'object' || Array.isArray(__lv)) __lmErr = 'laneModels 需为部分合并对象（如 {heavy:{worker:"provider/model"}}）'
+        if (!__lv || typeof __lv !== 'object' || Array.isArray(__lv)) __lmErr = 'laneModels 需为部分合并对象（如 {heavy:{worker:"provider/model"}} 或 {heavy:{worker:["首选","次选"]}}）'
         else {
           var __lanes = Object.keys(__lv)
           for (var __li = 0; __li < __lanes.length && !__lmErr; __li++) {
@@ -1200,9 +1202,26 @@ export function createRpc(ctx, state, deps) {
             for (var __ri2 = 0; __ri2 < __rks.length; __ri2++) {
               var __rk = __rks[__ri2]
               if (__rk !== 'worker' && __rk !== 'verifier') { __lmErr = 'laneModels.' + __ln + ' 未知角色键: ' + __rk + '（合法: worker/verifier）'; break }
-              if (typeof __lobj[__rk] !== 'string') { __lmErr = 'laneModels.' + __ln + '.' + __rk + ' 需为字符串（空串=清除）'; break }
-              var __rv = __lobj[__rk].trim()
-              if (__rv) { var __me = await cardModelErr(__rv); if (__me) { __lmErr = __me; break } }
+              var __raw = __lobj[__rk]
+              if (typeof __raw === 'string') {
+                var __rv = __raw.trim()
+                if (__rv) { var __me = await cardModelErr(__rv); if (__me) { __lmErr = __me; break } }
+                continue
+              }
+              if (Array.isArray(__raw)) {
+                // 数组形态（同档优先序）：逐项必须字符串且 trim 后非空（空串项 fail-loud——清槽请传 [] 或 ''），
+                // 逐项过合法清单校验，任一非法整包拒写
+                for (var __ai = 0; __ai < __raw.length; __ai++) {
+                  var __av = __raw[__ai]
+                  if (typeof __av !== 'string') { __lmErr = 'laneModels.' + __ln + '.' + __rk + '[' + __ai + '] 需为字符串（provider/model 复合格式）'; break }
+                  var __avt = __av.trim()
+                  if (!__avt) { __lmErr = 'laneModels.' + __ln + '.' + __rk + '[' + __ai + '] 为空串（清槽请传空数组 [] 或空串）'; break }
+                  var __me2 = await cardModelErr(__avt); if (__me2) { __lmErr = __me2; break }
+                }
+                if (__lmErr) break
+                continue
+              }
+              __lmErr = 'laneModels.' + __ln + '.' + __rk + ' 需为字符串或字符串数组（有序=同档优先序，空串/空数组=清槽）'; break
             }
           }
         }
@@ -1231,7 +1250,7 @@ export function createRpc(ctx, state, deps) {
       return mutateLocked(sid, function (d) {
         var __from = d[args.key] === undefined ? null : d[args.key] // 写前留旧值（JSON 落盘不容 undefined，归一成 null）
         var __hit = true
-        if (args.key === 'maxWorkers') d.maxWorkers = Math.max(1, Math.min(10, args.value || 3)); else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'cleanupRetentionDays') d.cleanupRetentionDays = Math.max(1, Math.min(90, Number(args.value) || 7)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'workerContinuable') d.workerContinuable = !!args.value; else if (args.key === 'verifyUserGuide') d.verifyUserGuide = !!args.value; else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } else if (args.key === 'laneModels') { var __base = cfg(d).laneModels; for (var __pi = 0; __pi < TASK_SIZES.length; __pi++) { var __pl = args.value[TASK_SIZES[__pi]]; if (!__pl) continue; if (__pl.worker !== undefined) __base[TASK_SIZES[__pi]].worker = __pl.worker.trim(); if (__pl.verifier !== undefined) __base[TASK_SIZES[__pi]].verifier = __pl.verifier.trim() } d.laneModels = __base } else if (args.key === 'fallbackModels') { d.fallbackModels = core.normalizeFallbackModels(args.value) } else __hit = false
+        if (args.key === 'maxWorkers') d.maxWorkers = Math.max(1, Math.min(10, args.value || 3)); else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'cleanupRetentionDays') d.cleanupRetentionDays = Math.max(1, Math.min(90, Number(args.value) || 7)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'workerContinuable') d.workerContinuable = !!args.value; else if (args.key === 'verifyUserGuide') d.verifyUserGuide = !!args.value; else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } else if (args.key === 'laneModels') { var __base = cfg(d).laneModels; for (var __pi = 0; __pi < TASK_SIZES.length; __pi++) { var __pl = args.value[TASK_SIZES[__pi]]; if (!__pl) continue; if (__pl.worker !== undefined) __base[TASK_SIZES[__pi]].worker = core.normalizeLaneSlot(__pl.worker); if (__pl.verifier !== undefined) __base[TASK_SIZES[__pi]].verifier = core.normalizeLaneSlot(__pl.verifier) } d.laneModels = __base } else if (args.key === 'fallbackModels') { d.fallbackModels = core.normalizeFallbackModels(args.value) } else __hit = false
         if (__hit) {
           if (!Array.isArray(d.configLog)) d.configLog = []
           d.configLog.push({ key: String(args.key), from: __from, to: d[args.key] === undefined ? null : d[args.key], actor: actor, at: new Date().toISOString() })
