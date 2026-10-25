@@ -9,25 +9,38 @@ import { readRunUsage, findRunLog, readLogBytes, readLogFrames } from './usage.m
 import { splitRuleOf, pushRejectLesson, DECOMPOSE_SCHEMA, buildDecomposerPrompt, applyDecomposeProposal, TEAM_DECOMPOSE_FLOW } from './policy.mjs'
 const { ah, cfg, claimApply, resolveApply, verifyApply, lateVerdictApply, lateNoticeFp, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER, opsLogLine } = core
 
-// ===== RATE_LIMIT 额度限流嗅探（task-mvneq4kk）=====
-// 纯函数：中英文限流报错识别 + 「重置时间」解析。命中 /429|RATE_LIMIT|rate.?limit|限额|额度/i 才返回对象；
-// 尝试解析「YYYY-MM-DD HH:mm:ss 重置」（中文，glm 原形事故实证形态）或「reset(s) at/on YYYY-MM-DD HH:mm:ss」
-// （英文）样式时间 → until 时间戳（按本地时区构造，与供应商报错文案口径一致）；解析不到时间 →
-// until = now + 30min（保守缺省）。非限流文本返回 null。
+// ===== 模型冷却嗅探：限流（task-mvneq4kk）+ 连接/网关故障短窗（task-mvnx8hnm）=====
+// 纯函数：两类报错形态识别，返回 { until, parsed, kind }，均不命中返回 null。
+// ① 限流形态（kind='rate-limit'，行为与 C5 落地逐字一致）：命中 /429|RATE_LIMIT|rate.?limit|限额|额度/i；
+//    尝试解析「YYYY-MM-DD HH:mm:ss 重置」（中文，glm 原形事故实证形态）或「reset(s) at/on YYYY-MM-DD HH:mm:ss」
+//    （英文）样式时间 → until 时间戳（按本地时区构造，与供应商报错文案口径一致）；解析不到时间 →
+//    until = now + 30min（保守缺省）。
+// ② 连接/网关形态（kind='connectivity'）：命中 CONNECTIVITY_RE → until = now + 10min 固定短窗
+//    （连接故障多为瞬时，短窗自动恢复——比限流缺省 30min 短；固定不开放配置，要配置化等实证再开）。
+// 判定顺序：先限流后连接（两类关键词并存的文本按限流处理，窗口更保守）。
+// 英文裸词 timeout 刻意不在连接形态内（只认 ETIMEDOUT errno 形态）——供应商「provider timeout after 30s」
+// 类软性报错与 withTimeout 的「label timeout Nms」硬超时文本都不进冷却（C5 既有断言锁定该口径）。
 var RATE_LIMIT_RE = /429|RATE_LIMIT|rate.?limit|限额|额度/i
 var RATE_RESET_ZH_RE = /(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{1,2}):(\d{1,2})\s*重置/
 var RATE_RESET_EN_RE = /resets?(?:\s+at|\s+on)?\s+(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{1,2}):(\d{1,2})/i
 var RATE_LIMIT_DEFAULT_MS = 30 * 60000
-export function parseRateLimit(errText) {
+var CONNECTIVITY_RE = /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|ECONNRESET|EAI_AGAIN|fetch failed|network|socket|502|503|504|网关|连接|超时/i
+var CONNECTIVITY_COOLDOWN_MS = 10 * 60000
+export function parseModelCooldown(errText) {
   var s = String(errText || '')
-  if (!RATE_LIMIT_RE.test(s)) return null
-  var m = s.match(RATE_RESET_ZH_RE) || s.match(RATE_RESET_EN_RE)
-  if (m) {
-    var ts = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6])).getTime()
-    if (isFinite(ts)) return { until: ts, parsed: true }
+  if (RATE_LIMIT_RE.test(s)) {
+    var m = s.match(RATE_RESET_ZH_RE) || s.match(RATE_RESET_EN_RE)
+    if (m) {
+      var ts = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6])).getTime()
+      if (isFinite(ts)) return { until: ts, parsed: true, kind: 'rate-limit' }
+    }
+    return { until: Date.now() + RATE_LIMIT_DEFAULT_MS, parsed: false, kind: 'rate-limit' }
   }
-  return { until: Date.now() + RATE_LIMIT_DEFAULT_MS, parsed: false }
+  if (CONNECTIVITY_RE.test(s)) return { until: Date.now() + CONNECTIVITY_COOLDOWN_MS, parsed: false, kind: 'connectivity' }
+  return null
 }
+// 兼容层（task-mvnx8hnm）：旧导出名保留为别名，既有调用点（测试/潜在宿主消费方）零改动
+export var parseRateLimit = parseModelCooldown
 // 冷却消息「至 HH:mm」格式化（本地时区）
 function hhmmOf(ts) { var d = new Date(ts); return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) }
 
@@ -51,9 +64,10 @@ export function createDispatch(ctx, state, deps) {
     // 共享状态别名（本体由 index.mjs apply 统一构建并逐模块注入）
     var dispatchedEver = state.dispatchedEver
     var badModels = state.badModels
-    // 额度冷却表（task-mvneq4kk）：RATE_LIMIT 限流登记，与 badModels 同生命周期（纯内存不持久化，重启即清——
-    // 额度重置窗口本就短）。语义分治：badModels=连续失败熔断（布尔），modelCooldown=额度窗口冷却（until 时间戳），
-    // 两张表各管各的。key = 模型 id（provider/model 复合串）：限流是账户级额度窗口，不按会话分键。
+    // 冷却表（task-mvneq4kk 限流 / task-mvnx8hnm 连接故障）：与 badModels 同生命周期（纯内存不持久化，
+    // 重启即清——额度重置窗口本就短，连接短窗 10min 更短）。语义分治：badModels=连续失败熔断（布尔），
+    // modelCooldown=窗口冷却（until 时间戳），两张表各管各的（连接类冷却只进本表，不动熔断判定）。
+    // key = 模型 id（provider/model 复合串）：限流是账户级额度窗口、连接故障是网关面，都不按会话分键。
     // 缺字段就地补（测试桩/老宿主兼容，与 poolHealthFor 同例）。
     var modelCooldown = state.modelCooldown || (state.modelCooldown = {})
     // 冷却期判定：返回冷却截止 ts（0=不在冷却）；过期项惰性清除（读路径顺手删，无需 sweeper）
@@ -63,16 +77,31 @@ export function createDispatch(ctx, state, deps) {
       if (Date.now() >= until) { delete modelCooldown[model]; return 0 }
       return until
     }
-    // 限流嗅探登记：两条登记路径共用（①spawn extras 回退臂 e/e2 文本 ②settleWorker 失败臂 errText——
+    // 冷却嗅探登记：两条登记路径共用（①spawn extras 回退臂 e/e2 文本 ②settleWorker 失败臂 errText——
     // activation.result 拆除兜底臂带上来的诊断文本也走②）。max 收敛：多次报错只延不缩
-    // （带重置时间的精确值与 30min 缺省并存时取更晚者）。返回冷却截止 ts，未命中返回 null。
-    function sniffRateLimit(model, errText) {
+    // （带重置时间的精确值与 30min/10min 缺省并存时取更晚者）；截止未后延则零改动零留痕（防重复报错刷屏）。
+    // 留痕分态（task-mvnx8hnm）：限流=「额度冷却至 HH:mm」，连接/网关=「连接故障短冷却 10 分钟」——
+    // 卡 messages 各记一条 kind='cooldown'，排查时一眼分清「额度没了」与「连不上」。
+    // 写卡失败静默吞掉（留痕是附属动作，绝不阻断 spawn 回退/失败结算主流程）。返回冷却截止 ts，未命中 null。
+    async function sniffModelCooldown(sid, taskId, model, errText) {
       if (!model) return null
-      var hit = parseRateLimit(errText)
+      var hit = parseModelCooldown(errText)
       if (!hit) return null
-      if (hit.until > (modelCooldown[model] || 0)) modelCooldown[model] = hit.until
-      console.error('[task-board] 模型 ' + model + ' 命中 RATE_LIMIT 限流，冷却至 ' + new Date(modelCooldown[model]).toISOString() + '（' + (hit.parsed ? '重置时间解析' : '缺省 30min') + '）')
-      return modelCooldown[model]
+      if (hit.until <= (modelCooldown[model] || 0)) return modelCooldown[model]
+      modelCooldown[model] = hit.until
+      var until = modelCooldown[model]
+      if (hit.kind === 'connectivity') console.error('[task-board] 模型 ' + model + ' 连接/网关故障，短冷却 10 分钟至 ' + new Date(until).toISOString())
+      else console.error('[task-board] 模型 ' + model + ' 命中 RATE_LIMIT 限流，冷却至 ' + new Date(until).toISOString() + '（' + (hit.parsed ? '重置时间解析' : '缺省 30min') + '）')
+      try {
+        await mutateLocked(sid, function (d) {
+          var t = d.tasks.find(function (x) { return x.id === taskId })
+          if (!t) return null
+          if (!Array.isArray(t.messages)) t.messages = []
+          t.messages.push({ kind: 'cooldown', text: hit.kind === 'connectivity' ? ('🔌 模型 ' + model + ' 连接故障短冷却 10 分钟（至 ' + hhmmOf(until) + '）') : ('⏳ 模型 ' + model + ' 额度冷却至 ' + hhmmOf(until)), at: new Date().toISOString(), by: 'system' })
+          return { ok: true }
+        }, true) // skipKick：只是留痕，不踢 poolCycle
+      } catch (_) {}
+      return until
     }
     // ===== 备用模型链健康判定（task-mvnqxlpn）：不在 badModels 熔断名单且不在 modelCooldown 冷却期 =====
     // 两张表各管各的（熔断=连续失败布尔，冷却=额度窗口时间戳），任一命中即不健康。
@@ -519,9 +548,9 @@ export function createDispatch(ctx, state, deps) {
           }
         }
       } catch (e) {
-        // RATE_LIMIT 嗅探①（spawn 秒死路径）：带覆盖模型的首次失败文本命中限流 → 登记冷却表，
-        // 本轮回退裸请求（父模型）照走，下一轮起取模链自动降档。modelOverride 空 = 父模型无法归因，跳过。
-        if (modelOverride) sniffRateLimit(modelOverride, e && e.message ? e.message : String(e))
+        // 冷却嗅探①（spawn 秒死路径）：带覆盖模型的首次失败文本命中限流/连接故障 → 登记冷却表，
+        // 本轮回退裸请求（父模型）照走，下一轮起取模链自动切备用/降档。modelOverride 空 = 父模型无法归因，跳过。
+        if (modelOverride) await sniffModelCooldown(sid, t.id, modelOverride, e && e.message ? e.message : String(e))
         // 外挂参数回退（既有模型覆盖通道，task-muy3gm03 起并入 verifier 加餐 persona/toolFilter，
         // task-mvnenrwk 起再并入 decomposer 加餐 outputSchema）：
         // provider 不支持某能力 / toolFilter 命中未知名时服务面 fail-loud 拒收（绝不静默忽略）——
@@ -545,8 +574,8 @@ export function createDispatch(ctx, state, deps) {
               run = activationAsRun(await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'caller' }))
             } else run = await subagents.start(providerName, req)
           } catch (e2) {
-            // RATE_LIMIT 嗅探①b：剥光外挂参数后的二次失败同样嗅探（e2 文本）
-            if (modelOverride) sniffRateLimit(modelOverride, e2 && e2.message ? e2.message : String(e2))
+            // 冷却嗅探①b：剥光外挂参数后的二次失败同样嗅探（e2 文本）
+            if (modelOverride) await sniffModelCooldown(sid, t.id, modelOverride, e2 && e2.message ? e2.message : String(e2))
             console.error('[task-board] spawn ' + role + ' failed:', String(e2)); return null
           }
         } else { console.error('[task-board] spawn ' + role + ' failed:', String(e)); return null }
@@ -1236,10 +1265,10 @@ export function createDispatch(ctx, state, deps) {
     }
 
     async function settleWorker(sid, rec, output, failed, errText) {
-      // RATE_LIMIT 嗅探②（continuable 死子路径）：失败结算文本命中限流 → 本 run 所用模型登记冷却表。
-      // activation.result 拆除兜底臂带上来的诊断文本（含「限额将在 … 重置」）也走这里。
+      // 冷却嗅探②（continuable 死子路径）：失败结算文本命中限流/连接故障 → 本 run 所用模型登记冷却表。
+      // activation.result 拆除兜底臂带上来的诊断文本（含「限额将在 … 重置」/ ENOTFOUND 等）也走这里。
       // rec.model 空 = 父模型（id 不可知）无法归因，跳过；badModels 熔断语义不受影响（两张表各管各的）。
-      if (failed && rec.model) sniffRateLimit(rec.model, errText)
+      if (failed && rec.model) await sniffModelCooldown(sid, rec.taskId, rec.model, errText)
       // 完成回执开关（设置区「通知」notifyDone）：在同一次持锁回调里读看板文档（零额外读盘），
       // 缺字段/回调未跑到时保持 true——宁可多报一条，也不因读配置失败漏报完成。
       var doneOn = true
