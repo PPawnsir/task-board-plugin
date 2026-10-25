@@ -9,6 +9,28 @@ import { readRunUsage, findRunLog, readLogBytes, readLogFrames } from './usage.m
 import { splitRuleOf, pushRejectLesson, DECOMPOSE_SCHEMA, buildDecomposerPrompt, applyDecomposeProposal, TEAM_DECOMPOSE_FLOW } from './policy.mjs'
 const { ah, cfg, claimApply, resolveApply, verifyApply, lateVerdictApply, lateNoticeFp, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER } = core
 
+// ===== RATE_LIMIT 额度限流嗅探（task-mvneq4kk）=====
+// 纯函数：中英文限流报错识别 + 「重置时间」解析。命中 /429|RATE_LIMIT|rate.?limit|限额|额度/i 才返回对象；
+// 尝试解析「YYYY-MM-DD HH:mm:ss 重置」（中文，glm 原形事故实证形态）或「reset(s) at/on YYYY-MM-DD HH:mm:ss」
+// （英文）样式时间 → until 时间戳（按本地时区构造，与供应商报错文案口径一致）；解析不到时间 →
+// until = now + 30min（保守缺省）。非限流文本返回 null。
+var RATE_LIMIT_RE = /429|RATE_LIMIT|rate.?limit|限额|额度/i
+var RATE_RESET_ZH_RE = /(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{1,2}):(\d{1,2})\s*重置/
+var RATE_RESET_EN_RE = /resets?(?:\s+at|\s+on)?\s+(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{1,2}):(\d{1,2})/i
+var RATE_LIMIT_DEFAULT_MS = 30 * 60000
+export function parseRateLimit(errText) {
+  var s = String(errText || '')
+  if (!RATE_LIMIT_RE.test(s)) return null
+  var m = s.match(RATE_RESET_ZH_RE) || s.match(RATE_RESET_EN_RE)
+  if (m) {
+    var ts = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6])).getTime()
+    if (isFinite(ts)) return { until: ts, parsed: true }
+  }
+  return { until: Date.now() + RATE_LIMIT_DEFAULT_MS, parsed: false }
+}
+// 冷却消息「至 HH:mm」格式化（本地时区）
+function hhmmOf(ts) { var d = new Date(ts); return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) }
+
 export function createDispatch(ctx, state, deps) {
     // 宿主 fs 句柄与「会话工作区解析根」随预研注入瘦身退役（task-muvjs392）：派发侧不再读盘——
     // 清单只给「路径:L行号 — 一句用途」，文件内容由 Worker 自己用 read 工具按行号范围自取。
@@ -29,6 +51,29 @@ export function createDispatch(ctx, state, deps) {
     // 共享状态别名（本体由 index.mjs apply 统一构建并逐模块注入）
     var dispatchedEver = state.dispatchedEver
     var badModels = state.badModels
+    // 额度冷却表（task-mvneq4kk）：RATE_LIMIT 限流登记，与 badModels 同生命周期（纯内存不持久化，重启即清——
+    // 额度重置窗口本就短）。语义分治：badModels=连续失败熔断（布尔），modelCooldown=额度窗口冷却（until 时间戳），
+    // 两张表各管各的。key = 模型 id（provider/model 复合串）：限流是账户级额度窗口，不按会话分键。
+    // 缺字段就地补（测试桩/老宿主兼容，与 poolHealthFor 同例）。
+    var modelCooldown = state.modelCooldown || (state.modelCooldown = {})
+    // 冷却期判定：返回冷却截止 ts（0=不在冷却）；过期项惰性清除（读路径顺手删，无需 sweeper）
+    function cooldownLive(model) {
+      var until = modelCooldown[model]
+      if (!until) return 0
+      if (Date.now() >= until) { delete modelCooldown[model]; return 0 }
+      return until
+    }
+    // 限流嗅探登记：两条登记路径共用（①spawn extras 回退臂 e/e2 文本 ②settleWorker 失败臂 errText——
+    // activation.result 拆除兜底臂带上来的诊断文本也走②）。max 收敛：多次报错只延不缩
+    // （带重置时间的精确值与 30min 缺省并存时取更晚者）。返回冷却截止 ts，未命中返回 null。
+    function sniffRateLimit(model, errText) {
+      if (!model) return null
+      var hit = parseRateLimit(errText)
+      if (!hit) return null
+      if (hit.until > (modelCooldown[model] || 0)) modelCooldown[model] = hit.until
+      console.error('[task-board] 模型 ' + model + ' 命中 RATE_LIMIT 限流，冷却至 ' + new Date(modelCooldown[model]).toISOString() + '（' + (hit.parsed ? '重置时间解析' : '缺省 30min') + '）')
+      return modelCooldown[model]
+    }
     // 「上下文注入」区块通道的按子代理会话缓存表 + 首轮竞速认领队列随该通道一起退役（task-muvjs392）：
     // 瘦身清单直接进首条 prompt，不再需要注入段命中与父子归属认领（并行 spawn 认领错包的潜伏 bug 一并消灭）。
     var knownSessions = state.knownSessions
@@ -290,6 +335,42 @@ export function createDispatch(ctx, state, deps) {
           if (badModels[modelKey(sid, cands[mi][0])]) { console.error('[task-board] model ' + cands[mi][0] + ' (' + cands[mi][1] + ' 级) circuited, trying next level'); continue }
           modelOverride = cands[mi][0]; modelSource = cands[mi][1]; break
         }
+        // ===== 额度冷却降档（task-mvneq4kk）：解析出的候选在冷却期 → 沿 heavy→standard→light 降档再试 =====
+        // 降档候选同样过熔断+冷却双闸（冷却项顺带惰性清除过期）；到底（light 也不可用）→ 父模型兜底
+        // （不挂 agentOptions；刻意不再回试板级 workerModel——它与原档同属高位额度面，且四级链常态本就
+        // 由它兜底过一遍）。当前档取 t.size（缺省=标档语义 standard）；严格只降不升。
+        // 实际降档留痕：run 落档 modelSource='cooldown-downgrade' + 卡 messages 记
+        // 「原档模型 X 冷却中（至 HH:mm），本 run 降档为 Y」。modelOverride=''（parent 命中）无模型可归因，不参与。
+        if (modelOverride) {
+          var cdUntil = cooldownLive(modelOverride)
+          if (cdUntil) {
+            var cdFrom = modelOverride
+            var laneOrder = ['heavy', 'standard', 'light']
+            var curLane = laneOrder.indexOf(sz) >= 0 ? sz : 'standard'
+            var cdPicked = ''
+            for (var di = laneOrder.indexOf(curLane) + 1; di < laneOrder.length; di++) {
+              var dl = laneCfg[laneOrder[di]]
+              var dm = dl && typeof dl[roleKey] === 'string' ? dl[roleKey].trim() : ''
+              if (!dm) continue
+              if (badModels[modelKey(sid, dm)]) { console.error('[task-board] cooldown 降档候选 ' + dm + ' 熔断中，继续降档'); continue }
+              if (cooldownLive(dm)) { console.error('[task-board] cooldown 降档候选 ' + dm + ' 同在冷却期，继续降档'); continue }
+              cdPicked = dm; break
+            }
+            modelOverride = cdPicked // 空串 = 到底，父模型兜底
+            modelSource = 'cooldown-downgrade'
+            var cdTo = cdPicked || '父模型'
+            console.error('[task-board] 模型 ' + cdFrom + ' 冷却中（至 ' + hhmmOf(cdUntil) + '），本 run 降档为 ' + cdTo)
+            try {
+              await mutateLocked(sid, function (d) {
+                var t2 = d.tasks.find(function (x) { return x.id === t.id })
+                if (!t2) return null
+                if (!Array.isArray(t2.messages)) t2.messages = []
+                t2.messages.push({ kind: 'cooldown', text: '⏳ 原档模型 ' + cdFrom + ' 冷却中（至 ' + hhmmOf(cdUntil) + '），本 run 降档为 ' + cdTo, at: new Date().toISOString(), by: 'system' })
+                return { ok: true }
+              }, true) // skipKick：只是留痕，不踢 poolCycle
+            } catch (_) {}
+          }
+        }
       }
       var pack = ''
       try { pack = readContextPack(t) } catch (e) {
@@ -370,6 +451,9 @@ export function createDispatch(ctx, state, deps) {
           }
         }
       } catch (e) {
+        // RATE_LIMIT 嗅探①（spawn 秒死路径）：带覆盖模型的首次失败文本命中限流 → 登记冷却表，
+        // 本轮回退裸请求（父模型）照走，下一轮起取模链自动降档。modelOverride 空 = 父模型无法归因，跳过。
+        if (modelOverride) sniffRateLimit(modelOverride, e && e.message ? e.message : String(e))
         // 外挂参数回退（既有模型覆盖通道，task-muy3gm03 起并入 verifier 加餐 persona/toolFilter，
         // task-mvnenrwk 起再并入 decomposer 加餐 outputSchema）：
         // provider 不支持某能力 / toolFilter 命中未知名时服务面 fail-loud 拒收（绝不静默忽略）——
@@ -392,7 +476,11 @@ export function createDispatch(ctx, state, deps) {
             } else if (hasActivationApi(subagents)) {
               run = activationAsRun(await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'caller' }))
             } else run = await subagents.start(providerName, req)
-          } catch (e2) { console.error('[task-board] spawn ' + role + ' failed:', String(e2)); return null }
+          } catch (e2) {
+            // RATE_LIMIT 嗅探①b：剥光外挂参数后的二次失败同样嗅探（e2 文本）
+            if (modelOverride) sniffRateLimit(modelOverride, e2 && e2.message ? e2.message : String(e2))
+            console.error('[task-board] spawn ' + role + ' failed:', String(e2)); return null
+          }
         } else { console.error('[task-board] spawn ' + role + ' failed:', String(e)); return null }
       }
       // rec 统一形态：id = 该次 run 的子会话 id（continuable 是 childId，一次性是 run.id——
@@ -413,7 +501,9 @@ export function createDispatch(ctx, state, deps) {
           if (rec.settled) return
           rec.settled = true // 先立旗：与事件/超时臂同一纪律
           var stopReason = (res && res.stopReason) || 'error'
-          var errText = '子会话被宿主拆除（stopReason: ' + stopReason + (res && res.diagnostic ? '，' + String(res.diagnostic).slice(0, 120) : '') + '）'
+          // diagnostic 截断放宽 120→400（task-mvneq4kk）：glm 等供应商的 429 报错「限额将在 YYYY-MM-DD HH:mm:ss
+          // 重置」结构化文本常超 120 字符，截太短会把重置时间切掉 → RATE_LIMIT 嗅探只能退 30min 缺省。
+          var errText = '子会话被宿主拆除（stopReason: ' + stopReason + (res && res.diagnostic ? '，' + String(res.diagnostic).slice(0, 400) : '') + '）'
           settleWorker(sid, rec, '', true, errText).catch(function (e) { console.error('[task-board] activation 拆除结算失败 (task ' + rec.taskId + '):', String(e)) })
         }, function (err) {
           if (rec.settled) return
@@ -1078,6 +1168,10 @@ export function createDispatch(ctx, state, deps) {
     }
 
     async function settleWorker(sid, rec, output, failed, errText) {
+      // RATE_LIMIT 嗅探②（continuable 死子路径）：失败结算文本命中限流 → 本 run 所用模型登记冷却表。
+      // activation.result 拆除兜底臂带上来的诊断文本（含「限额将在 … 重置」）也走这里。
+      // rec.model 空 = 父模型（id 不可知）无法归因，跳过；badModels 熔断语义不受影响（两张表各管各的）。
+      if (failed && rec.model) sniffRateLimit(rec.model, errText)
       // 完成回执开关（设置区「通知」notifyDone）：在同一次持锁回调里读看板文档（零额外读盘），
       // 缺字段/回调未跑到时保持 true——宁可多报一条，也不因读配置失败漏报完成。
       var doneOn = true

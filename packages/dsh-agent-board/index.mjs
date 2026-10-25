@@ -41,6 +41,8 @@ export function apply(ctx) {
       dispatchedEver: {},  // sid -> { runId: true }（回执判定：区分派发执行 vs 主窗口手动）
       reconcileDone: {},   // sid -> true（可续跑 Worker 重启 reconcile 的 per-host 一次性标记，见 dispatch.mjs）
       badModels: {},       // 模型熔断坏名单（sid|model → true）
+      modelCooldown: {},   // RATE_LIMIT 额度冷却表（task-mvneq4kk）：modelId → until 时间戳；纯内存不持久化，
+                           //   与 badModels 同生命周期（重启即清，额度重置窗口本就短）；熔断=连续失败、冷却=额度窗口，两表分治
       escNotifyTimers: {}, // 歧义通知 25s 去抖（同任务新调度顶替旧调度）
       receiptBuf: {},      // 回执 45s/满 5 条聚合窗口
       receiptedKeys: {},   // 回执幂等去重（完成事件指纹，1h TTL）
