@@ -58,7 +58,7 @@ import { Readable } from 'node:stream'
  * @property {(fn:Function, label?:string, timeoutMs?:number)=>Promise<any>} waitFor  真实时间轮询直到条件为真（默认 5s 上限）
  * @property {(label:string)=>Object|undefined} lastRun  按 label 前缀找最近一次一次性 run（label 形如 'worker:task-x'）
  * @property {(fn:(d:Object)=>void)=>void} patchBoard  直接改写看板文件（构造孤儿/脏数据场景用）
- * @property {()=>Promise<void>} cleanup  收尾：跑全部 disposer、恢复 HOME env、递归删临时目录
+ * @property {()=>Promise<void>} cleanup  收尾：跑全部 disposer、100ms 真实静默窗（烧完迟到去抖/退避链，task-mvo9ca58）、恢复 HOME env、递归删临时目录
  */
 
 /**
@@ -337,6 +337,11 @@ export function createMockCtx(opts) {
     cleanup: async function () {
       for (var i = 0; i < disposers.length; i++) { try { disposers[i]() } catch (_) {} }
       for (var j = 0; j < timers.length; j++) timers[j].cancelled = true
+      // 真实静默窗（task-mvo9ca58 双保险）：HOME 复原前留 ~100ms，让 teardown 前已排上的真实
+      // setTimeout 去抖/退避链（store.kickCycle 50ms / wt 退避）在「HOME 仍指临时目录」的窗口内烧完——
+      // 迟到落盘进临时根随后被 rm，不漏真根。主保险是 store 停用闸（上方 disposers 落 state.deactivated），
+      // 本窗兜「闸落前已进入 backoff、链尾在 teardown 后才重算路径」的尾巴。
+      await new Promise(function (r) { setTimeout(r, 100) })
       if (hadHome) process.env.HOME = prevHome
       else delete process.env.HOME
       try { fs.rmSync(home, { recursive: true, force: true }) } catch (_) {}

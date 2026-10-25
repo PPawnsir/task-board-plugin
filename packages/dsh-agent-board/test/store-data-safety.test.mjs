@@ -11,6 +11,7 @@ import path from 'node:path'
 import { createMockCtx } from './helpers/mock-ctx.mjs'
 import * as plugin from '../index.mjs'
 import { createStore } from '../lib/store.mjs'
+import { boardHome } from '../lib/core.mjs'
 
 function boardFile(env) { return path.join(env.home, '.dsh', 'tasks-' + env.sid + '.json') }
 
@@ -214,4 +215,105 @@ test('④ poolCycle 空闲清理（行为级）：残留忙碌 poolStatus 经锁
     var b = env.board()
     assert.equal(b.poolStatus.workers.length + b.poolStatus.verifiers.length, 0, '残留忙碌 poolStatus 已被清空')
   } finally { await env.cleanup() }
+})
+
+// ===== ⑤ mock 板泄漏拒写闸（task-mvo9ca58，巡检 n-mvo4y8ojzr3y）=====
+// 场景：teardown（disposers 跑过、HOME 复原）后，迟到的真实 setTimeout 去抖/退避链尾才触发写盘，
+// boardDirName() 按已复原 HOME 现算 → mock 板落真根（实证 91 个 tasks-session-mock-*.json 污染真 ~/.dsh）。
+// 修法：state.deactivated 停用闸——createStore 自注册 ctx.effect disposer 落闸，落闸后 wt() 拒写
+// **新板文件**（已有板 salvage/继承写回不受限）。原子写主链不动。
+
+test('⑤ 泄漏闸（单元级）：deactivated 后拒写新板文件，已有板 salvage 写不受限', async () => {
+  var home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-board-gate-'))
+  fs.mkdirSync(path.join(home, '.dsh'), { recursive: true })
+  var prevHome = process.env.HOME
+  var hadHome = Object.prototype.hasOwnProperty.call(process.env, 'HOME')
+  process.env.HOME = home
+  var state = { fileLocks: {}, cyclePending: {}, poolHealth: {}, teamModeCache: {}, feedbackCache: {}, epicSplitCache: {} }
+  var store = createStore({}, state, { sessionCwd: function () { return home } })
+  try {
+    var sid = 'session-wt-gate-' + Date.now().toString(36)
+    var p = path.join(home, '.dsh', 'tasks-' + sid + '.json')
+    await store.wt(sid, { ownerSession: sid, tasks: [] })
+    assert.ok(fs.existsSync(p), '未停用：新板正常落盘（闸不误伤正常路径）')
+    state.deactivated = true // 模拟插件 disposers 已跑（teardown）
+    // 已有板写回（salvage/继承路径同属此类）不受限——救命写不拦
+    await store.wt(sid, { ownerSession: sid, tasks: [{ id: 'salv1' }] })
+    assert.equal(JSON.parse(fs.readFileSync(p, 'utf8')).tasks.length, 1, '已停用：已有板 salvage 写回不受限')
+    // 新板文件拒写
+    var sid2 = sid + '-late'
+    var p2 = path.join(home, '.dsh', 'tasks-' + sid2 + '.json')
+    await assert.rejects(store.wt(sid2, { ownerSession: sid2, tasks: [] }), /deactivated/, '已停用：新板文件拒写')
+    assert.ok(!fs.existsSync(p2), '拒写后磁盘无新板文件')
+  } finally {
+    if (hadHome) process.env.HOME = prevHome
+    else delete process.env.HOME
+    try { fs.rmSync(home, { recursive: true, force: true }) } catch (_) {}
+  }
+})
+
+test('⑤ 泄漏闸（集成级）：cleanup 后立即迟到写——停用闸拒写，真根不出现新 mock 板文件', async () => {
+  var env = createMockCtx()
+  plugin.apply(env.ctx)
+  var realTarget = null
+  var cleaned = false
+  try {
+    await createTask(env, 'g1')
+    assert.ok(fs.existsSync(boardFile(env)), '前置：临时 HOME 里本板已落盘')
+    await env.cleanup() // disposers 跑 → 停用闸落（接线实证点）；100ms 静默窗；HOME 复原；删临时目录
+    cleaned = true
+    // cleanup 后 boardHome() 即真根（HOME 已复原）；env.sid 是唯一 mock id，真根必无此文件
+    realTarget = path.join(boardHome(), 'tasks-' + env.sid + '.json')
+    assert.ok(!fs.existsSync(realTarget), '前置：真根本无此 mock 板文件')
+    // 模拟「cleanup 后立即 kickCycle」式迟到触发：mock 宿主 cleanup 不摘工具表，task_create 仍可达，
+    // 其 mutateLocked → wt 写盘路径按已复原 HOME 现算——正是泄漏根因路径
+    var tool = env.tools.get('task_create')
+    assert.ok(tool && typeof tool.execute === 'function', '前置：task_create 工具已注册')
+    var errText = ''
+    try {
+      var r = await tool.execute({ sessionId: env.sid, id: 'late1', title: '迟到写探针', description: 'teardown 后迟到写' })
+      errText = r && r.ok !== true && r.error ? String(r.error) : ''
+    } catch (e) { errText = String(e) }
+    assert.match(errText, /deactivated|已停用/, '迟到写被停用闸拒写（错误可见、不静默）')
+    assert.ok(!fs.existsSync(realTarget), '真根未出现新 mock 板文件（泄漏根治）')
+  } finally {
+    // 回归兜底：闸若失效把板写进了真根，这里清污——测试失败不该变成真根残留
+    try { if (realTarget && fs.existsSync(realTarget)) fs.unlinkSync(realTarget) } catch (_) {}
+    if (!cleaned) await env.cleanup()
+  }
+})
+
+// ===== ⑥ .tmp 原子写孤儿清扫（task-mvo9ca58，巡检 n-mvo4y8iyv3r0）=====
+// wt() 崩溃窗口（强杀发生在 rename 前）留 tasks-*.json.<pid>.<ts>-<seq>.tmp 残件无人清（实证 336KB
+// 残件滞留 4 天）。修法：读盘列举 tasks-* 时（findAdoptableBoardFile 的 readdirSync）顺手 unlink
+// mtime 早于 now-1h 的 tasks-*.tmp——1h 视界远长于存活写的 tmp 生命周期（崩溃安全），只扫本目录。
+
+test('⑥ .tmp 孤儿清扫（行为级）：超 1h 残件读盘后消失，新 tmp 与非同族文件不动', async () => {
+  var env = makeRawStore()
+  try {
+    var dsh = path.join(env.home, '.dsh')
+    var oldTmp = path.join(dsh, 'tasks-session-dead.json.43320.1761000000000-1.tmp')
+    var newTmp = path.join(dsh, 'tasks-session-live.json.43320.1761000000001-2.tmp')
+    var alienTmp = path.join(dsh, 'notes-index.json.9999.1761000000002-1.tmp') // 非 tasks- 前缀
+    fs.writeFileSync(oldTmp, '{"tasks":[{"id":"x"', 'utf8') // 崩溃残件（截断的半片 JSON）
+    fs.writeFileSync(newTmp, '{"tasks":[{"id":"y"', 'utf8')
+    fs.writeFileSync(alienTmp, '1', 'utf8')
+    var twoHoursAgo = new Date(Date.now() - 2 * 3600000)
+    fs.utimesSync(oldTmp, twoHoursAgo, twoHoursAgo) // mtime 拉到 2h 前（>1h 视界）
+    fs.utimesSync(alienTmp, twoHoursAgo, twoHoursAgo)
+    // 触发读盘列举：rt 一个无板 sid → ENOENT → findAdoptableBoardFile → readdirSync + 顺手清扫
+    await env.store.rt('session-wt-sweep-' + Date.now().toString(36))
+    assert.ok(!fs.existsSync(oldTmp), '超 1h 的 tasks-*.tmp 孤儿已被清扫')
+    assert.ok(fs.existsSync(newTmp), '新 tmp 不动（存活写的 tmp 生命周期远短于 1h，但宁可不碰）')
+    assert.ok(fs.existsSync(alienTmp), '非 tasks- 前缀文件不动（边界：只扫看板同族残件）')
+  } finally { env.cleanup() }
+})
+
+test('⑥ .tmp 孤儿清扫（源码级）：清扫挂在读盘列举点 + 1h 视界 + 只认 tasks-*.tmp 同族', () => {
+  var sto = fs.readFileSync(new URL('../lib/store.mjs', import.meta.url), 'utf8')
+  assert.match(sto, /function sweepTmpOrphans\(home, files\)/)   // 清扫 helper 存在
+  assert.match(sto, /TMP_ORPHAN_MS = 3600000/)                   // 1 小时视界（崩溃安全）
+  assert.match(sto, /f\.indexOf\('tasks-'\) !== 0 \|\| f\.slice\(-4\) !== '\.tmp'/) // 只认 tasks-*.tmp 同族
+  assert.match(sto, /sweepTmpOrphans\(home, files\)/)            // 挂在读盘列举点
+  assert.match(sto, /state\.deactivated && !fsNode\.existsSync\(p\)/) // 停用闸落点（新板才拒，已有板放行）
 })

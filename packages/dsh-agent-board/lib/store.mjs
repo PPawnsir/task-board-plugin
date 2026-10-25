@@ -43,6 +43,13 @@ export function createStore(ctx, state, deps) {
     var cyclePending = state.cyclePending
     var poolHealth = state.poolHealth || (state.poolHealth = {})   // 腐坏隔离/抢救 hint 落这里（与 runtime health 同表）
 
+    // ===== 停用闸旗标接线（task-mvo9ca58）：插件 disposers 跑过即置 state.deactivated=true =====
+    // 根治「mock 板泄漏真根」（巡检 n-mvo4y8ojzr3y）：boardDirName() 每次现读 env，teardown 后 HOME 已复原，
+    // 任何迟到触发（真实 setTimeout 去抖/退避链尾）的写盘都按真根现算路径落盘。落闸后 wt() 拒写**新板文件**
+    // （已有板 salvage/继承写回不受限——救命写不拦）。旗标挂共享 state：直建 store 的测试 state 无此字段 →
+    // undefined 即 falsy → 闸常关（行为与旧版逐字一致）；ctx.effect 在直建场景（ctx={}）不存在 → 守卫跳过。
+    if (ctx && typeof ctx.effect === 'function') ctx.effect(function () { return function () { state.deactivated = true } })
+
     // 看板文件用「家目录绝对路径 + node:fs」直读写——不再走 fs 服务的相对路径解析
     // （fs 服务的相对路径解析根 = 进程启动 cwd，cwd 一变所有看板静默读成空板；
     //  曾因此导致整个看板状态异常。绝对路径对此永久免疫）
@@ -59,12 +66,32 @@ export function createStore(ctx, state, deps) {
     // ③ 候选必须唯一 —— 多候选一律不动（宁可留孤儿板等人工认领，也不合并错板）。
     // 触发点在 rt() 的「文件不存在」分支：工具 / RPC / UI 三通道都走 rt，天然统一受益。
     function activeRootIds() { try { var rs = ctx.agents && ctx.agents.roots(); var s = {}; if (Array.isArray(rs)) for (var i = 0; i < rs.length; i++) s[String(rs[i].id)] = true; return s } catch (_) { return {} } }
+    // ===== .tmp 原子写孤儿清扫（task-mvo9ca58，巡检 n-mvo4y8iyv3r0）=====
+    // wt() 崩溃窗口（强杀发生在 rename 前）留下 tasks-*.json.<pid>.<ts>-<seq>.tmp 残件（实证 10-20 wedge
+    // 重启窗 336KB 残件滞留 4 天无人清）。读盘列举 tasks-* 时顺手 unlink mtime 早于 now-1h 的 tasks-*.tmp：
+    // 1 小时视界远长于任何存活写的 tmp 生命周期（单次写毫秒级、退避重试全程秒级）→ 崩溃安全；
+    // 只扫 boardHome() 本目录（边界：不碰 home 以外目录）；同步 API 与下方既有 readdirSync 同款。
+    var TMP_ORPHAN_MS = 3600000
+    function sweepTmpOrphans(home, files) {
+      var now = Date.now()
+      for (var i = 0; i < files.length; i++) {
+        var f = String(files[i] || '')
+        if (f.indexOf('tasks-') !== 0 || f.slice(-4) !== '.tmp') continue
+        var tp = path.join(home, f)
+        var st = null
+        try { st = fsNode.statSync(tp) } catch (_) { continue }
+        if (!st || !(now - st.mtimeMs > TMP_ORPHAN_MS)) continue
+        try { fsNode.unlinkSync(tp); console.error('[task-board] 清扫 .tmp 原子写孤儿（>1h 残件）: ' + tp) }
+        catch (e) { if (!e || e.code !== 'ENOENT') console.error('[task-board] .tmp 孤儿清扫失败（下次读盘再试）: ' + tp + ' :: ' + String(e)) }
+      }
+    }
     // 找可接管的孤儿看板：返回文件名，或 null（含「多候选」——多候选刻意返回 null）
     function findAdoptableBoardFile(sid, cwd) {
       if (!cwd) return null                                  // 本会话工作区未知 → 绝不猜（猜错就是合并错板）
       var home = boardHome()
       var files
       try { files = fsNode.readdirSync(home) } catch (_) { return null }
+      sweepTmpOrphans(home, files) // 读盘列举顺手清扫 .tmp 原子写孤儿（task-mvo9ca58）
       var alive = activeRootIds()
       var hits = []
       for (var i = 0; i < files.length; i++) {
@@ -260,6 +287,13 @@ export function createStore(ctx, state, deps) {
     }
     async function wt(sid, d) {
       var c = JSON.stringify(d); var p = boardPath(sid)
+      // 停用闸（task-mvo9ca58）：插件已停用（disposers 已跑）→ 拒写**新板文件**——teardown 后 HOME 已复原，
+      // 迟到写按真根现算路径会落错数据根（mock 板污染真 ~/.dsh 的根治点）。已存在板文件的
+      // salvage/继承写回不受限（救命写不拦）。只加闸，不动下方原子写主链。
+      if (state.deactivated && !fsNode.existsSync(p)) {
+        console.error('[task-board] 插件已停用，拒写新板文件（防 teardown 后迟到写落错数据根）: ' + p)
+        throw new Error('plugin deactivated: refuse to create new board file ' + p)
+      }
       // tmp 唯一名（P1 根修 task-mv1e17x9）：pid + 时间戳 + 进程内自增序号——并发 wt() 各自写各自的 tmp，
       // rename 装上的永远是**某一份**完整 JSON（旧实现共享 p+'.tmp'：两个并发 chunked 写在同一 tmp 交错，
       // rename 把拼接怪原子装上正位——原子 rename 防写一半，防不住 tmp 本身是拼的）。
