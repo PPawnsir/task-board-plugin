@@ -673,7 +673,7 @@ function apply(ctx) {
         })
         // 首用引导横幅（task-mvmttnux，反馈 n-muygxqc7045b 最低成本方案）：仅未 dismiss 时渲染（localStorage 持久化），
         // 「？」链 README + ✕ 关闭；独立于下方空态 CTA 行，不动空态统一决策（六列骨架照常）。
-        content = React.createElement('div', null, React.createElement(FilterBar, null), hasFilter && active.length === 0 && archived.length === 0 ? React.createElement('div', { style: { textAlign: 'center', padding: 16, color: C.text2, fontSize: 11 } }, '无匹配任务') : null, obd ? null : React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', background: C.nested, borderRadius: 6 } }, React.createElement('span', null, '看板 = 把任务交给后台 Worker 执行、Verifier 独立验收的任务板'), React.createElement('a', { href: 'https://github.com/PPawnsir/task-board-plugin#readme', target: '_blank', rel: 'noopener', title: '查看 README 使用文档', style: { color: C.brand, textDecoration: 'none', fontWeight: 600, flexShrink: 0 } }, '？'), React.createElement('button', { onClick: function () { try { localStorage.setItem(ONBOARD_DISMISS_KEY, '1') } catch (_) {} state.onboardDismissed = true; notify() }, title: '关闭引导（不再显示）', style: { marginLeft: 'auto', border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 10, color: C.text2, padding: '0 2px', lineHeight: 1, flexShrink: 0 } }, '✕')), React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, state.selectMode ? '多选模式：点击卡片勾选，底部批量操作' : '提示：拖拽卡片到目标列即可流转状态'), tasks.length === 0 ? React.createElement('div', { style: { textAlign: 'center', padding: '16px 8px 12px', color: C.text2, fontSize: 12 } }, '点击右上角', React.createElement('span', { style: { color: C.brand, fontWeight: 600 } }, '「+ 新建任务」'), '创建第一张卡，或直接在对话里说：帮我建一张任务卡') : null, React.createElement('div', { style: { display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4 } }, cols),  React.createElement(BatchBar, null))
+        content = React.createElement('div', null, React.createElement(FilterBar, null), hasFilter && active.length === 0 && archived.length === 0 ? React.createElement('div', { style: { textAlign: 'center', padding: 16, color: C.text2, fontSize: 11 } }, '无匹配任务') : null, obd ? null : React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', background: C.nested, borderRadius: 6 } }, React.createElement('span', null, '看板 = 后台 Worker 执行、Verifier 独立验收；拆解官拆大任务，轻/标/重三档力度路由'), React.createElement('a', { href: 'https://github.com/PPawnsir/task-board-plugin#readme', target: '_blank', rel: 'noopener', title: '查看 README 使用文档', style: { color: C.brand, textDecoration: 'none', fontWeight: 600, flexShrink: 0 } }, '？'), React.createElement('button', { onClick: function () { try { localStorage.setItem(ONBOARD_DISMISS_KEY, '1') } catch (_) {} state.onboardDismissed = true; notify() }, title: '关闭引导（可在 ⚙️ 设置-界面重新开启）', style: { marginLeft: 'auto', border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 10, color: C.text2, padding: '0 2px', lineHeight: 1, flexShrink: 0 } }, '✕')), React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 } }, state.selectMode ? '多选模式：点击卡片勾选，底部批量操作' : '提示：拖拽卡片到目标列即可流转状态'), tasks.length === 0 ? React.createElement('div', { style: { textAlign: 'center', padding: '16px 8px 12px', color: C.text2, fontSize: 12 } }, '点击右上角', React.createElement('span', { style: { color: C.brand, fontWeight: 600 } }, '「+ 新建任务」'), '创建第一张卡，或直接在对话里说：帮我建一张任务卡') : null, React.createElement('div', { style: { display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4 } }, cols),  React.createElement(BatchBar, null))
       }
       // 面板根容器（顶层 div）：zoom 挂这里——等比缩放整个面板子树（字体/图标/间距），只影响本面板
       // 不影响宿主页面；uiZoom 为订阅值（设置弹层选档 → state.uiZoom + notify → 本组件重渲染即时生效）。
@@ -2591,6 +2591,20 @@ function apply(ctx) {
           UI_ZOOM_LEVELS.map(function (z) { return React.createElement('option', { key: String(z), value: String(z) }, Math.round(z * 100) + '%' + (z === 1 ? '（默认）' : '')) })))
     }
 
+    // 首用引导横幅重开入口（task-mvnnkv7x-2）：✕ 关闭后此前无任何重开通道（kernel.js 仅 localStorage.setItem
+    // 写键，title 写死「不再显示」）。照 ZoomCfg 同族纯客户端偏好范式：localStorage.removeItem(ONBOARD_DISMISS_KEY)
+    // + state.onboardDismissed=false + notify——TopPanel update 链 setObd 订阅即时重渲染出横幅，无需刷新。
+    // 仅关闭态（state.onboardDismissed=true）有意义：组件内自守 + 「界面」小节挂载点双闸，未关闭时不渲染。
+    function OnboardReset() {
+      if (!state.onboardDismissed) return null
+      function reopen() {
+        try { localStorage.removeItem(ONBOARD_DISMISS_KEY) } catch (_) {}
+        state.onboardDismissed = false; notify()
+      }
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, '引导横幅',
+        React.createElement('button', { onClick: reopen, title: '重新显示首用引导横幅（board 视图顶部定位行）', style: { padding: '0px 5px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text, cursor: 'pointer', lineHeight: '14px' } }, '重新显示'))
+    }
+
     function PoolCfgPopover(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect, useRef = _R.useRef
       var _a = useState(false), open = _a[0], setOpen = _a[1]
@@ -2691,7 +2705,11 @@ function apply(ctx) {
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '界面'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
             React.createElement(ZoomCfg, null),
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（等比缩放面板字体/图标/间距，仅本面板生效并本地记忆）'))) : null)
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（等比缩放面板字体/图标/间距，仅本面板生效并本地记忆）')),
+          // 引导横幅重开行（task-mvnnkv7x-2）：仅关闭态（obd=true）渲染——横幅挂着时无需重开入口
+          state.onboardDismissed ? React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 3 } },
+            React.createElement(OnboardReset, null),
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（首用定位行已 ✕ 关闭，点此重新显示）')) : null) : null)
     }
 
     function TeamView() {

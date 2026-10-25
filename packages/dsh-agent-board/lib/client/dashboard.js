@@ -1039,6 +1039,20 @@
           UI_ZOOM_LEVELS.map(function (z) { return React.createElement('option', { key: String(z), value: String(z) }, Math.round(z * 100) + '%' + (z === 1 ? '（默认）' : '')) })))
     }
 
+    // 首用引导横幅重开入口（task-mvnnkv7x-2）：✕ 关闭后此前无任何重开通道（kernel.js 仅 localStorage.setItem
+    // 写键，title 写死「不再显示」）。照 ZoomCfg 同族纯客户端偏好范式：localStorage.removeItem(ONBOARD_DISMISS_KEY)
+    // + state.onboardDismissed=false + notify——TopPanel update 链 setObd 订阅即时重渲染出横幅，无需刷新。
+    // 仅关闭态（state.onboardDismissed=true）有意义：组件内自守 + 「界面」小节挂载点双闸，未关闭时不渲染。
+    function OnboardReset() {
+      if (!state.onboardDismissed) return null
+      function reopen() {
+        try { localStorage.removeItem(ONBOARD_DISMISS_KEY) } catch (_) {}
+        state.onboardDismissed = false; notify()
+      }
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, '引导横幅',
+        React.createElement('button', { onClick: reopen, title: '重新显示首用引导横幅（board 视图顶部定位行）', style: { padding: '0px 5px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text, cursor: 'pointer', lineHeight: '14px' } }, '重新显示'))
+    }
+
     function PoolCfgPopover(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect, useRef = _R.useRef
       var _a = useState(false), open = _a[0], setOpen = _a[1]
@@ -1139,7 +1153,11 @@
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '界面'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
             React.createElement(ZoomCfg, null),
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（等比缩放面板字体/图标/间距，仅本面板生效并本地记忆）'))) : null)
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（等比缩放面板字体/图标/间距，仅本面板生效并本地记忆）')),
+          // 引导横幅重开行（task-mvnnkv7x-2）：仅关闭态（obd=true）渲染——横幅挂着时无需重开入口
+          state.onboardDismissed ? React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 3 } },
+            React.createElement(OnboardReset, null),
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（首用定位行已 ✕ 关闭，点此重新显示）')) : null) : null)
     }
 
     function TeamView() {
