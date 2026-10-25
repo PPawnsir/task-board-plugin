@@ -184,3 +184,67 @@ test('startActivation⑥：新契约路径在源码层接线（startActivation �
   assert.match(src, /function activationAsRun\(act\)/)
   assert.match(src, /function activationRequestOf\(req\)/)
 })
+
+// ===== 落闸弃权损毁（task-mvnyk55n）：veto 对 continuable 子会话不再只 interrupt 留存 =====
+// 原形：ontology EW-B 卡一卡 6 个存活 worker 子会话——弃权/终止的 interrupt 留存会话随
+// 「编辑→重派」循环淤积成停泊残影，且可被续跑/投递链路误唤醒与现任并行。
+// 修法：veto 时新契约路径（activation 在手）先 interrupt 再 dispose 销毁；老契约路径保持
+// interrupt 不变；dispose 失败降级 interrupt 留存（记 console.error，不阻断弃权）。
+test('startActivation⑦：落闸弃权新契约路径 → 先 interrupt 再 activation.dispose 销毁（不停泊）', async () => {
+  var board = mkBoard([mkTask()]) // pending 无占位 → 落闸锁内重验必否决（过期快照=弃权原形）
+  var calls = []
+  var opts = {}
+  var interrupts = []
+  var subagents = mkActivationSubagents(calls, opts)
+  subagents.interrupt = function (id, auth) { interrupts.push({ id: id, auth: auth }) }
+  var dispatch = mkDispatch(board, { subagents: subagents })
+  var origErr = console.error; console.error = function () {} // 压掉弃权日志
+  try {
+    var sr = await dispatch.spawnOneShot(SID, board.tasks[0], 'worker')
+    assert.ok(sr && sr.vetoed === true, '闸门否决 → 弃权返回')
+    assert.equal(interrupts.length, 1, 'dispose 前先 interrupt 打断当前 turn（停损信号先行）')
+    assert.equal(interrupts[0].id, 'child-1', 'interrupt 目标=刚建的子会话')
+    assert.equal(interrupts[0].auth.kind, 'ancestor', 'authority 形状同款')
+    assert.deepEqual(opts.disposed, ['worker:t1'], 'veto 场景 dispose 被调用（销毁而非留存淤积）')
+  } finally { console.error = origErr }
+})
+
+test('startActivation⑧：落闸弃权老契约路径（无 startActivation）→ 保持 interrupt 留存不变', async () => {
+  var board = mkBoard([mkTask()])
+  var interrupts = []
+  var oldSubagents = {
+    list: function () { return ['p1'] },
+    getProvider: function () { return { inheritsParentContext: false } },
+    startContinuable: async function () { return { childId: 'child-old', messageId: 'm1' } },
+    interrupt: function (id) { interrupts.push(id) },
+  }
+  var dispatch = mkDispatch(board, { subagents: oldSubagents })
+  var origErr = console.error; console.error = function () {}
+  try {
+    var sr = await dispatch.spawnOneShot(SID, board.tasks[0], 'worker')
+    assert.ok(sr && sr.vetoed === true, '老契约路径闸门否决同样弃权')
+    assert.deepEqual(interrupts, ['child-old'], '老契约无 activation 可 dispose → interrupt 留存逐字不变')
+  } finally { console.error = origErr }
+})
+
+test('startActivation⑨：落闸弃权 dispose 失败 → 降级 interrupt 留存（记 console.error，不阻断弃权）', async () => {
+  var board = mkBoard([mkTask()])
+  var interrupts = []
+  var subagents = {
+    list: function () { return ['p1'] },
+    getProvider: function () { return { inheritsParentContext: false } },
+    startActivation: async function () {
+      return { childId: 'child-x', messageId: 'm1', result: new Promise(function () {}), dispose: async function () { throw new Error('dispose boom') } }
+    },
+    interrupt: function (id) { interrupts.push(id) },
+  }
+  var dispatch = mkDispatch(board, { subagents: subagents })
+  var errLines = []
+  var origErr = console.error; console.error = function () { errLines.push(Array.prototype.join.call(arguments, ' ')) }
+  try {
+    var sr = await dispatch.spawnOneShot(SID, board.tasks[0], 'worker')
+    assert.ok(sr && sr.vetoed === true, 'dispose 失败不阻断弃权返回')
+    assert.deepEqual(interrupts, ['child-x'], 'interrupt 已先行送达 → dispose 失败即降级为留存形态')
+    assert.ok(errLines.some(function (l) { return l.indexOf('落闸弃权 dispose 失败') >= 0 && l.indexOf('dispose boom') >= 0 }), '失败记 console.error 留痕')
+  } finally { console.error = origErr }
+})

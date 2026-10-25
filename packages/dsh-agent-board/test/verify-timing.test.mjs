@@ -396,6 +396,100 @@ test('假杀根修③：hold=true → 同一次落账 pending+assignMode=manual 
   assert.equal(core.pickDispatch({ tasks: [board2.tasks[0]] }, 1, 0, null).pendings.length, 1, '无 hold：回 pending 后照常自动重派')
 })
 
+// ===== 停泊子会话损毁分态（task-mvnyk55n）：hold 终止对 activation 走 dispose；默认终止保持 interrupt 留存 =====
+// 原形：continuable 终止一律 interrupt 留存 → 停泊会话淤积 + 可被误唤醒（ontology EW-B 一卡 6 子会话）。
+// 分态：hold:true（不再重派）终止=不再续 → 销毁；默认终止（会重派）→ interrupt 留存（续跑位要留）。
+test('停泊治理：hold 终止且 rec.act 在手 → 先 interrupt 再 dispose 销毁；默认终止 → interrupt 留存不动 act', async () => {
+  const parent = { id: FULL_SID }
+  // ① hold:true + 新契约 activation 在手 → dispose 销毁（interrupt 先行打断 turn）
+  const interrupts = [], disposes = [], closed = []
+  const board = mkTermBoard('pk1', 'child-pk1')
+  const runs = { [FULL_SID]: { 'pk1': { id: 'child-pk1', childId: 'child-pk1', continuable: true, ran: true, run: null, act: { dispose: async () => { disposes.push('child-pk1') } }, role: 'worker', taskId: 'pk1', startedAt: Date.now(), model: '', settled: false } } }
+  const h = mkRpcHarness(board, runs, {
+    rootForSession: () => parent,
+    closeRunHistory: mkCloseRunHistory(board, closed),
+  }, { subagents: { interrupt: (id) => interrupts.push(id), listChildren: async () => [] } })
+  const r = await h['terminate-agent']({ taskId: 'pk1', hold: true })
+  assert.equal(r.ok, true)
+  assert.deepEqual(interrupts, ['child-pk1'], 'dispose 前先 interrupt 打断当前 turn')
+  assert.deepEqual(disposes, ['child-pk1'], 'hold 终止走 dispose 销毁（不再 interrupt 留存淤积）')
+  assert.equal('killUnconfirmed' in r, false, 'dispose 成功即确认终止')
+  assert.equal(board.tasks[0].assignMode, 'manual', 'hold 连带转手动语义不回归')
+  assert.deepEqual(closed, [{ taskId: 'pk1', runId: 'child-pk1', outcome: 'terminated' }], '关账 terminated 不回归')
+  // ② 对照：默认终止（无 hold）→ 保持 interrupt 留存，不动 activation（续跑位要留）
+  const interrupts2 = [], disposes2 = []
+  const board2 = mkTermBoard('pk2', 'child-pk2')
+  const runs2 = { [FULL_SID]: { 'pk2': { id: 'child-pk2', childId: 'child-pk2', continuable: true, ran: true, run: null, act: { dispose: async () => { disposes2.push('child-pk2') } }, role: 'worker', taskId: 'pk2', startedAt: Date.now(), model: '', settled: false } } }
+  const h2 = mkRpcHarness(board2, runs2, { rootForSession: () => parent }, { subagents: { interrupt: (id) => interrupts2.push(id) } })
+  const r2 = await h2['terminate-agent']({ taskId: 'pk2' })
+  assert.equal(r2.ok, true)
+  assert.deepEqual(interrupts2, ['child-pk2'], '默认终止保持 interrupt 留存')
+  assert.deepEqual(disposes2, [], '默认终止不 dispose（续跑位要留）')
+  assert.equal(board2.tasks[0].assignMode, 'auto', '无 hold 不转手动')
+  // ③ 对照：hold 但无 activation 在手（老契约/续跑轮 rec 无 act）→ 保持 interrupt 留存
+  const interrupts3 = []
+  const board3 = mkTermBoard('pk3', 'child-pk3')
+  const runs3 = { [FULL_SID]: { 'pk3': { id: 'child-pk3', childId: 'child-pk3', continuable: true, ran: true, run: null, role: 'worker', taskId: 'pk3', startedAt: Date.now(), model: '', settled: false } } }
+  const h3 = mkRpcHarness(board3, runs3, { rootForSession: () => parent }, { subagents: { interrupt: (id) => interrupts3.push(id) } })
+  const r3 = await h3['terminate-agent']({ taskId: 'pk3', hold: true })
+  assert.equal(r3.ok, true)
+  assert.deepEqual(interrupts3, ['child-pk3'], 'hold 但无 activation → 保持 interrupt 留存')
+  assert.equal(board3.tasks[0].assignMode, 'manual')
+  // ④ hold + dispose 抛错 + interrupt 兜底在位 → 降级留存不记 killFail（turn 已打断）；无 interrupt 兜底才记
+  const sysNotes4 = []
+  const board4 = mkTermBoard('pk4', 'child-pk4')
+  const runs4 = { [FULL_SID]: { 'pk4': { id: 'child-pk4', childId: 'child-pk4', continuable: true, ran: true, run: null, act: { dispose: async () => { throw new Error('dispose boom') } }, role: 'worker', taskId: 'pk4', startedAt: Date.now(), model: '', settled: false } } }
+  const h4 = mkRpcHarness(board4, runs4, { rootForSession: () => parent, pushSysNote: (sid, text) => sysNotes4.push(text) }, { subagents: { interrupt: () => {} } })
+  const r4 = await h4['terminate-agent']({ taskId: 'pk4', hold: true })
+  assert.equal(r4.ok, true)
+  assert.equal('killUnconfirmed' in r4, false, 'dispose 失败但 interrupt 兜底已打断 turn → 不记终止未生效')
+  assert.deepEqual(sysNotes4, [])
+})
+
+// ===== 停泊治理②（task-mvnyk55n 驳回根修）：terminate 摘表即立 rec.settled 首胜旗 =====
+// 驳回原形：doTerminate 摘 runsFor 表项时未立旗 → hold 终止的 dispose 按宿主契约落定
+// activation.result → dispatch 拆除兜底臂抢在 hold 落账前把手动终止误记成 Worker 失败
+// （retryCount+1 / lastError=子会话被宿主拆除 / retryCount=2 直接 blocked）。本测试钉死
+// 「终止认领即立旗」契约：兜底臂的 settled 判因此等价于归属守卫（集成r 做真实链路回归）。
+test('停泊治理②：terminate 认领即立 rec.settled——hold dispose 联动 result 落定不再抢结算；默认终止同纪律', async () => {
+  const parent = { id: FULL_SID }
+  // ① hold 终止 + 宿主同构 activation（dispose 拆除时落定 result，stopReason=aborted）
+  let settleAct = null
+  const board = mkTermBoard('ps1', 'child-ps1')
+  const rec1 = { id: 'child-ps1', childId: 'child-ps1', continuable: true, ran: true, run: null,
+    act: { result: new Promise(function (res) { settleAct = res }), dispose: async function () { settleAct({ output: [], stopReason: 'aborted' }) } },
+    role: 'worker', taskId: 'ps1', startedAt: Date.now(), model: '', settled: false }
+  const runs = { [FULL_SID]: { 'ps1': rec1 } }
+  const h = mkRpcHarness(board, runs, {
+    rootForSession: () => parent,
+    closeRunHistory: mkCloseRunHistory(board, []),
+  }, { subagents: { interrupt: () => {}, listChildren: async () => [] } })
+  const r = await h['terminate-agent']({ taskId: 'ps1', hold: true })
+  assert.equal(r.ok, true)
+  assert.equal(rec1.settled, true, 'terminate 摘表即立首胜旗——dispose 联动的 result 迟到落定被旗挡下')
+  assert.equal(runs[FULL_SID]['ps1'], undefined, '活跃表项已摘（归属转移给 terminate 自身结账）')
+  // 给 dispose 联动的 result 落定链充分跑完（.then 微任务+结算链），卡面不得有任何失败结算痕迹
+  await new Promise(function (res) { setTimeout(res, 50) })
+  assert.equal(board.tasks[0].retryCount || 0, 0, '无 retryCount 误加（兜底臂未抢结）')
+  assert.equal(board.tasks[0].lastError, undefined, '无「子会话被宿主拆除」误落')
+  assert.equal(board.tasks[0].status, 'pending', 'hold 终止停派语义纯净')
+  assert.equal(board.tasks[0].assignMode, 'manual', 'hold 连带转手动不回归')
+  assert.ok(!board.tasks[0].history.some(function (x) { return /worker 失败/.test(x.note || '') }), 'history 无「worker 失败…重新排队」误记')
+  assert.ok(board.tasks[0].history.some(function (x) { return /手动终止，任务重新排队/.test(x.note || '') }), '终止落账本身在列')
+  // ② 默认终止（无 hold）同纪律：立旗 + 不动 act——旧 Worker 迟到的 idle/result 落定不得再翻卡面
+  const board2 = mkTermBoard('ps2', 'child-ps2')
+  const rec2 = { id: 'child-ps2', childId: 'child-ps2', continuable: true, ran: true, run: null,
+    act: { dispose: async function () { throw new Error('默认终止不得调 dispose') } },
+    role: 'worker', taskId: 'ps2', startedAt: Date.now(), model: '', settled: false }
+  const runs2 = { [FULL_SID]: { 'ps2': rec2 } }
+  const h2 = mkRpcHarness(board2, runs2, { rootForSession: () => parent }, { subagents: { interrupt: () => {} } })
+  const r2 = await h2['terminate-agent']({ taskId: 'ps2' })
+  assert.equal(r2.ok, true)
+  assert.equal(rec2.settled, true, '默认终止同样立旗（续跑换新 rec，旧 rec 迟到结算一律空转）')
+  assert.equal(board2.tasks[0].retryCount || 0, 0)
+  assert.equal(board2.tasks[0].assignMode, 'auto', '无 hold 不转手动（分态不回归）')
+})
+
 // ===== 纯函数口径：lateVerdictApply wasApproved 判定 =====
 test('lateVerdictApply：wasApproved 口径（resolved / archived-from-resolved / archived-from-cancelled）', () => {
   // resolved → approved

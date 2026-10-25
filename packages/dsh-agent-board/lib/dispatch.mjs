@@ -598,8 +598,10 @@ export function createDispatch(ctx, state, deps) {
       // 会话 id 语义不变，t.runs[].id / claimedBy / verifierRun / poolStatus.runId / 详情页跳转全部照旧）。
       // rec.run 只在一次性路径存在（dispose/result 的来源）；continuable 路径 rec.continuable=true，
       // 用 rec.childId 定位 host 事件、dispose 走 drain（卡1 先不 interrupt，见 settleContinuable）。
+      // rec.act（task-mvnyk55n）：新契约 activation 随 rec 留存——落闸弃权臂与 doTerminate 的
+      // hold 终止据此 dispose 销毁子会话（老契约路径无 activation，act=null，保持 interrupt 留存）。
       var rec = useContinuable
-        ? { id: childId, childId: childId, continuable: true, ran: false, run: null, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, size: laneSize || undefined, settled: false }
+        ? { id: childId, childId: childId, continuable: true, ran: false, run: null, act: actForSettle, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, size: laneSize || undefined, settled: false }
         : { id: String(run.id), run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, size: laneSize || undefined, settled: false }
       // ===== 新宿主 continuable 结算兜底臂（v0.2.1 实证 2026-10-24：activation.result 只认拆除落定）=====
       // 原形：rate-limit 子会话 turn/end error → 管理器拆除 activation → result 落定——
@@ -607,6 +609,11 @@ export function createDispatch(ctx, state, deps) {
       // rec 挂 running 直到 120 分钟硬超时。activation.result 恰好在「子会话被拆除」这一刻落定
       // （正常完成 parked-idle 不落定、不误伤续跑）——把它接上就是失败/拆除场景的零事件依赖结算通道。
       // rec.settled 首胜旗与事件/超时/上报三通道共用：先到先结，后到被挡。
+      // 归属不变式（task-mvnyk55n 驳回根修）：「rec 被摘出 runsFor 活跃表 ⇒ 摘除点已同步立
+      // rec.settled」对全部摘除路径成立（落闸弃权 646 / 续跑弃权 838 / settleRun 各入口
+      // finish 698·事件 1299 / settleReportedRun 1262 / 幽灵清扫 1735 / doTerminate 摘表即立——
+      // 后者正是本次补上的缺口：hold 终止的 dispose 落定 result 时本臂若抢结，会把手动终止
+      // 误记成 Worker 失败）。因此本臂的 settled 判即归属守卫，无需再判表项在否。
       if (useContinuable && actForSettle && actForSettle.result && typeof actForSettle.result.then === 'function') {
         actForSettle.result.then(function (res) {
           if (rec.settled) return
@@ -629,8 +636,10 @@ export function createDispatch(ctx, state, deps) {
       dispatchedEver[sid][String(rec.id)] = true
       // ===== 落闸锁内重验（task-mv6c7cdm，仅 worker 角色；与续跑路径同一闸门 spawnGateOk）=====
       // spawn 在途窗口内卡面可能已被 terminate 等路径翻走（占位清、回 pending）——此时本次派发基于
-      // 过期快照，必须弃权：settled 旗堵迟到结算 + 摘 rec + 停掉刚建的子会话（continuable=interrupt
-      // 留存口径与 terminate 一致；一次性=dispose），不落 run 留档——它在卡面从未存在过，卡面由
+      // 过期快照，必须弃权：settled 旗堵迟到结算 + 摘 rec + 停掉刚建的子会话（continuable：新契约
+      // activation 在手=先 interrupt 再 dispose 销毁（task-mvnyk55n——弃权会话续跑位已失，interrupt
+      // 留存只会随「编辑→重派」循环淤积成停泊残影）；老契约无 activation=interrupt 留存不变；
+      // 一次性=dispose），不落 run 留档——它在卡面从未存在过，卡面由
       // terminate 那笔写重排（pending），下一轮 cycle 按现状重新决策。
       // 为什么登记在闸门之前：闸门是持锁慢操作（锁内重读新鲜快照），若夹在「spawn 返回」与「登记」
       // 之间会重新撕开事件可见性窗口——登记先行保住既有纪律，闸门否决时再逆向摘干净即可。
@@ -642,7 +651,15 @@ export function createDispatch(ctx, state, deps) {
           rec.settled = true // 先立旗：迟到的 idle 结算与超时臂一并放行空转
           if (runsFor(sid)[t.id] === rec) delete runsFor(sid)[t.id]
           try {
-            if (useContinuable) { if (typeof subagents.interrupt === 'function') subagents.interrupt(childId, { kind: 'ancestor', agent: parent }) }
+            if (useContinuable) {
+              if (typeof subagents.interrupt === 'function') subagents.interrupt(childId, { kind: 'ancestor', agent: parent })
+              // 落闸弃权损毁（task-mvnyk55n）：新契约 activation 在手 → dispose 销毁子会话。
+              // dispose 失败一律降级 interrupt 留存（上一步已发信号），记 console.error 不阻断弃权主流程。
+              if (actForSettle && typeof actForSettle.dispose === 'function') {
+                try { await actForSettle.dispose() }
+                catch (e2) { console.error('[task-board] 落闸弃权 dispose 失败，降级 interrupt 留存（task ' + t.id + ' child ' + childId + '）:', String(e2)) }
+              }
+            }
             else if (run && typeof run.dispose === 'function') await run.dispose()
           } catch (_) {}
           // 依赖否决收口（task-mv9yupm4）：dependsOn 后补导致的否决无人翻卡（update-task 不动状态机），
@@ -777,6 +794,26 @@ export function createDispatch(ctx, state, deps) {
       try { msgs = core.buildMessages(t) } catch (_) {}
       if (msgs) text += '\n\n该任务的最新消息（主窗口裁决/高优干预/驳回理由等，请务必遵循）：\n' + msgs
       text += '\n\n【优先级声明】本次消息与上面 messages 里的最新裁决/干预，优先于上文历史中的原始任务契约；两者冲突时以最新指示为准（例如原始契约写「上报歧义后不要做其他事」，而最新裁决要求「直接上报完成」，就以「上报完成」为准）。'
+      // ===== 续跑前清场（task-mvnyk55n，停泊残影防唤醒）=====
+      // 原形：ontology EW-B 卡一卡 6 个存活 worker 子会话，被终止者 8 小时后被意外唤醒与现任并行。
+      // 冷复活目标子会话前，对同卡 runs 留档里**其他** continuable childId（非本次续跑目标）逐个
+      // interrupt——停泊残影（被弃权/被取代/旧失败的留存会话）可被续跑/投递链路误唤醒，先清场
+      // 保住「同卡任一时刻最多一个活 Worker 会话」。目标 childId 不收（它就是本轮要复活的）；
+      // interrupt 幂等 fire-and-return，单个失败不阻断其余清场与续跑本体。
+      try {
+        if (typeof subagents.interrupt === 'function') {
+          var seenParked = {}
+          var pruns = Array.isArray(t.runs) ? t.runs : []
+          for (var pri = pruns.length - 1; pri >= 0; pri--) {
+            var pr = pruns[pri]
+            if (!pr || pr.continuable !== true) continue
+            var pid = String(pr.id || '')
+            if (!pid || pid === String(childId) || seenParked[pid]) continue
+            seenParked[pid] = true
+            try { subagents.interrupt(pid, { kind: 'ancestor', agent: parent }) } catch (_) {}
+          }
+        }
+      } catch (_) {}
       try {
         await subagents.sendMessage(parent, childId, [{ type: 'text', text: text }], { signal: makeSignal() })
       } catch (e) {
@@ -1900,7 +1937,7 @@ export function createDispatch(ctx, state, deps) {
         // hook run 也归「verifiers」区展示（同一格里都是非 Worker 的一次性 run）。
         try {
           d.poolStatus = { workers: [], verifiers: [] }
-          Object.keys(runs).forEach(function (k) { var rc = runs[k]; if (!rc) return; d.poolStatus[rc.role === 'worker' ? 'workers' : 'verifiers'].push({ id: k, num: '-', busy: true, taskId: rc.taskId, runId: String(rc.id), done: 0, queueLen: 0, suspect: false, model: rc.model || '' }) })
+          Object.keys(runs).forEach(function (k) { var rc = runs[k]; if (!rc) return; d.poolStatus[rc.role === 'worker' ? 'workers' : 'verifiers'].push({ id: k, num: '-', busy: true, taskId: rc.taskId, runId: String(rc.id), done: 0, queueLen: 0, suspect: false, model: rc.model || '', modelSource: rc.modelSource || '' }) })
         } catch (e) { console.error('[task-board] 池状态快照异常（本轮跳过）:', String(e)) }
         if (info.length > 0) { d.dispatchInfo = info.join('; '); d.dispatchInfoAt = new Date().toISOString() }
         else if (d.dispatchInfo && (!d.dispatchInfoAt || Date.now() - new Date(d.dispatchInfoAt).getTime() > 90000)) { delete d.dispatchInfo; delete d.dispatchInfoAt } // 瞬时通知：90s TTL 过期即清，不再永久残留

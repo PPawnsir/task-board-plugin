@@ -890,3 +890,170 @@ test('集成p·开工计划闸口：全合规/部分越界/无 touches 三路径
     assert.equal(t1.status, 'in-progress', '全程不阻断执行')
   } finally { await env.cleanup() }
 })
+
+// ===== 场景 q：续跑前清场（task-mvnyk55n，停泊残影防唤醒）=====
+// 原形：ontology EW-B 卡一卡 6 个存活 worker 子会话，被终止/弃权的留存会话 8 小时后被误唤醒与现任
+// 并行。修法：tryResumeWorker 冷复活目标子会话前，对同卡 runs 留档里其他 continuable childId 逐个
+// interrupt 清场（目标不收——它正是本轮要复活的）。
+// 构造：child1 失败留存 → noResume 易主 → fresh spawn child2 → child2 也失败（child1 成停泊残影）
+// → 重派轮续跑 child2：清场必打 child1、不打 child2。
+function stopsOnChild(env, childId) { return env.interrupts.filter(function (x) { return x.childId === childId }) }
+// ===== 原子补丁写（task-mvnyk55n 集成q flake 根修，2026-10-26 实证）=====
+// 失败签名：console 打「board file corrupt, quarantined」+ waitFor 超时「noResume 挡住续跑」——
+// 看板被隔离成空板，后续派发链整链停摆。机制（代码级实证 + Verifier 探针双确认）：
+//   mock-ctx 的 env.patchBoard 是「readFileSync 改改写 + writeFileSync 直写」（mock-ctx.mjs:313-318），
+//   而生产上插件自身写板一律走 store.wt 原子写（tmp+fsync+rename，task-mv1e17x9）——**直写形态在生产
+//   根本不存在**。continuable 结算尾链（accumulateRunUsage 的 rt 读 dispatch.mjs:1176、stopSettledOneShot
+//   的 rt 读 dispatch.mjs:922，均为 task-muwkhqf8/task-mvbeallq 存量）在 waitFor 收敛后仍挂在 libuv
+//   线程池上在飞；此刻测试同步 writeFileSync 截断+重写，线程池读交付撕裂内容 → JSON.parse 失败 →
+//   recoverCorrupt 隔离 → 空板 → 15s 超时。rename 原子性保证读侧只见旧版或新版、永不见半份——
+//   本 helper 让测试补丁写服从宿主同款原子写不变式（根修测试基建失真，非加睡眠稳测试）。
+//   Windows 上 rename 覆盖正位时若正位被在飞读句柄占着会 EPERM/EBUSY（store.wt 同款实证）→ 退避重试。
+async function patchBoardAtomic(env, fn) {
+  var p = path.join(env.home, '.dsh', 'tasks-' + env.sid + '.json')
+  var d = JSON.parse(fs.readFileSync(p, 'utf8'))
+  fn(d)
+  var tmp = p + '.' + process.pid + '.' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.tmp'
+  fs.writeFileSync(tmp, JSON.stringify(d), 'utf8')
+  for (var i = 0; i < 200; i++) {
+    try { fs.renameSync(tmp, p); return }
+    catch (e) {
+      if (e && (e.code === 'EPERM' || e.code === 'EBUSY' || e.code === 'EACCES')) { await new Promise(function (r) { setTimeout(r, 10) }); continue }
+      try { fs.unlinkSync(tmp) } catch (_) {}
+      throw e
+    }
+  }
+  // 重试耗尽（理论上在飞读不会挂 2s）：降级 unlink+rename，与 store.wt 的 Windows 兜底同纪律。
+  try { fs.unlinkSync(p) } catch (_) {}
+  fs.renameSync(tmp, p)
+}
+test('集成q·续跑前清场：冷复活目标前 interrupt 同卡其他停泊 continuable 子会话，目标 childId 不收', async () => {
+  var env = createMockCtx()
+  // 本场景三段派发链（spawn→失败→fresh spawn→失败→续跑）是全套件 waitFor 密度最高的一条，
+  // 全量 npm test 并行进程负载下真实 I/O 收敛显著变慢（实测 5s 默认上限偶发超时）——统一放宽到 15s。
+  var W = 15000
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-q1', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 1 }, '首轮 worker spawn 发生', W)
+    var child1 = env.continuables[0].childId
+    await env.waitFor(function () { var x = env.task('task-q1'); return x && x.status === 'in-progress' && x.claimedBy === child1 ? x : null }, '落卡 in-progress', W)
+    // 首轮失败（空文本按失败重排）→ pending + incomplete；endContinuable 留存一枪，续跑位在手豁免补停
+    env.emitStatus(child1, 'running')
+    env.emitStatus(child1, 'idle')
+    await env.waitFor(function () { var x = env.task('task-q1'); return x && x.status === 'pending' && x.runs && x.runs[0] && x.runs[0].outcome === 'incomplete' ? x : null }, '首轮失败回 pending', W)
+    // 相对断言（≥1）：endContinuable 的留存一枪同步先于落盘（settleRun 内 997→1004→1013 序），必在；
+    // 但结算末尾 stopSettledOneShot 的异步补停臂（fire-and-forget，await rt 读锁外快照）可能在
+    // noResume 易主/child2 落卡后才落定——resumeTarget 不再指向 child1，豁免失效会再补一枪
+    // （dispatch.mjs:928，既有幂等清理，产品行为无错）。本测试只断言「清场相对基数 +1」，绝对枪数不当基线。
+    assert.ok(stopsOnChild(env, child1).length >= 1, '失败结算留存 interrupt 至少一枪')
+    // 构造「child1 被取代」现场：旧留档立 noResume（续跑资格关闭）→ 下轮 fresh spawn 新 Worker。
+    // 补丁写必须走原子写（patchBoardAtomic）：child1 结算尾链的 rt 读此刻仍可能在飞，
+    // env.patchBoard 的非原子直写会被它撕裂读成半截 JSON → 看板隔离 → 后续派发链停摆（本场景历史红签名）。
+    await patchBoardAtomic(env, function (d) { var t = d.tasks.find(function (x) { return x.id === 'task-q1' }); t.runs[0].noResume = true })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 2 }, 'noResume 挡住续跑 → fresh spawn 新 Worker', W)
+    var child2 = env.continuables[1].childId
+    await env.waitFor(function () { var x = env.task('task-q1'); return x && x.status === 'in-progress' && x.claimedBy === child2 ? x : null }, '新 Worker 落卡', W)
+    // 新 Worker 也失败 → child2 持续跑位；child1 自此是停泊残影（留存但续跑位不在手）
+    env.emitStatus(child2, 'running')
+    env.emitStatus(child2, 'idle')
+    await env.waitFor(function () { var x = env.task('task-q1'); return x && x.status === 'pending' && x.runs && x.runs[1] && x.runs[1].outcome === 'incomplete' ? x : null }, '新 Worker 失败回 pending', W)
+    // 静默窗（真实时间 300ms，与集成r 同款约定）：让 child1/child2 结算末尾 stopSettledOneShot 的
+    // 迟到补停充分跑完再取基数——该臂是 fire-and-forget 链（不随任何 waitFor 条件收敛），
+    // 全量并行负载下 rt 快照读可能跨过 noResume 易主/child2 落卡才落定，给残影 child1 补一枪。
+    // 等尘埃落定后取 base，下方「清场 = base+1 / 目标 = base」的相对断言才不与异步臂赛跑。
+    await new Promise(function (r) { setTimeout(r, 300) })
+    var base1 = stopsOnChild(env, child1).length
+    var base2 = stopsOnChild(env, child2).length
+    assert.ok(base1 >= 1, '清场前 child1 至少有失败结算一枪（补停臂若迟到落定已被基数吸收）')
+    assert.ok(base2 >= 1, 'child2 失败结算留存至少一枪')
+    // ===== 重派轮：续跑 child2 → 清场先 interrupt 残影 child1；目标 child2 不收 =====
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.sendMessages.some(function (m) { return m.childId === child2 }) }, '续跑 sendMessage 冷复活 child2', W)
+    var t = await env.waitFor(function () { var x = env.task('task-q1'); return x && x.status === 'in-progress' && x.claimedBy === child2 && x.runs && x.runs.length === 3 ? x : null }, '续跑落闸：认领位回 child2 + 续跑留档', W)
+    assert.equal(t.runs[2].resume, true, '第三条是续跑记录')
+    assert.equal(stopsOnChild(env, child1).length, base1 + 1, '续跑前清场：旧停泊子会话 child1 收到 interrupt（防误唤醒）')
+    assert.equal(stopsOnChild(env, child2).length, base2, '目标 childId 不收清场 interrupt（它正被冷复活）')
+    // 续跑轮正常交付收口（清场不伤续跑本体）
+    var rep = await env.tools.get('board_report').execute({ taskId: 'task-q1', kind: 'complete', summary: '续跑交付', changes: '改了 q', selfTest: 'npm test 全绿', diffStat: '' })
+    assert.equal(rep.ok, true)
+    t = await env.waitFor(function () { var x = env.task('task-q1'); return x && x.status === 'resolved' && x.runs[2].outcome === 'completed' ? x : null }, '续跑轮交付落 resolved 且关账', W)
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 r：hold 终止 × activation.result 联动结算竞态（task-mvnyk55n 驳回根修）=====
+// 驳回原形（Verifier 临时探针实证）：doTerminate(hold) 的 dispose 按宿主契约落定 activation.result，
+// 而 doTerminate 摘 runsFor 表项时未立 rec.settled → dispatch 拆除结算兜底臂抢在 hold 落账前把
+// 手动终止误记成一次 Worker 失败（retryCount+1 / lastError=子会话被宿主拆除 / 「worker 失败…重新排队」；
+// 卡已有 retryCount=2 时直接被打成 blocked）。根修：doTerminate 摘表即立 rec.settled 首胜旗
+// （兜底臂 settled 判因此等价归属守卫）。本场景用真实 apply(mockCtx) 链路 + 宿主同构
+// startActivation 桩（dispose 拆除时落定 result，stopReason=aborted）复刻全竞态。
+test('集成r·hold终止结算竞态：dispose 落定 activation.result 不抢结——零 retryCount/lastError 误记，停派语义纯净', async () => {
+  var env = createMockCtx()
+  var W = 15000
+  try {
+    // 新契约宿主桩（与真实宿主同构：dispose 拆除子会话 → activation.result 以 stopReason=aborted 落定）
+    var activations = []
+    env.ctx.subagents.startActivation = async function (spec) {
+      var settle = {}
+      var act = {
+        childId: 'child-a' + (activations.length + 1),
+        messageId: 'ma' + (activations.length + 1),
+        label: spec.label,
+        disposed: false,
+        result: new Promise(function (res, rej) { settle.res = res; settle.rej = rej }),
+        dispose: async function () { act.disposed = true; settle.res({ output: [], stopReason: 'aborted' }) },
+      }
+      activations.push(act)
+      return act
+    }
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-r1', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return activations.length >= 1 }, 'worker spawn 走新契约 startActivation', W)
+    var act1 = activations[0]
+    await env.waitFor(function () { var x = env.task('task-r1'); return x && x.status === 'in-progress' && x.claimedBy === act1.childId ? x : null }, '落卡 in-progress', W)
+    // ===== 主场景：hold 终止 → dispose 销毁 + result 落定（竞态窗口）=====
+    var term = await env.rpc('terminate-agent', { sessionId: env.sid, taskId: 'task-r1', hold: true })
+    assert.equal(term.ok, true)
+    assert.equal(term.terminated, 'worker:task-r1')
+    assert.equal(act1.disposed, true, 'hold 终止走 dispose 销毁')
+    assert.ok(env.interrupts.some(function (x) { return x.childId === act1.childId }), 'dispose 前 interrupt 打断当前 turn')
+    var t = await env.waitFor(function () { var x = env.task('task-r1'); return x && x.status === 'pending' && x.assignMode === 'manual' ? x : null }, 'hold 落账：pending + manual', W)
+    // 兜底臂的误结算是 fire-and-forget 链（不随 RPC 返回）——给足真实时间窗让任何迟到结算充分跑完再断言
+    await new Promise(function (r) { setTimeout(r, 300) })
+    t = env.task('task-r1')
+    assert.equal(t.retryCount || 0, 0, '兜底臂未抢结：无 retryCount 误加')
+    assert.equal(t.lastError, undefined, '无「子会话被宿主拆除」lastError 误落')
+    assert.equal(t.status, 'pending', 'hold 终止停派语义纯净（不被失败臂翻动）')
+    assert.equal(t.assignMode, 'manual')
+    assert.ok(!t.history.some(function (h) { return /worker 失败/.test(h.note || '') }), 'history 无「worker 失败…重新排队」误记')
+    assert.ok(t.history.some(function (h) { return /手动终止，任务重新排队/.test(h.note || '') }), '终止落账本身在列')
+    assert.equal(t.runs[0].outcome, 'terminated', 'run 留档关账 terminated（非失败形态）')
+    await env.clock.advance(50)
+    await new Promise(function (r) { setTimeout(r, 50) })
+    assert.equal(activations.length, 1, 'manual 闸门：不再自动重派')
+    assert.equal(env.sendMessages.length, 0, '零续跑投递')
+    // ===== 加强形态：retryCount=2 的卡被 hold 终止——修复前竞态会直接打成 blocked =====
+    await createTask(env, 'task-r2', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return activations.length >= 2 }, '第二张卡 worker spawn', W)
+    var act2 = activations[1]
+    await env.waitFor(function () { var x = env.task('task-r2'); return x && x.status === 'in-progress' && x.claimedBy === act2.childId ? x : null }, 'task-r2 落卡 in-progress', W)
+    // 落卡 waitFor 收敛时 spawn 链尾（recordRunHistory 写盘）可能仍在飞——先给 100ms 真实静默窗让其落完，
+    // 再走原子补丁写（防直写被在飞读撕裂/防补丁读改写在飞写丢失），与集成q 同一纪律。
+    await new Promise(function (r) { setTimeout(r, 100) })
+    await patchBoardAtomic(env, function (d) { var x = d.tasks.find(function (y) { return y.id === 'task-r2' }); x.retryCount = 2; x.lastError = '前两次失败留痕' })
+    var term2 = await env.rpc('terminate-agent', { sessionId: env.sid, taskId: 'task-r2', hold: true })
+    assert.equal(term2.ok, true)
+    await env.waitFor(function () { var x = env.task('task-r2'); return x && x.status === 'pending' && x.assignMode === 'manual' ? x : null }, 'task-r2 hold 落账', W)
+    await new Promise(function (r) { setTimeout(r, 300) })
+    var t2 = env.task('task-r2')
+    assert.equal(t2.status, 'pending', 'retryCount=2 的卡 hold 终止不得被打成 blocked')
+    assert.equal(t2.retryCount, 2, '终止不加失败计数')
+    assert.equal(t2.lastError, '前两次失败留痕', '既有 lastError 不被「子会话被宿主拆除」覆盖')
+    assert.ok(!t2.history.some(function (h) { return /worker 失败|待人工介入/.test(h.note || '') }), '无失败/阻塞误记')
+  } finally { await env.cleanup() }
+})

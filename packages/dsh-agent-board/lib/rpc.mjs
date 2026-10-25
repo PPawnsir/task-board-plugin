@@ -768,14 +768,40 @@ export function createRpc(ctx, state, deps) {
       var killFail = '', killWhy = ''
       if (rec) {
         delete runsFor(sid)[taskId]; label = rec.role + ':' + taskId
+        // 终止认领即立首胜旗（task-mvnyk55n 驳回根修）：hold 终止的 dispose 会按宿主契约落定
+        // activation.result，dispatch 的拆除结算兜底臂接到落定就结算——不先立旗，兜底臂会抢在
+        // 下方 hold 落账（mutateLocked）之前把本次手动终止误记成一次 Worker 失败
+        // （retryCount+1 / lastError=子会话被宿主拆除 / history 落「worker 失败…重新排队」，
+        // retryCount=2 的卡直接被打成 blocked，与「hold=停派」语义正面冲突）。
+        // 终止的账由本函数自己结（accumulateRunUsage + closeRunHistory + mutateLocked），立旗后
+        // 兜底臂/超时臂/idle 事件通道对这条 rec 的迟到落定一律空转——与落闸弃权臂（dispatch 646）
+        // 同一纪律，且补上「离开活跃表的 rec 必然已立 settled 旗」不变式的最后一个缺口。
+        rec.settled = true
         // 清理：一次性 run 走 dispose（既有语义逐字不变）；continuable 的 rec 没有 run（持久子会话），
         // 卡2 起改走 **interrupt 留存**（task-muw5h2ps）：只打断当前 turn、不销毁子会话——否则「手动终止」
         // 之后旧 Worker 仍在改同一棵树，与新派发的 Worker 并行写盘（终止按钮反而制造双写）。
+        // 终止分态细化（task-mvnyk55n）：hold:true（不再重派）且新契约 activation 在手（rec.act）→
+        // 先 interrupt 再 dispose **销毁**子会话——终止=不再续，interrupt 留存只会淤积成停泊残影
+        // （ontology EW-B 实证：被终止者 8 小时后被误唤醒与现任并行）；默认终止（会重派）保持
+        // interrupt 留存（续跑位要留）。dispose 失败一律降级 interrupt 留存，记 console.error 不阻断。
         // interrupt 失败（会话已死 / 无 root 可授权）：任务照常回 pending 重排，不卡死——但不再静默（根修②）。
         try { if (rec.run) await rec.run.dispose() } catch (_) {}
         if (rec.continuable) {
           var subs = ctx.subagents, rroot = rootForSession(sid)
-          if (subs && typeof subs.interrupt === 'function' && rroot) {
+          if (hold && rec.act && typeof rec.act.dispose === 'function') {
+            // hold 终止 + activation 在手：先 interrupt 打断当前 turn（与落闸弃权臂同序，停损信号先行），
+            // 再 dispose 销毁。dispose 不依赖 rroot（activation 自带句柄）；双双失败才记 killFail。
+            var stopped = false
+            if (subs && typeof subs.interrupt === 'function' && rroot) {
+              try { subs.interrupt(rec.childId, { kind: 'ancestor', agent: rroot }); stopped = true } catch (_) {}
+            }
+            try { await rec.act.dispose() }
+            catch (e) {
+              console.error('[task-board] terminate(hold) dispose 失败，降级 interrupt 留存 (task ' + taskId + ' child ' + rec.childId + '):', String(e))
+              if (!stopped) { killFail = String(rec.childId || ''); killWhy = 'dispose 抛错且无 interrupt 兜底: ' + String(e) }
+            }
+          }
+          else if (subs && typeof subs.interrupt === 'function' && rroot) {
             try { subs.interrupt(rec.childId, { kind: 'ancestor', agent: rroot }) }
             catch (e) { killFail = String(rec.childId || ''); killWhy = 'interrupt 抛错: ' + String(e); console.error('[task-board] terminate interrupt 失败 (task ' + taskId + ' child ' + rec.childId + '):', String(e)) }
           } else { killFail = String(rec.childId || ''); killWhy = '宿主无 interrupt 能力或无活 root 可授权' }
