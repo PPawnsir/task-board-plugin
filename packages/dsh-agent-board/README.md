@@ -226,6 +226,25 @@ draft → pending → in-progress → verifying → resolved → archived
 - 手动派发：详情页「派发 / 派发验收」按钮可随时手动触发单任务派发（auto 模式补派、manual 模式主通道）
 - 会话隔离：看板按会话分桶，多会话互不干扰
 
+#### 力度路由使用指南（三档 × 双角色 / 取模链四级）
+
+一句话：卡级 `size` 不是标签，是**路由键**——派发时按它查板级 `laneModels` 表定模，不用每张卡手填模型。
+
+- **怎么调档**：对话里 `task_update taskId=... size='heavy'`（`light` / `standard` / `heavy`；空串 `''` = 清除、回标档语义；非法值拒写）。建卡后随时可调，拆解出的子卡也可逐张改；卡面 size 徽章只读——GUI 不编辑档位，调档统一走对话（避免误点改档）。
+- **怎么配表**：⚙️ 池配置弹层「**力度路由**」小节（模型行之后）＝三档 × Worker/Verifier **共 6 个模型下拉**；空 =「继承板级」（继承上方 `workerModel` / `verifierModel` 行），沿用两段式（选中后点 ✓ 才保存）。写通道 `set-board-config key='laneModels'`，**部分合并**——只合显式给出的槽位，非法模型整体拒写不留半截，每次写入落 configLog 审计行。
+- **怎么读结果**：取模链四级，自上而下 ① **卡级 `model` 特例**（最高）→ ② **档位 lane 槽** → ③ **板级 `workerModel` / `verifierModel`** → ④ **父模型**；每跳照常过熔断，命中熔断降下一跳（限流冷却期同样按 heavy→standard→light 降档取模）。实际命中跳随 run 落 `modelSource` 留档（审计「这张卡为什么用了这个模型」），档位随 run 落 `size`。
+- **怎么用来看账**：记分卡「**按档位**」小表＝三档 × runs/驳回/异常/token（归桶键 = `run.size`；无 size 老 run 归标档、脏值收敛标档，零迁移），用来回答「轻/标/重哪档性价比最高、该给哪档配更强模型」。
+
+#### 拆解官工作流（task_decompose：需求卡 → 实现侧子卡）
+
+适用场景：用户用自然语言丢来一个大需求（跨模块、边界不清、一口气干不完）——先建 **draft 需求卡**保留需求原文，再用 `task_decompose` 派**一次性拆解官**出实现侧子卡提案；确认后逐张发布，Worker 拿到的就是 10~30 分钟可独立验收的小卡。Team 模式第 9 条需求卡工作流（`TEAM_DECOMPOSE_FLOW`）即这条链路；`task_decompose` 工具常驻，**不受 `epicSplit` 开关影响**。
+
+- **门禁**：源卡须 `draft`/`pending`（`in-progress`/`verifying`/已完成卡拒拆：「源卡须为 draft/pending」）；同一源卡已有活跃拆解 run → 拒并返回 `runId`（等落定再重拆）；仅主窗口可用（子代理调用被拒）。
+- **提案契约**：拆解官**零建卡工具**（权限口子根本不用开），唯一交付物是 `outputSchema` 强箍的 `{verdict, children[], rationale}`——`verdict` 只 `split`/`keep`；每个 child 必填 `title`/`description`/`size`/`touches`/`acceptance`，可选 `modelHint`/`dependsOnIdx`；`children` 上限 **8 张**（`DECOMPOSE_MAX_CHILDREN`，超出截断）；`dependsOnIdx` 只许引用本批**前排**下标，物化时翻译成真实 id，按构造天然无环。拆解纪律写死在 prompt：先 `read` 调研清单里的文件、按文件/模块边界从实现侧拆，每张卡 touches 精确到文件、acceptance 是可执行命令。
+- **物化**：run 落定后 host 读 `result.structured` 自动物化为 **draft 子卡**（`parentId`=源卡、`proposalOf`=源卡 id、size/model/touches/acceptance/dependsOn 全部落位，id 派生 `源卡id-N`），源卡追加「🧩 拆解提案已就位」消息并通知主窗口；**源卡状态不变**（仍 draft/pending），确认或调档后逐张 `task_update publish=true` 发布（也可 `batch-op publish` 批量）。`verdict=keep` = 判定不用拆：rationale 落源卡消息、零子卡，源卡按原样推进。
+- **幂等重拆**：新提案落地时清掉上次**未发布**的提案子卡（`proposalOf` 指向该源卡且仍 `draft` 的整批移除）；已 publish/已落定的子卡绝不碰；提案畸形或 run 失败时旧批**不清**（失败不毁已有资产），失败原因落源卡消息，可原样重试。
+- **并发位**：拆解官 run 计入 **Verifier 并发位**（`activeV`），**不占 Worker 位**；活跃拆解期间源卡**跳过派发**（不让 Worker 抢在拆解结论前整坨执行）；宿主不支持 `outputSchema` 时自动剥外挂参数重试，仍拿不到 `structured` 走失败臂（源卡零改动）。
+
 ### 可续跑 Worker（continuable，卡1~卡3 已落地，默认开）
 
 **一句话**：Worker 从「一次性 run」变成**持久子会话**——超时不再丢现场，重派时原会话**冷复活**接着干；Verifier 与 hook run 仍是一次性。
@@ -269,16 +288,20 @@ Team 托管档独有（调度员体验）：
 > 兼容：旧的 `set-board-mode` / `set-team-mode` 两个 RPC 原样保留（旧客户端与脚本不受影响），
 > 内部仍以 `boardMode` + `teamMode` 两个字段落盘，老看板文件无损；`get-tasks` 额外返回派生字段 `workMode` 供 UI 单点读取。
 
-## 14 个 Agent 工具
+## 16 个 Agent 工具
 
 | 类别 | 工具 |
 |---|---|
 | 任务管理 | `task_create` / `task_list` / `task_context` / `task_update` / `task_claim` / `task_resolve` / `task_verify` / `task_archive` / `task_cancel` |
+| 需求拆解 | `task_decompose` |
+| 调研上下文 | `task_preview_context` |
 | 池治理 | `task_terminate` / `task_intervene` / `task_arbitrate` |
 | 子代理上报 | `board_report` / `board_verdict` |
 
 > 管理工具仅主窗口可用（子代理调用会被拒绝）；`board_report`/`board_verdict` 是子代理的专用上报通道。
 > `board_report` 的 `kind` 三档：`complete`（交付完成）/ `escalate`（歧义上报等裁决）/ `progress`（里程碑进展，静默可见、不通知）。
+> `task_decompose` 只 spawn 一次性拆解官 run（计 Verifier 并发位、不占 Worker 位），提案由 host 物化为 draft 子卡——工具本身不建卡，用法见「拆解官工作流」。
+> `task_preview_context` 只预演调研注入清单（笔记全文 + 文件清单；不建卡、不派发），开工前用来确认材料够不够。
 
 ## 仓库结构
 
@@ -314,7 +337,7 @@ v1.6.0 起 host 端从单体 index.mjs（1487 行）拆为薄壳 + 7 个领域�
 | `store.mjs` | 持久化 | boardPath / rt / wt 原子落盘 / 跨重启继承 / fileLocks 串行化 / mutateLocked |
 | `notify.mjs` | 通知 | makeMsg / 歧义 25s 去抖 / 回执聚合 + 空闲门控 / 投递前过滤 |
 | `dispatch.mjs` | 派发引擎 | poolCycle / spawnOneShot / settleRun / 两级超时 / 孤儿回收 / 可续跑 Worker（continuable + 重启 reconcile + usage 水位线） |
-| `rpc.mjs` | 接口层 | RPC 路由 + 13 个 Agent 工具注册 |
+| `rpc.mjs` | 接口层 | RPC 路由 + 16 个 Agent 工具注册 |
 
 （store→dispatch 的循环依赖由 `deps.poolCycle` 晚绑定解开；index.mjs 对外 re-export 契约不变。）
 
