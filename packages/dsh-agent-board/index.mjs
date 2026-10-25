@@ -14,7 +14,7 @@
 // 共享闭包状态全部收进 apply 内的显式 state 对象，逐模块经参数注入（禁止跨模块隐式引用）。
 //
 // 兼容 re-export：对外导出契约不变（单测与历史引用直接 import 自本文件）。
-export { TASK_SIZE_CONTRACT, SUGGEST_SPLIT_TEXT, TEAM_SPLIT_RULE, TEAM_DECISION_TREE, TEAM_CONTEXT_PACKING, suggestSplitOf, withSplitHint, splitRuleOf } from './lib/policy.mjs'
+export { TASK_SIZE_CONTRACT, SUGGEST_SPLIT_TEXT, TEAM_SPLIT_RULE, TEAM_DECISION_TREE, TEAM_CONTEXT_PACKING, TEAM_DECOMPOSE_FLOW, suggestSplitOf, withSplitHint, splitRuleOf } from './lib/policy.mjs'
 export { findRunLog, readRunUsage, aggregateUsageSummary, effectiveTokens, taskEffectiveTokens, readMainWindowUsage, sizeBucketOf, runRoleOf, auditRunEntry, auditRunsCompleteness, attributeRejection, buildScoreboard, SCOREBOARD_MIN_SAMPLE, SIZE_BUCKET_SMALL_MAX, SIZE_BUCKET_MEDIUM_MAX, clusterRejections, REJECTION_CLUSTER_RULES, modelPerfHint, MODEL_HINT_MIN_RUNS, MODEL_HINT_MIN_PASS, MODEL_HINT_EFF_GAP, qualityChangeHints, QUALITY_CHANGE_PP, QUALITY_MIN_SAMPLE, QUALITY_WINDOW_DAYS } from './lib/usage.mjs'
 import { createSession } from './lib/session.mjs'
 import { createStore } from './lib/store.mjs'

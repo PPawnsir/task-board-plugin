@@ -1140,7 +1140,7 @@ export function createRpc(ctx, state, deps) {
     })
     handle('create-task', async function (args) { var sid = rpcSessionId(args); /* 短 id 防幻影板（task-muuf0o7a）：截断/不完整 sessionId 建出的板永远匹配不到活 root（每 15s 刷屏元凶），显式报错优于静默建幻影板；import- 前缀板由 isFullSessionId 放行 */ if (!isFullSessionId(sid)) return { ok: false, error: 'sessionId 不完整（疑似截断短 id），拒绝创建任务: ' + sid }; var actor = rpcActor(args); /* hooks 只许主窗口设置（角色门禁） */ if (args.hooks !== undefined && hooksDenied(actor)) return { ok: false, error: HOOKS_MAIN_ONLY }; return mutateLocked(sid, function (d) { var nHooks = null; if (args.hooks !== undefined) { var hn = normalizeHooks(args.hooks); if (hn.error) return { ok: false, error: hn.error }; nHooks = hn.hooks } if (args.id && d.tasks.find(function (x) { return x.id === args.id })) return { ok: false, error: 'duplicate id' }; if (args.dependsOn && args.dependsOn.length) { var derr = validateDeps(d, args.id || '(pending)', args.dependsOn); if (derr) return { ok: false, error: derr } }; var now = new Date().toISOString(); /* Team 模式护栏：draft 缺省跟随 teamMode（先补齐依赖/上下文再统一 publish）；显式 draft:false 保留为立即派发的逃生门 */ var asDraft = args.draft === undefined ? !!d.teamMode : !!args.draft; var t = { id: args.id || ('task-' + Date.now().toString(36)), title: args.title || 'Untitled', description: args.description || '', status: asDraft ? 'draft' : 'pending', priority: args.priority || 'medium', tags: args.tags || [], parentId: args.parentId || null, subtaskStrategy: null, assignMode: 'auto', assignee: null, context: { files: (Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : []), docs: [], instructions: args.instructions || '', notes: (typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : ''), relatedTasks: [], prerequisites: '' }, acceptance: args.acceptance || '', dependsOn: args.dependsOn || [], touches: normTouches(args.touches), pipeline: args.pipeline || '', claimedBy: null, claimedAt: null, createdAt: now, resolvedAt: null, verifiedAt: null, verifiedBy: null, archivedAt: null, resolution: null, waitingForTouches: null, messages: [], history: [{ from: 'created', to: asDraft ? 'draft' : 'pending', timestamp: now, actor: actor, note: asDraft ? 'created as draft' : 'created' }] }; if (nHooks && Object.keys(nHooks).length) t.hooks = nHooks; if (!t.pipeline) { t.pipeline = classifyPipeline(t); t.pipelineAuto = true }; d.tasks.push(t); t.lintWarnings = draftLint(t, draftLintIo(sid, d.ownerCwd)); /* 调研门禁 warning 族（与并行 UI 卡约定字段名 warning，core 纯函数统一口径）：空描述/无调研上下文/整树 glob 三类软提示合并为一条（；分隔），不拦截创建；字段可选，老 client 无感 */ var out = withSplitHint({ ok: true, task: t }, t, cfg(d).epicSplit); appendDispatchWarning(out, d, t); /* 派发预警（task-mvbealtf）：与 task_create 工具同口径，返回体瞬态提示不落卡 */ var warns = createTaskWarnings(t); attachContextSuggestions(out, warns, t.touches, existsInSession(sid)); if (warns.length) out.warning = warns.join('；'); return out }) })
     handle('list-children', async function (args) { var sid = rpcSessionId(args); var subs = ctx.subagents; if (!subs) return { ok: true, children: [] }; try { var list = await subs.listChildren(sid); var children = (list || []).map(function (c) { return { id: String(c.sessionId || c.id || ''), label: String(c.label || c.title || c.mode || '') } }).filter(function (c) { return c.id.length > 0 }); return { ok: true, children: children } } catch (e) { return { ok: true, children: [], error: String(e) } } })
-    // ===== #14 批量操作：archive（仅 resolved/cancelled）/ set-priority（全部）/ delete（真删，无 undo）=====
+    // ===== #14 批量操作：archive（仅 resolved/cancelled）/ set-priority（全部）/ delete（真删，无 undo）/ publish（仅 draft → pending）=====
     // delete op 与单任务 delete-task 走同一套 deleteGate 门禁（状态 + 未归档子任务），
     // done/skipped 语义与 archive 完全一致：门禁不过就进 skipped（附 reasons[id] 一行原因）。
     // 注意：批量删除是**真删**（从 tasks 数组移除），不产生 undo 快照——batch-undo 对 delete 无意义。
@@ -1174,7 +1174,9 @@ export function createRpc(ctx, state, deps) {
             if (['low', 'medium', 'high', 'critical'].indexOf(args.value) < 0) { skipped.push(id); return }
             t.priority = args.value; ah(t, t.status, t.status, actor, '批量设优先级: ' + args.value); done++
           } else if (args.op === 'publish') {
-            if (t.status !== 'draft') { skipped.push(id); return }
+            // 批量发布草稿（task-mvneoy1u 确认流）：复用单卡 publish 语义——仅 draft → pending（翻卡即入派发池）；
+            // 非 draft 进 skipped 并附原因（与 archive 的 'cannot archive' 同收口，客户端渲成「标题：原因」列表）。
+            if (t.status !== 'draft') { skip(id, '仅草稿可发布（当前状态 ' + t.status + '）'); return }
             t.status = 'pending'; ah(t, 'draft', 'pending', actor, 'batch publish'); done++
           } else { skipped.push(id) }
         })
@@ -1183,7 +1185,7 @@ export function createRpc(ctx, state, deps) {
         // 刻意不级联归档子卡：批量语义只动显式选中的 id（与单卡 archiveApply 的级联不同，保持老行为）。
         var parentsClosed = 0
         for (var ai = 0; ai < archived.length; ai++) { if (maybeAutoCloseParent(d, archived[ai])) parentsClosed++ }
-        // reasons 在 delete（deleteGate 门禁原因）与 archive（cannot archive）op 下有内容；
+        // reasons 在 delete（deleteGate 门禁原因）/ archive（cannot archive）/ publish（非草稿）op 下有内容；
         // 老客户端只读 skipped.length，多一个可选字段无感。
         var out = { ok: true, done: done, skipped: skipped, reasons: reasons }
         if (parentsClosed) out.parentsClosed = parentsClosed

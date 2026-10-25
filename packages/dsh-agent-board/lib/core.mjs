@@ -1236,9 +1236,11 @@ export function epicPrecheckNote(pre) {
 // 序列化口径（单测锁定）：
 //   - 只挑「驱动列表/详情渲染」的字段：id/status/priority/title/description/parentId/tags/
 //     claimedBy/claimedAt/resolvedAt/verifiedAt/archivedAt/lastError/lastProgress.text/
-//     frozen/stuckSince/escalation.question。
+//     frozen/stuckSince/escalation.question/reviewedAt/size/model。
 //     escalation 必须在内：新歧义要触发面板自动弹开，而 board_report escalate 只写
 //     escalation/messages/history，不动其他任何字段——漏掉它自动弹开就死了。
+//     size/model 必须在内（task-mvneoy1u）：详情页力度徽标与模型特例只读展示直读这两字段，
+//     对话式 task_update 调档后若 hash 不变，3s 轮询短路会让徽标长期显示旧值。
 //     childStats 由 tasks 现算，其输入（子任务 status/parentId）已随上述字段覆盖。
 //   - history/messages/usage/context 不参与：不驱动列表渲染，结算写账/进展消息若参与
 //     会让 hash 频繁抖动，短路失效。
@@ -1257,6 +1259,7 @@ export function tasksHash(tasks) {
       t.lastError, t.lastProgress && t.lastProgress.text,
       t.frozen ? '1' : '', t.stuckSince, t.escalation && t.escalation.question,
       t.reviewedAt,
+      t.size, t.model, // 力度路由卡级字段（详情页徽标/特例展示数据源，见上方口径注）
       t.reviewHint ? String(t.reviewHint.score) + ':' + (Array.isArray(t.reviewHint.reasons) ? t.reviewHint.reasons.join('|') : '') : '',
       t.lateVerdict ? (t.lateVerdict.verdict + ':' + t.lateVerdict.at) : ''
     ].join('\u0001'))

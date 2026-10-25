@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process'
 import * as core from '../lib/core.mjs'
 // 粒度治理（软闸门）住在 lib/policy.mjs（策略层，纯函数）、usage 聚合住在 lib/usage.mjs，
 // 均由 index.mjs 薄壳 re-export（对外契约不变），这里仍从 index.mjs 导入直接断言
-import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE, TEAM_DECISION_TREE, TEAM_CONTEXT_PACKING, splitRuleOf } from '../index.mjs'
+import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE, TEAM_DECISION_TREE, TEAM_CONTEXT_PACKING, TEAM_DECOMPOSE_FLOW, splitRuleOf } from '../index.mjs'
 import { aggregateUsageSummary, readRunUsage, findRunLog, effectiveTokens, taskEffectiveTokens } from '../index.mjs'
 import { createRpc } from '../lib/rpc.mjs'
 // no-root 刷屏根治（task-muuf0o7a）专项：会话层幻影板防线 + 派发层 root 闸门直调断言
@@ -1306,6 +1306,25 @@ test('粒度治理接线：工具描述/Team 提示词/双出口返回体均已�
   assert.equal((src.match(/withSplitHint\(\{ ok: true, task: t \}, t, cfg\(d\)\.epicSplit\)/g) || []).length, 2) // task_create 工具 + create-task RPC
   assert.match(src, /全量\|整体\|系统级\|全面\|重构\|所有模块\|整个/) // 史诗特征词表在位
   assert.match(src, /SPLIT_DESC_LIMIT = 500/)                        // 500 字符阈值在位
+})
+
+// ===== Team 提示词第 9 条：需求卡 → 拆解官 → 确认发布工作流引导（task-mvneoy1u）=====
+test('Team 提示词第 9 条（TEAM_DECOMPOSE_FLOW）：文案要点 + dispatch 注入位置（splitRuleOf 之后恒拼接）', () => {
+  const src = hostSrc()
+  // 文案要点：draft 需求卡（留原文）→ task_decompose 拆解官提案 → 呈现一览 → 确认/调档 → 统一 publish
+  assert.match(TEAM_DECOMPOSE_FLOW, /^9\. 需求卡工作流/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /draft 需求卡（保留需求原文）/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /task_decompose/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /标题\/档位\/模型\/touches/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /task_update 改 size\/model/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /统一 publish/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /最后防线/)
+  // 注入位置（源码级）：dispatch 在 splitRuleOf(...) 之后恒拼接第 9 条——
+  // 不经 splitRuleOf 出口（那是 epicSplit 门禁管的 6~8 条），第 9 条是流程引导不受其门禁
+  assert.ok(src.includes("splitRuleOf(epicSplitOn(String(agent.id))) + '\\n' + TEAM_DECOMPOSE_FLOW"))
+  // 第 9 条不进 splitRuleOf 出口（出口仍只拼 6~8 条，epicSplit=false 时整条不出现）
+  assert.ok(!splitRuleOf(true).includes(TEAM_DECOMPOSE_FLOW))
+  assert.ok(!splitRuleOf(false).includes(TEAM_DECOMPOSE_FLOW))
 })
 
 // ===== create-task 空 description 软警告（E 卡）=====
@@ -4234,6 +4253,10 @@ test('tasksHash: 关键字段变 → hash 变；非关键字段（history/messag
   // escalation 必须入 hash：board_report escalate 只写 escalation/messages/history、
   // 不动其他任何字段——漏掉它「新歧义自动弹开面板」会被 hash 短路吞掉
   assert.notEqual(core.tasksHash([mkTask({ id: 'a', escalation: { question: '歧义', at: 'x', by: 'w' } })]), h0)
+  // size/model 必须入 hash（task-mvneoy1u）：详情页力度徽标/模型特例直读这两字段，
+  // 对话式 task_update 调档后 hash 不变会被 3s 轮询短路吞掉，徽标长期显示旧值
+  assert.notEqual(core.tasksHash([mkTask({ id: 'a', size: 'heavy' })]), h0)
+  assert.notEqual(core.tasksHash([mkTask({ id: 'a', model: 'p/m-x' })]), h0)
   // 非关键字段不动 hash（不驱动列表渲染，参与会让结算写账/进展消息引发空渲染抖动）
   const t1 = mkTask({ id: 'a' }); t1.history.push({ from: 'pending', to: 'in-progress', timestamp: 'x', actor: 'y', note: '' })
   assert.equal(core.tasksHash([t1]), h0)
@@ -4891,11 +4914,17 @@ test('epicSplit 行为①：Team 提示词第 6~8 条随门禁注入/消失（�
   assert.ok(on.includes(TEAM_SPLIT_RULE)); assert.match(on, /大任务必须拆分/); assert.match(on, /checkParentAuto/)
   assert.ok(on.includes(TEAM_DECISION_TREE)); assert.match(on, /拆解决策树/)
   assert.ok(on.includes(TEAM_CONTEXT_PACKING)); assert.match(on, /上下文装配/)
+  // 第 9 条需求卡工作流（task-mvneoy1u）：随注入段出现，且注入位置在 splitRuleOf 出口内容（第 8 条）之后
+  assert.ok(on.includes(TEAM_DECOMPOSE_FLOW)); assert.match(on, /需求卡工作流/)
+  assert.ok(on.indexOf(TEAM_DECOMPOSE_FLOW) > on.indexOf(TEAM_CONTEXT_PACKING), '第 9 条注入位置在 splitRuleOf 之后')
   const off = textOf(false)
   // 第 6~8 条整条消失（连 parentId/checkParentAuto 都不再出现），基础 1~5 条引导一字不少
   assert.doesNotMatch(off, /大任务必须拆分|拆解决策树|上下文装配/)
   assert.doesNotMatch(off, /parentId=父卡 id|checkParentAuto|epic 父卡/)
   assert.match(off, /Team 模式已开启/); assert.match(off, /5\. Team 模式下 task_create 默认建为草稿/)
+  // 第 9 条**不受 epicSplit 门禁**（流程引导不是劝拆）：6~8 条整条消失时它仍在
+  assert.ok(off.includes(TEAM_DECOMPOSE_FLOW), 'epicSplit=false 时第 9 条仍注入')
+  assert.match(off, /确认或调档（task_update 改 size\/model）后统一 publish/)
   assert.equal(on.replace(splitRuleOf(true), ''), off.replace(splitRuleOf(false), '')) // 除第 6~8 条外逐字相同
 })
 
@@ -6107,6 +6136,54 @@ test('巡检③：batch-op archive 跳过附 reasons（id → 原因）且 clien
   const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   assert.match(built, /it\.title \+ '：' \+ it\.reason/)
   assert.match(built, /'跳过原因'/)
+})
+
+// ===== 确认流批量发布（task-mvneoy1u）：batch-op publish 只翻 draft，其他状态 skipped 附原因 =====
+test('batch-op publish：仅 draft → pending（复用单卡语义），非 draft 进 skipped 附原因', async () => {
+  const a = mkTask({ id: 'pb-a', status: 'draft' })
+  const b = mkTask({ id: 'pb-b', status: 'pending' })
+  const c = mkTask({ id: 'pb-c', status: 'in-progress' })
+  const e = mkTask({ id: 'pb-e', status: 'resolved' })
+  const board = mkBoard([a, b, c, e])
+  const h = mkRpcHandlers(board)
+  const r = await h['batch-op']({ op: 'publish', ids: ['pb-a', 'pb-b', 'pb-c', 'pb-e', 'pb-x'] })
+  assert.equal(r.ok, true)
+  assert.equal(r.done, 1)
+  assert.deepEqual(r.skipped, ['pb-b', 'pb-c', 'pb-e', 'pb-x'])
+  // 翻卡语义与单卡 publish 同口径：draft → pending + 流转审计行
+  assert.equal(a.status, 'pending')
+  assert.ok(a.history.some((x) => x.from === 'draft' && x.to === 'pending' && /batch publish/.test(x.note || '')))
+  assert.equal(b.status, 'pending') // 本就是 pending，未被误翻
+  // 跳过附原因（客户端 reasonRows 渲成「标题：原因」列表）；不存在的 id 走统一 skip 收口
+  assert.match(r.reasons['pb-b'], /仅草稿可发布（当前状态 pending）/)
+  assert.match(r.reasons['pb-c'], /仅草稿可发布（当前状态 in-progress）/)
+  assert.match(r.reasons['pb-e'], /仅草稿可发布（当前状态 resolved）/)
+  assert.equal(r.reasons['pb-x'], '任务不存在')
+  // 全 draft 批：整批翻 pending、零跳过
+  const board2 = mkBoard([mkTask({ id: 'd1', status: 'draft' }), mkTask({ id: 'd2', status: 'draft' })])
+  const r2 = await mkRpcHandlers(board2)['batch-op']({ op: 'publish', ids: ['d1', 'd2'] })
+  assert.equal(r2.done, 2); assert.deepEqual(r2.skipped, []); assert.deepEqual(r2.reasons, {})
+  assert.equal(board2.tasks[0].status, 'pending'); assert.equal(board2.tasks[1].status, 'pending')
+})
+
+// ===== 卡详情 size 徽标 + model 特例只读展示（task-mvneoy1u；v1 不做 GUI 编辑，调档走对话 task_update）=====
+test('卡详情 status 行：size 徽标（轻/标/重，无 size 不显示）+ model 特例只读展示（源码 + 组装产物）', () => {
+  const src = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  // size 徽标紧随状态徽章、在管线下拉之前（status/标签行挂点）
+  assert.ok(src.indexOf("statusLabels[task.status] || task.status), task.size ? React.createElement('span'") > 0, 'size 徽标紧随状态徽章')
+  // 无 size 不显示（条件三元 null 分支）；轻/标/重 映射 + 只读调档指引 title
+  assert.match(src, /\(\{ light: '轻', standard: '标', heavy: '重' \}\)\[task\.size\] \|\| task\.size\) : null/)
+  assert.match(src, /'力度档位 size=' \+ task\.size/)
+  assert.match(src, /调档走对话 task_update，v1 不做 GUI 编辑/)
+  // model 特例：存在才显示模型名（只读展示，改/删走对话 task_update）
+  assert.match(src, /task\.model \? React\.createElement\('span'/)
+  assert.match(src, /'卡级模型特例 model=' \+ task\.model/)
+  assert.match(src, /'🎯 ' \+ task\.model\) : null/)
+  // 组装产物同步（pretest 已跑 build-client）
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /力度档位 size=/)
+  assert.match(built, /卡级模型特例 model=/)
+  assert.match(built, /\{ light: '轻', standard: '标', heavy: '重' \}/)
 })
 
 // ===== 巡检三连②（详情编辑 / 表单标签 / 恢复预警）：优先级+标签可编辑 / 标签进 create 载荷 / 恢复 confirm 门禁 =====
