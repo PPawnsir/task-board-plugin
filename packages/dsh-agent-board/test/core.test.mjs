@@ -3942,8 +3942,8 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
   // depsSatisfied（task-mv9yupm4，spawn 落闸锁内补验依赖）、
   // Verifier 验收员加餐常量（VERIFIER_PERSONA/VERIFIER_TOOL_FILTER，task-muy3gm03）
   assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER \} = core/)
-  // rpc.mjs 解构表尾部再随建卡派发预警（appendDispatchWarning，task-mvbealtf）扩展
-  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint, appendDispatchWarning \} = core/)
+  // rpc.mjs 解构表尾部再随建卡派发预警（appendDispatchWarning，task-mvbealtf）、力度路由档位表（TASK_SIZES，task-mvnemvf5）扩展
+  assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint, appendDispatchWarning, TASK_SIZES \} = core/)
   // 既有「全子任务 resolved → 父 verifying」逻辑不动（checkParentAuto 仍在 verifyApply 链路；
   // 但其内部已委托共享 helper maybeAutoCloseParent——单一判定口径，core.mjs 不在 hostSrc 清单，单独读）
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')

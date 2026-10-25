@@ -101,7 +101,7 @@ export function createDispatch(ctx, state, deps) {
     // 若 sendMessage 的登记被重试一次，就会出现两条同 id 且都停在 running 的记录（续跑资格与 usage 水位线
     // 双双错乱）——故「同 id 已有未落定的条目」时不再追加；而**首派/续跑回退 fresh spawn 一律追加新条目**
     // （同一 childId 的多次派发各占一条，这是 usage 水位线分段的前提，见 seekSeqOf）。
-    async function recordRunHistory(sid, taskId, role, runId, model, hardMin, continuable, resume) {
+    async function recordRunHistory(sid, taskId, role, runId, model, hardMin, continuable, resume, modelSource) {
       try {
         await mutateLocked(sid, function (d) {
           var t = d.tasks.find(function (x) { return x.id === taskId })
@@ -114,6 +114,8 @@ export function createDispatch(ctx, state, deps) {
             }
           }
           var e = { role: role, id: runId, at: new Date().toISOString(), model: model || '', outcome: 'running', hardMin: hardMin || 120 }
+          // 力度路由（task-mvnemvf5）：本次实际取模来源 card/lane/board/parent 随 run 留档，便于审计
+          if (modelSource) e.modelSource = modelSource
           if (continuable) e.continuable = true
           if (resume) e.resume = true
           t.runs.push(e)
@@ -263,10 +265,31 @@ export function createDispatch(ctx, state, deps) {
       // 只有闸门外的直接调用（如 dispatch-task RPC 指定了无 root 的 sid）才会触发此报错。
       var parent = rootForSession(sid); if (!parent) { console.error('[task-board] no root agent for session ' + sid + ', skip spawn'); return null }
       var providerName = pickProvider(); if (!providerName) { console.error('[task-board] no subagent provider'); return null }
+      // ===== 力度路由四级取模链（task-mvnemvf5 地基）：card → lane → board → parent =====
+      // 优先级：t.model（卡级特例，最高）→ t.size 查 cfg(dsnap).laneModels[size][roleKey]（非空才用）→
+      //   dsnap.workerModel/verifierModel（板级，现状兜底）→ 父模型（modelOverride='' = 不挂 agentOptions，现状）。
+      // 每个候选照常过 badModels 熔断：命中即跳过该候选降下一跳（原「熔断即回父模型」改为「熔断即降一级」）。
+      // modelSource 记实际命中跳（card/lane/board/parent），随 run 留档落卡便于审计。
+      // hook run（hook-pre/hook-post）不进链：维持现状恒用父模型（板级 worker/verifier 模型对 hook 无语义）。
       var modelOverride = ''
+      var modelSource = 'parent'
       var dsnap = await rt(sid)
-      if (role === 'verifier') { modelOverride = (typeof dsnap.verifierModel === 'string' && dsnap.verifierModel.trim()) ? dsnap.verifierModel.trim() : ''; if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited, using parent model'); modelOverride = '' } }
-      else if (role === 'worker') { modelOverride = (typeof dsnap.workerModel === 'string' && dsnap.workerModel.trim()) ? dsnap.workerModel.trim() : ''; if (modelOverride && badModels[modelKey(sid, modelOverride)]) { console.error('[task-board] model ' + modelOverride + ' circuited, using parent model'); modelOverride = '' } }
+      if (role === 'worker' || role === 'verifier') {
+        var roleKey = role === 'verifier' ? 'verifier' : 'worker'
+        var cands = []
+        var tm = typeof t.model === 'string' ? t.model.trim() : ''
+        if (tm) cands.push([tm, 'card'])
+        var sz = typeof t.size === 'string' ? t.size : ''
+        var laneCfg = cfg(dsnap).laneModels
+        if (sz && laneCfg[sz]) { var lv = typeof laneCfg[sz][roleKey] === 'string' ? laneCfg[sz][roleKey].trim() : ''; if (lv) cands.push([lv, 'lane']) }
+        var bm = role === 'verifier' ? dsnap.verifierModel : dsnap.workerModel
+        bm = typeof bm === 'string' ? bm.trim() : ''
+        if (bm) cands.push([bm, 'board'])
+        for (var mi = 0; mi < cands.length; mi++) {
+          if (badModels[modelKey(sid, cands[mi][0])]) { console.error('[task-board] model ' + cands[mi][0] + ' (' + cands[mi][1] + ' 级) circuited, trying next level'); continue }
+          modelOverride = cands[mi][0]; modelSource = cands[mi][1]; break
+        }
+      }
       var pack = ''
       try { pack = readContextPack(t) } catch (e) {
         console.error('[task-board] context pack read failed:', String(e))
@@ -366,8 +389,8 @@ export function createDispatch(ctx, state, deps) {
       // rec.run 只在一次性路径存在（dispose/result 的来源）；continuable 路径 rec.continuable=true，
       // 用 rec.childId 定位 host 事件、dispose 走 drain（卡1 先不 interrupt，见 settleContinuable）。
       var rec = useContinuable
-        ? { id: childId, childId: childId, continuable: true, ran: false, run: null, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, settled: false }
-        : { id: String(run.id), run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, settled: false }
+        ? { id: childId, childId: childId, continuable: true, ran: false, run: null, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, settled: false }
+        : { id: String(run.id), run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, settled: false }
       // ===== 新宿主 continuable 结算兜底臂（v0.2.1 实证 2026-10-24：activation.result 只认拆除落定）=====
       // 原形：rate-limit 子会话 turn/end error → 管理器拆除 activation → result 落定——
       // 但 agent/status 事件面在 v0.2.1 的 Scoped 事件体系下对插件全局订阅不再可达（子会话死亡 8 分钟零结算实证），
@@ -422,7 +445,7 @@ export function createDispatch(ctx, state, deps) {
       // **必须 await**（task-muwkhqf8）：上报通道的收尾（settleReportedRun → closeRunHistory）要求在
       // 「记录已落卡」之后才能关账——fire-and-forget 下极短任务（worker 秒级 board_report）会撞上竞态：
       // 关账先落地 → 找不到条目 → closeRunHistory 空转，run 记录依旧停在 running。
-      await recordRunHistory(sid, t.id, role, String(rec.id), modelOverride, c.hardTimeoutMin, !!rec.continuable)
+      await recordRunHistory(sid, t.id, role, String(rec.id), modelOverride, c.hardTimeoutMin, !!rec.continuable, false, modelSource)
       // ===== 两级超时臂（软提醒 + 硬超时结算）：本体在 armTimeouts，fresh spawn 与续跑共用 =====
       armTimeouts(sid, rec, t, c)
       return rec

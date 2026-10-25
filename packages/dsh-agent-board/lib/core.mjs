@@ -136,6 +136,26 @@ export function classifyPipeline(t) {
 //           ② 验收落账（settleVerifier/board_verdict）不挂 t.verification.userTest；
 //           ③ client 详情页自测指南块与报告「本版自测清单」段整块不渲染。
 //   消费点同为 spawn/结算时读 cfg 快照，无需热路径缓存。
+// ===== 力度路由表（task-mvnemvf5 地基）：laneModels 三档 × 双角色 =====
+// 形态固定为 { light/standard/heavy: { worker, verifier } }，空串槽位 = 继承下一级
+// （取模链：卡级 t.model → laneModels[t.size][role] → 板级 workerModel/verifierModel → 父模型）。
+// 脏值收敛：非对象/未知档/未知角色键/非字符串槽位一律归一为同形空串——消费面（spawnOneShot 取模链、
+// get-tasks 透出、set-board-config 部分合并基座）只认这一个形态，不各自兜底。
+// 卡级字段 t.size（∈ TASK_SIZES，可缺省）与 t.model（可缺省字符串）不动存量卡：缺字段=标档语义，零迁移。
+export var TASK_SIZES = ['light', 'standard', 'heavy']
+export function normalizeLaneModels(v) {
+  var out = { light: { worker: '', verifier: '' }, standard: { worker: '', verifier: '' }, heavy: { worker: '', verifier: '' } }
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    for (var i = 0; i < TASK_SIZES.length; i++) {
+      var lane = v[TASK_SIZES[i]]
+      if (lane && typeof lane === 'object' && !Array.isArray(lane)) {
+        if (typeof lane.worker === 'string') out[TASK_SIZES[i]].worker = lane.worker.trim()
+        if (typeof lane.verifier === 'string') out[TASK_SIZES[i]].verifier = lane.verifier.trim()
+      }
+    }
+  }
+  return out
+}
 export function cfg(d) {
   var soft = Math.max(1, Math.min(480, d.softTimeoutMin || 30))
   var hard = Math.max(soft, Math.min(1440, d.hardTimeoutMin || 120))
@@ -143,7 +163,7 @@ export function cfg(d) {
   var crd = d.cleanupRetentionDays
   if (typeof crd !== 'number' || !(crd >= 1)) crd = 7
   crd = Math.max(1, Math.min(90, Math.round(crd)))
-  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, cleanupRetentionDays: crd, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false, workerContinuable: d.workerContinuable !== false, verifyUserGuide: d.verifyUserGuide !== false }
+  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, cleanupRetentionDays: crd, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false, workerContinuable: d.workerContinuable !== false, verifyUserGuide: d.verifyUserGuide !== false, laneModels: normalizeLaneModels(d.laneModels) }
 }
 
 // ===== 看板数据目录（跨重启继承用）=====
@@ -160,7 +180,7 @@ export function boardHome() { return path.join(boardDirName(), '.dsh') }
 // ownerCwd（跨重启继承）：创建该看板的会话工作区路径，继承判定全靠它——取不到就省略字段
 // （绝不落空串，否则「路径读不到的多个会话」会被误判成同一工作区）。
 export function seed(sid, ownerCwd) {
-  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, poolStatus: { workers: [], verifiers: [] }, tasks: [], configLog: [] }
+  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', laneModels: normalizeLaneModels(null), softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, poolStatus: { workers: [], verifiers: [] }, tasks: [], configLog: [] }
   if (typeof ownerCwd === 'string' && ownerCwd) d.ownerCwd = ownerCwd
   return d
 }
@@ -182,6 +202,9 @@ export function normalizeBoard(d) {
     if (typeof d.epicSplit !== 'boolean') d.epicSplit = true
     if (typeof d.workerContinuable !== 'boolean') d.workerContinuable = true
     if (typeof d.verifyUserGuide !== 'boolean') d.verifyUserGuide = true
+    // 力度路由表（task-mvnemvf5）：缺字段/脏值 → 归一同形（空串=继承下一级），老看板读入即满足透出形态。
+    // 刻意只动板级 laneModels：卡级 t.size/t.model 不在此补字段——缺字段=标档语义，存量卡零迁移。
+    d.laneModels = normalizeLaneModels(d.laneModels)
     // 配置审计行（实证 n-mv8ki92qnhdq：verifierModel 神隐回退零留痕无从审计）：老看板缺字段/脏值 → 补空数组；
     // 写入由 set-board-config 成功时追加 {key, from, to, actor, at}（截尾 50 条），此处只兜底形态。
     if (!Array.isArray(d.configLog)) d.configLog = []
