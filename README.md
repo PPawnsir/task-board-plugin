@@ -41,6 +41,8 @@
 | **0.1.7 ~ 0.1.7-x**（含 rc） | **≥ 1.2.2（必须）** | 0.1.7 会话日志升级为 format v4：插件消息 `source.kind` 必须是生产者自有 kind。1.2.1 及更早会在**任务完成/阻塞回执**落盘时抛 `SessionFormatError: format v4 message requires a producer-owned source kind`，并连带使主窗口当前轮次失败（表现为「本轮运行失败」）；同时「跳转会话」因宿主移除 `sessions.open` 而失效（控制台 `sessionsSvc.open is not a function`），卡片活动心跳读不到 v4 日志（`session.v4.jsonl.zstd`） |
 | 0.1.5-rc.1 ~ 0.1.6 | ≤ 1.2.1 | 1.2.2 起按 0.1.7 协议编写（v4 source kind、`uiWorkspace.openSession` 跳转），旧宿主未做回归验证，建议停留 1.2.1 |
 
+> 当前版本 **v1.9.0** 已在宿主 **0.2.1-rc.3** 全量实测：640 断言全绿 + 拆解官/力度路由/健康嗅探真机 E2E 全链。
+
 ```sh
 dsh plugin --profile web add dsh-agent-board@latest   # 0.1.7+/0.2.x 宿主（推荐）
 dsh plugin --profile web add dsh-agent-board@1.2.1    # 0.1.5/0.1.6 宿主
@@ -113,10 +115,12 @@ dsh plugin --profile web remove dsh-agent-board
 
 ## 功能总览
 
-**核心能力一页速览**（`★` 为 v1.7.5–1.8.4 新栈）：
+**核心能力一页速览**（`★` 为 v1.7.5–1.8.4 新栈；`☆` 为 v1.9.0 新栈）：
 
 - **看板**：六列状态流、拖拽 / 多选批量 / 文本·优先级·标签筛选、归档留档、会话隔离
 - **派发**：一次性 Worker / 独立 Verifier、依赖调度（DFS 环检测）、touches 文件级排他、可续跑 Worker、Team 托管、**spawn 落闸锁内重验**（spawnGateOk：claim 占位与落闸决策读同一把锁的同一份快照，terminate/dependsOn 后补 落在 spawn 在途窗口即弃权——竞态与后补依赖双双根治）、**高优干预分态**（intervene 无活跃 run 时区分「续跑窗口，干预随续跑注入」与「真无 run」，返回体带 state 字段）、**建卡派发预警**（将自动派发时 lintWarnings 瞬态提示「约 1s 内被领取，想占位请 draft:true」）、**宿主 spawn API 双兼容**（v0.2.1 宿主把 `subagents.start/startContinuable` 统一重构为 `startActivation(spec)`——能力探测自动选路：新契约按 `delivery` 语义分发（continuable=`parent` 结算留言 / 一次性=`caller` 只回 result），Activation 适配旧 run 形状下游零改动；老宿主逐字走旧双路径）+ **continuable 结算兜底臂**（`activation.result` 在子会话被宿主拆除时落定即接失败结算——rate-limit/模型崩溃的死子不再挂到硬超时）
+- **智能调度** `☆`：**拆解官工作流**（自然语言需求卡 → `task_decompose` 拆解官先调研后提案（outputSchema 强箍，子卡必带档位/touches/验收命令）→ 主窗口呈现、你确认调档 → 逐张 publish；拆解官在池条「🧩 拆解中」与源卡徽标可见）+ **力度路由**（轻/标/重三档 × Worker/Verifier 六条有序链，四级取模链：卡级特例→档位链→板级→父模型，每跳过健康闸）+ **备用模型链** `fallbackModels`（额度到顶/故障先跨供应商同档切换，链尽才降档）+ **冷却与熔断**（限流带重置时间解析、连接/网关故障 10 分钟短窗自恢复）+ **模型健康嗅探**（`llm.stream` 极简探测定时扫已配置模型，统一 modelHealth 视图——冷却/熔断/近 5 次 run 聚合，弹层链芯片带 🟢🟡🔴⚪ 健康点，事前调度可见）
+- **执行纪律面** `☆`：**计划闸口**（Worker 动笔前报「计划改动」清单，越界+撞他卡锁双查警示，点名持锁卡）+ **仲裁扩权入锁**（`task_arbitrate` 的 `expandTouches` 把放行文件并入有效锁集+冲突预检+hold 撞锁自动等锁复工）+ **续跑健康闸**（病模型续跑自动改 fresh spawn、宿主秒拆喂熔断、死会话哨兵 5s 即重派）+ **sizeHint 动态调档**（Worker 执行中自报档位修正，下次 spawn 生效）+ **opsLog 人工留痕**（GUI/脚本写集落盘截尾 50 条 + Team 注入「最近人工操作」摘要）
 - **验收治理** `★`：硬性验收脚本独立复跑、驳回全量带回重派、Verifier 自测指南（userTest）、风险队列「待你过目」、验收时序防护（Verifier 在场时主窗口抢批需显式 `force:true`；有活跃 run 的卡禁止归档；Verifier 迟到结论落 `lateVerdict` 留痕+直投告警）、**迟到 verdict 三保险**（①入参校验：`verdict` 非 approved/rejected 拒收并返回重调指引——漏带字段不再被当驳回落账；②通知分态：approved 迟到=「✅ 迟到复核·全过追认」notice 级，🚨「迟到驳回」只留给真 rejected；③指纹去重：同 taskId+by+verdict 只投一次，重复落账零重复通知）
 - **度量** `★`：Token 消耗（总量 / 有效 / 缓存读，按模型·按任务·按日）+ 记分卡（模型表现 / 质量趋势 / 驳回聚类）
 - **可运维性** `★`：运行时健康自检（派发冻结 / 结算停滞告警）、异常驱动审视（风险队列 / 质量异动告警 / 批次摘要）、起草 lint、数据安全（原子写盘 / 腐坏隔离 / 自动 salvage）、**僵尸 run 留档清扫**（host 重启后「落定卡上的 running 无 endedAt 留档」在派发周期自动关账 `stale-closed` + 清认领位，归档门禁不再被幻影 run 永久拦截）、**子会话生命周期收口**（一次性 run 落定/迟到 verdict 落账后主动 interrupt 子会话——「结算≠停止」空转根治；continuable 收紧为「续跑位真在本 child 手上」才豁免，残影 Worker 无处藏身）、**terminate 三保险**（no-rec 也按认领位盲杀补刀 + interrupt 失败 err 级可见化 + `hold:true` 原子「终止+转手动」）、**配置审计**（set-board-config 成功写入落板级 configLog {key,from,to,actor,at} 截尾 50 条；模型下拉两段式选中≠保存）
@@ -230,7 +234,7 @@ draft → pending → in-progress → verifying → resolved → archived
 
 一句话：卡级 `size` 不是标签，是**路由键**——派发时按它查板级 `laneModels` 表定模，不用每张卡手填模型。
 
-- **怎么调档**：对话里 `task_update taskId=... size='heavy'`（`light` / `standard` / `heavy`；空串 `''` = 清除、回标档语义；非法值拒写）。建卡后随时可调，拆解出的子卡也可逐张改；卡面 size 徽章只读——GUI 不编辑档位，调档统一走对话（避免误点改档）。
+- **怎么调档**：对话里 `task_update taskId=... size='heavy'`（`light` / `standard` / `heavy`；空串 `''` = 清除、回标档语义；非法值拒写）照常可用，且 GUI 三处可达：新建表单档位下拉、详情页档位下拉直调、卡列表「轻/标/重」徽标（未设档显示灰「标」）；**Team 托管板建卡/发布必须显式设档**（缺档拒建拒发，错误文案带三档语义），非 Team 板零约束；拆解出的子卡每张必带档（拆解官 schema 硬约束）。
 - **怎么配表**：「模型路由」弹层（工具栏 cpu 图标）「**力度路由**」小节＝三档 × Worker/Verifier **共 6 条有序链编辑器**（下拉添加+芯片 ×/↑ 排序，改动即写）；空链 =「继承板级」（继承上方 `workerModel` / `verifierModel` 行）。写通道 `set-board-config key='laneModels'`，**部分合并**——只合显式给出的槽位，非法模型整体拒写不留半截，每次写入落 configLog 审计行。**档位槽支持有序数组=同档优先序**：槽位值允许字符串（单模）或有序字符串数组（第一位=首选，派发按序取首个健康模型——首选冷却/熔断则次选赢，槽内全病照旧走备用链→降档→父模型）；GUI 为链式编辑器（`task-mvokikl3`：下拉添加+芯片 × 移除/↑ 前移，读写整个有序数组，备用模型链同款）。
 - **怎么读结果**：取模链四级，自上而下 ① **卡级 `model` 特例**（最高）→ ② **档位 lane 槽** → ③ **板级 `workerModel` / `verifierModel`** → ④ **父模型**；每跳照常过熔断，命中熔断降下一跳（限流冷却期同样按 heavy→standard→light 降档取模）。实际命中跳随 run 落 `modelSource` 留档（审计「这张卡为什么用了这个模型」），档位随 run 落 `size`。
 - **怎么用来看账**：记分卡「**按档位**」小表＝三档 × runs/驳回/异常/token（归桶键 = `run.size`；无 size 老 run 归标档、脏值收敛标档，零迁移），用来回答「轻/标/重哪档性价比最高、该给哪档配更强模型」。
