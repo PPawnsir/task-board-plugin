@@ -1876,6 +1876,27 @@ export function createDispatch(ctx, state, deps) {
             } catch (e) { console.error('[task-board] 回收判定失败 (task ' + (t && t.id) + '):', String(e)) }
           })
         } catch (e) { console.error('[task-board] 回收段异常（本轮跳过回收，派发照常）:', String(e)) }
+        // ①.5 等锁自动复工（task-mvonytz3⑤，回应用户戳深②「挂起等锁全手动、靠人脑盯梢」）：
+        // task_arbitrate action=hold 且 expandTouches 撞锁的卡落 waitingLock:{files,heldBy,at}（与 frozen 共存）。
+        // 每轮重查等锁文件的他卡持锁（口径=core.planLockConflicts：有效锁集 touches∪extraTouches，
+        // 持锁卡 resolved/cancelled/archived 即放）——全部释放 → 自动解冻回派发池：解冻发生在
+        // ② pickDispatch 之前，本卡当轮即可被选中重派（裁决答案在 messages 里，随 prompt 注入）。
+        // 兜底：heldBy 卡永不再持（如已 resolved 而冻结卡一直没被扫到）由每轮扫描兜住；
+        // 手动 unfreeze 会清 waitingLock（rpc doUnfreezeTask），人工放行永远优先。
+        try {
+          for (var wi = 0; wi < d.tasks.length; wi++) {
+            var wt0 = d.tasks[wi]
+            try {
+              if (!wt0 || !wt0.frozen || !wt0.waitingLock || !Array.isArray(wt0.waitingLock.files) || !wt0.waitingLock.files.length) continue
+              if (core.planLockConflicts(d, wt0.id, wt0.waitingLock.files).length) continue // 仍有他卡持锁 → 继续等
+              var wl0 = wt0.waitingLock
+              delete wt0.waitingLock
+              delete wt0.frozen; delete wt0.frozenAt; delete wt0.frozenBy
+              ah(wt0, wt0.status, wt0.status, 'system', '锁已释放自动复工（等锁文件 ' + wl0.files.join('、') + ' 已无他卡持锁），重新进入派发池')
+              info.push('lock-resume ' + wt0.id)
+            } catch (e) { console.error('[task-board] 等锁复工判定失败 (task ' + (wt0 && wt0.id) + '):', String(e)) }
+          }
+        } catch (e) { console.error('[task-board] 等锁复工扫描异常（本轮跳过）:', String(e)) }
         // ② 派发决策 + 占位 claim（worker 仅 auto；verifier 两种模式都跑）
         try {
           var capW = isAuto ? Math.max(0, c.maxWorkers - activeW) : 0

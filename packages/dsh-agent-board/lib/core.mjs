@@ -132,6 +132,33 @@ export function planOutsideTouches(touches, files) {
   return out
 }
 
+// ===== 「撞他卡有效锁」判定（task-mvonytz3，冲突三时刻之「运行中漂移」+ 等锁自动复工共用）=====
+// 计划/扩权清单逐条 vs 他卡有效锁集（touches ∪ extraTouches；持锁口径唯一出处=holdsFiles：
+// in-progress+claimedBy / verifying，resolved/cancelled/archived 即放）。本卡自身排除（taskId）。
+// 只供警示与等锁判定，绝不阻断——硬拦写盘不在看板能力面，残余由验收 diff 审计 + 主窗口提交纪律兜底。
+// 消费点三处同口径：① task_arbitrate expandTouches 冲突预检 ② 计划闸口双查（planGateApply）
+// ③ poolCycle 等锁自动复工扫描（waitingLock 释放判定）。
+// 返回 [{ file, holders: [{ id, status }] }]（file 为归一后的路径；holders 按 tasks 顺序）。
+export function planLockConflicts(d, taskId, planFiles) {
+  var out = []
+  if (!d || !Array.isArray(d.tasks)) return out
+  var list = Array.isArray(planFiles) ? planFiles : []
+  if (!list.length) return out
+  var holds = holdsFiles(d)
+  for (var i = 0; i < list.length; i++) {
+    var f = normTouch(list[i])
+    if (!f) continue
+    var holders = []
+    for (var j = 0; j < holds.length; j++) {
+      var h = holds[j]
+      if (!h || h.id === taskId) continue
+      if (overlapsTouches([f], h.touches)) holders.push({ id: h.id, status: h.status || '' })
+    }
+    if (holders.length) out.push({ file: f, holders: holders })
+  }
+  return out
+}
+
 // ===== 依赖校验（#18）=====
 // 存在性 + 自引用 + DFS 环检测；返回错误消息或 null
 export function validateDeps(d, taskId, deps) {
@@ -1077,23 +1104,43 @@ export function buildHookPrompt(epic, phase, childTasks) {
 //   ② 史诗 post-hook：提交动作收进任务生命周期（post=done 才收口 epic），提交可追溯、可审计。
 //   锁只表达「文件正在被写」，「改动尚未提交」由上面两条承接——否则 resolved 卡长期不归档
 //   会一直堵住同批文件、把本可并行的批次全串行化，这正是本次回调要消除的代价。
-// 返回 [{id, touches}]，id 用于 blockedTouches.conflicts 展示"在等谁"。
+// ===== 仲裁扩权入锁（task-mvonytz3，用户 2026-10-26 实证缝隙：运行中被仲裁扩权的文件不进锁注册表）=====
+// 卡新增 extraTouches 运行时字段（仅 task_arbitrate expandTouches 可写，角色门禁同 hooks；独立于
+// 创建时声明的 touches——touches 保持审计原值不污染）。读侧统一按「有效锁集 = touches ∪ extraTouches」
+// 取：① holdsFiles（持锁集合）② touchesConflict（候选比对侧）③ pickDispatch 同轮动持——
+// 扩权登记即刻参与锁语义。释放零接线：持锁两态口径不变（in-progress+claimedBy / verifying），
+// 卡 resolved/cancelled/archived 即随状态放锁（extraTouches 字段本体留卡作审计轨，只是不再参与锁判定）。
+// 无扩权时行为逐字不变：无 extraTouches 的卡本函数原样返回 touches 引用（零新对象零新口径）。
+export function effectiveTouches(t) {
+  var base = (t && Array.isArray(t.touches)) ? t.touches : []
+  var ext = (t && Array.isArray(t.extraTouches)) ? t.extraTouches : []
+  if (!ext.length) return base
+  var out = base.slice()
+  for (var i = 0; i < ext.length; i++) { if (typeof ext[i] === 'string' && ext[i] && out.indexOf(ext[i]) < 0) out.push(ext[i]) }
+  return out
+}
+// 返回 [{id, touches, status}]，touches 为有效锁集（touches ∪ extraTouches），id 用于
+// blockedTouches.conflicts 展示"在等谁"；status 供撞锁警示文案分态（在跑/验收中，见 rpc.lockHitText）。
 export function holdsFiles(d) {
   var out = []
   if (!d || !Array.isArray(d.tasks)) return out
   for (var i = 0; i < d.tasks.length; i++) {
     var t = d.tasks[i]
-    if (!t || !Array.isArray(t.touches) || !t.touches.length) continue
+    if (!t) continue
+    var eff = effectiveTouches(t)
+    if (!eff.length) continue
     var holds = t.status === 'verifying' || (t.status === 'in-progress' && !!t.claimedBy)
-    if (holds) out.push({ id: t.id, touches: t.touches })
+    if (holds) out.push({ id: t.id, touches: eff, status: t.status })
   }
   return out
 }
-// 候选任务（pending）与一组锁持有者是否冲突；返回持有者 id 列表（空数组 = 无冲突）
+// 候选任务（pending）与一组锁持有者是否冲突；返回持有者 id 列表（空数组 = 无冲突）。
+// 候选侧同样按有效锁集取（task-mvonytz3：被扩权过的卡重派/续跑时，扩权边界参与冲突判定）。
 export function touchesConflict(t, holds) {
   var out = []
   if (!t || !Array.isArray(holds)) return out
-  for (var i = 0; i < holds.length; i++) { if (holds[i] && holds[i].id !== t.id && overlapsTouches(t.touches, holds[i].touches)) out.push(holds[i].id) }
+  var mine = effectiveTouches(t)
+  for (var i = 0; i < holds.length; i++) { if (holds[i] && holds[i].id !== t.id && overlapsTouches(mine, holds[i].touches)) out.push(holds[i].id) }
   return out
 }
 
@@ -1129,7 +1176,10 @@ export function pickDispatch(d, capW, capV, busyTaskIds) {
       var conflicts = touchesConflict(cands[i], holds)
       if (conflicts.length) { blockedTouches.push({ id: cands[i].id, conflicts: conflicts }); continue }
       pendings.push(cands[i])
-      if (Array.isArray(cands[i].touches) && cands[i].touches.length) holds.push({ id: cands[i].id, touches: cands[i].touches })
+      // 同轮动持按有效锁集（touches ∪ extraTouches，task-mvonytz3）：扩权过的候选入持即带扩权边界；
+      // status 缺省（pending→即将 in-progress）——本表条目只被 touchesConflict 读 id+touches。
+      var effT = effectiveTouches(cands[i])
+      if (effT.length) holds.push({ id: cands[i].id, touches: effT })
     }
   }
   var verifs = capV > 0 ? d.tasks.filter(function (t) { return t.status === 'verifying' && !t.frozen && (!t.pipeline || t.pipeline === 'full') && !t.escalation && t.verifierRun !== 'spawn-pending' && !(busyTaskIds && busyTaskIds[t.id]) }).slice(0, capV) : []

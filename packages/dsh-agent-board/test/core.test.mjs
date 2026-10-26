@@ -1186,6 +1186,117 @@ test('touches 锁生命周期接线（源码级）：holdsFiles 两态口径 + �
   assert.match(dsp, /resolved\/cancelled\/archived 即放/)
 })
 
+// ===== 冲突三时刻补齐（task-mvonytz3）：仲裁扩权入锁 + 撞他卡锁判定 =====
+// 背景：用户 2026-10-26 实证缝隙——touches 锁在 Worker 运行中被仲裁扩权时，扩出的文件不进锁注册表，
+// 并行卡在同一文件上可互踩（policy.mjs/rpc.mjs/board-list.js 三起扩权未撞车纯靠运气）。
+// 修法①②：卡新增 extraTouches 运行时字段（独立于 touches 审计原值，仅 task_arbitrate 可写）+
+// 读侧三处（holdsFiles/touchesConflict/pickDispatch）统一按有效锁集 touches ∪ extraTouches 取——
+// 扩权登记即刻参与锁语义；释放零接线（随 resolved/cancelled/archived 状态放锁）。
+
+test('effectiveTouches: 无扩权原样返回 touches 引用（行为逐字不变）；有扩权并入去重（touches 原值不动）', () => {
+  // 无扩权：同一引用返回（零新对象——读侧行为与特性引入前逐字一致）
+  const t0 = mkTask({ touches: ['src/a.js'] })
+  assert.equal(core.effectiveTouches(t0), t0.touches)
+  assert.deepEqual(core.effectiveTouches(mkTask({})), [])     // 无 touches 无扩权 → 空
+  assert.deepEqual(core.effectiveTouches(null), [])
+  // 有扩权：并集新数组（touches 在前），touches 审计原值不被污染
+  const t1 = mkTask({ touches: ['src/a.js'], extraTouches: ['lib/b.js'] })
+  const eff = core.effectiveTouches(t1)
+  assert.deepEqual(eff, ['src/a.js', 'lib/b.js'])
+  assert.notEqual(eff, t1.touches)                            // 并集是新数组
+  assert.deepEqual(t1.touches, ['src/a.js'])                  // 审计原值不动
+  // 去重 + 非字符串/空串过滤
+  const t2 = mkTask({ touches: ['src/a.js'], extraTouches: ['src/a.js', '', 42, 'lib/b.js'] })
+  assert.deepEqual(core.effectiveTouches(t2), ['src/a.js', 'lib/b.js'])
+  // 仅扩权无 touches：扩权文件即有效锁集
+  const t3 = mkTask({ extraTouches: ['lib/x.mjs'] })
+  assert.deepEqual(core.effectiveTouches(t3), ['lib/x.mjs'])
+})
+
+test('扩权入锁②：holdsFiles 持锁集合并入 extraTouches（仅扩权也持锁；resolved 即放；status 透出）', () => {
+  const now = new Date().toISOString()
+  const holder = mkTask({ id: 'A', status: 'in-progress', claimedBy: 'w1', claimedAt: now, touches: ['src/a.mjs'], extraTouches: ['src/b.mjs'] })
+  const holds = core.holdsFiles(mkBoard([holder]))
+  assert.deepEqual(holds[0].touches, ['src/a.mjs', 'src/b.mjs'], '有效锁集 = touches ∪ extraTouches')
+  assert.equal(holds[0].status, 'in-progress', 'status 透出（供撞锁警示文案分态）')
+  // 仅扩权无 touches：在跑也持锁（仲裁扩权核心场景——原卡 touches 为空，扩出的文件必须入锁）
+  const onlyExt = mkTask({ id: 'B', status: 'in-progress', claimedBy: 'w2', claimedAt: now, extraTouches: ['lib/x.mjs'] })
+  assert.deepEqual(core.holdsFiles(mkBoard([onlyExt])).map(h => [h.id, h.touches]), [['B', ['lib/x.mjs']]])
+  // resolved 即放锁：extraTouches 随状态释放（字段本体留卡作审计轨，锁不再持）
+  const done = mkTask({ id: 'C', status: 'resolved', touches: ['src/c.mjs'], extraTouches: ['src/d.mjs'] })
+  assert.deepEqual(core.holdsFiles(mkBoard([done])), [])
+  // 无扩权卡行为逐字不变：touches 原引用透出（零新对象）
+  const plain = mkTask({ id: 'D', status: 'in-progress', claimedBy: 'w3', claimedAt: now, touches: ['src/e.mjs'] })
+  assert.equal(core.holdsFiles(mkBoard([plain]))[0].touches, plain.touches)
+})
+
+test('扩权入锁②：touchesConflict 候选侧 extraTouches 参与判定 + pickDispatch 双向扩权拦派', () => {
+  const now = new Date().toISOString()
+  // 候选侧：pending 卡带 extraTouches（上轮仲裁扩权过）撞持有卡 → 被拦
+  const holds = [{ id: 'h1', touches: ['src/**'], status: 'in-progress' }]
+  assert.deepEqual(core.touchesConflict(mkTask({ id: 'w1', touches: ['lib/a.js'], extraTouches: ['src/b.js'] }), holds), ['h1'])
+  assert.deepEqual(core.touchesConflict(mkTask({ id: 'w2', touches: ['lib/a.js'] }), holds), []) // 无扩权不撞
+  // pickDispatch 双向：持有卡经 extraTouches 拦候选；候选带 extraTouches 撞持有卡 touches 也被拦
+  const d = mkBoard([
+    mkTask({ id: 'holder', status: 'in-progress', claimedBy: 'run-1', claimedAt: now, touches: ['src/a.mjs'], extraTouches: ['lib/x.mjs'] }),
+    mkTask({ id: 'cand1', touches: ['lib/x.mjs'], createdAt: '2026-01-01' }),                          // 撞 holder 的扩权锁 → 拦
+    mkTask({ id: 'cand2', touches: ['lib/y.mjs'], extraTouches: ['src/a.mjs'], createdAt: '2026-01-02' }), // 自身扩权撞 holder touches → 拦
+    mkTask({ id: 'cand3', touches: ['lib/z.mjs'], createdAt: '2026-01-03' }),                          // 无撞 → 派
+  ])
+  const r = core.pickDispatch(d, 5, 0, null)
+  assert.deepEqual(r.pendings.map(t => t.id), ['cand3'])
+  assert.deepEqual(r.blockedTouches, [{ id: 'cand1', conflicts: ['holder'] }, { id: 'cand2', conflicts: ['holder'] }])
+})
+
+test('planLockConflicts: 撞他卡有效锁点名（自卡排除 / 状态分态 / extraTouches 参与 / resolved 放锁 / 零命中）', () => {
+  const now = new Date().toISOString()
+  const d = mkBoard([
+    mkTask({ id: 'A', status: 'in-progress', claimedBy: 'w1', claimedAt: now, touches: ['src/a.mjs'], extraTouches: ['src/shared.mjs'] }),
+    mkTask({ id: 'B', status: 'verifying', touches: ['src/v.mjs'] }),
+    mkTask({ id: 'C', status: 'resolved', touches: ['src/done.mjs'] }),   // 已放锁 → 不命中
+    mkTask({ id: 'me', status: 'in-progress', claimedBy: 'w2', claimedAt: now, touches: ['src/mine.mjs'] }),
+  ])
+  // 撞 A 的 touches 与 extraTouches + 撞 B（verifying 分态透出）；自卡 src/mine.mjs 排除；resolved 的 C 不命中
+  const hits = core.planLockConflicts(d, 'me', ['src/a.mjs', 'src/shared.mjs', 'src/v.mjs', 'src/mine.mjs', 'src/done.mjs', 'src/free.mjs'])
+  assert.deepEqual(hits, [
+    { file: 'src/a.mjs', holders: [{ id: 'A', status: 'in-progress' }] },
+    { file: 'src/shared.mjs', holders: [{ id: 'A', status: 'in-progress' }] },  // A 的扩权锁也拦
+    { file: 'src/v.mjs', holders: [{ id: 'B', status: 'verifying' }] },
+  ])
+  // 零命中：无持锁卡 / 空清单 / 脏板
+  assert.deepEqual(core.planLockConflicts(mkBoard([]), 'me', ['src/a.mjs']), [])
+  assert.deepEqual(core.planLockConflicts(d, 'me', []), [])
+  assert.deepEqual(core.planLockConflicts(null, 'me', ['src/a.mjs']), [])
+  // 多卡同文件：holders 按 tasks 顺序全列出
+  const d2 = mkBoard([
+    mkTask({ id: 'A', status: 'in-progress', claimedBy: 'w1', claimedAt: now, touches: ['src/s.mjs'] }),
+    mkTask({ id: 'B', status: 'verifying', extraTouches: ['src/s.mjs'] }),
+  ])
+  assert.deepEqual(core.planLockConflicts(d2, 'x', ['src/s.mjs'])[0].holders.map(h => h.id), ['A', 'B'])
+})
+
+test('扩权入锁接线（源码级）：core 三处读侧 + 仲裁登记点 + 等锁扫描点 + 工具纪律文案 + 闸口双查', () => {
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  assert.match(coreSrc, /export function effectiveTouches\(t\)/)
+  assert.match(coreSrc, /export function planLockConflicts\(d, taskId, planFiles\)/)
+  // holdsFiles/touchesConflict/pickDispatch 三处统一按有效锁集取
+  assert.match(coreSrc, /var eff = effectiveTouches\(t\)/)
+  assert.match(coreSrc, /var mine = effectiveTouches\(t\)/)
+  assert.match(coreSrc, /var effT = effectiveTouches\(cands\[i\]\)/)
+  const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  assert.match(rpcSrc, /async function doResolveEscalation\(sid, actor, taskId, answer, action, expandTouches\)/)
+  assert.match(rpcSrc, /hooksDenied\(actor\)\) return \{ ok: false, error: 'expandTouches 仅主窗口可登记/) // 角色门禁同 hooks
+  assert.match(rpcSrc, /t\.waitingLock = \{ files:/)           // hold 撞锁落结构化字段（等锁链起点）
+  assert.match(rpcSrc, /lockHitText\(lockHits\)/)              // 扩权冲突预检点名持锁卡
+  assert.match(rpcSrc, /core\.planLockConflicts\(d, t\.id, planFiles\)/)  // 计划闸口双查第二查
+  assert.match(rpcSrc, /禁止只在 answer 文字里放行/)            // 主窗口纪律同步（工具描述⑦）
+  assert.match(rpcSrc, /if \(expandIn\) out\.extraTouches/)    // 无扩权时返回体形态逐字不变（字段不挂）
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  assert.match(dsp, /等锁自动复工/)                              // poolCycle ①.5 扫描段
+  assert.match(dsp, /core\.planLockConflicts\(d, wt0\.id, wt0\.waitingLock\.files\)/)
+  assert.match(dsp, /锁已释放自动复工/)
+})
+
 test('README 双份同步记录 touches 锁随工作态口径（状态流转到 resolved 即释放）', () => {
   const pkg = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
   const root = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')

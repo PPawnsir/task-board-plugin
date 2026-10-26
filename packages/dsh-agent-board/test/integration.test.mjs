@@ -6,6 +6,9 @@
 //   update-task 在飞卡写依赖 warning 软提示（pending 卡不带）
 //   开工计划闸口（p，task-mvneoyba）：『计划改动：』前缀 progress 自动比对 touches 边界——
 //   全合规/部分越界/无 touches 三路径 + 越界三通道警示（卡 messages+主窗口通知+返回体 warning）+ 幂等
+//   冲突三时刻（s/t/u，task-mvonytz3）：仲裁扩权入锁（extraTouches 落账→锁集生效→撞锁预检→resolved 释放）/
+//   计划闸口双查（越界无锁=原文案 / 撞锁=点名持锁卡 / 兼有=合并 / 无 touches 卡撞锁也现形）/
+//   等锁自动复工（hold 撞锁落 waitingLock → 持锁卡 resolved 自动解冻重派；手动解冻优先；非冲突 hold 不受影响）
 // 九场景全部跑在「真实 index.mjs apply(mockCtx)」上（卡1 harness），不改生产代码；
 // 每用例独立 mockCtx + 独立临时 HOME，互不污染（HOME env 是进程级，顶层用例默认串行，严禁并行）。
 //
@@ -1055,5 +1058,260 @@ test('集成r·hold终止结算竞态：dispose 落定 activation.result 不抢�
     assert.equal(t2.retryCount, 2, '终止不加失败计数')
     assert.equal(t2.lastError, '前两次失败留痕', '既有 lastError 不被「子会话被宿主拆除」覆盖')
     assert.ok(!t2.history.some(function (h) { return /worker 失败|待人工介入/.test(h.note || '') }), '无失败/阻塞误记')
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 s：仲裁扩权入锁全链（task-mvonytz3①②③，用户 2026-10-26 实证缝隙）=====
+// 原形：touches 锁在 Worker 运行中被仲裁扩权时，扩出的文件不进锁注册表，并行卡在同一文件上互踩
+//（policy.mjs/rpc.mjs/board-list.js 三起扩权未撞车纯靠运气）。
+// 链路：扩权落账（extraTouches + history/messages 双留痕 + 返回体回显，touches 审计原值不动）→
+// 重派后持有侧锁集生效（他卡同文件派发被挡）→ 他卡扩权撞锁预检 conflictWarning 点名持锁卡（不阻断）→
+// 候选侧扩权即刻被拦 → resolved 释放（extraTouches 字段留卡作审计轨，锁不再持）。
+test('集成s·仲裁扩权入锁：落账→锁集生效（他卡被挡）→撞锁预检点名→候选侧即拦→resolved 释放', async () => {
+  var env = createMockCtx()
+  var W = 15000
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-s1', { pipeline: 'work', touches: ['src/a.mjs'] })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 1 }, 's1 worker spawn', W)
+    var child1 = env.continuables[0].childId
+    await env.waitFor(function () { var x = env.task('task-s1'); return x && x.status === 'in-progress' && x.claimedBy === child1 ? x : null }, 's1 落卡 in-progress', W)
+    // ===== ① 扩权落账：escalate → task_arbitrate 带 expandTouches（归一+去重+空串过滤）=====
+    var esc = await env.tools.get('board_report').execute({ taskId: 'task-s1', kind: 'escalate', question: '需要改 src/b.mjs，是否放行？' })
+    assert.equal(esc.escalated, true)
+    var arb = await env.tools.get('task_arbitrate').execute({ taskId: 'task-s1', answer: '放行 src/b.mjs', expandTouches: ['./src/b.mjs', 'src/b.mjs', ''] })
+    assert.equal(arb.ok, true)
+    assert.equal(arb.action, 'resume')
+    assert.deepEqual(arb.extraTouches, ['src/b.mjs'], '返回体回显有效锁扩展（normTouch 归一 + 去重 + 空串过滤）')
+    assert.ok(!('conflictWarning' in arb), '无他卡持锁 → 无冲突预检字段（返回体形态不变）')
+    var t1 = env.task('task-s1')
+    assert.deepEqual(t1.touches, ['src/a.mjs'], 'touches 审计原值不动')
+    assert.deepEqual(t1.extraTouches, ['src/b.mjs'], 'extraTouches 落盘')
+    assert.equal(t1.status, 'pending', 'resume 裁决回派发池')
+    assert.ok(t1.history.some(function (h) { return /裁决扩权登记：extraTouches 并入 1 项（src\/b\.mjs）/.test(h.note || '') }), 'history 留痕扩权登记')
+    assert.ok((t1.messages || []).some(function (m) { return m.kind === 'touches-expand' && /仲裁扩权/.test(m.text) }), 'messages 留 touches-expand（重派 Worker prompt 可见真实边界）')
+    // ===== ② 重派后持有侧锁集生效：s2 撞 s1 的扩权锁被挡 =====
+    await env.clock.advance(50); await env.clock.advance(50) // 首轮幽灵回收 + 重派各一轮
+    await env.waitFor(function () { var x = env.task('task-s1'); return x && x.status === 'in-progress' && x.claimedBy ? x : null }, 's1 带扩权重派落卡', W)
+    await createTask(env, 'task-s2', { pipeline: 'work', touches: ['src/b.mjs'] })
+    await env.clock.advance(50)
+    // poolCycle 主写（② pickDispatch 拦截 + ④ waitingForTouches 展示态）是「读盘→判定→持锁写」异步链，
+    // 不随 advance 同步收敛——固定真实 sleep 冷启动敏感（Verifier 首跑实证 waitingForTouches 读到 null，
+    // task-mvonytz3 驳回根修）——按套件纪律 waitFor 轮询到链尾落盘（与集成u 同一形态）。
+    var t2 = await env.waitFor(function () { var x = env.task('task-s2'); return x && x.status === 'pending' && x.waitingForTouches ? x : null }, 's2 被 s1 的扩权锁挡住（s1 touches 只有 a.mjs，纯靠 extraTouches 拦）', W)
+    assert.equal(t2.status, 'pending')
+    assert.deepEqual(t2.waitingForTouches, ['task-s1'], 'waitingForTouches 点名 s1')
+    // ===== ③ 撞锁预检：s3 扩权 src/b.mjs（正被 s1 持锁）→ conflictWarning 点名，不阻断 =====
+    await createTask(env, 'task-s3', { pipeline: 'work', touches: ['src/c.mjs'] })
+    await env.clock.advance(50)
+    await env.waitFor(function () { var x = env.task('task-s3'); return x && x.status === 'in-progress' ? x : null }, 's3 落卡 in-progress', W)
+    await env.tools.get('board_report').execute({ taskId: 'task-s3', kind: 'escalate', question: '要动 src/b.mjs' })
+    var arb3 = await env.tools.get('task_arbitrate').execute({ taskId: 'task-s3', answer: '放行', expandTouches: ['src/b.mjs'] })
+    assert.equal(arb3.ok, true, '预检不阻断登记')
+    assert.deepEqual(arb3.extraTouches, ['src/b.mjs'])
+    assert.match(arb3.conflictWarning, /扩权冲突预检：⚔️ src\/b\.mjs 正被 task-s1 持锁（该卡 Worker 在跑）/, 'conflictWarning 点名持锁卡')
+    // 候选侧：s3 重派时扩权锁即刻参与判定——撞 s1 持锁被拦
+    await env.clock.advance(50); await env.clock.advance(50)
+    // 同上纪律：幽灵回收 + 拦截展示态都是 poolCycle 异步链尾，waitFor 轮询收敛（不用固定真实 sleep——
+    // Verifier 定向复现首跑曾在本断言点读到 waitingForTouches=null）。
+    var t3 = await env.waitFor(function () { var x = env.task('task-s3'); return x && x.status === 'pending' && x.waitingForTouches ? x : null }, 's3 带扩权回池即被 s1 持锁拦下', W)
+    assert.equal(t3.status, 'pending')
+    assert.deepEqual(t3.waitingForTouches, ['task-s1'])
+    // ===== 释放：s1 resolved → 扩权锁即放（字段留卡），s2 放行；s2 resolved → s3 放行 =====
+    var rep = await env.tools.get('board_report').execute({ taskId: 'task-s1', kind: 'complete', summary: 's1 交付', changes: '改了 a/b', selfTest: 'npm test 全绿', diffStat: '' })
+    assert.equal(rep.ok, true)
+    await env.waitFor(function () { var x = env.task('task-s1'); return x && x.status === 'resolved' ? x : null }, 's1 落定 resolved', W)
+    await env.clock.advance(50)
+    await env.waitFor(function () { var x = env.task('task-s2'); return x && x.status === 'in-progress' ? x : null }, 's1 resolved → 扩权锁放 → s2 派发', W)
+    t1 = env.task('task-s1')
+    assert.deepEqual(t1.extraTouches, ['src/b.mjs'], 'extraTouches 字段留卡作审计轨')
+    t2 = env.task('task-s2')
+    assert.equal(t2.waitingForTouches, undefined, '放行后等待展示态清除')
+    t3 = env.task('task-s3')
+    assert.equal(t3.status, 'pending', 's3 仍被 s2（现持 b.mjs）挡着——锁语义链完整')
+    assert.deepEqual(t3.waitingForTouches, ['task-s2'])
+    var rep2 = await env.tools.get('board_report').execute({ taskId: 'task-s2', kind: 'complete', summary: 's2 交付', changes: '改了 b', selfTest: 'npm test 全绿', diffStat: '' })
+    assert.equal(rep2.ok, true)
+    await env.clock.advance(50)
+    await env.waitFor(function () { var x = env.task('task-s3'); return x && x.status === 'in-progress' ? x : null }, 's2 resolved → s3 放行', W)
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 t：计划闸口双查（task-mvonytz3④，本卡灵魂件——「运行中漂移」时刻现形）=====
+// 闸口比对计划清单时除「越本卡 touches」外加「撞他卡有效锁」判定，撞锁点名持锁卡（警示不阻断）。
+// 矩阵：越界无锁=原文案逐字 / 撞锁无越界=点名文案 / 兼有=合并 / 无 touches 卡撞锁也现形。
+//（仲裁扩权→锁集的全链已在场景 s 覆盖；本场景的 t1 扩权状态用原子补丁直接构造，聚焦闸口矩阵。）
+test('集成t·计划闸口双查：越界无锁=原文案 / 撞锁=点名持锁卡 / 兼有=合并 / 幂等', async () => {
+  var env = createMockCtx()
+  var W = 15000
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-t1', { pipeline: 'work', touches: ['src/a.mjs'] })
+    await createTask(env, 'task-t2', { pipeline: 'work', touches: ['src/b.mjs', 'src/shared.mjs'] })
+    await createTask(env, 'task-t3', { pipeline: 'work' }) // 无 touches 卡
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 3 }, '三卡同轮派发', W)
+    await env.waitFor(function () { var x = env.task('task-t2'); return x && x.status === 'in-progress' ? x : null }, 't2 落卡 in-progress', W)
+
+    // ===== ① 越界无锁冲突：原文案逐字不变（无 ⚔️ 段）=====
+    var g1 = await env.tools.get('board_report').execute({ taskId: 'task-t2', kind: 'progress', question: '计划改动：src/b.mjs\nsrc/c.mjs' })
+    assert.equal(g1.ok, true)
+    assert.equal(g1.warning, '计划改动越界：src/c.mjs 不在本卡 touches 内——请修正计划（只改 touches 范围内的文件），或 board_report kind=escalate 请主窗口放行', '越界无锁=原文案逐字不变')
+    assert.deepEqual(g1.planGate, { files: 2, outside: ['src/c.mjs'] }, '无撞锁时 planGate 不挂 lockConflicts')
+    var tt2 = env.task('task-t2')
+    var gate1 = (tt2.messages || []).filter(function (m) { return m.kind === 'plan-gate' && m.text.indexOf('越界') >= 0 })
+    assert.equal(gate1[0].text, '⚠️ 计划改动越界：src/c.mjs 不在 touches（src/b.mjs、src/shared.mjs）内——主窗口可 task_intervene 纠正或放行', '卡消息原文案逐字不变')
+
+    // ===== t1 经仲裁扩权持有 src/shared.mjs（撞锁现场构造）=====
+    // 补丁写前的确定性收敛（替代固定真实 sleep 静默窗，task-mvonytz3 驳回根修）：上方落卡 waitFor 只收敛到
+    // 本轮主写（占位 claim 即置 in-progress），三张卡 spawn 链尾（recordRunHistory 落 run 留档 + 占位换真
+    // claimedBy 两次持锁写）此刻仍可能在飞——它们与 patchBoardAtomic 的直写都是读改写，补丁若夹进
+    // 「在飞读之后、在飞写之前」会被回写冲掉（extraTouches 丢失 → 闸口撞锁断言偶发空，与 s 的固定 sleep 同源）。
+    // 收敛点=三卡 claimedBy 全换真值且 run 留档已落：每卡 claim-swap 程序序在 recordRunHistory 之后，
+    // 三条链又在 poolCycleBody 的 for 循环里逐条 await——全部换真即全部落盘、零在飞写。
+    await env.waitFor(function () {
+      var okAll = ['task-t1', 'task-t2', 'task-t3'].every(function (id) {
+        var x = env.task(id)
+        return x && x.status === 'in-progress' && x.claimedBy && x.claimedBy !== 'spawn-pending' && x.runs && x.runs.length >= 1
+      })
+      return okAll ? okAll : null
+    }, '三卡 spawn 链尾全部落盘（claimedBy 换真 + run 留档）', W)
+    await patchBoardAtomic(env, function (d) { var x = d.tasks.find(function (y) { return y.id === 'task-t1' }); x.extraTouches = ['src/shared.mjs'] })
+
+    // ===== ② 撞锁无越界：计划在本卡边界内，但撞 t1 扩权锁 → 点名文案（无越界段）=====
+    var g2 = await env.tools.get('board_report').execute({ taskId: 'task-t2', kind: 'progress', question: '计划改动：src/b.mjs\nsrc/shared.mjs' })
+    assert.equal(g2.ok, true, '撞锁不阻断执行')
+    assert.equal(g2.warning, '⚔️ src/shared.mjs 正被 task-t1 持锁（该卡 Worker 在跑）——请与他卡错时改写这些文件，或 board_report kind=escalate 请主窗口协调', '撞锁=点名文案（通道③返回体）')
+    assert.deepEqual(g2.planGate.outside, [], '本卡边界内零越界')
+    assert.deepEqual(g2.planGate.lockConflicts, [{ file: 'src/shared.mjs', holders: ['task-t1'] }], 'lockConflicts 视图点名持锁卡')
+    tt2 = env.task('task-t2')
+    var gate2 = (tt2.messages || []).filter(function (m) { return m.kind === 'plan-gate' && m.text.indexOf('⚔️') >= 0 })
+    assert.equal(gate2.length, 1, '通道①：卡 messages 追加 ⚔️ 撞锁行')
+    assert.equal(gate2[0].text, '⚔️ src/shared.mjs 正被 task-t1 持锁（该卡 Worker 在跑）——主窗口可 task_intervene 协调或错时执行')
+
+    // ===== ③ 兼有：越界 + 撞锁合并警示 =====
+    var g3 = await env.tools.get('board_report').execute({ taskId: 'task-t2', kind: 'progress', question: '计划改动：src/shared.mjs\nsrc/z.mjs' })
+    assert.equal(g3.ok, true)
+    assert.match(g3.warning, /计划改动越界：src\/z\.mjs 不在本卡 touches 内/, '兼有：越界段在')
+    assert.match(g3.warning, /⚔️ src\/shared\.mjs 正被 task-t1 持锁（该卡 Worker 在跑）/, '兼有：撞锁段在')
+    assert.deepEqual(g3.planGate.outside, ['src/z.mjs'])
+    assert.deepEqual(g3.planGate.lockConflicts, [{ file: 'src/shared.mjs', holders: ['task-t1'] }])
+    tt2 = env.task('task-t2')
+    var gate3 = (tt2.messages || []).filter(function (m) { return m.kind === 'plan-gate' && m.text.indexOf('src/z.mjs') >= 0 })
+    assert.equal(gate3.length, 1)
+    assert.match(gate3[0].text, /⚠️ 计划改动越界：src\/z\.mjs 不在 touches（src\/b\.mjs、src\/shared\.mjs）内；⚔️ src\/shared\.mjs 正被 task-t1 持锁（该卡 Worker 在跑）——主窗口可 task_intervene 纠正或放行/, '兼有=合并卡消息')
+
+    // ===== 幂等：同一撞锁计划重复上报，闸口行不重复记 =====
+    await env.tools.get('board_report').execute({ taskId: 'task-t2', kind: 'progress', question: '计划改动：src/b.mjs\nsrc/shared.mjs' })
+    tt2 = env.task('task-t2')
+    gate2 = (tt2.messages || []).filter(function (m) { return m.kind === 'plan-gate' && m.text.indexOf('⚔️') >= 0 && m.text.indexOf('src/z.mjs') < 0 })
+    assert.equal(gate2.length, 1, '同内容撞锁行幂等防刷屏')
+
+    // ===== 通道②：主窗口通知含撞锁点名 =====
+    await env.clock.advance(45000)
+    await env.waitFor(function () { return env.sent.length >= 1 }, '聚合窗到点投递', W)
+    var delivered = env.sent.map(function (m) { return m.content[0].text }).join('\n')
+    assert.ok(delivered.indexOf('⚔️ task-t2 计划改动撞他卡文件锁：⚔️ src/shared.mjs 正被 task-t1 持锁（该卡 Worker 在跑）——可 task_intervene 协调') >= 0, '主窗口通知含撞锁点名与处置入口')
+    assert.ok(delivered.indexOf('⚠️ task-t2 计划改动越界：src/c.mjs 不在 touches 内——可 task_intervene 纠正或放行') >= 0, '越界通知形态逐字不变')
+
+    // ===== ④ 无 touches 卡撞锁也现形：跳过越界比对仍查他卡锁 =====
+    await env.waitFor(function () { var x = env.task('task-t3'); return x && x.status === 'in-progress' ? x : null }, 't3 落卡', W)
+    var g4 = await env.tools.get('board_report').execute({ taskId: 'task-t3', kind: 'progress', question: '计划改动：src/shared.mjs' })
+    assert.equal(g4.ok, true)
+    assert.equal(g4.planGate.skipped, true, '无边界卡仍标 skipped')
+    assert.deepEqual(g4.planGate.lockConflicts, [{ file: 'src/shared.mjs', holders: ['task-t1', 'task-t2'] }], '无 touches 卡撞锁同样点名（t1 扩权锁 + t2 自有 touches 锁并存，按 tasks 序全列出）')
+    assert.match(g4.warning, /⚔️ src\/shared\.mjs 正被 task-t1 持锁（该卡 Worker 在跑）/, '通道③警示')
+    // 无 touches 且无撞锁 → 原文案跳过（既有行为不变，由场景 p ④ 锁定）
+    var g5 = await env.tools.get('board_report').execute({ taskId: 'task-t3', kind: 'progress', question: '计划改动：any/where.mjs' })
+    assert.ok(!('warning' in g5), '无撞锁的 skipped 卡不带 warning')
+    assert.equal(g5.planGate.skipped, true)
+    assert.ok(!('lockConflicts' in g5.planGate))
+  } finally { await env.cleanup() }
+})
+
+// ===== 场景 u：等锁自动复工（task-mvonytz3⑤，回应用户戳深②「挂起等锁全手动、靠人脑盯梢」）=====
+// task_arbitrate action=hold 且 expandTouches 撞锁 → 卡落 waitingLock:{files,heldBy,at}（与 frozen 共存）；
+// poolCycle ①.5 每轮重查等锁文件的他卡持锁 → 全部释放（持锁卡 resolved）→ 自动解冻回派发池当轮重派
+// +history 留痕「锁已释放自动复工」。手动 unfreeze 清 waitingLock（人工放行优先，但锁语义照常拦——
+// 解冻≠越权）；非冲突 hold（无 waitingLock）不受扫描影响。
+test('集成u·等锁自动复工：hold 撞锁落 waitingLock→持锁卡 resolved 自动解冻重派；手动解冻清等锁；非冲突 hold 不受影响', async () => {
+  var env = createMockCtx()
+  var W = 15000
+  try {
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-u1', { pipeline: 'work', touches: ['src/u1.mjs'] })
+    await createTask(env, 'task-u2', { pipeline: 'work', touches: ['src/u2.mjs'] })
+    await createTask(env, 'task-u3', { pipeline: 'work', touches: ['src/u3.mjs'] })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 3 }, 'u1/u2/u3 同轮派发', W)
+    await env.waitFor(function () { var x = env.task('task-u3'); return x && x.status === 'in-progress' ? x : null }, 'u3 落卡 in-progress', W)
+
+    // ===== u2：hold + 撞锁 → waitingLock 结构化落卡（与 frozen 共存），走自动复工链 =====
+    await env.tools.get('board_report').execute({ taskId: 'task-u2', kind: 'escalate', question: '要动 src/u1.mjs' })
+    var arb2 = await env.tools.get('task_arbitrate').execute({ taskId: 'task-u2', answer: '放行 src/u1.mjs，等锁', action: 'hold', expandTouches: ['src/u1.mjs'] })
+    assert.equal(arb2.ok, true)
+    assert.match(arb2.conflictWarning, /⚔️ src\/u1\.mjs 正被 task-u1 持锁（该卡 Worker 在跑）/, 'hold 撞锁返回体点名持锁卡')
+    var t2 = env.task('task-u2')
+    assert.equal(t2.status, 'pending'); assert.equal(t2.frozen, true, 'hold 冻结照旧')
+    assert.deepEqual(t2.waitingLock && t2.waitingLock.files, ['src/u1.mjs'], 'waitingLock.files 落卡')
+    assert.deepEqual(t2.waitingLock && t2.waitingLock.heldBy, ['task-u1'], 'waitingLock.heldBy 点名')
+    assert.ok(t2.waitingLock && t2.waitingLock.at, 'waitingLock.at 留痕')
+    assert.ok(t2.history.some(function (h) { return /撞锁等锁：waitingLock 落卡/.test(h.note || '') }), 'history 留痕等锁登记')
+
+    // ===== u3：hold + 撞锁 → waitingLock 落卡；随后手动解冻（人工放行优先）清 waitingLock =====
+    await env.tools.get('board_report').execute({ taskId: 'task-u3', kind: 'escalate', question: '也要动 src/u1.mjs' })
+    await env.tools.get('task_arbitrate').execute({ taskId: 'task-u3', answer: '放行，我手动盯', action: 'hold', expandTouches: ['src/u1.mjs'] })
+    var t3 = env.task('task-u3')
+    assert.equal(t3.frozen, true); assert.ok(t3.waitingLock, 'u3 waitingLock 落卡')
+    var unf = await env.rpc('unfreeze-task', { sessionId: env.sid, taskId: 'task-u3' })
+    assert.equal(unf.ok, true)
+    t3 = env.task('task-u3')
+    assert.equal(t3.frozen, undefined)
+    assert.equal(t3.waitingLock, undefined, '手动解冻清 waitingLock（人工放行永远优先）')
+
+    // ===== 冻结/等锁期：持锁卡 u1 未放，多轮心跳 u2 全程冻结不派；u3 解冻后仍被锁语义拦（解冻≠越权）=====
+    await env.clock.advance(40000)
+    t2 = env.task('task-u2')
+    assert.equal(t2.frozen, true, '持锁卡未放 → u2 全程冻结')
+    assert.equal(t2.status, 'pending')
+    // poolCycle 异步链（幽灵回收 await settleRunRecord → 持锁段④写展示态）不随 advance 同步收敛，
+    // 直读会抢在链尾落盘前（实证：rec 已摘但 waitingForTouches 尚未写）——waitFor 轮询收敛。
+    t3 = await env.waitFor(function () { var x = env.task('task-u3'); return x && x.status === 'pending' && x.waitingForTouches ? x : null }, 'u3 解冻后照样被 u1 活锁拦（waitingForTouches 点名）', W)
+    assert.deepEqual(t3.waitingForTouches, ['task-u1'], '锁语义不因人工放行失效')
+    assert.ok(!t3.history.some(function (h) { return /锁已释放自动复工/.test(h.note || '') }), '手动解冻不留自动复工痕迹')
+    assert.equal(env.continuables.length, 3, '窗口内零新 spawn')
+
+    // ===== 非冲突 hold 不受影响：无 expandTouches 的 hold 不落 waitingLock，永不被扫描解冻 =====
+    //（u3 已是 pending 不能再 escalate——board_report 只受理 in-progress；u4 新卡走该路径）
+    await createTask(env, 'task-u4', { pipeline: 'work', touches: ['src/u4.mjs'] })
+    await env.clock.advance(50)
+    await env.waitFor(function () { var x = env.task('task-u4'); return x && x.status === 'in-progress' ? x : null }, 'u4 落卡 in-progress', W)
+    await env.tools.get('board_report').execute({ taskId: 'task-u4', kind: 'escalate', question: '普通挂起' })
+    var arb4 = await env.tools.get('task_arbitrate').execute({ taskId: 'task-u4', answer: '补上下文', action: 'hold' })
+    assert.equal(arb4.ok, true)
+    assert.ok(!('conflictWarning' in arb4), '无扩权 → 无冲突预检字段（返回体形态不变）')
+    var t4 = env.task('task-u4')
+    assert.equal(t4.frozen, true)
+    assert.equal(t4.waitingLock, undefined, '非冲突 hold 不落 waitingLock')
+
+    // ===== 持锁卡 resolved → u2 自动解冻当轮重派；u3 被 u2 同轮动持挡一轮（锁语义链完整）=====
+    var rep = await env.tools.get('board_report').execute({ taskId: 'task-u1', kind: 'complete', summary: 'u1 交付', changes: '改了 u1', selfTest: 'npm test 全绿', diffStat: '' })
+    assert.equal(rep.ok, true)
+    await env.waitFor(function () { var x = env.task('task-u1'); return x && x.status === 'resolved' ? x : null }, 'u1 落定 resolved', W)
+    await env.clock.advance(50)
+    var t2r = await env.waitFor(function () { var x = env.task('task-u2'); return x && x.status === 'in-progress' && !x.frozen && !x.waitingLock ? x : null }, '锁释放 → u2 自动解冻当轮重派', W)
+    assert.ok(t2r.history.some(function (h) { return /锁已释放自动复工（等锁文件 src\/u1\.mjs 已无他卡持锁）/.test(h.note || '') }), 'history 留痕自动复工')
+    assert.ok(t2r.claimedBy, '重派落座')
+    t3 = env.task('task-u3')
+    assert.equal(t3.status, 'pending', 'u3 被 u2 的同轮动持（extraTouches 含 u1.mjs）挡一轮')
+    assert.deepEqual(t3.waitingForTouches, ['task-u2'])
+    t4 = env.task('task-u4')
+    assert.equal(t4.frozen, true, '非冲突 hold 全程冻结（自动复工扫描不碰它）')
+    // 链条收口不死锁：u2 落定 → u3 放行
+    var rep2 = await env.tools.get('board_report').execute({ taskId: 'task-u2', kind: 'complete', summary: 'u2 交付', changes: '改了 u2/u1', selfTest: 'npm test 全绿', diffStat: '' })
+    assert.equal(rep2.ok, true)
+    await env.clock.advance(50)
+    await env.waitFor(function () { var x = env.task('task-u3'); return x && x.status === 'in-progress' ? x : null }, 'u2 resolved → u3 放行', W)
   } finally { await env.cleanup() }
 })
