@@ -923,7 +923,7 @@
       function commit(v) {
         var n = parseInt(v, 10)
         if (isNaN(n) || n < props.min || n > props.max) { setVal(String(props.value)); setDirty(false); return }
-        setVal(String(n)); setDirty(false); rpc('set-board-config', { key: props.cfgKey, value: n }).then(fetchTasks).catch(function () {})
+        setVal(String(n)); setDirty(false); rpc('set-board-config', { key: props.cfgKey, value: n }).then(function (r) { if (typeof props.onSaved === 'function') props.onSaved(r); return fetchTasks() }).catch(function () {})
       }
       return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } },
         props.label,
@@ -1074,6 +1074,25 @@
         React.createElement('button', { onClick: reopen, title: '重新显示首用引导横幅（board 视图顶部定位行）', style: { padding: '0px 5px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text, cursor: 'pointer', lineHeight: '14px' } }, '重新显示'))
     }
 
+    // ===== 模型健康点（task-mvoulhm7）：🟢健康 / 🟡冷却中至HH:mm / 🔴熔断 / ⚪未知 =====
+    // 数据只来自 get-tasks.modelHealth；title 悬浮展示探测/run 时间、最近延迟与近 5 次 run 聚合。
+    var MODEL_HEALTH_META = { healthy: { icon: '🟢', label: '健康', color: C.ok }, cooldown: { icon: '🟡', label: '冷却中', color: C.warn }, circuit: { icon: '🔴', label: '熔断', color: C.err }, unknown: { icon: '⚪', label: '未知', color: C.text2 } }
+    function healthHhmm(ts) { var d = new Date(Number(ts)); return isNaN(d.getTime()) ? '' : ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) }
+    function healthTimeText(v) { if (!v) return ''; var d = new Date(v); return isNaN(d.getTime()) ? String(v) : d.toLocaleString() }
+    function ModelHealthDot(props) {
+      var h = (props.health && props.health[props.model]) || { state: 'unknown', note: '尚无健康信号' }
+      var meta = MODEL_HEALTH_META[h.state] || MODEL_HEALTH_META.unknown
+      var untilText = h.state === 'cooldown' && h.until ? healthHhmm(h.until) : ''
+      var label = meta.label + (untilText ? '至 ' + untilText : '')
+      var lines = [props.model + '：' + label]
+      if (h.note) lines.push(String(h.note))
+      if (h.lastProbe) lines.push('最近探测：' + healthTimeText(h.lastProbe))
+      if (h.lastSeen) lines.push('最近信号：' + healthTimeText(h.lastSeen))
+      if (typeof h.latencyMs === 'number') lines.push('最近延迟：' + h.latencyMs + 'ms')
+      if (Array.isArray(h.recentRuns) && h.recentRuns.length) lines.push('近 ' + h.recentRuns.length + ' 次 run：' + h.recentRuns.filter(function (r) { return r.ok }).length + ' 次成功')
+      return React.createElement('span', { role: 'img', 'aria-label': props.model + ' ' + label, title: lines.join('\n'), style: { color: meta.color, cursor: 'help', flexShrink: 0, fontSize: 9, lineHeight: '12px' } }, meta.icon)
+    }
+
     // ===== 有序模型链编辑器（task-mvokikl3 链式编辑器：下拉添加 + 芯片排序，替代首选单选与文本框）=====
     // 弹层内复用 7 处（力度路由六槽 + 备用模型链）：当前链渲染为模型芯片行（每片 × 移除 + ↑ 前移一位），
     // 尾部下拉（合法目录全量、过滤已在链中的）+「添加」追加到链尾；空链显示 props.emptyHint 占位语义
@@ -1107,6 +1126,7 @@
           list.length === 0 ? React.createElement('span', { style: { color: C.text2, fontStyle: 'italic', paddingTop: 1 } }, props.emptyHint || '无') : null,
           list.map(function (m, i) {
             return React.createElement('span', { key: m + '@' + i, title: (i === 0 ? '首选' : '第 ' + (i + 1) + ' 顺位') + ' · 按序取第一个健康模型', style: { display: 'inline-flex', alignItems: 'center', gap: 1, padding: '0px 2px 0px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.nested, color: C.text, whiteSpace: 'nowrap' } },
+              React.createElement(ModelHealthDot, { model: m, health: props.health }),
               React.createElement('span', null, m),
               i > 0 ? React.createElement('button', { onClick: function () { upAt(i) }, title: '前移一位（↑）', style: chipBtn }, '↑') : null,
               React.createElement('button', { onClick: function () { removeAt(i) }, title: '移除（×）', style: chipBtn }, '×'))
@@ -1133,6 +1153,22 @@
       // 链编辑器共用模型目录：弹层取一次 list-models 下发 7 处编辑器（六槽+备用链），免每编辑器各发一次 RPC；
       // 目录不可用（老宿主/枚举失败）时 routeModels 恒 null，编辑器降级为文本输入 + 添加，不丢功能。
       var _rm = useState(null), routeModels = _rm[0], setRouteModels = _rm[1]
+      // 健康面局部读取（不改 kernel 全局状态）：弹层打开即取 + 15s 刷新；关闭时令 epoch 失效，迟到响应丢弃。
+      var _mh = useState({}), modelHealth = _mh[0], setModelHealth = _mh[1]
+      var _pe = useState(true), probeEnabled = _pe[0], setProbeEnabled = _pe[1]
+      var _pi = useState(15), probeIntervalMin = _pi[0], setProbeIntervalMin = _pi[1]
+      var healthEpoch = useRef(0)
+      function refreshModelHealth() {
+        var epoch = healthEpoch.current, args = state.tasksHash ? { ifHash: state.tasksHash } : {}
+        return rpc('get-tasks', args).then(function (d) {
+          if (!d || d.error || epoch !== healthEpoch.current) return d
+          setModelHealth(d.modelHealth || {})
+          setProbeEnabled(d.probeEnabled !== false)
+          setProbeIntervalMin(Number(d.probeIntervalMin) > 0 ? Number(d.probeIntervalMin) : 15)
+          return d
+        }).catch(function () { return null })
+      }
+      useEffect(function () { if (!open) return; refreshModelHealth(); var timer = setInterval(refreshModelHealth, 15000); return function () { clearInterval(timer); healthEpoch.current++ } }, [open])
       useEffect(function () {
         var cancelled = false
         rpc('list-models').then(function (r) { if (!cancelled && r && r.ok && Array.isArray(r.models) && r.models.length) setRouteModels(r.models) }).catch(function () {})
@@ -1143,6 +1179,7 @@
       // 任一非法整体拒写（ok:false 由编辑器亮 ⚠️ 不静默吞）；写成功后编辑器侧 fetchTasks 回读权威值。
       function saveLaneSlot(lane, role, nextArr) { var patch = {}; patch[lane] = {}; patch[lane][role] = nextArr; return rpc('set-board-config', { key: 'laneModels', value: patch }) }
       function saveFallbackChain(nextArr) { return rpc('set-board-config', { key: 'fallbackModels', value: nextArr }) }
+      function saveProbeEnabled(next) { setProbeEnabled(next); return rpc('set-board-config', { key: 'probeEnabled', value: next }).then(refreshModelHealth).catch(refreshModelHealth) }
       useEffect(function () { if (!open) return; function onDown(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }; document.addEventListener('mousedown', onDown); return function () { document.removeEventListener('mousedown', onDown) } }, [open])
       function toggle() {
         // 与 PoolCfgPopover 同口径：fixed + 视口坐标（面板 overflow:hidden 会裁 absolute 弹层）；
@@ -1158,10 +1195,19 @@
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 5 } }, '板级模型'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
             React.createElement(ModelCfg, { label: 'Worker 模型', cfgKey: 'workerModel', value: props.workerModel }),
+            props.workerModel ? React.createElement(ModelHealthDot, { model: props.workerModel, health: modelHealth }) : null,
             React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Worker 执行模型）')),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
             React.createElement(ModelCfg, { label: 'Verifier 模型', cfgKey: 'verifierModel', value: props.verifierModel }),
+            props.verifierModel ? React.createElement(ModelHealthDot, { model: props.verifierModel, health: modelHealth }) : null,
             React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Verifier 异构审查）')),
+          // 主动健康嗅探配置：只打本页已配置模型；关掉后冷却/熔断/run 被动健康面仍然保留。
+          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '健康嗅探（事前调度）'),
+          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', whiteSpace: 'normal', maxWidth: 360 } },
+            React.createElement('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 9, color: C.text, cursor: 'pointer' }, title: '每间隔对板级/档位/备用链中已配置模型发一次 maxTokens=1 的极短 ping；不创建子代理' },
+              React.createElement('input', { type: 'checkbox', checked: !!probeEnabled, onChange: function (e) { saveProbeEnabled(e.target.checked) } }), '主动探测'),
+            React.createElement(MinCfg, { label: '间隔', cfgKey: 'probeIntervalMin', value: probeIntervalMin, min: 1, max: 1440, tip: '主动健康探测间隔（1~1440 分钟，默认 15）', onSaved: refreshModelHealth }),
+            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '仅已配置模型 · 关闭仍保留被动健康')),
           // ② 力度路由六槽（链编辑器，task-mvokikl3）：三档 × Worker/Verifier 各一条有序模型链——
           // 读写整个槽位数组（非仅首选）；空链=继承上方板级模型行。
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '力度路由'),
@@ -1169,14 +1215,14 @@
             var laneObj = (props.laneModels && props.laneModels[ln[0]]) || {}
             return React.createElement('div', { key: ln[0], style: { marginBottom: 4 } },
               React.createElement('div', { style: { marginBottom: 2 } },
-                React.createElement(OrderedModelsEditor, { label: ln[1] + ' Worker', value: laneObj.worker, models: routeModels, emptyHint: '继承板级', onSave: function (next) { return saveLaneSlot(ln[0], 'worker', next) } })),
+                React.createElement(OrderedModelsEditor, { label: ln[1] + ' Worker', value: laneObj.worker, models: routeModels, emptyHint: '继承板级', health: modelHealth, onSave: function (next) { return saveLaneSlot(ln[0], 'worker', next) } })),
               React.createElement('div', null,
-                React.createElement(OrderedModelsEditor, { label: ln[1] + ' Verifier', value: laneObj.verifier, models: routeModels, emptyHint: '继承板级', onSave: function (next) { return saveLaneSlot(ln[0], 'verifier', next) } })))
+                React.createElement(OrderedModelsEditor, { label: ln[1] + ' Verifier', value: laneObj.verifier, models: routeModels, emptyHint: '继承板级', health: modelHealth, onSave: function (next) { return saveLaneSlot(ln[0], 'verifier', next) } })))
           }),
           React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 1, whiteSpace: 'normal', maxWidth: 360 } }, '每槽=有序模型链：按序取第一个健康模型（首选冷却/熔断则次选递补，槽内全病走备用链→降档→父模型）；空链 = 继承上方 Worker/Verifier 模型行；卡档位走对话 task_update size=light/standard/heavy'),
           // ③ 备用模型链：同款链编辑器（task-mvokikl3，替代逗号/换行文本框）
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '备用模型链'),
-          React.createElement(OrderedModelsEditor, { label: '备用链', value: props.fbModels, models: routeModels, emptyHint: '无（不启用）', onSave: saveFallbackChain }),
+          React.createElement(OrderedModelsEditor, { label: '备用链', value: props.fbModels, models: routeModels, emptyHint: '无（不启用）', health: modelHealth, onSave: saveFallbackChain }),
           React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 360 } }, '取模口径：卡级特例 → 档位路由 → 板级模型；备用链=档位链全不可用时的跨档逃生索——候选冷却/熔断时按链顺序找首个健康替代，链尽再走降档/父模型兜底；空链=不启用')) : null)
     }
 

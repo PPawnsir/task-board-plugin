@@ -284,6 +284,48 @@ export function normalizeFallbackModels(v) {
   }
   return out
 }
+// ===== 模型健康嗅探（task-mvoulhm7）=====
+// 主动探测只打已配置模型：板级 Worker/Verifier ∪ 三档双角色槽位 ∪ fallbackModels，去重且不全目录扫。
+// probeEnabled=false 只停主动请求，冷却/熔断/run 被动聚合与调度消费照常；间隔缺省 15min，钳 1~1440。
+export function normalizeProbeIntervalMin(v) {
+  var n = Number(v)
+  if (!isFinite(n) || n <= 0) n = 15
+  return Math.max(1, Math.min(1440, Math.round(n)))
+}
+export function configuredModelIds(d) {
+  d = d || {}
+  var c = cfg(d), out = [], seen = {}
+  function add(v) { if (typeof v !== 'string') return; var s = v.trim(); if (s && !seen[s]) { seen[s] = true; out.push(s) } }
+  add(d.workerModel); add(d.verifierModel)
+  for (var i = 0; i < TASK_SIZES.length; i++) {
+    var lane = c.laneModels[TASK_SIZES[i]]
+    for (var j = 0; j < lane.worker.length; j++) add(lane.worker[j])
+    for (var k = 0; k < lane.verifier.length; k++) add(lane.verifier[k])
+  }
+  for (var f = 0; f < c.fallbackModels.length; f++) add(c.fallbackModels[f])
+  return out
+}
+// get-tasks 的公开健康视图：内部按会话分桶（熔断本就以 sid|model 为键），公开仍是 {modelId:entry}。
+// 每次读都按原冷却/熔断表现算有效状态，过期冷却无需等下一次派发心跳即可从 GUI 消失。
+export function modelHealthView(d, bucket, opts) {
+  opts = opts || {}
+  var ids = configuredModelIds(d), health = bucket || {}, bad = opts.badModels || {}, cooldown = opts.modelCooldown || {}
+  var sid = String(opts.sid || ''), now = Number(opts.now) || Date.now(), out = {}
+  for (var i = 0; i < ids.length; i++) {
+    var id = ids[i], raw = health[id] || {}
+    var state = raw.observed === 'healthy' ? 'healthy' : 'unknown'
+    var note = raw.observedNote || raw.note || '尚无健康信号'
+    var until = Number(cooldown[id]) || 0, cooling = until > now
+    if (cooling) { state = 'cooldown'; note = raw.cooldownNote || '模型冷却中' }
+    if (bad[sid + '|' + id]) { state = 'circuit'; note = raw.circuitNote || '连续失败，模型熔断中' }
+    var entry = { state: state, lastProbe: raw.lastProbe || null, lastSeen: raw.lastSeen || null, note: note }
+    if (cooling) entry.until = until
+    if (typeof raw.latencyMs === 'number' && isFinite(raw.latencyMs)) entry.latencyMs = raw.latencyMs
+    if (Array.isArray(raw.recentRuns) && raw.recentRuns.length) entry.recentRuns = raw.recentRuns.slice(-5)
+    out[id] = entry
+  }
+  return out
+}
 export function cfg(d) {
   var soft = Math.max(1, Math.min(480, d.softTimeoutMin || 30))
   var hard = Math.max(soft, Math.min(1440, d.hardTimeoutMin || 120))
@@ -291,7 +333,7 @@ export function cfg(d) {
   var crd = d.cleanupRetentionDays
   if (typeof crd !== 'number' || !(crd >= 1)) crd = 7
   crd = Math.max(1, Math.min(90, Math.round(crd)))
-  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, cleanupRetentionDays: crd, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false, workerContinuable: d.workerContinuable !== false, verifyUserGuide: d.verifyUserGuide !== false, laneModels: normalizeLaneModels(d.laneModels), fallbackModels: normalizeFallbackModels(d.fallbackModels) }
+  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, cleanupRetentionDays: crd, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false, workerContinuable: d.workerContinuable !== false, verifyUserGuide: d.verifyUserGuide !== false, probeEnabled: d.probeEnabled !== false, probeIntervalMin: normalizeProbeIntervalMin(d.probeIntervalMin), laneModels: normalizeLaneModels(d.laneModels), fallbackModels: normalizeFallbackModels(d.fallbackModels) }
 }
 
 // ===== 看板数据目录（跨重启继承用）=====
@@ -308,7 +350,7 @@ export function boardHome() { return path.join(boardDirName(), '.dsh') }
 // ownerCwd（跨重启继承）：创建该看板的会话工作区路径，继承判定全靠它——取不到就省略字段
 // （绝不落空串，否则「路径读不到的多个会话」会被误判成同一工作区）。
 export function seed(sid, ownerCwd) {
-  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', laneModels: normalizeLaneModels(null), fallbackModels: [], softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, poolStatus: { workers: [], verifiers: [] }, tasks: [], configLog: [], opsLog: [] }
+  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, probeEnabled: true, probeIntervalMin: 15, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', laneModels: normalizeLaneModels(null), fallbackModels: [], softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, poolStatus: { workers: [], verifiers: [] }, tasks: [], configLog: [], opsLog: [] }
   if (typeof ownerCwd === 'string' && ownerCwd) d.ownerCwd = ownerCwd
   return d
 }
@@ -330,6 +372,9 @@ export function normalizeBoard(d) {
     if (typeof d.epicSplit !== 'boolean') d.epicSplit = true
     if (typeof d.workerContinuable !== 'boolean') d.workerContinuable = true
     if (typeof d.verifyUserGuide !== 'boolean') d.verifyUserGuide = true
+    // 主动健康嗅探：老看板缺字段=开 + 15min；显式 false 才停主动请求，被动健康面不受影响。
+    if (typeof d.probeEnabled !== 'boolean') d.probeEnabled = true
+    d.probeIntervalMin = normalizeProbeIntervalMin(d.probeIntervalMin)
     // 力度路由表（task-mvnemvf5）：缺字段/脏值 → 归一同形（空数组=继承下一级），老看板读入即满足透出形态。
     // 槽位有序数组化（task-mvnxckhq）：老看板的单字符串槽位在此归一为单元素数组，零迁移。
     // 刻意只动板级 laneModels：卡级 t.size/t.model 不在此补字段——缺字段=标档语义，存量卡零迁移。

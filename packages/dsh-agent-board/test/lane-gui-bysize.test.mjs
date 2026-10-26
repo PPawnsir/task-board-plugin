@@ -22,6 +22,8 @@ import { readFileSync } from 'node:fs'
 import { buildScoreboard } from '../index.mjs'
 import { localDayKey } from '../lib/usage.mjs'
 import { createDispatch } from '../lib/dispatch.mjs'
+import { createRpc } from '../lib/rpc.mjs'
+import { cfg, seed, normalizeBoard, configuredModelIds, modelHealthView } from '../lib/core.mjs'
 
 const src = readFileSync(new URL('../lib/client/dashboard.js', import.meta.url), 'utf8')
 const ksrc = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
@@ -187,25 +189,26 @@ var SID = 'session-test-0000-0000-000000000000'
 function mkTask(over) {
   return Object.assign({ id: 't1', title: 'T', description: '', status: 'in-progress', priority: 'medium', tags: [], parentId: null, assignMode: 'auto', assignee: null, context: { instructions: '' }, acceptance: '', dependsOn: [], pipeline: 'full', claimedBy: 'spawn-pending', claimedAt: null, createdAt: '2026-01-01T00:00:00Z', history: [], messages: [] }, over || {})
 }
-function mkDispatch(board, ctxOver) {
+function mkDispatch(board, ctxOver, stateOver) {
+  var shared = Object.assign({ knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: {}, modelCooldown: {}, modelHealth: {} }, stateOver || {})
   return createDispatch(
     Object.assign({ fs: {}, effect: function () {}, get: function () { return null } }, ctxOver || {}),
-    { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: {} },
+    shared,
     {
       rt: async function () { return board }, wt: async function () {},
       mutateLocked: async function (sid, fn) { return fn(board) },
       kickCycle: function () {}, rootForSession: function () { return { id: SID } },
-      sessionCwd: function () { return '' }, withTimeout: function (p) { return p }, runsFor: function () { return ({}) },
+      sessionCwd: function () { return '' }, withTimeout: function (p) { return p }, runsFor: function (sid) { return shared.activeRuns[sid] || (shared.activeRuns[sid] = {}) },
       feedbackOn: function () { return true }, pushSysNote: function () {}, maybeNotify: function () {}, notifyTaskDone: function () {},
     })
 }
-function mkActivationSubagents(calls) {
+function mkActivationSubagents(calls, result) {
   return {
     list: function () { return ['p1'] },
     getProvider: function () { return { inheritsParentContext: false } },
     startActivation: async function (spec) {
       calls.push(spec)
-      return { childId: 'child-' + calls.length, messageId: 'msg-' + calls.length, result: new Promise(function () {}), dispose: async function () {} }
+      return { childId: 'child-' + calls.length, messageId: 'msg-' + calls.length, result: result || new Promise(function () {}), dispose: async function () {} }
     },
   }
 }
@@ -277,7 +280,7 @@ test('⑦备用链：FallbackCfg/textarea 退役 + OrderedModelsEditor 同款链
   assert.ok(iMr7 >= 0 && iPc7 > iMr7)
   assert.ok(src.slice(iMr7, iPc7).indexOf("React.createElement('textarea'") < 0, '模型路由弹层区不得再含 textarea（备用链改链编辑器）')
   // 备用链接同款链编辑器 + 跨档逃生索语义标注
-  assert.match(src, /React\.createElement\(OrderedModelsEditor, \{ label: '备用链', value: props\.fbModels, models: routeModels, emptyHint: '无（不启用）', onSave: saveFallbackChain \}\)/, '备用链未接 OrderedModelsEditor')
+  assert.match(src, /React\.createElement\(OrderedModelsEditor, \{ label: '备用链', value: props\.fbModels, models: routeModels, emptyHint: '无（不启用）', health: modelHealth, onSave: saveFallbackChain \}\)/, '备用链未接 OrderedModelsEditor')
   assert.ok(src.indexOf('跨档逃生索') >= 0, '缺「档位链全不可用时的跨档逃生索」语义标注')
   // 写通道：整个有序数组（改动即写，host 逐项合法清单校验）
   assert.match(src, /function saveFallbackChain\(nextArr\) \{ return rpc\('set-board-config', \{ key: 'fallbackModels', value: nextArr \}\) \}/, '缺 saveFallbackChain 整链数组写')
@@ -338,4 +341,208 @@ test('⑩OrderedModelsEditor：组件存在 + 芯片行（×移除/↑前移）+
   assert.match(src, /placeholder: 'provider\/model'/, '缺目录缺失降级文本输入')
   // 弹层取一次 list-models 下发 7 处（routeModels），避免每编辑器各发一次 RPC
   assert.match(src, /var _rm = useState\(null\), routeModels = _rm\[0\], setRouteModels = _rm\[1\]/, 'ModelRoutePopover 缺 routeModels 目录 state')
+})
+
+// ===== ⑪ 模型健康：配置缺省/归一 + 已配置模型枚举 + 四态统一视图 =====
+test('⑪模型健康配置与统一视图：默认15分钟、已配置集合去重、冷却/熔断/健康/未知与过期恢复', () => {
+  assert.equal(seed(SID).probeEnabled, true)
+  assert.equal(seed(SID).probeIntervalMin, 15)
+  assert.equal(cfg({}).probeEnabled, true)
+  assert.equal(cfg({}).probeIntervalMin, 15)
+  assert.equal(cfg({ probeIntervalMin: 2.4 }).probeIntervalMin, 2)
+  var old = { tasks: [], probeEnabled: 'dirty', probeIntervalMin: 0 }
+  normalizeBoard(old)
+  assert.equal(old.probeEnabled, true)
+  assert.equal(old.probeIntervalMin, 15)
+  old.probeEnabled = false; old.probeIntervalMin = 2000; normalizeBoard(old)
+  assert.equal(old.probeEnabled, false)
+  assert.equal(old.probeIntervalMin, 1440)
+
+  var d = seed(SID)
+  d.workerModel = 'p/a'; d.verifierModel = 'p/v'
+  d.laneModels.light.verifier = ['p/d']
+  d.laneModels.heavy.worker = ['p/b', 'p/a']
+  d.fallbackModels = ['p/c', 'p/a']
+  assert.deepEqual(configuredModelIds(d), ['p/a', 'p/v', 'p/d', 'p/b', 'p/c'], '板级∪档位∪备用链去重；不扫目录/不含卡级模型')
+  var now = Date.now()
+  var bucket = {
+    'p/a': { observed: 'healthy', observedNote: '主动探测通过', lastProbe: '2026-10-26T01:00:00.000Z', lastSeen: '2026-10-26T01:00:00.000Z', latencyMs: 12, recentRuns: [{ ok: true, at: '2026-10-26T00:00:00.000Z', latencyMs: 30 }] },
+    'p/b': { observed: 'healthy', observedNote: '最近 run 成功', cooldownNote: '额度限流，冷却至 15:00' },
+    'p/c': { observed: 'unknown', circuitNote: '验收连续失败，已熔断' },
+    'p/removed': { observed: 'healthy' },
+  }
+  var view = modelHealthView(d, bucket, { sid: SID, now: now, modelCooldown: { 'p/b': now + 60000 }, badModels: { [SID + '|p/c']: true } })
+  assert.equal(view['p/a'].state, 'healthy')
+  assert.equal(view['p/a'].lastProbe, '2026-10-26T01:00:00.000Z')
+  assert.equal(view['p/a'].latencyMs, 12)
+  assert.equal(view['p/a'].recentRuns.length, 1)
+  assert.equal(view['p/b'].state, 'cooldown')
+  assert.equal(view['p/b'].until, now + 60000)
+  assert.equal(view['p/b'].note, '额度限流，冷却至 15:00')
+  assert.equal(view['p/c'].state, 'circuit')
+  assert.equal(view['p/d'].state, 'unknown', '已配置但无信号=未知')
+  assert.equal('p/removed' in view, false, '已移出配置的模型不透出/不探测')
+  var recovered = modelHealthView(d, bucket, { sid: SID, now: now, modelCooldown: { 'p/b': now - 1 }, badModels: {} })
+  assert.equal(recovered['p/b'].state, 'healthy', '过期冷却不残留')
+  assert.equal('until' in recovered['p/b'], false)
+  assert.equal(recovered['p/c'].state, 'unknown', '无熔断时回基础观察态')
+})
+
+function mkHealthRpc(board, stateOver) {
+  var state = Object.assign({ handlers: {}, teamModeCache: {}, feedbackCache: {}, epicSplitCache: {}, modelHealth: {}, modelCooldown: {}, badModels: {} }, stateOver || {})
+  var ctx = { tools: { register: function () {} }, effect: function () {}, webServer: { register: function () { return function () {} } }, get: function () { return null } }
+  createRpc(ctx, state, {
+    getActorId: function () { return 'tester' }, resolveRoot: function (x) { return x }, toolSessionId: function () { return SID }, rpcSessionId: function () { return SID },
+    rootForSession: function () { return null }, deriveWorkMode: function () { return 'auto' }, runsFor: function () { return {} },
+    rt: async function () { return board }, mutateLocked: async function (sid, fn) { return fn(board) },
+    maybeNotify: function () {}, notifyTaskDone: function () {}, spawnOneShot: function () {}, accumulateRunUsage: function () {},
+    readContextPack: async function () { return null }, pushSysNote: function () {}, sessionCwd: function () { return '' },
+  })
+  return { handlers: state.handlers, state: state }
+}
+
+// ===== ⑫ get-tasks 健康透出 + 探测开关/间隔写通道（含 unchanged 轻量响应）=====
+test('⑫RPC：get-tasks 透出 modelHealth/probeEnabled/probeIntervalMin，set-board-config 可写且轻量响应不丢健康面', async () => {
+  var board = seed(SID); board.workerModel = 'p/a'
+  var state = {
+    modelHealth: { [SID]: { 'p/a': { observed: 'healthy', observedNote: '主动探测通过', lastProbe: '2026-10-26T01:00:00.000Z', lastSeen: '2026-10-26T01:00:00.000Z', latencyMs: 9, recentRuns: [] } } },
+    modelCooldown: {}, badModels: {},
+  }
+  var h = mkHealthRpc(board, state)
+  var first = await h.handlers['get-tasks']({})
+  assert.equal(first.probeEnabled, true)
+  assert.equal(first.probeIntervalMin, 15)
+  assert.equal(first.modelHealth['p/a'].state, 'healthy')
+  assert.equal(first.modelHealth['p/a'].latencyMs, 9)
+  var light = await h.handlers['get-tasks']({ ifHash: first.tasksHash })
+  assert.equal(light.unchanged, true)
+  assert.equal(light.modelHealth['p/a'].state, 'healthy', 'unchanged 轻量响应仍透健康表')
+  var off = await h.handlers['set-board-config']({ key: 'probeEnabled', value: false })
+  assert.equal(off.ok, true)
+  var interval = await h.handlers['set-board-config']({ key: 'probeIntervalMin', value: 7 })
+  assert.equal(interval.ok, true)
+  assert.equal(board.probeEnabled, false)
+  assert.equal(board.probeIntervalMin, 7)
+  assert.deepEqual(board.configLog.slice(-2).map(function (x) { return x.key }), ['probeEnabled', 'probeIntervalMin'], '两个配置键均入既有审计')
+  var after = await h.handlers['get-tasks']({})
+  assert.equal(after.probeEnabled, false)
+  assert.equal(after.probeIntervalMin, 7)
+  assert.equal(after.modelHealth['p/a'].state, 'healthy', '关主动探测不清被动健康信号')
+})
+
+function mkProbeCtx(calls, errorText) {
+  var llm = {
+    stream: function (options) {
+      calls.push(options)
+      return (async function * () {
+        if (errorText) yield { type: 'finish', reason: { kind: 'error', failure: { message: errorText } } }
+        else yield { type: 'finish', reason: { kind: 'stop' } }
+      })()
+    },
+  }
+  return { get: function (name) { return name === 'llm' ? llm : null } }
+}
+function mkProbeBoard() {
+  var d = seed(SID)
+  d.workerModel = 'p/a'; d.verifierModel = 'p/v'
+  d.laneModels.heavy.worker = ['p/b', 'p/a']; d.fallbackModels = ['p/c']
+  return d
+}
+
+// ===== ⑬ 主动嗅探：极短 llm.stream 直调 + 仅配置集合 + 关闭零请求 + 429 复用冷却 =====
+test('⑬主动探测：maxTokens=1 无系统/工具/子代理，仅已配置去重集合；probeEnabled=false 零请求', async () => {
+  var calls = [], state = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+  var dispatch = mkDispatch(mkProbeBoard(), mkProbeCtx(calls), state)
+  var result = await dispatch.probeConfiguredModels(SID, mkProbeBoard())
+  assert.equal(result.probed, 4)
+  assert.equal(result.healthy, 4)
+  assert.deepEqual(result.models, ['p/a', 'p/v', 'p/b', 'p/c'])
+  assert.equal(calls.length, 4)
+  assert.deepEqual(calls.map(function (x) { return x.provider + '/' + x.model }), result.models)
+  for (var i = 0; i < calls.length; i++) {
+    assert.equal(calls[i].maxTokens, 1)
+    assert.equal(calls[i].messages[0].content[0].text, 'ping')
+    assert.equal('system' in calls[i], false)
+    assert.equal('tools' in calls[i], false)
+    assert.equal('sessionId' in calls[i], false, '直调不创建/绑定子会话')
+  }
+  var h = state.modelHealth[SID]['p/a']
+  assert.equal(h.state, 'healthy')
+  assert.ok(h.lastProbe && h.lastSeen)
+  assert.equal(typeof h.latencyMs, 'number')
+
+  var offCalls = [], offBoard = mkProbeBoard(); offBoard.probeEnabled = false
+  var offState = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+  var off = await mkDispatch(offBoard, mkProbeCtx(offCalls), offState).probeConfiguredModels(SID, offBoard)
+  assert.equal(off.disabled, true)
+  assert.equal(off.probed, 0)
+  assert.equal(offCalls.length, 0, '关闭主动探测=零 LLM 请求')
+  assert.equal(offState.modelHealth[SID]['p/a'].state, 'unknown', '关闭后仍建立被动健康表/未知态')
+})
+
+test('⑬b主动探测失败：429 finish error 复用冷却登记，不污染 badModels 熔断表', async () => {
+  var calls = [], board = seed(SID); board.workerModel = 'p/a'
+  var state = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+  var origErr = console.error; console.error = function () {}
+  try {
+    var result = await mkDispatch(board, mkProbeCtx(calls, '429 RATE_LIMIT'), state).probeConfiguredModels(SID, board)
+    assert.equal(result.probed, 1)
+    assert.equal(result.healthy, 0)
+    assert.ok(state.modelCooldown['p/a'] > Date.now())
+    assert.equal(state.modelHealth[SID]['p/a'].state, 'cooldown')
+    assert.ok(state.modelHealth[SID]['p/a'].lastProbe)
+    assert.equal(Object.keys(state.badModels).length, 0)
+  } finally { console.error = origErr }
+})
+
+async function runVerifierHealth(result) {
+  var settle = null, pending = new Promise(function (resolve) { settle = resolve })
+  var board = seed(SID); board.verifierModel = 'p/v'; board.tasks = [mkTask({ status: 'verifying' })]
+  var state = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+  var dispatch = mkDispatch(board, { subagents: mkActivationSubagents([], pending) }, state)
+  var rec = await dispatch.spawnOneShot(SID, board.tasks[0], 'verifier')
+  assert.equal(rec.model, 'p/v')
+  settle(result)
+  for (var i = 0; i < 30; i++) {
+    var h = state.modelHealth[SID] && state.modelHealth[SID]['p/v']
+    if (h && h.recentRuns.length) break
+    await new Promise(function (resolve) { setTimeout(resolve, 10) })
+  }
+  return { board: board, state: state }
+}
+
+// ===== ⑭ 被动 run 聚合 + 熔断登记：统一结算点真实落健康表 =====
+test('⑭被动健康面：Verifier 成功 run 记健康/延迟/近5次，失败 run 同步熔断且保留失败样本', async () => {
+  var ok = await runVerifierHealth({ output: [{ type: 'text', text: 'APPROVED' }], stopReason: 'completed' })
+  var ho = ok.state.modelHealth[SID]['p/v']
+  assert.equal(ho.state, 'healthy')
+  assert.equal(ho.recentRuns.length, 1)
+  assert.equal(ho.recentRuns[0].ok, true)
+  assert.equal(typeof ho.latencyMs, 'number')
+  assert.match(ho.observedNote, /最近 run 成功（近 1 次 1 次成功）/)
+  assert.equal(ho.lastProbe, null, '被动 run 不伪造主动探测时间')
+
+  var bad = await runVerifierHealth({ output: [], stopReason: 'error', diagnostic: 'boom' })
+  var hb = bad.state.modelHealth[SID]['p/v']
+  assert.equal(bad.state.badModels[SID + '|p/v'], true, '原 badModels 熔断判定照常')
+  assert.equal(hb.state, 'circuit', '熔断登记同步健康表')
+  assert.equal(hb.recentRuns.length, 1)
+  assert.equal(hb.recentRuns[0].ok, false)
+  assert.match(hb.circuitNote, /验收连续失败/)
+})
+
+// ===== ⑮ GUI 健康点与弹层配置：四态/悬浮详情/七处链芯片/局部15s刷新/产物同步 =====
+test('⑮模型路由健康点：🟢🟡🔴⚪ + 悬浮详情 + 主动探测配置 + build 产物标记', () => {
+  assert.ok(src.indexOf('function ModelHealthDot(props)') >= 0)
+  for (const icon of ['🟢', '🟡', '🔴', '⚪']) assert.ok(src.indexOf(icon) >= 0, '缺健康点图标 ' + icon)
+  assert.ok(src.indexOf("role: 'img'") >= 0 && src.indexOf("'aria-label': props.model + ' ' + label") >= 0, '健康点缺可访问名称')
+  for (const text of ['最近探测：', '最近信号：', '最近延迟：', '次 run：']) assert.ok(src.indexOf(text) >= 0, '悬浮详情缺 ' + text)
+  assert.match(src, /React\.createElement\(ModelHealthDot, \{ model: m, health: props\.health \}\)/, '链芯片未接健康点')
+  assert.equal((src.match(/OrderedModelsEditor, \{ label:[^\n]*health: modelHealth/g) || []).length, 3, 'Worker/Verifier map + 备用链三处接线覆盖七处编辑器')
+  assert.ok(src.indexOf("rpc('get-tasks', args)") >= 0 && src.indexOf('setInterval(refreshModelHealth, 15000)') >= 0, '弹层缺局部健康刷新')
+  assert.ok(src.indexOf("key: 'probeEnabled'") >= 0 && src.indexOf("cfgKey: 'probeIntervalMin'") >= 0, '弹层缺探测开关/间隔配置')
+  assert.ok(src.indexOf('健康嗅探（事前调度）') >= 0)
+  for (const marker of ['function ModelHealthDot(props)', '健康嗅探（事前调度）', "cfgKey: 'probeIntervalMin'", 'health: modelHealth']) {
+    assert.ok(built.indexOf(marker) >= 0, 'client.js 缺健康标记：' + marker + '（需 npm run build-client）')
+  }
 })
