@@ -443,7 +443,8 @@ export function cancelApply(d, t, actor, note) {
 //   ① 点位可选——epic 未声明 hooks 时全链路零变化（pickDispatch / maybeAutoCloseParent / poolCycle
 //      都只在 hooks 存在且 enabled 时才进入分支，老 epic 行为逐字不变）；
 //   ② 薄框架——prompt 只给契约与上下文，做什么由 hook agent 自行决策，吃不准就歧义上报；
-//   ③ commit/push 不进任何默认形态——默认文案明确写「不要默认提交/推送」，收口动作全由 agent 自己判断。
+//   ③ commit/push 不进任何默认形态——无例外禁止：提交一律由主窗口验收后承接
+//      （task-mvoocc68 收紧，原「除非」逃生口已焊死）。
 export var HOOK_PHASES = ['pre', 'post']
 export var HOOK_STATES = ['idle', 'running', 'done', 'failed']
 // 建卡/更新卡的 hooks 浅校验（工具 task_create/task_update 与 RPC create-task/update-task 共用同一口径）。
@@ -946,10 +947,11 @@ export function buildWorkerPrompt(t, pack, feedbackEnabled) {
   p += '\n\n开工计划闸口：调研完成后、动笔写代码前，先 board_report（kind=progress），question 以『' + PLAN_GATE_PREFIX + '』开头列出你将要修改/新建的文件清单（每行一个路径）。这一步是硬闸口：主窗口会比对你的计划与本卡 touches 边界，越界会被立即纠正——想清楚再报。'
   // git 纪律红线（n-muyaaoo7cqnd 实证事故：并行 Worker 跑 git checkout HEAD -- package.json
   // 把另一 Worker 的在途编辑冲掉）：禁止还原命令，只改自己写的文件，要干净基线走 escalate 上报。
-  // 精确路径 add 条款（n-mv6xntg1p6i5 实证：并行 Worker 共享 worktree+暂存区，宽泛 git add
-  // 三起吞并他卡在途编辑——p4-rdf 带走 p4-apply-ddl-core 的 4 处在途编辑混入自己 commit）：
-  // 提交只允许精确路径 add（本卡 touches 或逐一列明改过的文件），禁 git add -A / . / 目录。
-  p += '\n\ngit 纪律红线：禁止 git checkout / git restore / git reset --hard / git clean 等还原命令（会冲掉并行 Worker 与你自己的未提交在途编辑）；你只需管自己写的文件，别人改了别的文件与你无关；确实需要干净基线时用 board_report（kind=escalate）上报，由主窗口裁决。提交时只允许精确路径 git add <本卡 touches 声明的文件>（或明确你改过的文件路径逐一列出）；禁止 git add -A / git add . / git add 目录——并行 Worker 共享暂存区，宽泛 add 会把别卡在途编辑卷进你的 commit。'
+  // 提交禁令无例外（task-mvoocc68；task-mvomad6c Worker 验收前自行 commit ad8afd2 实证）：
+  // commit/push 一律禁止——提交权归主窗口验收后承接，工作区改动保持未提交状态交付；
+  // 原「提交时只允许精确路径 add」隐含许可条款（n-mv6xntg1p6i5 三起暂存吞并实证）随之退役，
+  // add 也禁：暂存区与并行 Worker 共享，任何暂存都会混进主窗口的提交口径。
+  p += '\n\ngit 纪律红线：禁止 git checkout / git restore / git reset --hard / git clean 等还原命令（会冲掉并行 Worker 与你自己的未提交在途编辑）；你只需管自己写的文件，别人改了别的文件与你无关；确实需要干净基线时用 board_report（kind=escalate）上报，由主窗口裁决。禁止 git commit / git push：提交一律由主窗口在验收通过后承接，无一例外；你的工作区改动保持未提交状态交付。也不要 git add（含 git add -A / git add . / git add 目录）——暂存区与并行 Worker 共享，你的任何暂存都会混进主窗口的提交口径。'
   // 大文件交付纪律（实证 n-mv65bhk0mg5w：gs-gov-policy task-mv63fo9y 池 Worker 连续 3 个 run 单次输出
   // 64k tok 撞上限、烧 330k token 零文件产出——都在试图一次性 write 整个 22.5KB HTML；主窗口改用
   // write×1 + edit×2 分块落地同一 spec 一次过）：固定段写死「预估 >8KB 禁止单次 write 全量」。
@@ -1022,9 +1024,10 @@ export function buildVerifierPrompt(t, pack, userGuide) {
 // ===== hook run prompt（薄框架模板，hooks=agent run）=====
 // hook 点 = 一次真实 agent 运行：prompt 只给「契约一句话 + epic 上下文 + 子任务清单」，
 // 具体做什么由 hook agent 按现场自行决策；吃不准/信息不足一律歧义上报，禁止硬闯。
-// commit/push 不进任何默认形态——前置不许默认提交，后置明确写「不要默认提交/推送」（红线③）。
+// commit/push 不进任何默认形态——2026-10-26 起收紧为无例外禁止（task-mvoocc68，红线③）：
+// 提交一律由主窗口在验收通过后承接，hook agent 的改动同样保持未提交状态交付。
 // pre 契约：让这批子任务具备开跑条件（做什么准备由 agent 判断，可只读调研后什么都不改）。
-// post 契约：把这批已完成的工作收口（验证/总结/（自行决定并自负其责的）提交都算）。
+// post 契约：把这批已完成的工作收口（验证/总结等——自行决策并自负其责；提交不在其中）。
 export function buildHookPrompt(epic, phase, childTasks) {
   var kids = Array.isArray(childTasks) ? childTasks : []
   var pre = phase !== 'post'
@@ -1045,9 +1048,9 @@ export function buildHookPrompt(epic, phase, childTasks) {
   }
   p += '\n你的任务：' + (pre
     ? '让这批子任务具备开跑条件。做什么准备由你根据上下文判断（可只读调研、制定方案、补齐约定，也可以判断为「无需准备」）。'
-    : '把这批已完成的工作收口。收口动作由你判断（通常可能涉及验证、总结，也可能涉及提交——自行决策并自负其责）。')
+    : '把这批已完成的工作收口。收口动作由你判断（通常涉及验证、总结等——自行决策并自负其责；提交不在其中，提交一律由主窗口承接）。')
   p += '信息不足、吃不准、或需要用户/主窗口决策时：优先调用 board_report（kind=escalate, taskId=' + epic.id + ', question=疑问）；工具不可用则输出以 [ESCALATE] 开头的说明。不要猜测、不要硬闯。\n'
-  p += '红灯纪律：不要默认提交（git commit）或推送（git push）——除非上面的运行契约明确要求，或你判断确实是本次收口不可省略的一步；那也要在完成说明里写清做了什么、为什么。\n'
+  p += '红灯纪律：禁止提交（git commit）或推送（git push）——提交一律由主窗口在验收通过后承接，无一例外；你的改动保持未提交状态交付。\n'
   if (!pre) p += '本次收口完成后，史诗将自动转入 verifying（交人验收）。\n'
   p += '\n完成契约（双模，工具优先）：\n'
   if (pre) p += '1. 完成时：优先调用 board_report 工具（kind=complete, taskId=' + epic.id + '，summary=做了什么准备/changes=改动清单（无改动就写「无」）/selfTest=自测情况/diffStat=变更概要）。工具不可用则按分段格式输出（## 开发描述 / ## 改动清单 / ## 自测情况 / ## diff 概要）。完成即代表 pre 闸门放行，之后 epic 的子任务会开始派发。\n'

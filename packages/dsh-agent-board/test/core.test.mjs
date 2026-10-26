@@ -480,22 +480,25 @@ test('buildVerifierPrompt: 注入交付物 + 验收脚本 + messages', () => {
   assert.match(p, /做完了/); assert.match(p, /npm test/); assert.match(p, /board_verdict/); assert.match(p, /方案B/)
 })
 
-test('buildWorkerPrompt: git 纪律红线（禁还原命令 + 精确路径 add）注入，verifier prompt 不注入（源码断言）', () => {
+test('buildWorkerPrompt: git 纪律红线（禁还原命令 + 提交禁令无例外）注入，verifier prompt 不注入（源码断言）', () => {
   const t = mkTask({ id: 'g1' })
   const p = core.buildWorkerPrompt(t)
   assert.match(p, /git 纪律红线/)
   assert.match(p, /禁止 git checkout \/ git restore \/ git reset --hard \/ git clean 等还原命令/)
   assert.match(p, /会冲掉并行 Worker 与你自己的未提交在途编辑/)
   assert.match(p, /确实需要干净基线时用 board_report（kind=escalate）上报/)
-  // 精确路径 add 条款（task-mv73ylwe；n-mv6xntg1p6i5 实证：并行 Worker 共享暂存区，宽泛 add 吞并他卡在途编辑）
-  assert.match(p, /提交时只允许精确路径 git add <本卡 touches 声明的文件>/)
-  assert.match(p, /禁止 git add -A \/ git add \. \/ git add 目录/)
-  assert.match(p, /并行 Worker 共享暂存区，宽泛 add 会把别卡在途编辑卷进你的 commit/)
+  // 提交禁令无例外（task-mvoocc68；task-mvomad6c Worker 验收前自行 commit ad8afd2 实证——逃生口焊死，
+  // 提交权归主窗口验收后承接；原「提交时只允许精确路径 add」隐含许可条款随之退役，add 也禁——暂存区共享）
+  assert.match(p, /禁止 git commit \/ git push：提交一律由主窗口在验收通过后承接，无一例外/)
+  assert.match(p, /你的工作区改动保持未提交状态交付/)
+  assert.match(p, /也不要 git add（含 git add -A \/ git add \. \/ git add 目录）/)
+  assert.match(p, /暂存区与并行 Worker 共享，你的任何暂存都会混进主窗口的提交口径/)
+  assert.doesNotMatch(p, /提交时只允许精确路径 git add/) // 旧隐含许可条款已退役
   // verifier prompt 不动
   const pv = core.buildVerifierPrompt(t)
   assert.doesNotMatch(pv, /git 纪律红线/)
   assert.doesNotMatch(pv, /reset --hard/)
-  assert.doesNotMatch(pv, /精确路径 git add/)
+  assert.doesNotMatch(pv, /禁止 git commit \/ git push/)
   assert.doesNotMatch(pv, /git add -A/)
   // 源码级：条款只在 buildWorkerPrompt 体内（切片边界到 buildVerifierPrompt 之前），不在 buildVerifierPrompt 体内
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
@@ -503,11 +506,12 @@ test('buildWorkerPrompt: git 纪律红线（禁还原命令 + 精确路径 add�
   assert.ok(wBody.length > 500, 'buildWorkerPrompt 切片成功')
   assert.match(wBody, /git 纪律红线/)
   assert.match(wBody, /git reset --hard/)
-  assert.match(wBody, /提交时只允许精确路径 git add/)
-  assert.match(wBody, /禁止 git add -A/)
+  assert.match(wBody, /禁止 git commit \/ git push：提交一律由主窗口在验收通过后承接，无一例外/)
+  assert.match(wBody, /保持未提交状态交付/)
+  assert.doesNotMatch(wBody, /提交时只允许精确路径 git add/) // 旧隐含许可条款源码级清零
   const vBody = coreSrc.slice(coreSrc.indexOf('export function buildVerifierPrompt'), coreSrc.indexOf('export function buildHookPrompt'))
   assert.doesNotMatch(vBody, /git 纪律红线/)
-  assert.doesNotMatch(vBody, /精确路径 git add/)
+  assert.doesNotMatch(vBody, /禁止 git commit \/ git push/)
 })
 
 test('buildWorkerPrompt: 开工计划闸口条款注入（动笔前+『计划改动：』前缀+越界纠正三语义），verifier prompt 不注入（源码断言）', () => {
@@ -3272,16 +3276,23 @@ test('buildHookPrompt: 薄框架模板（契约 + epic 上下文 + 子任务清�
   assert.match(p, /由你根据上下文判断/)
   assert.match(p, /board_report（kind=escalate, taskId=epic/) // 歧义兜底通道
   assert.match(p, /不要猜测、不要硬闯/)
-  assert.match(p, /不要默认提交（git commit）或推送（git push）/) // 红线③：commit/push 不入默认形态
+  assert.match(p, /红灯纪律：禁止提交（git commit）或推送（git push）——提交一律由主窗口在验收通过后承接，无一例外/) // 红线③收紧无例外（task-mvoocc68）
+  assert.doesNotMatch(p, /除非/)                            // 旧逃生口已焊死（task-mvomad6c 实证）
   assert.match(p, /完成即代表 pre 闸门放行/)
-  // post 契约：收口语义 + 明确「自行决策并自负其责」，且不含 pre 的放行文案
+  // post 契约：收口语义 + 明确「自行决策并自负其责」+ 提交不在其中，且不含 pre 的放行文案
   const q = core.buildHookPrompt(epi, 'post', kids)
   assert.match(q, /hooks=post run/)
   assert.match(q, /post（收口闸门）/)
   assert.match(q, /把这批已完成的工作收口/)
   assert.match(q, /自行决策并自负其责/)
+  assert.match(q, /提交不在其中，提交一律由主窗口承接/)
+  assert.doesNotMatch(q, /除非/)
   assert.match(q, /史诗将自动转入 verifying/)
   assert.doesNotMatch(q, /完成即代表 pre 闸门放行/)
+  // 「除非…收口」旧逃生口与「不要默认提交」旧文案全源码清零（task-mvoocc68：根因原文曾在本 builder 的红灯纪律句）
+  const hookSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(hookSrc, /除非[^\n]*收口/)
+  assert.doesNotMatch(hookSrc, /不要默认提交/)
   // 无子任务时也有可读清单占位（不产生半截列表）
   assert.match(core.buildHookPrompt(epi, 'pre', []), /（暂无子任务）/)
 })
