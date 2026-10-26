@@ -70,6 +70,54 @@ export function createDispatch(ctx, state, deps) {
     // key = 模型 id（provider/model 复合串）：限流是账户级额度窗口、连接故障是网关面，都不按会话分键。
     // 缺字段就地补（测试桩/老宿主兼容，与 poolHealthFor 同例）。
     var modelCooldown = state.modelCooldown || (state.modelCooldown = {})
+    // 统一健康表（task-mvoulhm7）：内部按会话分桶，避免 sid|model 熔断信号串板；get-tasks 公开为 {modelId:entry}。
+    // observed=最近主动探测/run 的基础状态，冷却与熔断是覆盖态；调度仍只认这两种覆盖态，未知不等于不可用。
+    var modelHealth = state.modelHealth || (state.modelHealth = {})
+    // 熔断连击表（task-mvowb2hc 洞①）：sid|model → 连续「模型面失败」次数（纯内存不持久化，与
+    // badModels/modelCooldown 同生命周期，重启即清）。语义：只有「会话被宿主/激活机制在开工前杀掉」
+    // 这类模型面失败才计数（worker 自己的失误——空输出/超时等——不算），连续 N 次才拉黑进 badModels
+    // （熔断语义不变：拉黑后链跳过 + 健康表 circuit）；任一可归因 run 正常完成即归零（settleRunRecord）。
+    var modelFailStreak = state.modelFailStreak || (state.modelFailStreak = {})
+    var probeInFlight = {}, probeAbort = {}, probeNextAt = {}, probeDisposed = false
+    function healthBucket(sid) { return modelHealth[sid] || (modelHealth[sid] = {}) }
+    function healthEntry(sid, model) {
+      var b = healthBucket(sid)
+      return b[model] || (b[model] = { state: 'unknown', observed: 'unknown', lastProbe: null, lastSeen: null, note: '尚无健康信号', observedNote: '尚无健康信号', recentRuns: [] })
+    }
+    function syncModelHealth(sid, model, cooldownOverride) {
+      var e = healthEntry(sid, model), until = typeof cooldownOverride === 'number' ? cooldownOverride : cooldownLive(model)
+      e.state = e.observed === 'healthy' ? 'healthy' : 'unknown'
+      e.note = e.observedNote || '尚无健康信号'
+      delete e.until
+      if (until) { e.state = 'cooldown'; e.until = until; e.note = e.cooldownNote || '模型冷却中' }
+      if (badModels[modelKey(sid, model)]) { e.state = 'circuit'; e.note = e.circuitNote || '连续失败，模型熔断中' }
+      return e
+    }
+    function observeModel(sid, model, ok, opts) {
+      if (!model || probeDisposed) return null
+      opts = opts || {}
+      var e = healthEntry(sid, model), at = new Date().toISOString()
+      var latency = Number(opts.latencyMs)
+      e.lastSeen = at
+      e.observed = ok ? 'healthy' : 'unknown'
+      if (isFinite(latency) && latency >= 0) e.latencyMs = Math.round(latency)
+      if (opts.probe) {
+        e.lastProbe = at
+        e.observedNote = ok ? '主动探测通过' : ('主动探测失败' + (opts.note ? '：' + opts.note : ''))
+      } else {
+        e.recentRuns.push({ ok: !!ok, at: at, latencyMs: isFinite(latency) && latency >= 0 ? Math.round(latency) : null })
+        if (e.recentRuns.length > 5) e.recentRuns = e.recentRuns.slice(-5)
+        var passed = e.recentRuns.filter(function (r) { return r.ok }).length
+        e.observedNote = (ok ? '最近 run 成功' : '最近 run 失败') + '（近 ' + e.recentRuns.length + ' 次 ' + passed + ' 次成功）'
+      }
+      e.note = e.observedNote
+      return syncModelHealth(sid, model)
+    }
+    function markModelCircuit(sid, model, note) {
+      var e = healthEntry(sid, model)
+      e.circuitNote = note || '连续验收失败，模型熔断中'
+      return syncModelHealth(sid, model)
+    }
     // 冷却期判定：返回冷却截止 ts（0=不在冷却）；过期项惰性清除（读路径顺手删，无需 sweeper）
     function cooldownLive(model) {
       var until = modelCooldown[model]
@@ -87,9 +135,12 @@ export function createDispatch(ctx, state, deps) {
       if (!model) return null
       var hit = parseModelCooldown(errText)
       if (!hit) return null
-      if (hit.until <= (modelCooldown[model] || 0)) return modelCooldown[model]
+      if (hit.until <= (modelCooldown[model] || 0)) { syncModelHealth(sid, model, modelCooldown[model]); return modelCooldown[model] }
       modelCooldown[model] = hit.until
       var until = modelCooldown[model]
+      var he = healthEntry(sid, model)
+      he.cooldownNote = hit.kind === 'connectivity' ? ('连接/网关故障，冷却至 ' + hhmmOf(until)) : ('额度限流，冷却至 ' + hhmmOf(until))
+      syncModelHealth(sid, model, until)
       if (hit.kind === 'connectivity') console.error('[task-board] 模型 ' + model + ' 连接/网关故障，短冷却 10 分钟至 ' + new Date(until).toISOString())
       else console.error('[task-board] 模型 ' + model + ' 命中 RATE_LIMIT 限流，冷却至 ' + new Date(until).toISOString() + '（' + (hit.parsed ? '重置时间解析' : '缺省 30min') + '）')
       try {
@@ -108,8 +159,9 @@ export function createDispatch(ctx, state, deps) {
     // 消费点=spawnOneShot 取模链：候选被判不健康时先扫板级 fallbackModels 找首个健康者（链本身逐项过本检查）。
     function healthyModel(sid, modelId) {
       if (!modelId) return false
-      if (badModels[modelKey(sid, modelId)]) return false
-      if (cooldownLive(modelId)) return false
+      var h = syncModelHealth(sid, modelId)
+      if (h.state === 'circuit') return false
+      if (h.state === 'cooldown') return false
       return true
     }
     // 扫备用链找首个健康模型（保持链序=主窗口配置的能力水位优先级）；链尽/空链返回 ''。
@@ -119,6 +171,107 @@ export function createDispatch(ctx, state, deps) {
         if (healthyModel(sid, fbList[fi])) return fbList[fi]
       }
       return ''
+    }
+    // ===== 熔断连击喂给（task-mvowb2hc 洞①）：模型面失败判别 + 连击计数 + 三连拉黑 =====
+    // 模型面失败 = 会话被宿主/激活机制在开工前杀掉，两条来源文本都在本文件内确定：
+    //   ① activation.result 拆除兜底臂：「子会话被宿主拆除（stopReason: X，…）」（stopReason=completed
+    //      的收尾性拆除不算——那是正常完成的副产物，不是模型失败）；
+    //   ② activation 异常兜底臂：「子会话 activation 异常：…」（spawn 机制/provider 面失败，同属开工前）。
+    // worker 自己的失误（空输出/超时中断/文本降级失败）不算——好模型不该为 worker 的错误背锅。
+    var WORKER_MODEL_CIRCUIT_AFTER = 3 // 连续 N 次模型面失败才拉黑（与 worker 三连败阻塞同一三击口径）
+    function isModelKillFailure(errText) {
+      var s = String(errText || '')
+      if (s.indexOf('子会话被宿主拆除（stopReason: ') === 0) return s.indexOf('子会话被宿主拆除（stopReason: completed') !== 0
+      return s.indexOf('子会话 activation 异常：') === 0
+    }
+    // 连击 +1；达 N 且尚未拉黑 → badModels 落黑名单（取模链/降档候选的既有熔断判定照常消费，零新分支）
+    // + 健康表 circuit + 系统通知（不带 taskId：与验收熔断通知同口径，不受任务回执冲刷丢弃）。
+    // 返回是否本次调用触发拉黑（测试/留痕用）。
+    function feedModelFailure(sid, model) {
+      if (!model) return false
+      var k = modelKey(sid, model)
+      var n = (modelFailStreak[k] || 0) + 1
+      modelFailStreak[k] = n
+      if (n < WORKER_MODEL_CIRCUIT_AFTER) return false
+      if (!badModels[k]) {
+        badModels[k] = true
+        markModelCircuit(sid, model, '连续 ' + n + ' 次 spawn/续跑即被宿主拆除（模型失败），已熔断')
+        pushSysNote(sid, '模型 ' + model + ' 连续 ' + n + ' 次 spawn/续跑即被宿主秒拆（模型失败），已熔断——后续取模链跳过该模型')
+      }
+      return true
+    }
+    // 连击归零：任一可归因 run 正常完成即证明模型链路恢复（settleRunRecord completed 路径调用）
+    function resetModelFailure(sid, model) { if (model) delete modelFailStreak[modelKey(sid, model)] }
+    // ===== 主动模型嗅探：llm.stream 极短直调（无子代理/系统提示/工具，maxTokens=1）=====
+    // finish=stop/max-tokens 等均证明模型链路可用；error/aborted/无 finish 才算失败。失败文本复用既有冷却登记，
+    // 但不改 badModels 熔断判定。同模型全局只在飞一次，15s 硬超时带 AbortSignal，绝不阻塞 poolCycle 派发。
+    async function probeModel(sid, model) {
+      if (probeDisposed) return null
+      if (probeInFlight[model]) return probeInFlight[model]
+      var llm = ctx.get && ctx.get('llm')
+      if (!llm || typeof llm.stream !== 'function') return null
+      var slash = model.indexOf('/')
+      if (slash <= 0 || slash === model.length - 1) return null
+      var started = Date.now(), ac = new AbortController(), timedOut = false, disposeTimer = null
+      var promise = (async function () {
+        try {
+          if (ctx.timer && typeof ctx.timer.timeout === 'function') disposeTimer = ctx.timer.timeout(function () { timedOut = true; ac.abort() }, 15000)
+          else { var nativeTimer = setTimeout(function () { timedOut = true; ac.abort() }, 15000); disposeTimer = function () { clearTimeout(nativeTimer) } }
+          var stream = llm.stream({ provider: model.slice(0, slash), model: model.slice(slash + 1), messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }], maxTokens: 1, signal: ac.signal })
+          var finished = false, failure = ''
+          for await (var chunk of stream) {
+            if (!chunk || chunk.type !== 'finish') continue
+            finished = true
+            var reason = chunk.reason || {}
+            if (reason.kind === 'error' || reason.kind === 'aborted') failure = String((reason.failure && reason.failure.message) || reason.kind || '模型探测失败')
+          }
+          if (!finished) throw new Error('模型探测流未返回 finish')
+          if (failure) throw new Error(failure)
+          observeModel(sid, model, true, { probe: true, latencyMs: Date.now() - started })
+          return true
+        } catch (e) {
+          var text = timedOut ? 'probe timeout 15000ms' : String(e && e.message || e).slice(0, 300)
+          observeModel(sid, model, false, { probe: true, latencyMs: Date.now() - started, note: text })
+          if (!probeDisposed) { try { await sniffModelCooldown(sid, '', model, text) } catch (_) {} }
+          return false
+        } finally {
+          try { if (typeof disposeTimer === 'function') disposeTimer() } catch (_) {}
+          delete probeInFlight[model]
+          delete probeAbort[model]
+        }
+      })()
+      probeInFlight[model] = promise
+      probeAbort[model] = ac
+      return promise
+    }
+    async function probeConfiguredModels(sid, d) {
+      var c = cfg(d), models = core.configuredModelIds(d)
+      for (var i = 0; i < models.length; i++) syncModelHealth(sid, models[i])
+      if (!c.probeEnabled) return { disabled: true, models: models, probed: 0 }
+      var llm = ctx.get && ctx.get('llm')
+      if (!llm || typeof llm.stream !== 'function') return { disabled: false, unavailable: true, models: models, probed: 0 }
+      var probed = 0, healthy = 0
+      for (var m = 0; m < models.length; m++) {
+        if (probeDisposed) break
+        var before = probeInFlight[models[m]] ? false : true
+        var ok = await probeModel(sid, models[m])
+        if (ok === null) continue
+        if (before) probed++
+        if (ok === true) healthy++
+      }
+      return { disabled: false, models: models, probed: probed, healthy: healthy }
+    }
+    // 15s 调度心跳驱动间隔闸：配置变化立即重排，探测在后台跑，不 await 进派发主链。
+    function maybeProbeModels(sid, d) {
+      var c = cfg(d), now = Date.now()
+      if (!c.probeEnabled) { probeNextAt[sid] = 0; return }
+      var llm = ctx.get && ctx.get('llm')
+      if (!llm || typeof llm.stream !== 'function') return
+      var planKey = String(c.probeIntervalMin)
+      if (probeNextAt[sid] && probeNextAt[sid].plan === planKey && now < probeNextAt[sid].at) return
+      if (!probeNextAt[sid] || probeNextAt[sid].plan !== planKey) probeNextAt[sid] = { at: 0, plan: planKey }
+      probeNextAt[sid] = { at: now + c.probeIntervalMin * 60000, plan: planKey }
+      probeConfiguredModels(sid, d).catch(function (e) { console.error('[task-board] 模型健康探测失败（下周期重试）:', String(e)) })
     }
     // 「上下文注入」区块通道的按子代理会话缓存表 + 首轮竞速认领队列随该通道一起退役（task-muvjs392）：
     // 瘦身清单直接进首条 prompt，不再需要注入段命中与父子归属认领（并行 spawn 认领错包的潜伏 bug 一并消灭）。
@@ -264,6 +417,18 @@ export function createDispatch(ctx, state, deps) {
       if (t && Array.isArray(t.runs)) for (var i = 0; i < t.runs.length; i++) { if (t.runs[i] && t.runs[i].role === 'worker') n++ }
       if (!n) n = (t && t.retryCount) || 0
       return n + 1
+    }
+    // 续跑目标的原模型（task-mvowb2hc 洞②）：runs 留档最新 worker 行的 model——续跑健康闸的输入 +
+    // 续跑 rec 的归因补齐源（原形：续跑 rec.model 恒空，秒拆/冷却失败无法归因到模型）。只在
+    // resumeTarget 命中（childId 非空）后调用：最新 worker 行就是续跑目标行（同一会话同一模型）。
+    function resumeModelOf(t) {
+      if (!t || !Array.isArray(t.runs)) return ''
+      for (var i = t.runs.length - 1; i >= 0; i--) {
+        var r = t.runs[i]
+        if (!r || r.role !== 'worker') continue
+        return String(r.model || '')
+      }
+      return ''
     }
     // continuable 子会话日志的当前字节数（续跑基线）：续跑轮结算时只读这之后的字节，从而只认
     // 「本轮新写的助手文本」。护栏理由：子会话是同一个会话，上一轮（被中断那次）的助手文本仍在日志里——
@@ -708,6 +873,8 @@ export function createDispatch(ctx, state, deps) {
         try { if (typeof rec.softDispose === 'function') rec.softDispose() } catch (_) {}
         // 硬臂：reject 掉旁挂闸门 → withTimeout 的 race 立即落定为失败；rec.settled 已立时 finish 直接放行
         try { if (typeof rec.abort === 'function') rec.abort() } catch (_) {}
+        // 死会话哨兵臂（task-mvowb2hc 洞③）：结算即撤哨兵，不再查活跃目录（fresh spawn 无哨兵，零改动）
+        try { if (typeof rec.deathDispose === 'function') rec.deathDispose() } catch (_) {}
       }
       rec.disarm = disarmTimeouts // 暴露给上报通道（board_report 完成即收尾）与事件通道结算路径
       // 软臂：回调式 ctx.timer.timeout(cb, ms)（真实 ctx.timer 返回 dispose 闭包）→ 可被 disarm 真清掉；
@@ -773,6 +940,15 @@ export function createDispatch(ctx, state, deps) {
       if (!subagents || typeof subagents.sendMessage !== 'function') return null
       var childId = resumeTarget(t)
       if (!childId) return null
+      // ===== 续跑前健康闸（task-mvowb2hc 洞②）：原模型已被熔断/冷却 → 放弃续跑改 fresh spawn =====
+      // 原形（task-mvoutja4）：continuable 续跑直接 sendMessage 旧会话，不重新过取模链——会话模型
+      // 已被熔断/冷却时照样续跑（实证：病模型续跑 38 分钟零产出）。修：续跑前查目标会话模型健康
+      // （badModels 熔断 + modelCooldown 冷却，healthyModel 双闸同款），病模型 → 放弃续跑返回 fallback，
+      // 调用方落回 fresh spawn 走健康取模链（链自动跳过病模型），原因随 resume-fallback 消息留档。
+      var origModel = resumeModelOf(t)
+      if (origModel && !healthyModel(sid, origModel)) {
+        return { fallback: '续跑放弃：原模型 ' + origModel + ' 熔断/冷却中（续跑健康闸）——改走健康取模链重跑' }
+      }
       var parent = rootForSession(sid)
       if (!parent) return { fallback: 'root 会话不在线，无法授权续跑' }
       // cfg 提前取好：sendMessage 返回后要**零 await** 地登记 rec（事件通道必须马上能看到它，
@@ -822,7 +998,7 @@ export function createDispatch(ctx, state, deps) {
       }
       // ⚠️ sendMessage 返回 → 登记 rec 必须**零 await**（既有纪律）：冷复活子会话的 running→idle
       // 随时可能到达，事件通道必须马上能在活跃表里看到它——否则 idle 被 rec.ran 守卫挡下，结算干等硬超时。
-      var rec = { id: childId, childId: childId, continuable: true, resumed: true, ran: false, run: null, role: 'worker', taskId: t.id, startedAt: Date.now(), model: '', size: (core.TASK_SIZES.indexOf(t && t.size) >= 0 ? t.size : 'standard'), settled: false, baselineBytes: logSizeOf(childId) }
+      var rec = { id: childId, childId: childId, continuable: true, resumed: true, ran: false, run: null, role: 'worker', taskId: t.id, startedAt: Date.now(), model: origModel, size: (core.TASK_SIZES.indexOf(t && t.size) >= 0 ? t.size : 'standard'), settled: false, baselineBytes: logSizeOf(childId) }
       runsFor(sid)[t.id] = rec
       if (!dispatchedEver[sid]) dispatchedEver[sid] = {}
       dispatchedEver[sid][childId] = true
@@ -871,8 +1047,51 @@ export function createDispatch(ctx, state, deps) {
       // 详情页可区分首派/续跑，且它成为续跑资格判定的最新依据。
       // 这条**必须 await**：竞速下（冷复活子会话立刻 idle）closeRunHistory 可能先落地，
       // 那会找不到条目、结局留在 running → 该 run 永久失去续跑资格。
-      await recordRunHistory(sid, t.id, 'worker', childId, '', c.hardTimeoutMin, true, true, '', (core.TASK_SIZES.indexOf(t && t.size) >= 0 ? t.size : 'standard'))
+      await recordRunHistory(sid, t.id, 'worker', childId, origModel, c.hardTimeoutMin, true, true, '', (core.TASK_SIZES.indexOf(t && t.size) >= 0 ? t.size : 'standard'))
+      // ===== 死会话哨兵（task-mvowb2hc 洞③）：sendMessage 返回 ≠ 会话真活 =====
+      // 原形（task-mvoutja4）：会话 14:07:07 已被宿主拆除，sendMessage 后续跑留档照挂 running——
+      // 冷复活承诺落空且无任何结算通道可达（v0.2.1 scoped 事件面对插件订阅不可达 + 续跑 rec 无
+      // activation 句柄），running 假相一路挂到硬超时/人工终止（实证 38 分钟零产出）。短延时后查
+      // 活跃目录（listChildren，与 reconcileRoot 同一存活源）：会话不在 + 本轮从未观测到 running
+      // 事件 → 立即按失败结算重派（不留 running 假相）；会话在/已观测到 running → 哨兵退位，
+      // 结算归事件/超时通道既有语义（健康模型续跑行为零变化）。老宿主/桩无 timer 或 listChildren
+      // 能力 → 不挂哨兵，行为逐字不变。
+      armResumeDeathWatch(sid, rec, t)
       return { rec: rec }
+    }
+
+    // 死会话哨兵（task-mvowb2hc 洞③）：续跑 sendMessage 返回后短延时查活跃目录，会话不在且从未
+    // 观测到 running 事件 → 立即失败结算重派。RESUME_DEATH_WATCH_MS=5000：给冷复活留出落定窗口
+    // （sendMessage 返回 ≠ 目录立即可见），相对硬超时 120min 仍是「立即」。结算走 settleRun 失败臂
+    // （与事件/超时通道同一套口径：retryCount/重排/kickCycle 全复用，不留第二套失败结算）。
+    var RESUME_DEATH_WATCH_MS = 5000
+    function armResumeDeathWatch(sid, rec, t) {
+      var tm = ctx.timer
+      var subagents = ctx.subagents
+      if (!tm || typeof tm.timeout !== 'function') return
+      if (!subagents || typeof subagents.listChildren !== 'function') return
+      var h = tm.timeout(function () {
+        if (rec.settled || rec.ran) return // 已结算 / 已观测到 running（会话真活）→ 哨兵退位
+        var check = function (kids) {
+          if (rec.settled || rec.ran) return
+          var kidList = Array.isArray(kids) ? kids : []
+          for (var i = 0; i < kidList.length; i++) {
+            var kc = kidList[i]; if (!kc) continue
+            var cid = String(kc.sessionId || kc.id || '')
+            if (cid && cid === String(rec.childId)) return // 会话在活跃目录：真活，结算归事件/超时通道
+          }
+          rec.settled = true // 先立旗：堵迟到的 idle/超时臂重入（与事件臂同一纪律）
+          console.error('[task-board] 续跑会话已不存在（sendMessage 后活跃目录未命中，死会话哨兵），立即失败重派 task ' + rec.taskId + ' child ' + rec.childId)
+          settleRun(sid, rec, null, new Error('续跑会话已不存在（sendMessage 后未在活跃目录命中，死会话哨兵）'))
+        }
+        var q
+        try { q = subagents.listChildren(sid) } catch (e) { return }
+        if (q && typeof q.then === 'function') {
+          var guarded = (typeof withTimeout === 'function') ? withTimeout(q, 5000, '死会话哨兵 listChildren') : q
+          Promise.resolve(guarded).then(check, function () {}) // 查询失败：不判定，交给既有结算通道
+        } else check(q)
+      }, RESUME_DEATH_WATCH_MS)
+      rec.deathDispose = function () { try { if (typeof h === 'function') h() } catch (_) {} }
     }
 
     // run 结算：保证收尾；工具通道（board_report/board_verdict）已推进状态的话文本路径跳过
@@ -937,6 +1156,11 @@ export function createDispatch(ctx, state, deps) {
       try {
         await closeRunHistory(sid, rec.taskId, String(rec.id), opts.outcome, rec.continuable ? { noResume: rec.resumeBlocked === true } : null)
       } catch (e) { console.error('[task-board] closeRunHistory 收尾失败 (task ' + rec.taskId + '):', String(e)) }
+      // 统一健康表被动面：每个可归因 run 落定都记最近 5 次成败与本次延迟；父模型 id 不可知则跳过。
+      if (rec.model) observeModel(sid, rec.model, opts.outcome === 'completed', { latencyMs: Math.max(0, Date.now() - Number(rec.startedAt || Date.now())) })
+      // 熔断连击归零（task-mvowb2hc 洞①）：连击只在「连续」语义内计数——任一可归因 run 正常完成
+      // 即证明模型链路恢复，清零重新计数（失败落定不动连击，也归不了零）。
+      if (rec.model && opts.outcome === 'completed') resetModelFailure(sid, rec.model)
       // ② usage 落账：读该次 run 的 v4 日志聚合（水位线增量），累加到任务。放在状态推进之后：
       //    统计是附加信息，读日志失败/无 usage 时静默跳过，绝不影响结算语义。
       //    Worker 失败重试、驳回重做都会各走一次 settleRun，因此多轮消耗天然累加（runs 计数）。
@@ -1333,6 +1557,11 @@ export function createDispatch(ctx, state, deps) {
           // 失败原因落卡（截断 300）：卡片详情页可直接查看最近失败原因，排查三连败不再靠猜
           t.lastError = String(errText || '').slice(0, 300)
           t.retryCount = (t.retryCount || 0) + 1
+          // ===== 宿主秒拆喂熔断（task-mvowb2hc 洞①）：spawn/续跑后即被宿主拆除（stopReason:error）
+          // = 模型面失败，计入熔断连击——原形 task-mvoutja4：glm-5.3-flash 秒拆 ×3 不计入 badModels，
+          // 熔断永不触发，档位链每轮重派都再选同一个坏模型。连续 3 次才拉黑（熔断语义不变：badModels
+          // 落黑名单 → 取模链跳过 + 健康表 circuit）；worker 自己的失误不计，成功 run 归零（settleRunRecord）。
+          if (rec.model && isModelKillFailure(errText)) feedModelFailure(sid, rec.model)
           if (t.retryCount >= 3) { var ps = t.status; t.status = 'blocked'; ah(t, ps, 'blocked', String(rec.id), 'worker 失败 x' + t.retryCount + '（' + String(errText).slice(0, 120) + '），待人工介入'); return { task: t, blocked: true } }
           var ps2 = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, ps2, 'pending', String(rec.id), 'worker 失败（' + String(errText).slice(0, 80) + '），重新排队 (' + t.retryCount + '/3)')
           return { task: t, retry: true }
@@ -1396,6 +1625,7 @@ export function createDispatch(ctx, state, deps) {
             // 熔断文案分态（task-mv73ym2k，实证 n-mv6ezj6vary4）：错误串含 UNKNOWN_MODEL = 模型 id 非法
             // （mistake 类：配置写错，模型无辜）——与「连续验收失败」（quality 类）区分，不归一堆。
             var modelIllegal = /UNKNOWN_MODEL/i.test(String(errText || ''))
+            markModelCircuit(sid, rec.model, modelIllegal ? '模型 id 配置非法，已熔断' : '验收连续失败，已熔断')
             pushSysNote(sid, modelIllegal
               ? '模型 ' + rec.model + ' 配置非法（不在可用清单），已熔断回退父级模型——请经 list-models 选合法 id 重配'
               : '模型 ' + rec.model + ' 验收连续失败，已熔断回退父级模型')
@@ -1774,6 +2004,8 @@ export function createDispatch(ctx, state, deps) {
       var info = []
       var runs = runsFor(sid)
       var snap = await rt(sid)
+      // 主动健康嗅探只借用 15s 心跳的间隔闸，后台执行不阻塞本轮派发；配置/冷却/run 被动面不依赖本开关。
+      try { maybeProbeModels(sid, snap) } catch (e) { console.error('[task-board] 模型健康探测调度失败:', String(e)) }
       // 本轮主体整段进 try：任一环节抛异常都只作废本轮（console 留痕），下一轮心跳 / kickCycle 照常进来。
       // ① 派发循环心跳（运行时健康自检）：主体正常返回（含空闲快进早退）才算「成功跑完一轮」刷新时间戳；
       // 异常被隔离时不刷新——连续 >5min 不刷新 + 有可派卡 + 有空位 = rpc 侧亮「派发循环疑似冻结」红条。
@@ -2085,6 +2317,8 @@ export function createDispatch(ctx, state, deps) {
     // state.activeRuns = {} 等价）。原位清空是必要的——runsFor(sid) 返回的是每会话子对象，
     // 只换顶层容器会把这些子对象连同里面的 rec 一起漏掉。
     ctx.effect(function () { return function () { Object.keys(state.activeRuns).forEach(function (psid) { var rr = state.activeRuns[psid]; Object.keys(rr).forEach(function (k) { try { var r0 = rr[k]; if (r0 && r0.run) r0.run.dispose(); if (r0) r0.settled = true } catch (_) {} ; delete rr[k] }) }); state.activeRuns = {}; state.reconcileDone = {} } })
+    // 卸载同时停主动嗅探： AbortSignal 取消在飞请求，迟到结果不再写健康表；已有被动表随 host 状态一并废弃。
+    ctx.effect(function () { return function () { probeDisposed = true; Object.keys(probeAbort).forEach(function (model) { try { probeAbort[model].abort() } catch (_) {} }); probeNextAt = {} } })
     // Host 侧调度心跳：每 15s 对所有已知会话跑 poolCycle（客户端轮询只是触发器之一，面板关闭/后台节流时照常运转）
     ;(function () { var tm = ctx.timer; if (!tm) return; var disposeTick = tm.interval(function () { var cutoff = Date.now() - 1800000; Object.keys(knownSessions).forEach(function (sid) { if (knownSessions[sid] < cutoff) delete knownSessions[sid]; else poolCycle(sid).catch(function () {}) }) }, 15000); ctx.effect(function () { return disposeTick }) })()
 
@@ -2126,5 +2360,5 @@ export function createDispatch(ctx, state, deps) {
 
     // resumeTarget 一并透出（task-mv6c7cbo）：rpc 侧 doIntervene 在无活跃 rec 时靠它细分
     // 「续跑窗口 / 真无 run」两态（纯读 t.runs 零 IO，同一函数两处复用，不另写第二套口径）。
-    return { poolCycle: poolCycle, spawnOneShot: spawnOneShot, accumulateRunUsage: accumulateRunUsage, settleReportedRun: settleReportedRun, readContextPack: readContextPack, closeRunHistory: closeRunHistory, resumeTarget: resumeTarget }
+    return { poolCycle: poolCycle, spawnOneShot: spawnOneShot, accumulateRunUsage: accumulateRunUsage, settleReportedRun: settleReportedRun, readContextPack: readContextPack, closeRunHistory: closeRunHistory, resumeTarget: resumeTarget, probeConfiguredModels: probeConfiguredModels, maybeProbeModels: maybeProbeModels }
 }

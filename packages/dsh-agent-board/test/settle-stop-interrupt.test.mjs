@@ -15,6 +15,7 @@ import assert from 'node:assert/strict'
 import { createMockCtx } from './helpers/mock-ctx.mjs'
 import * as plugin from '../index.mjs'
 import { createRpc } from '../lib/rpc.mjs'
+import { createDispatch } from '../lib/dispatch.mjs'
 
 // ===== 测试工具（与 integration.test.mjs 同形）=====
 async function createTask(env, id, extra) {
@@ -279,4 +280,231 @@ test('① 收紧：continuable 旧 run 被重派取代（残影形状）→ 幽�
     assert.equal(t.claimedBy, 'child-new-worker', '新 Worker 认领位不动')
     assert.equal(t.runs[t.runs.length - 1].outcome, 'running', '新 run 留档不被误关')
   } finally { await env.cleanup() }
+})
+
+// ===== 续跑健康闸 / 死会话哨兵（task-mvowb2hc 洞②③④）=====
+// 原形（task-mvoutja4 实证）：glm-5.3-flash 提供商故障三连洞——洞②续跑不过健康闸（continuable 续跑
+// 直接 sendMessage 旧会话，不重新过取模链，病模型照样续跑 38 分钟零产出）；洞③死会话续跑成僵尸
+// running（续跑留档挂 running 但会话早已拆除，零结算通道可达，挂到人工终止）。修：tryResumeWorker
+// 续跑前查目标会话模型健康（badModels 熔断 + modelCooldown 冷却，healthyModel 双闸），病模型 → 放弃
+// 续跑改 fresh spawn 走健康取模链（resume-fallback 消息留痕）；sendMessage 返回后挂死会话哨兵（短延时
+// 查活跃目录 listChildren），会话不在且从未观测到 running → 立即失败结算重派，不留 running 假相。
+// 健康模型续跑行为逐字不变（洞④回归）。薄桩 harness：与 core.test.mjs mkContinuableDispatch 同形
+// （真跑 poolCycle），另加 state 注入（种病模型）、记录式 timer（哨兵手动 fire）、listChildren 可剧本化。
+var GATE_SID = 'session-test-gate-0000-0000-000000000000'
+function mkGateTask(over) {
+  return Object.assign({ id: 'g1', title: '续跑闸卡', description: '', status: 'pending', priority: 'medium', tags: [], parentId: null, assignMode: 'auto', assignee: null, context: { instructions: '' }, acceptance: '', dependsOn: [], pipeline: 'full', claimedBy: null, claimedAt: null, createdAt: '2026-01-01T00:00:00Z', history: [], messages: [] }, over || {})
+}
+function mkGateBoard(tasks) { return { version: 12, ownerSession: GATE_SID, boardMode: 'auto', tasks: tasks || [] } }
+function mkGateDispatch(board, ctxOver, stateOver) {
+  var listeners = []
+  var timerCalls = []
+  var notes = []
+  var runs = {}
+  var activeRuns = {}
+  activeRuns[GATE_SID] = runs
+  var state = Object.assign({ knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {} }, stateOver || {})
+  state.activeRuns = activeRuns
+  var base = {
+    fs: {}, get: function () { return null },
+    // 记录式 timer：timeout(cb, ms) 捕获回调与延迟，测试手动 fire（死亡哨兵 5s / 软臂 30min 都经这里）；
+    // interval（15s 心跳）只登记不触发——本套用例手动跑 poolCycle，心跳不入 timerCalls 免污染哨兵过滤
+    timer: {
+      timeout: function (a, b) {
+        if (typeof a === 'function') { var h = { cb: a, ms: b, cancelled: false }; timerCalls.push(h); return function () { h.cancelled = true } }
+        return new Promise(function () {})
+      },
+      interval: function () { return function () {} },
+    },
+    effect: function (f) { var d = f(); return function () {} }, // 真实 effect 立即执行回调——事件订阅当场建立
+    on: function (name, fn) { listeners.push({ name: name, fn: fn }); return function () {} },
+    subagents: {
+      list: function () { return ['mock'] },
+      getProvider: function () { return { inheritsParentContext: false } },
+      start: async function () { return { id: 'run-x', result: new Promise(function () {}), dispose: async function () {} } },
+      startContinuable: async function () { return { childId: 'child-new', messageId: 'm1' } },
+    },
+  }
+  var dispatch = createDispatch(
+    Object.assign(base, ctxOver || {}),
+    state,
+    {
+      rt: async function () { return board }, wt: async function () {}, mutateLocked: async function (sid, fn) { return fn(board) }, kickCycle: function () {},
+      rootForSession: function () { return { id: GATE_SID } },
+      withTimeout: function (p) { return p }, runsFor: function () { return runs }, feedbackOn: function () { return true },
+      pushSysNote: function (s, text, taskId) { notes.push({ sid: s, text: text, taskId: taskId }) },
+      maybeNotify: function () {}, notifyTaskDone: function () {},
+    })
+  return { dispatch: dispatch, state: state, runs: runs, listeners: listeners, timerCalls: timerCalls, notes: notes, board: board }
+}
+var flushGate = async function () { for (var i = 0; i < 8; i++) await new Promise(function (r) { setImmediate(r) }) }
+// 死会话哨兵的短延时臂（软臂 30min 被排除在窗口外；本桩无 llm 不挂探测臂）
+function gateWatchArms(h) { return h.timerCalls.filter(function (c) { return c.ms > 0 && c.ms <= 60000 && !c.cancelled }) }
+// 续跑目标行（原形留档形状：continuable + timeout/error + model 随留档）
+function gateResumeRow(model) { return { role: 'worker', id: 'child-old', at: '2026-01-01T00:00:00.000Z', model: model, outcome: 'timeout/error', hardMin: 120, continuable: true } }
+
+test('续跑健康闸①（task-mvowb2hc 洞②）：原模型已熔断 → 零续跑投递，改 fresh spawn 走健康取模链（fallback 命中+留痕）', async () => {
+  var t = mkGateTask({ runs: [gateResumeRow('prov/glm-5.3-flash')] })
+  var board = mkGateBoard([t])
+  board.workerModel = 'prov/glm-5.3-flash'
+  board.fallbackModels = ['prov/alt-model']
+  var badModels = {}
+  badModels[GATE_SID + '|prov/glm-5.3-flash'] = true
+  var sent = []
+  var h = mkGateDispatch(board, {
+    subagents: {
+      list: function () { return ['mock'] },
+      getProvider: function () { return { inheritsParentContext: false } },
+      start: async function () { throw new Error('不该走一次性路径') },
+      startContinuable: async function () { return { childId: 'child-new', messageId: 'm1' } },
+      sendMessage: async function (p, cid, content, opts) { sent.push({ cid: cid, text: content[0].text }); return 'm2' },
+    },
+  }, { badModels: badModels })
+  var origErr = console.error; console.error = function () {} // 压掉链跳过日志
+  try {
+    await h.dispatch.poolCycle(GATE_SID)
+    await flushGate()
+    assert.deepEqual(sent, [], '病模型零续跑投递（健康闸拦截，不再空烧病模型）')
+    var note = (t.messages || []).find(function (m) { return m.kind === 'resume-fallback' })
+    assert.ok(note, '续跑放弃留痕（resume-fallback 消息）')
+    assert.match(note.text, /续跑放弃/)
+    assert.match(note.text, /prov\/glm-5\.3-flash/)
+    assert.equal(t.claimedBy, 'child-new', '回退 fresh spawn 落卡（新 Worker）')
+    var last = t.runs[t.runs.length - 1]
+    assert.equal(last.model, 'prov/alt-model', 'fresh spawn 走健康取模链：备用链命中首个健康者')
+    assert.equal(last.modelSource, 'fallback', 'modelSource=fallback 留档')
+  } finally { console.error = origErr }
+})
+
+test('续跑健康闸②（task-mvowb2hc 洞②）：原模型冷却中 → 同样放弃续跑改 fresh spawn（healthyModel 双闸覆盖冷却）', async () => {
+  var t = mkGateTask({ runs: [gateResumeRow('prov/glm-5.3-flash')] })
+  var board = mkGateBoard([t])
+  board.workerModel = 'prov/glm-5.3-flash'
+  var sent = []
+  var cooldown = {}
+  cooldown['prov/glm-5.3-flash'] = Date.now() + 60000
+  var h = mkGateDispatch(board, {
+    subagents: {
+      list: function () { return ['mock'] },
+      getProvider: function () { return { inheritsParentContext: false } },
+      start: async function () { throw new Error('不该走一次性路径') },
+      startContinuable: async function () { return { childId: 'child-new', messageId: 'm1' } },
+      sendMessage: async function (p, cid, content, opts) { sent.push({ cid: cid, text: content[0].text }); return 'm2' },
+    },
+  }, { modelCooldown: cooldown })
+  var origErr = console.error; console.error = function () {}
+  try {
+    await h.dispatch.poolCycle(GATE_SID)
+    await flushGate()
+    assert.deepEqual(sent, [], '冷却中模型零续跑投递')
+    var note = (t.messages || []).find(function (m) { return m.kind === 'resume-fallback' })
+    assert.ok(note && /续跑放弃/.test(note.text), '续跑放弃留痕')
+    assert.equal(t.claimedBy, 'child-new', '回退 fresh spawn（父模型兜底——冷却面不回试同档高位）')
+  } finally { console.error = origErr }
+})
+
+test('续跑健康闸③（task-mvowb2hc 洞④回归）：健康模型续跑逐字不变——sendMessage 照发、rec 落闸、续跑行 model 补齐归因', async () => {
+  var t = mkGateTask({ runs: [gateResumeRow('prov/glm-5.3-flash')] })
+  var board = mkGateBoard([t])
+  board.workerModel = 'prov/glm-5.3-flash'
+  var sent = []
+  var h = mkGateDispatch(board, {
+    subagents: {
+      list: function () { return ['mock'] },
+      getProvider: function () { return { inheritsParentContext: false } },
+      start: async function () { throw new Error('健康模型续跑命中时不该走一次性路径') },
+      startContinuable: async function () { throw new Error('续跑命中时不该 fresh spawn') },
+      sendMessage: async function (p, cid, content, opts) { sent.push({ cid: cid, text: content[0].text, options: opts }); return 'm2' },
+    },
+  })
+  await h.dispatch.poolCycle(GATE_SID)
+  await flushGate()
+  assert.equal(sent.length, 1, '健康模型照常续跑（零回归）')
+  assert.equal(sent[0].cid, 'child-old', '冷复活目标是原子会话')
+  assert.ok(sent[0].options && sent[0].options.signal, 'sendMessage 选项形态 { signal } 不变')
+  var rec = h.runs['g1']
+  assert.equal(rec.model, 'prov/glm-5.3-flash', '续跑 rec.model 补齐归因（原形恒空）')
+  assert.equal(rec.resumed, true)
+  assert.equal(rec.settled, false)
+  assert.equal(t.runs[1].resume, true, '续跑留档照旧')
+  assert.equal(t.runs[1].model, 'prov/glm-5.3-flash', '续跑行 model 落档（审计补齐）')
+  assert.equal(t.claimedBy, 'child-old', '认领位回原子会话')
+})
+
+test('死会话哨兵（task-mvowb2hc 洞③）：sendMessage 返回但会话不在活跃目录 → 立即失败重派不留 running 假相', async () => {
+  var t = mkGateTask({ runs: [gateResumeRow('prov/glm-5.3-flash')] })
+  var board = mkGateBoard([t])
+  board.workerModel = 'prov/glm-5.3-flash'
+  var kids = [] // 会话不在活跃目录（死会话原形：宿主拆除后冷复活承诺落空）
+  var h = mkGateDispatch(board, {
+    subagents: {
+      list: function () { return ['mock'] },
+      getProvider: function () { return { inheritsParentContext: false } },
+      start: async function () { throw new Error('续跑命中时不该走一次性路径') },
+      startContinuable: async function () { throw new Error('续跑命中时不该 fresh spawn') },
+      sendMessage: async function (p, cid, content, opts) { return 'm2' },
+      listChildren: async function () { return kids },
+    },
+  })
+  await h.dispatch.poolCycle(GATE_SID)
+  await flushGate()
+  assert.equal(h.runs['g1'] && h.runs['g1'].resumed, true, '续跑先正常落闸（哨兵随后接管）')
+  assert.equal(t.runs.length, 2, '首派 + 续跑各一条')
+  assert.equal(t.runs[1].outcome, 'running', '续跑留档先挂 running（哨兵未触发前）')
+  assert.ok(gateWatchArms(h).length >= 1, '死亡哨兵短延时臂在位')
+  // 触发哨兵：会话不在活跃目录 → 立即失败结算重派（不留 running 假相）
+  gateWatchArms(h).forEach(function (c) { c.cb() })
+  await flushGate()
+  assert.equal(t.status, 'pending', '立即失败重排（原形挂到人工终止，现立即收口）')
+  assert.equal(t.retryCount, 1, '失败计数照旧')
+  assert.equal(t.runs[1].outcome, 'timeout/error', '续跑留档立即关账（非 running 假相）')
+  assert.equal(h.runs['g1'], undefined, '活跃 rec 摘除')
+})
+
+test('死会话哨兵·退位（task-mvowb2hc 洞③）：会话在活跃目录 / 已观测到 running → 不误杀（健康续跑零变化）', async () => {
+  // Case A：listChildren 命中 child-old（会话真活）→ 哨兵触发但不结算
+  var t = mkGateTask({ runs: [gateResumeRow('prov/glm-5.3-flash')] })
+  var board = mkGateBoard([t])
+  board.workerModel = 'prov/glm-5.3-flash'
+  var h = mkGateDispatch(board, {
+    subagents: {
+      list: function () { return ['mock'] },
+      getProvider: function () { return { inheritsParentContext: false } },
+      start: async function () { throw new Error('不该走一次性路径') },
+      startContinuable: async function () { throw new Error('续跑命中时不该 fresh spawn') },
+      sendMessage: async function (p, cid, content, opts) { return 'm2' },
+      listChildren: async function () { return [{ id: 'child-old' }] },
+    },
+  })
+  await h.dispatch.poolCycle(GATE_SID)
+  await flushGate()
+  gateWatchArms(h).forEach(function (c) { c.cb() })
+  await flushGate()
+  assert.equal(t.status, 'in-progress', '会话在活跃目录：哨兵退位不误杀')
+  assert.equal(t.retryCount, undefined, '零失败计数')
+  assert.equal(t.runs[1].outcome, 'running', '续跑留档不被误关')
+  assert.ok(h.runs['g1'], '活跃 rec 保留（结算归事件/超时通道）')
+  // Case B：会话不在目录但已观测到 running 事件（rec.ran=true，会话曾真跑）→ 哨兵退位
+  var t2 = mkGateTask({ id: 'g2', runs: [gateResumeRow('prov/glm-5.3-flash')] })
+  var board2 = mkGateBoard([t2])
+  board2.workerModel = 'prov/glm-5.3-flash'
+  var h2 = mkGateDispatch(board2, {
+    subagents: {
+      list: function () { return ['mock'] },
+      getProvider: function () { return { inheritsParentContext: false } },
+      start: async function () { throw new Error('不该走一次性路径') },
+      startContinuable: async function () { throw new Error('续跑命中时不该 fresh spawn') },
+      sendMessage: async function (p, cid, content, opts) { return 'm2' },
+      listChildren: async function () { return [] },
+    },
+  })
+  await h2.dispatch.poolCycle(GATE_SID)
+  await flushGate()
+  h2.listeners[0].fn({ agent: { session: { id: 'child-old' } }, status: 'running' }) // 会话曾真跑起来
+  assert.equal(h2.runs['g2'].ran, true)
+  gateWatchArms(h2).forEach(function (c) { c.cb() })
+  await flushGate()
+  assert.equal(t2.status, 'in-progress', '已观测到 running：哨兵退位不误杀')
+  assert.ok(h2.runs['g2'], '活跃 rec 保留（结算归事件/超时通道）')
+  assert.equal(t2.runs[1].outcome, 'running', '续跑留档不被误关')
 })

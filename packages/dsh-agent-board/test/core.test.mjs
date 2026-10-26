@@ -3817,7 +3817,7 @@ test('可续跑 Worker 接线（源码级）：事件订阅走 ctx.effect 回收
   //    失败回退 fresh spawn）+ 三连败计数不受续跑影响（续跑同样走 settleWorker 的 retryCount 口径）
   assert.match(dsp, /await subagents\.sendMessage\(parent, childId, \[\{ type: 'text', text: text \}\], \{ signal: makeSignal\(\) \}\)/)
   assert.match(dsp, /【断点续跑】你之前执行此任务被中断（第 ' \+ attempt \+ ' 次尝试）/)
-  assert.match(dsp, /await recordRunHistory\(sid, t\.id, 'worker', childId, '', c\.hardTimeoutMin, true, true, '', \(core\.TASK_SIZES\.indexOf\(t && t\.size\) >= 0 \? t\.size : 'standard'\)\)/) // 续跑留档同带力度档位（task-mvneq4mw）
+  assert.match(dsp, /await recordRunHistory\(sid, t\.id, 'worker', childId, origModel, c\.hardTimeoutMin, true, true, '', \(core\.TASK_SIZES\.indexOf\(t && t\.size\) >= 0 \? t\.size : 'standard'\)\)/) // 续跑留档同带力度档位（task-mvneq4mw）+ 续跑行 model 补齐（task-mvowb2hc 洞②）
   assert.match(dsp, /if \(sp\.role === 'worker' && c\.workerContinuable !== false\) \{/)
   assert.match(dsp, /kind: 'resume-fallback'/)
   assert.match(dsp, /if \(r\.continuable !== true \|\| r\.noResume === true\) return ''/) // 续跑资格：一次性 run/已标 noResume 一律不够格
@@ -3825,7 +3825,7 @@ test('可续跑 Worker 接线（源码级）：事件订阅走 ctx.effect 回收
   // ⑥ 板级开关三件套（cfg 兜底 / normalizeBoard 补缺省 / seed 初值 / set-board-config 白名单 / get-tasks 透出）
   assert.match(coreSrc, /workerContinuable: d\.workerContinuable !== false/)
   assert.match(coreSrc, /if \(typeof d\.workerContinuable !== 'boolean'\) d\.workerContinuable = true/)
-  assert.match(coreSrc, /epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1/)
+  assert.match(coreSrc, /epicSplit: true, workerContinuable: true, verifyUserGuide: true(, probeEnabled: true, probeIntervalMin: \d+)?, minWorkers: 1/) // seed 缺省开；probe 字段随 task-mvoulhm7 插入 verifyUserGuide 与 minWorkers 之间（断言容忍新旧两种形态）
   assert.match(rpcSrc, /else if \(args\.key === 'workerContinuable'\) d\.workerContinuable = !!args\.value/)
   assert.match(rpcSrc, /d\.workerContinuable = cfg\(d\)\.workerContinuable/)
   // ⑦ 手动终止/活动查询对 continuable rec 不炸（id 统一取 rec.id，dispose 分路）
@@ -5228,7 +5228,7 @@ test('epicSplit 接线（源码级）：缓存同步 / Team 引导段门禁 / �
   // 配置层（core.mjs：cfg 兜底 / seed 初值 / normalizeBoard 老看板补齐）
   assert.match(coreSrc, /epicSplit: d\.epicSplit !== false/)
   assert.match(coreSrc, /if \(typeof d\.epicSplit !== 'boolean'\) d\.epicSplit = true/)
-  assert.match(coreSrc, /notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, minWorkers: 1/) // seed 缺省开（workerContinuable 随 task-muw5gnhv、verifyUserGuide 随 task-muxyyvg0 插入 epicSplit 与 minWorkers 之间）
+  assert.match(coreSrc, /notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true(, probeEnabled: true, probeIntervalMin: \d+)?, minWorkers: 1/) // seed 缺省开（workerContinuable 随 task-muw5gnhv、verifyUserGuide 随 task-muxyyvg0 插入 epicSplit 与 minWorkers 之间）；probe 字段随 task-mvoulhm7 插入（断言容忍新旧两种形态）
   // 缓存链路：rt() 读盘同步 + set-board-config 当场回填（Team 提示词是同步组装，只能读缓存）
   assert.match(src, /epicSplitCache\[sid\] = nd\.epicSplit !== false/)
   assert.match(src, /function epicSplitOn\(sid\) \{ return epicSplitCache\[sid\] !== false \}/)

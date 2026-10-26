@@ -248,3 +248,150 @@ test('startActivation⑨：落闸弃权 dispose 失败 → 降级 interrupt 留�
     assert.ok(errLines.some(function (l) { return l.indexOf('落闸弃权 dispose 失败') >= 0 && l.indexOf('dispose boom') >= 0 }), '失败记 console.error 留痕')
   } finally { console.error = origErr }
 })
+
+// ===== 宿主秒拆喂熔断（task-mvowb2hc 洞①）：stopReason:error 拆除计入熔断连击 =====
+// 原形（task-mvoutja4 实证）：glm-5.3-flash spawn 后 1 秒「子会话被宿主拆除（stopReason: error）」×3——
+// 该失败形态此前不计入 badModels，熔断永不触发，档位链每轮重派都再选同一个坏模型。修：settleWorker
+// 失败臂把「宿主拆除/activation 异常」归类为模型面失败喂连击表，连续 3 次才拉黑（熔断语义不变：
+// badModels 落黑名单 → 取模链跳过 + 健康表 circuit）；worker 自己的失误（空文本失败）不计，成功 run 归零。
+// 薄桩 harness：与 mkDispatch 同形，另加 runs 表持久（settleReportedRun 消费）+ state/notes/事件可观测。
+function mkCircuitDispatch(board, ctxOver, stateOver) {
+  var notes = []
+  var listeners = []
+  // runs 表必须与 state.activeRuns[SID] **同一对象**（core.test.mjs mkContinuableDispatch 同款）：
+  // spawnOneShot 经 runsFor 写 rec，agent/status 监听器经 state.activeRuns[sid] 读 rec——两处不同
+  // 形状（一个按 taskId 键、一个按 sid 键）事件通道就永远命中不到。
+  var runs = {}
+  var activeRuns = {}
+  activeRuns[SID] = runs
+  var state = Object.assign({ knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: activeRuns }, stateOver || {})
+  var dispatch = createDispatch(
+    Object.assign({
+      fs: {},
+      // 真 cordis 的 ctx.effect 立即执行回调取 disposer——桩里必须照做，否则 ctx.on 永不被触达，事件通道测不到
+      effect: function (f) { var d = f(); return function () {} },
+      get: function () { return null },
+      on: function (name, fn) { listeners.push({ name: name, fn: fn }); return function () {} },
+    }, ctxOver || {}),
+    state,
+    {
+      rt: async () => board,
+      wt: async () => {},
+      mutateLocked: async (sid, fn) => fn(board),
+      kickCycle: () => {},
+      rootForSession: () => ({ id: SID }),
+      sessionCwd: () => '', withTimeout: (p) => p, runsFor: () => runs, feedbackOn: () => true,
+      pushSysNote: function (s, text, taskId) { notes.push({ sid: s, text: text, taskId: taskId }) },
+      maybeNotify: () => {}, notifyTaskDone: () => {},
+    })
+  return { dispatch: dispatch, state: state, notes: notes, listeners: listeners, runs: runs }
+}
+// 每次调用返回可控 Activation，result 的 settle 函数按序推入 settles
+function mkSettleActivationSubagents(settles) {
+  var n = 0
+  return {
+    list: function () { return ['p1'] },
+    getProvider: function () { return { inheritsParentContext: false } },
+    startActivation: async function (spec) {
+      return { childId: 'child-' + (++n), messageId: 'm' + n, result: new Promise(function (res) { settles.push(res) }), dispose: async function () {} }
+    },
+    interrupt: function () {},
+  }
+}
+// 拆除落定诊断文本用「internal error」：不命中限流/连接冷却嗅探（隔离熔断连击单一变量）
+var CIRCUIT_MODEL = 'prov/glm-5.3-flash'
+var CIRCUIT_FALLBACK = 'prov/alt-model'
+
+test('startActivation⑩（task-mvowb2hc 洞①）：宿主秒拆（stopReason:error）三连 → 熔断拉黑 + 下一轮链跳过备用模型', async () => {
+  var board = mkBoard([mkTask({ status: 'in-progress', claimedBy: 'spawn-pending' })])
+  board.workerModel = CIRCUIT_MODEL
+  board.fallbackModels = [CIRCUIT_FALLBACK]
+  var settles = []
+  var h = mkCircuitDispatch(board, { subagents: mkSettleActivationSubagents(settles) })
+  var t = board.tasks[0]
+  var origErr = console.error; console.error = function () {} // 压掉失败结算日志
+  try {
+    for (var round = 1; round <= 3; round++) {
+      t.status = 'in-progress'; t.claimedBy = 'spawn-pending' // 每轮重置占位（失败结算回 pending 后可再派）
+      var sr = await h.dispatch.spawnOneShot(SID, t, 'worker')
+      assert.ok(sr, '第 ' + round + ' 轮 spawn 成功')
+      settles[round - 1]({ output: [], stopReason: 'error', diagnostic: 'internal error' })
+      await new Promise(function (r) { setTimeout(r, 30) })
+      if (round < 3) assert.equal(Object.keys(h.state.badModels).length, 0, '第 ' + round + ' 连未达阈值不拉黑')
+    }
+    assert.equal(h.state.badModels[SID + '|' + CIRCUIT_MODEL], true, '三连秒拆 → 熔断拉黑（连击 3 次计满）')
+    assert.ok(h.notes.some(function (x) { return x.text.indexOf(CIRCUIT_MODEL) >= 0 && x.text.indexOf('熔断') >= 0 }), '熔断系统通知在位（与验收熔断同口径）')
+    // 链跳过：下一轮 spawn 不再选坏模型——备用链命中首个健康者（熔断语义不变，链照旧消费 badModels）
+    t.status = 'in-progress'; t.claimedBy = 'spawn-pending'
+    var sr4 = await h.dispatch.spawnOneShot(SID, t, 'worker')
+    assert.ok(sr4 && String(sr4.id), '第 4 轮 spawn 成功')
+    assert.equal(sr4.model, CIRCUIT_FALLBACK, '坏模型被链跳过（fallback 命中）')
+    assert.equal(sr4.modelSource, 'fallback', 'modelSource=fallback 留档')
+    var fbMsg = (t.messages || []).find(function (m) { return m.kind === 'fallback' })
+    assert.ok(fbMsg && fbMsg.text.indexOf(CIRCUIT_MODEL) >= 0, '切备用留痕落卡')
+  } finally { console.error = origErr }
+})
+
+test('startActivation⑪（task-mvowb2hc 洞①）：两连拆不拉黑 + 成功 run 归零连击（「连续」语义不回归）', async () => {
+  var board = mkBoard([mkTask({ status: 'in-progress', claimedBy: 'spawn-pending' })])
+  board.workerModel = CIRCUIT_MODEL
+  var settles = []
+  var h = mkCircuitDispatch(board, { subagents: mkSettleActivationSubagents(settles) })
+  var t = board.tasks[0]
+  var origErr = console.error; console.error = function () {}
+  try {
+    for (var round = 1; round <= 2; round++) {
+      t.status = 'in-progress'; t.claimedBy = 'spawn-pending'
+      await h.dispatch.spawnOneShot(SID, t, 'worker')
+      settles[round - 1]({ output: [], stopReason: 'error', diagnostic: 'internal error' })
+      await new Promise(function (r) { setTimeout(r, 30) })
+    }
+    assert.equal(Object.keys(h.state.badModels).length, 0, '两连拆不拉黑（未达 3 连阈值）')
+    // 成功 run 归零连击：上报通道 completed 结算（settleReportedRun → settleRunRecord → resetModelFailure）
+    var rep = await h.dispatch.settleReportedRun(SID, t.id, { outcome: 'completed' })
+    assert.equal(rep, true, '成功结算走通（连击归零消费点）')
+    // 再一拆：连击从 1 重新起算 → 不拉黑
+    t.status = 'in-progress'; t.claimedBy = 'spawn-pending'
+    await h.dispatch.spawnOneShot(SID, t, 'worker')
+    settles[2]({ output: [], stopReason: 'error', diagnostic: 'internal error' })
+    await new Promise(function (r) { setTimeout(r, 30) })
+    assert.equal(Object.keys(h.state.badModels).length, 0, '成功归零后单拆不再拉黑（连续语义）')
+  } finally { console.error = origErr }
+})
+
+test('startActivation⑫（task-mvowb2hc 洞①边界）：worker 空文本失败（非模型面）×3 不喂熔断；completed 停止码拆除不计', async () => {
+  var flush = async function () { for (var i = 0; i < 5; i++) await new Promise(function (r) { setImmediate(r) }) }
+  // A：worker 自己的失误（事件通道空文本失败，errText='error' 非模型面）×3 → 照旧阻塞，badModels 恒空
+  var boardA = mkBoard([mkTask()])
+  boardA.workerModel = CIRCUIT_MODEL
+  var hA = mkCircuitDispatch(boardA, { subagents: mkSettleActivationSubagents([]) })
+  var tA = boardA.tasks[0]
+  var origErr = console.error; console.error = function () {} // 压掉「未读到 assistant 文本」与失败日志
+  try {
+    for (var round = 1; round <= 3; round++) {
+      await hA.dispatch.poolCycle(SID)
+      var cid = 'child-' + round
+      hA.listeners[0].fn({ agent: { session: { id: cid } }, status: 'running' }) // rec.ran 唯一来源
+      hA.listeners[0].fn({ agent: { session: { id: cid } }, status: 'idle' })
+      await flush()
+      assert.equal(Object.keys(hA.state.badModels).length, 0, '第 ' + round + ' 次空文本失败不喂熔断')
+    }
+    assert.equal(tA.status, 'blocked', '三连失败照旧阻塞（既有 retryCount 语义不变）')
+    assert.equal(Object.keys(hA.state.badModels).length, 0, 'worker 失误不计入熔断连击（好模型不背锅）')
+  } finally { console.error = origErr }
+  // B：activation.result 以 stopReason=completed 落定（收尾性拆除）→ 失败结算照旧，但不计入模型面连击
+  var boardB = mkBoard([mkTask({ status: 'in-progress', claimedBy: 'spawn-pending' })])
+  boardB.workerModel = CIRCUIT_MODEL
+  var settles = []
+  var hB = mkCircuitDispatch(boardB, { subagents: mkSettleActivationSubagents(settles) })
+  var tB = boardB.tasks[0]
+  try {
+    for (var r2 = 1; r2 <= 3; r2++) {
+      tB.status = 'in-progress'; tB.claimedBy = 'spawn-pending'
+      await hB.dispatch.spawnOneShot(SID, tB, 'worker')
+      settles[r2 - 1]({ output: [], stopReason: 'completed', diagnostic: 'parked teardown after completion' })
+      await new Promise(function (r) { setTimeout(r, 30) })
+    }
+    assert.equal(Object.keys(hB.state.badModels).length, 0, 'completed 停止码拆除不计入模型面连击')
+  } finally { console.error = origErr }
+})
