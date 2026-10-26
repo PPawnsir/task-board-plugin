@@ -27,9 +27,11 @@ export var TEAM_DECISION_TREE = '7. 拆解决策树（命中任一信号就该�
 // Team 提示词第 8 条：子代理零记忆，每张子卡都要独立带齐公共背景与调研包。
 export var TEAM_CONTEXT_PACKING = '8. 拆解后的上下文装配：每张子卡独立带齐调研包（description 写目标约束 + contextNotes 写结论思路 + contextFiles 带行号）——子代理零记忆，epic 父卡上的背景不会自动传给子卡，公共背景要逐卡复制进 contextNotes。执行中 Worker 发现任务比预估大时会 escalate 上报，此时拆分重派，别让 Worker 硬跑整坨。'
 // Team 提示词第 9 条：需求卡 → 拆解官 → 确认发布的工作流引导（task-mvneoy1u，epic task-mvnem59t 子卡 3/6）。
+// task-mvoutja4 补漏款：命中拆分树信号的需求即使已有设计稿也走拆解官——设计稿进需求卡 contextNotes 当
+// 拆解官参考方案起点（验证/修正而非从零重来），焊死「我已经设计好了」整卡直派的绕过缝隙。
 // ⚠️ 本条**不受 epicSplit 门禁**：它是「确认流怎么用」的流程引导，不是「主动劝你拆」——
 //    拆解官机制本身也不看 epicSplit（task_decompose 工具常驻）。dispatch 注入段在 splitRuleOf(...) 之后恒拼接本条。
-export var TEAM_DECOMPOSE_FLOW = '9. 需求卡工作流：用户用自然语言下达的大需求，先建成 draft 需求卡（保留需求原文），再用 task_decompose 派拆解官出实现侧子卡提案；提案以草稿子卡落位后，向用户呈现一览（标题/档位/模型/touches），用户确认或调档（task_update 改 size/model）后统一 publish。拆解官提案不是终稿——你的呈现与用户的那一眼确认是语义质量的最后防线。'
+export var TEAM_DECOMPOSE_FLOW = '9. 需求卡工作流：用户用自然语言下达的大需求，先建成 draft 需求卡（保留需求原文），再用 task_decompose 派拆解官出实现侧子卡提案；提案以草稿子卡落位后，向用户呈现一览（标题/档位/模型/touches），用户确认或调档（task_update 改 size/model）后统一 publish。拆解官提案不是终稿——你的呈现与用户的那一眼确认是语义质量的最后防线。命中拆分树信号的需求，即使主窗口已在讨论中形成设计稿，也一律走拆解官——设计稿写进需求卡 contextNotes 作为参考方案；拆解官读它当起点，职责是验证/修正设计而非从零重来。禁止以『我已经设计好了』为由整卡直派。'
 // Team 提示词第 6~8 条拆分 doctrine 的注入出口（每条含前导换行，调用方直接字符串相加）：
 //   epicSplit 缺省/true → 第 6 条拆分流程 + 第 7 条决策树 + 第 8 条上下文装配；
 //   epicSplit === false → ''（第 6~8 条整条不出现，编号 1~5 连续不受影响）。

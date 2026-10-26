@@ -13,7 +13,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { DECOMPOSE_SCHEMA, DECOMPOSE_MAX_CHILDREN, buildDecomposerPrompt, applyDecomposeProposal } from '../lib/policy.mjs'
+import { DECOMPOSE_SCHEMA, DECOMPOSE_MAX_CHILDREN, buildDecomposerPrompt, applyDecomposeProposal, TEAM_DECOMPOSE_FLOW } from '../lib/policy.mjs'
 import { epicPrecheck, epicPrecheckNote } from '../lib/core.mjs'
 import { createDispatch } from '../lib/dispatch.mjs'
 import { createRpc } from '../lib/rpc.mjs'
@@ -570,4 +570,25 @@ test('⑪ 产物：lib/client.js 含拆解官可见性标记', function () {
   for (const mk of ['🧩 拆解中 ×', '🧩 已提案 ×', 'decomposeBadgeOf', "tip: '拆解官'"]) {
     assert.ok(built.indexOf(mk) >= 0, 'client.js 缺标记：' + mk + '（需 npm run build-client 重组装）')
   }
+})
+
+// ===== ⑫ Team 第 9 条补漏（task-mvoutja4）：已有设计稿也必须走拆解官 =====
+// 补漏款焊死「我已经设计好了」的绕过缝隙：命中拆分树信号的需求即使主窗口已在讨论中形成设计稿，
+// 也一律走拆解官——设计稿写进需求卡 contextNotes 作为参考方案，拆解官验证/修正而非从零重来。
+test('⑫ 第 9 条已有设计稿款（TEAM_DECOMPOSE_FLOW）：补漏关键词在位 + 旧文案要点不丢', function () {
+  // 补漏款三个关键语义逐字锁死：①中间态（已有设计稿）也走拆解官 ②设计稿进 contextNotes 当起点
+  assert.match(TEAM_DECOMPOSE_FLOW, /即使主窗口已在讨论中形成设计稿/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /一律走拆解官/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /contextNotes 作为参考方案/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /验证\/修正设计而非从零重来/)
+  // ③禁止绕过：以「我已经设计好了」为由整卡直派被明文禁止
+  assert.match(TEAM_DECOMPOSE_FLOW, /禁止以/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /整卡直派/)
+  // 旧文案要点仍在（core.test.mjs 既有拼接/注入位置断言口径不破：/^9\. 需求卡工作流/ 等）
+  assert.match(TEAM_DECOMPOSE_FLOW, /^9\. 需求卡工作流/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /draft 需求卡（保留需求原文）/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /task_decompose/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /标题\/档位\/模型\/touches/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /统一 publish/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /最后防线/)
 })
