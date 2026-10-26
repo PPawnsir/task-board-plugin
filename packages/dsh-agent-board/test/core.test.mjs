@@ -6269,24 +6269,129 @@ test('batch-op publish：仅 draft → pending（复用单卡语义），非 dra
   assert.equal(board2.tasks[0].status, 'pending'); assert.equal(board2.tasks[1].status, 'pending')
 })
 
-// ===== 卡详情 size 徽标 + model 特例只读展示（task-mvneoy1u；v1 不做 GUI 编辑，调档走对话 task_update）=====
-test('卡详情 status 行：size 徽标（轻/标/重，无 size 不显示）+ model 特例只读展示（源码 + 组装产物）', () => {
+// ===== 卡详情 size 档位下拉（task-mvomad2c ③：只读徽标升级为可调下拉，Team 板不可调回空）+ model 特例只读展示 =====
+test('卡详情 status 行：size 档位下拉（三档+继承缺省；Team 板无继承项）+ model 特例只读展示（源码 + 组装产物）', () => {
   const src = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
-  // size 徽标紧随状态徽章、在管线下拉之前（status/标签行挂点）
-  assert.ok(src.indexOf("statusLabels[task.status] || task.status), task.size ? React.createElement('span'") > 0, 'size 徽标紧随状态徽章')
-  // 无 size 不显示（条件三元 null 分支）；轻/标/重 映射 + 只读调档指引 title
-  assert.match(src, /\(\{ light: '轻', standard: '标', heavy: '重' \}\)\[task\.size\] \|\| task\.size\) : null/)
-  assert.match(src, /'力度档位 size=' \+ task\.size/)
-  assert.match(src, /调档走对话 task_update，v1 不做 GUI 编辑/)
-  // model 特例：存在才显示模型名（只读展示，改/删走对话 task_update）
+  // size 下拉紧随状态徽章（status 行挂点）；value 缺省：Team=standard，非 Team=空（继承）
+  assert.ok(src.indexOf("statusLabels[task.status] || task.status), React.createElement('select', { value: task.size || (state.teamMode ? 'standard' : '')") > 0, 'size 下拉紧随状态徽章')
+  // 调档写回：update-task size 通道 + fetchTasks 刷新
+  assert.match(src, /rpc\('update-task', \{ taskId: task\.id, size: e\.target\.value \}\)\.then\(fetchTasks\)/)
+  // Team 板无「继承」选项（硬闸不可调回空）；非 Team 含「继承（标）」空值项（调回=清除 size）
+  assert.match(src, /\(state\.teamMode \? \[\] : \[React\.createElement\('option', \{ key: '', value: '' \}, '继承（标）'\)\]\)/)
+  assert.match(src, /\['light', '轻（light）'\], \['standard', '标（standard）'\], \['heavy', '重（heavy）'\]/)
+  assert.match(src, /Team 板硬闸必填，不可调回继承/)
+  // 旧只读口径退役（size 徽标不再只读；🎯model 徽标的只读文案是「改/删走对话」，不受此断言影响）
+  assert.ok(src.indexOf('调档走对话 task_update，v1 不做 GUI 编辑') < 0, 'size 徽标不应再为只读')
+  // model 特例：存在才显示模型名（只读展示，改/删走对话 task_update）——本卡不动
   assert.match(src, /task\.model \? React\.createElement\('span'/)
   assert.match(src, /'卡级模型特例 model=' \+ task\.model/)
   assert.match(src, /'🎯 ' \+ task\.model\) : null/)
   // 组装产物同步（pretest 已跑 build-client）
   const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.match(built, /力度档位 size=/)
+  assert.match(built, /力度档位（路由板级 laneModels 三档表定模）/)
   assert.match(built, /卡级模型特例 model=/)
-  assert.match(built, /\{ light: '轻', standard: '标', heavy: '重' \}/)
+  assert.match(built, /value: task\.size \|\| \(state\.teamMode \? 'standard' : ''\)/)
+})
+
+// ===== size 普适化①（task-mvomad2c 修正稿）：Team 板建卡缺 size 硬闸拒写（双通道）；非 Team 零约束零提示 =====
+test('Team 硬闸：create-task/task_create 缺 size 拒建（文案带三档语义）+ 非法值双模式拒 + 非 Team 零约束', async () => {
+  assert.match(core.TEAM_SIZE_REQUIRED_ERR, /light=单点小改\/文档\/配置，standard=常规模块改动（缺省），heavy=跨模块\/高风险\/需强推理/)
+  // Team 板：create-task RPC 缺 size 拒（不落卡）
+  const teamBoard = mkBoard([]); teamBoard.teamMode = true
+  const h1 = mkRpcHandlers(teamBoard)
+  const r1 = await h1['create-task']({ title: 'T', description: 'd' })
+  assert.equal(r1.ok, false)
+  assert.match(r1.error, /Team 模式板建卡\/发布必须显式设力度档位 size：light=单点小改/)
+  assert.equal(teamBoard.tasks.length, 0, '拒建不落卡')
+  // Team 板：带合法 size 建卡成功且落字段
+  const r2 = await h1['create-task']({ title: 'T', description: 'd', size: 'light' })
+  assert.equal(r2.ok, true); assert.equal(teamBoard.tasks[0].size, 'light')
+  // 非法 size：白名单校验先于硬闸，双模式同文案拒
+  const r3 = await h1['create-task']({ title: 'T2', description: 'd', size: 'ultra' })
+  assert.equal(r3.ok, false); assert.match(r3.error, /非法 size/)
+  // task_create 工具通道同口径：缺档拒 / 带档落 / 非法拒
+  const tc = h1.__tools['task_create']
+  const r4 = await tc.execute({ title: 'T3', description: 'd' })
+  assert.equal(r4.ok, false); assert.match(r4.error, /Team 模式板建卡\/发布必须显式设力度档位 size/)
+  const r5 = await tc.execute({ title: 'T4', description: 'd', size: 'heavy' })
+  assert.equal(r5.ok, true); assert.equal(teamBoard.tasks[teamBoard.tasks.length - 1].size, 'heavy')
+  const r6 = await tc.execute({ title: 'T5', description: 'd', size: 'x' })
+  assert.equal(r6.ok, false); assert.match(r6.error, /非法 size/)
+  // 非 Team 板：零约束——不设 size 照常建卡且不落字段；显式设档落字段；非法值仍拒
+  const solo = mkBoard([])
+  const h2 = mkRpcHandlers(solo)
+  const r7 = await h2['create-task']({ title: 'T', description: 'd' })
+  assert.equal(r7.ok, true); assert.equal('size' in solo.tasks[0], false, '非 Team 缺省不落 size 字段（标档语义零迁移）')
+  const r8 = await h2['create-task']({ title: 'T2', description: 'd', size: 'standard' })
+  assert.equal(r8.ok, true); assert.equal(solo.tasks[1].size, 'standard')
+  const r9 = await h2.__tools['task_create'].execute({ title: 'T3', description: 'd', size: 'bad' })
+  assert.equal(r9.ok, false); assert.match(r9.error, /非法 size/)
+})
+
+// ===== size 普适化①b：publish 硬闸（update-task/task_update/batch-op 三通道；同调用带 size 一把过）=====
+test('Team 硬闸：publish 缺档草稿拒发布（三通道）+ 同调用 publish+size 一把过 + 非 Team 零约束', async () => {
+  const teamBoard = mkBoard([]); teamBoard.teamMode = true
+  const h = mkRpcHandlers(teamBoard)
+  // 存量缺档草稿（绕过建卡硬闸直接落盘，模拟老卡/拆解官物化卡）；另有带档草稿对照
+  teamBoard.tasks.push(mkTask({ id: 'd1', status: 'draft' }), mkTask({ id: 'd2', status: 'draft', size: 'light' }))
+  // update-task RPC：缺档拒发布（不翻状态）
+  const r1 = await h['update-task']({ taskId: 'd1', publish: true })
+  assert.equal(r1.ok, false); assert.match(r1.error, /Team 模式板建卡\/发布必须显式设力度档位 size/)
+  assert.equal(teamBoard.tasks[0].status, 'draft', '拒发布不翻状态')
+  // 同调用 publish+size：size 赋值先于硬闸生效 → 一把过
+  const r2 = await h['update-task']({ taskId: 'd1', publish: true, size: 'heavy' })
+  assert.equal(r2.ok, true); assert.equal(teamBoard.tasks[0].status, 'pending'); assert.equal(teamBoard.tasks[0].size, 'heavy')
+  // 带档草稿直接发布
+  const r3 = await h['update-task']({ taskId: 'd2', publish: true })
+  assert.equal(r3.ok, true); assert.equal(teamBoard.tasks[1].status, 'pending')
+  // task_update 工具通道同口径
+  teamBoard.tasks.push(mkTask({ id: 'd3', status: 'draft' }))
+  const r4 = await h.__tools['task_update'].execute({ taskId: 'd3', publish: true })
+  assert.equal(r4.ok, false); assert.match(r4.error, /Team 模式板建卡\/发布必须显式设力度档位 size/)
+  // batch-op publish：缺档跳过附原因、有档照发（整批不熔断）
+  teamBoard.tasks.push(mkTask({ id: 'd4', status: 'draft', size: 'standard' }))
+  const r5 = await h['batch-op']({ ids: ['d3', 'd4'], op: 'publish' })
+  assert.equal(r5.ok, true); assert.equal(r5.done, 1); assert.deepEqual(r5.skipped, ['d3'])
+  assert.match(r5.reasons.d3, /Team 板缺力度档位 size/)
+  assert.equal(teamBoard.tasks.find((x) => x.id === 'd4').status, 'pending')
+  assert.equal(teamBoard.tasks.find((x) => x.id === 'd3').status, 'draft')
+  // 非 Team 板：publish 零约束（缺档草稿照发）
+  const solo = mkBoard([mkTask({ id: 's1', status: 'draft' })])
+  const r6 = await mkRpcHandlers(solo)['update-task']({ taskId: 's1', publish: true })
+  assert.equal(r6.ok, true); assert.equal(solo.tasks[0].status, 'pending')
+})
+
+// ===== size 普适化②（task-mvomad2c）：建卡表单档位下拉进 create-task 载荷（源码 + 产物）=====
+test('建卡表单：档位下拉（非 Team 继承缺省不写 size / Team 去继承缺省标档写 size）（源码 + 组装产物）', () => {
+  const src = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+  // 档位 state：Team 缺省 standard（无继承项，配合 host 硬闸）；非 Team 缺省 ''（继承=不落字段）
+  assert.match(src, /var _sz = useState\(wm === 'team' \? 'standard' : ''\), sizeSel = _sz\[0\], setSizeSel = _sz\[1\]/)
+  // 下拉选项：Team 无继承项；非 Team 含「继承（标档）」空值项 + 三档
+  assert.match(src, /\(wm === 'team' \? \[\] : \[React\.createElement\('option', \{ key: '', value: '' \}, '继承（标档）'\)\]\)/)
+  assert.match(src, /\['light', '轻（light）'\], \['standard', '标（standard）'\], \['heavy', '重（heavy）'\]/)
+  // 载荷：sizeSel 非空才写 size（继承零值不落字段，保持零值语义=标档）
+  assert.match(src, /if \(sizeSel\) payload\.size = sizeSel/)
+  assert.match(src, /rpc\('create-task', payload\)/)
+  // 组装产物同步
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /if \(sizeSel\) payload\.size = sizeSel/)
+  assert.match(built, /继承（标档）/)
+})
+
+// ===== size 普适化④（task-mvomad2c）：卡列表行档位小徽标（未设=灰「标」，title 注明缺省口径）=====
+test('卡列表行：档位徽标（轻/标/重 brand 色；未设=灰「标」）紧随优先级徽标（源码 + 组装产物）', () => {
+  const src = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+  // 挂点：徽标紧随优先级徽标
+  assert.ok(src.indexOf("}, prioLabel[t.priority] || '中'), React.createElement('span', { style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: t.size ?") > 0, '档位徽标紧随优先级徽标')
+  // 灰态口径：未设=nested 底 + text2 字 + 「标」兜底 + 缺省口径 title；已设=brand 色 + size 值 title
+  assert.match(src, /background: t\.size \? 'color-mix\(in srgb, ' \+ C\.brand \+ ' 18%, transparent\)' : C\.nested, color: t\.size \? C\.brand : C\.text2/)
+  assert.match(src, /'力度档位未显式设置——缺省=标档语义（路由 laneModels\.standard 槽）'/)
+  assert.match(src, /'力度档位 size=' \+ t\.size/)
+  assert.match(src, /\(\{ light: '轻', standard: '标', heavy: '重' \}\)\[t\.size\] \|\| '标'\)/)
+  // 组装产物同步
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /力度档位未显式设置——缺省=标档语义/)
+  assert.match(built, /\(\{ light: '轻', standard: '标', heavy: '重' \}\)\[t\.size\] \|\| '标'\)/)
 })
 
 // ===== 巡检三连②（详情编辑 / 表单标签 / 恢复预警）：优先级+标签可编辑 / 标签进 create 载荷 / 恢复 confirm 门禁 =====

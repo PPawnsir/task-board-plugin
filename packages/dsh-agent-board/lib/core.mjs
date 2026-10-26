@@ -210,6 +210,10 @@ export function classifyPipeline(t) {
 // 消费面（spawnOneShot 取模链、get-tasks 透出、set-board-config 部分合并基座）只认这一个形态，不各自兜底。
 // 卡级字段 t.size（∈ TASK_SIZES，可缺省）与 t.model（可缺省字符串）不动存量卡：缺字段=标档语义，零迁移。
 export var TASK_SIZES = ['light', 'standard', 'heavy']
+// ===== Team 板力度档位硬闸（task-mvomad2c 点菜 A 修正稿）：teamMode 板上建卡/发布缺 size 一律拒 =====
+// 适用面：create-task RPC / task_create 工具 / update-task publish / batch-op publish 四入口同文案拒写；
+// 非 Team 板零约束零提示（缺字段=标档语义照旧，存量卡零迁移）。错误文案自带三档语义，便于自助修正。
+export var TEAM_SIZE_REQUIRED_ERR = 'Team 模式板建卡/发布必须显式设力度档位 size：light=单点小改/文档/配置，standard=常规模块改动（缺省），heavy=跨模块/高风险/需强推理'
 // 档位槽单槽归一（set-board-config 写入与读路径归一共用同一口径）：
 // 字符串 → trim 后非空则单元素数组、空串 → 空数组（=清槽/继承下一级）；数组 → 逐项滤脏保序；其他 → 空数组。
 export function normalizeLaneSlot(v) {
