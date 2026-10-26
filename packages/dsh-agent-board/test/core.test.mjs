@@ -6510,11 +6510,12 @@ test('模型下拉两段式④（源码级）：ModelCfg 选中只改草稿态�
   assert.equal(pickM[0].indexOf('rpc('), -1, 'pick 不得直接调 rpc（两段式红线）')
   assert.match(pickM[0], /setVal\(v\)/)
   assert.match(pickM[0], /setDirty\(v !== \(props\.value \|\| ''\)\)/) // dirty 对比服务端权威值
-  // ② 提交唯一入口 = save()（rpc('set-board-config') 只住在 save 里；力度路由档位槽分支同纪律——task-mvneq4mw）
+  // ② 提交唯一入口 = save()（rpc('set-board-config') 只住在 save 里）。力度路由六槽 2026-10-26 起迁
+  // OrderedModelsEditor 链编辑器（task-mvokikl3，laneModels 写通道随编辑器搬走），ModelCfg 只服务板级模型行
   const saveM = body.match(/function save\(\) \{[\s\S]*?\n      \}/)
   assert.ok(saveM, 'ModelCfg 应定义 save')
   assert.match(saveM[0], /rpc\('set-board-config', \{ key: cfgKey, value: \(val \|\| ''\)\.trim\(\)/)
-  assert.match(saveM[0], /rpc\('set-board-config', \{ key: 'laneModels', value: patch \}\)/) // 档位槽走 laneModels 部分合并
+  assert.equal(saveM[0].indexOf("'laneModels'"), -1, 'ModelCfg 不再承担档位槽写（六槽已迁 OrderedModelsEditor，task-mvokikl3）')
   // ③ 下拉分支（if (models) 到降级分支之间）：onChange 走 pick；dirty 才渲染保存键（onClick: save）
   const selBranch = body.slice(body.indexOf('if (models)'), body.indexOf('// 降级'))
   assert.match(selBranch, /onChange: function \(e\) \{ pick\(e\.target\.value\) \}/)

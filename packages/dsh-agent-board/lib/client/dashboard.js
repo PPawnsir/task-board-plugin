@@ -2,7 +2,7 @@
 // dashboard —— 仪表盘域：统计（computeStats/TrendChart/StatCard/BarRow/ResearchRoiRow）· 范围筛选（RangeFilter）
 //   · 全局总览（GlobalBoards）· 报告（buildReport/ReportButton）· Token 消耗（TokenUsage）
 //   · 架构健康（HealthHints，架构自省 L1）
-//   · 团队池（TeamView/PoolStatus）· 设置（WorkModeSwitch/PoolCfg/MinCfg/ModelCfg/PoolCfgPopover/ModelRoutePopover/FallbackCfg）
+//   · 团队池（TeamView/PoolStatus）· 设置（WorkModeSwitch/PoolCfg/MinCfg/ModelCfg/OrderedModelsEditor/PoolCfgPopover/ModelRoutePopover）
 // 本文件是 apply(ctx) 函数体片段，不可独立运行；由 scripts/build-client.cjs 按序拼接生成 lib/client.js。
 // ============================================================================
 
@@ -996,10 +996,9 @@
     }
 
     // #11 头部减负：池配置收纳进 ⚙️ 弹出层（并发/超时/开关）；模型区（含 #17 verifier 异构模型设置、
-    // 力度路由六槽、备用链）2026-10-25 起搬至「模型路由」独立弹层 ModelRoutePopover（task-mvnyc8vo）
-    // 档位槽读侧口径（task-mvnxckhq 同档优先序）：槽位=有序数组（第一位=首选），GUI 只展示/编辑首选；
-    // 完整排序（次选及以后）走对话/RPC。容错：老 host 透出的单字符串形态按首选直读（host 归一后恒为数组，本分支只是防御）。
-    function laneFirst(x) { return Array.isArray(x) ? (x[0] || '') : (typeof x === 'string' ? x : '') }
+    // 力度路由六槽、备用链）2026-10-25 起搬至「模型路由」独立弹层 ModelRoutePopover（task-mvnyc8vo）。
+    // 六槽/备用链 2026-10-26 起升级为 OrderedModelsEditor 有序链编辑器（task-mvokikl3：下拉添加+芯片 ×/↑ 排序，
+    // 槽位读写整个有序数组）——原「GUI 只编首选」的 laneFirst 单选形态退役。
     function ModelCfg(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
       var _a = useState(props.value || ''), val = _a[0], setVal = _a[1]
@@ -1007,13 +1006,9 @@
       var _m = useState(null), models = _m[0], setModels = _m[1]
       var cfgKey = props.cfgKey || 'verifierModel'
       var label = props.label || 'Verifier 模型'
-      // 力度路由档位槽（task-mvneq4mw）：props.lane + props.laneRole 双存在时，写通道改走
-      // set-board-config key='laneModels' 部分合并（host 逐槽位校验，非法模型整体拒写——C1 地基通道），
-      // 空串=清槽恢复继承；空选项文案由 props.inheritLabel 覆盖（档位槽=「继承板级」，板级行=「继承父级」）。
-      // 槽位有序数组化（task-mvnxckhq）：props.value=首选（数组第一位，laneFirst 取），props.laneList=整槽
-      // 原数组——写回 [首选, ...其余原样]，不清空已有序；完整排序走对话/RPC，GUI 不做多值排序编辑器。
-      var lane = props.lane || ''
-      var laneRole = props.laneRole || ''
+      // 只服务板级 Worker/Verifier 模型行（两段式单选，空=「继承父级」）。力度路由档位槽曾复用本组件
+      // （task-mvneq4mw lane 分支），2026-10-26 起随链式编辑器升级迁往 OrderedModelsEditor（task-mvokikl3）——
+      // 档位槽走 laneModels 部分合并写通道的职责随编辑器搬走，本组件不再承担。
       var inhLabel = props.inheritLabel || '继承父级'
       // 下拉列出当前网关可用模型（host list-models RPC）；枚举失败降级为文本输入
       useEffect(function () {
@@ -1024,15 +1019,6 @@
       useEffect(function () { setVal(props.value || ''); setDirty(false) }, [props.value])
       function save() {
         setDirty(false)
-        if (lane && laneRole) {
-          // 档位槽=有序数组：GUI 只编辑首选（第一位），写回 [首选, ...其余原样]（不清空已有序）；
-          // 空串=清整槽（继承板级，与空选项文案语义一致）。
-          var first = (val || '').trim()
-          var rest = Array.isArray(props.laneList) ? props.laneList.slice(1) : []
-          var patch = {}; patch[lane] = {}; patch[lane][laneRole] = first ? [first].concat(rest) : []
-          rpc('set-board-config', { key: 'laneModels', value: patch }).then(fetchTasks).catch(function () {})
-          return
-        }
         rpc('set-board-config', { key: cfgKey, value: (val || '').trim() }).then(fetchTasks).catch(function () {})
       }
       // 下拉两段式（task-mv9yuq2l，实证 n-mv8ki92qnhdq：巡检戳即点即写 → verifierModel 神隐回退无从审计）：
@@ -1083,37 +1069,75 @@
         React.createElement('button', { onClick: reopen, title: '重新显示首用引导横幅（board 视图顶部定位行）', style: { padding: '0px 5px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text, cursor: 'pointer', lineHeight: '14px' } }, '重新显示'))
     }
 
-    // 备用模型链编辑（task-mvnyc8vo GUI / task-mvnqxlpn 数据面）：fallbackModels 有序字符串数组 ↔
-    // 逗号/换行分隔文本。失焦保存（onBlur），经 set-board-config key='fallbackModels' 既有通道——
-    // host 逐项合法清单校验，非法项整体拒写并回 error（这里把 error 短暂展示，不静默吞）。空=清链不启用。
-    function FallbackCfg(props) {
-      var _R = React; var useState = _R.useState, useEffect = _R.useEffect
-      function toText(arr) { return (Array.isArray(arr) ? arr : []).join('\n') }
-      var _a = useState(toText(props.value)), val = _a[0], setVal = _a[1]
-      var _b = useState(''), msg = _b[0], setMsg = _b[1]
-      useEffect(function () { setVal(toText(props.value)) }, [JSON.stringify(props.value || [])])
-      function save() {
-        var arr = val.split(/[\n,，;；]+/).map(function (s) { return s.trim() }).filter(function (s) { return !!s })
-        if (JSON.stringify(arr) === JSON.stringify(Array.isArray(props.value) ? props.value : [])) return // 无变化不写
-        rpc('set-board-config', { key: 'fallbackModels', value: arr }).then(function (r) {
+    // ===== 有序模型链编辑器（task-mvokikl3 链式编辑器：下拉添加 + 芯片排序，替代首选单选与文本框）=====
+    // 弹层内复用 7 处（力度路由六槽 + 备用模型链）：当前链渲染为模型芯片行（每片 × 移除 + ↑ 前移一位），
+    // 尾部下拉（合法目录全量、过滤已在链中的）+「添加」追加到链尾；空链显示 props.emptyHint 占位语义
+    // （六槽=「继承板级」、备用链=「无（不启用）」）。改动即写：props.onSave(nextArr) 返回 rpc Promise——
+    // 复用既有 set-board-config 通道（laneModels 槽位写**整个有序数组** / fallbackModels 写**整个数组**，
+    // 零 RPC 改动），host 逐项合法清单校验、非法整体拒写（ok:false 亮 ⚠️ 不静默吞）；写成功后 fetchTasks 回读权威值。
+    // props.models=null（目录枚举失败/老宿主）时降级为文本输入 + 添加，不丢功能。
+    function OrderedModelsEditor(props) {
+      var _R = React; var useState = _R.useState
+      // 读侧容错：老 host 单字符串形态归一为单元素数组；非字符串/空串项滤掉（host 归一后恒为干净数组，此处只是防御）
+      var list = Array.isArray(props.value) ? props.value.filter(function (x) { return typeof x === 'string' && x }) : (typeof props.value === 'string' && props.value ? [props.value] : [])
+      var _p = useState(''), pickVal = _p[0], setPickVal = _p[1]
+      var _m = useState(''), msg = _m[0], setMsg = _m[1]
+      var models = Array.isArray(props.models) ? props.models : null
+      // 下拉过滤已在链中的（链内唯一，重复添加无意义）
+      var avail = models ? models.filter(function (m) { return list.indexOf(m.id) < 0 }) : null
+      function commit(next) {
+        setMsg('')
+        Promise.resolve(props.onSave(next)).then(function (r) {
           if (r && r.ok === false) { setMsg('⚠️ ' + (r.error || '保存失败')); setTimeout(function () { setMsg('') }, 5000); return }
-          setMsg('✅ 已保存'); setTimeout(function () { setMsg('') }, 2000); fetchTasks()
+          fetchTasks()
         }).catch(function () { setMsg('⚠️ 保存失败'); setTimeout(function () { setMsg('') }, 3000) })
       }
-      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'flex-start', gap: 4, fontSize: 9, color: C.text2 } },
-        React.createElement('textarea', { value: val, rows: 3, onChange: function (e) { setVal(e.target.value) }, onBlur: save, placeholder: 'provider/model，逗号或换行分隔；空=不启用', title: '备用模型链（有序）：取模候选冷却/熔断时按链顺序找首个健康替代模型；空=不启用', style: { width: 300, padding: '2px 4px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text, fontFamily: 'inherit', resize: 'vertical', whiteSpace: 'pre' } }),
-        msg ? React.createElement('span', { style: { color: msg.indexOf('✅') === 0 ? C.ok : C.err, whiteSpace: 'normal', maxWidth: 140 } }, msg) : null)
+      function removeAt(i) { var next = list.slice(); next.splice(i, 1); commit(next) }
+      function upAt(i) { if (i <= 0) return; var next = list.slice(); var t = next[i - 1]; next[i - 1] = next[i]; next[i] = t; commit(next) }
+      function add() { var v = (pickVal || '').trim(); if (!v || list.indexOf(v) >= 0) return; setPickVal(''); commit(list.concat([v])) }
+      var chipBtn = { fontSize: 9, padding: '0px 2px', border: 'none', background: 'transparent', color: C.text2, cursor: 'pointer', lineHeight: '12px' }
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'flex-start', gap: 4, fontSize: 9, color: C.text2, whiteSpace: 'normal' } },
+        props.label ? React.createElement('span', { style: { paddingTop: 1, minWidth: 62 } }, props.label) : null,
+        React.createElement('span', { style: { display: 'inline-flex', flexWrap: 'wrap', gap: 3, alignItems: 'center', maxWidth: 250 } },
+          list.length === 0 ? React.createElement('span', { style: { color: C.text2, fontStyle: 'italic', paddingTop: 1 } }, props.emptyHint || '无') : null,
+          list.map(function (m, i) {
+            return React.createElement('span', { key: m + '@' + i, title: (i === 0 ? '首选' : '第 ' + (i + 1) + ' 顺位') + ' · 按序取第一个健康模型', style: { display: 'inline-flex', alignItems: 'center', gap: 1, padding: '0px 2px 0px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.nested, color: C.text, whiteSpace: 'nowrap' } },
+              React.createElement('span', null, m),
+              i > 0 ? React.createElement('button', { onClick: function () { upAt(i) }, title: '前移一位（↑）', style: chipBtn }, '↑') : null,
+              React.createElement('button', { onClick: function () { removeAt(i) }, title: '移除（×）', style: chipBtn }, '×'))
+          })),
+        // 尾部：下拉（过滤已选）/ 目录缺失降级文本输入 +「添加」追加链尾
+        avail ? React.createElement('select', { value: pickVal, onChange: function (e) { setPickVal(e.target.value) }, title: '选择要追加到链尾的模型（已在链中的已过滤）', style: { width: 150, padding: '0px 2px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
+          React.createElement('option', { value: '' }, '选择模型…'),
+          avail.map(function (m) { return React.createElement('option', { key: m.id, value: m.id }, m.name + ' (' + m.provider + ')') }))
+          : React.createElement('input', { value: pickVal, onChange: function (e) { setPickVal(e.target.value) }, onKeyDown: function (e) { if (e.key === 'Enter') add() }, placeholder: 'provider/model', title: '模型目录不可用，手输 provider/model 后点添加', style: { width: 110, padding: '0px 4px', fontSize: 9, border: '1px solid ' + C.border2, borderRadius: 2, background: C.card, color: C.text } }),
+        React.createElement('button', { onClick: add, disabled: !pickVal, title: '追加到链尾', style: { fontSize: 9, padding: '0px 5px', border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: pickVal ? C.brand : C.text2, cursor: pickVal ? 'pointer' : 'default', lineHeight: '14px', fontWeight: 600 } }, '添加'),
+        msg ? React.createElement('span', { style: { color: C.err, maxWidth: 140 } }, msg) : null)
     }
 
     // ===== 模型路由独立弹层（task-mvnyc8vo，用户 2026-10-25「模型配置独立弹出卡片」）=====
     // 模型相关全部配置从池配置弹层**搬走**（不是复制）到本弹层：①板级 Worker/Verifier 模型（ModelCfg
-    // 复用）②力度路由六槽 ③fallbackModels 备用链文本编辑（FallbackCfg）；池配置弹层只留并发/超时/开关。
+    // 复用）②力度路由六槽 ③fallbackModels 备用链——②③ 2026-10-26 起统一为 OrderedModelsEditor
+    // 有序链编辑器（task-mvokikl3：下拉添加+芯片 ×/↑ 排序，替代首选单选与文本框）；池配置弹层只留并发/超时/开关。
     // 弹层样式复用 PoolCfgPopover 的 fixed 定位模式（脱离面板 overflow 裁剪 + uiZoom 档位补偿）。
     function ModelRoutePopover(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect, useRef = _R.useRef
       var _a = useState(false), open = _a[0], setOpen = _a[1]
       var _p = useState(null), pos = _p[0], setPos = _p[1]
       var ref = useRef(null); var btnRef = useRef(null)
+      // 链编辑器共用模型目录：弹层取一次 list-models 下发 7 处编辑器（六槽+备用链），免每编辑器各发一次 RPC；
+      // 目录不可用（老宿主/枚举失败）时 routeModels 恒 null，编辑器降级为文本输入 + 添加，不丢功能。
+      var _rm = useState(null), routeModels = _rm[0], setRouteModels = _rm[1]
+      useEffect(function () {
+        var cancelled = false
+        rpc('list-models').then(function (r) { if (!cancelled && r && r.ok && Array.isArray(r.models) && r.models.length) setRouteModels(r.models) }).catch(function () {})
+        return function () { cancelled = true }
+      }, [])
+      // 改动即写（复用既有 set-board-config 通道，零 RPC 改动）：六槽=laneModels 部分合并、槽位写**整个有序数组**
+      // （非仅首选——task-mvokikl3 起 GUI 可编完整链）；备用链=fallbackModels 整个数组。host 逐项合法清单校验、
+      // 任一非法整体拒写（ok:false 由编辑器亮 ⚠️ 不静默吞）；写成功后编辑器侧 fetchTasks 回读权威值。
+      function saveLaneSlot(lane, role, nextArr) { var patch = {}; patch[lane] = {}; patch[lane][role] = nextArr; return rpc('set-board-config', { key: 'laneModels', value: patch }) }
+      function saveFallbackChain(nextArr) { return rpc('set-board-config', { key: 'fallbackModels', value: nextArr }) }
       useEffect(function () { if (!open) return; function onDown(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }; document.addEventListener('mousedown', onDown); return function () { document.removeEventListener('mousedown', onDown) } }, [open])
       function toggle() {
         // 与 PoolCfgPopover 同口径：fixed + 视口坐标（面板 overflow:hidden 会裁 absolute 弹层）；
@@ -1133,21 +1157,22 @@
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
             React.createElement(ModelCfg, { label: 'Verifier 模型', cfgKey: 'verifierModel', value: props.verifierModel }),
             React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Verifier 异构审查）')),
-          // ② 力度路由六槽（从池配置弹层搬入）：三档 × Worker/Verifier，读写通道不变
-          // （set-board-config key='laneModels' 部分合并；空槽=继承上方板级模型行；
-          // 槽位=有序数组，GUI 只编辑首选，完整排序走对话/RPC）。
+          // ② 力度路由六槽（链编辑器，task-mvokikl3）：三档 × Worker/Verifier 各一条有序模型链——
+          // 读写整个槽位数组（非仅首选）；空链=继承上方板级模型行。
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '力度路由'),
           [['light', '轻档'], ['standard', '标档'], ['heavy', '重档']].map(function (ln) {
             var laneObj = (props.laneModels && props.laneModels[ln[0]]) || {}
-            return React.createElement('div', { key: ln[0], style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 3 } },
-              React.createElement(ModelCfg, { label: ln[1] + ' Worker', lane: ln[0], laneRole: 'worker', inheritLabel: '继承板级', value: laneFirst(laneObj.worker), laneList: laneObj.worker }),
-              React.createElement(ModelCfg, { label: ln[1] + ' Verifier', lane: ln[0], laneRole: 'verifier', inheritLabel: '继承板级', value: laneFirst(laneObj.verifier), laneList: laneObj.verifier }))
+            return React.createElement('div', { key: ln[0], style: { marginBottom: 4 } },
+              React.createElement('div', { style: { marginBottom: 2 } },
+                React.createElement(OrderedModelsEditor, { label: ln[1] + ' Worker', value: laneObj.worker, models: routeModels, emptyHint: '继承板级', onSave: function (next) { return saveLaneSlot(ln[0], 'worker', next) } })),
+              React.createElement('div', null,
+                React.createElement(OrderedModelsEditor, { label: ln[1] + ' Verifier', value: laneObj.verifier, models: routeModels, emptyHint: '继承板级', onSave: function (next) { return saveLaneSlot(ln[0], 'verifier', next) } })))
           }),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 1, whiteSpace: 'normal', maxWidth: 340 } }, '空 = 继承上方 Worker/Verifier 模型行（取模链：卡级特例 → 档位 → 板级 → 父模型）；档位槽支持有序数组=同档优先序，此处只编辑首选（数组第一位），完整排序走对话/RPC；卡档位走对话 task_update size=light/standard/heavy'),
-          // ③ 备用模型链：文本编辑（逗号/换行分隔，失焦保存），v1 不做排序拖拽器
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 1, whiteSpace: 'normal', maxWidth: 360 } }, '每槽=有序模型链：按序取第一个健康模型（首选冷却/熔断则次选递补，槽内全病走备用链→降档→父模型）；空链 = 继承上方 Worker/Verifier 模型行；卡档位走对话 task_update size=light/standard/heavy'),
+          // ③ 备用模型链：同款链编辑器（task-mvokikl3，替代逗号/换行文本框）
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '备用模型链'),
-          React.createElement(FallbackCfg, { value: props.fbModels }),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 340 } }, '取模口径：卡级特例 → 档位路由 → 板级模型；候选模型冷却/熔断时按备用链顺序找首个健康替代，链尽再走降档/父模型兜底')) : null)
+          React.createElement(OrderedModelsEditor, { label: '备用链', value: props.fbModels, models: routeModels, emptyHint: '无（不启用）', onSave: saveFallbackChain }),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 360 } }, '取模口径：卡级特例 → 档位路由 → 板级模型；备用链=档位链全不可用时的跨档逃生索——候选冷却/熔断时按链顺序找首个健康替代，链尽再走降档/父模型兜底；空链=不启用')) : null)
     }
 
     function PoolCfgPopover(props) {

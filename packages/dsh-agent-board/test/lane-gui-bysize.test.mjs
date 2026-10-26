@@ -1,9 +1,8 @@
 // ===== 力度路由 GUI + 记分卡 bySize 档位维度（task-mvneq4mw）=====
 // 断言清单（对应任务验收口径）：
-//   ① 池配置弹层「力度路由」小节：三档 × Worker/Verifier 共 6 个 ModelCfg 下拉，
-//     写走 set-board-config key='laneModels' 部分合并，空串=「继承板级」语义；
-//     槽位=有序数组（task-mvnxckhq 同档优先序）：GUI 只编辑首选（laneFirst 读第一位、
-//     写回 [首选, ...其余原样] 不清空已有序），完整排序走对话/RPC
+//   ① 模型路由弹层「力度路由」小节：三档 × Worker/Verifier 共 6 个 OrderedModelsEditor 链编辑器
+//     （task-mvokikl3：下拉添加+芯片 ×/↑ 排序，替代首选单选），写走 set-board-config key='laneModels'
+//     部分合并、槽位写**整个有序数组**（非仅首选），空链=「继承板级」语义
 //   ② laneModels state 透传：kernel fetchTasks 回读 + TopPanel 订阅 + PoolCfgPopover props 接线
 //   ②b cfgKnobs 快照类型对称（验收驳回回归修复）：快照存原值，null→null 恒 false、真变化才 true
 //   ③ 记分卡 bySize 聚合（usage.mjs）：三档归桶 / 无 size 老 run 归标档 / hook 剔除 /
@@ -12,10 +11,11 @@
 //   ⑤ README 双份逐字一致 + 含「力度路由」「按档位」说明
 //   ⑥ 模型路由独立弹层（task-mvnyc8vo）：ModelRoutePopover 三区（板级/六槽/备用链）+
 //      池配置弹层搬离断言（不再含模型区）
-//   ⑦ 备用链 GUI：fallbackModels 文本编辑（逗号/换行分隔、失焦保存）→ 数组写入通道 +
-//      kernel fetchTasks/cfgKnobs/TopPanel 透传订阅
+//   ⑦ 备用链 GUI：OrderedModelsEditor 同款链编辑器（task-mvokikl3，FallbackCfg/textarea 退役）→
+//      fallbackModels 数组写入通道 + kernel fetchTasks/cfgKnobs/TopPanel 透传订阅
 //   ⑧ 在跑子代理模型可见：成员卡 + 池状态条渲染 model 与取模来源角标；dispatch poolStatus 带 modelSource
 //   ⑨ 产物含模型路由弹层标记
+//   ⑩ OrderedModelsEditor 组件本体：芯片 ×/↑ 交互 + 下拉过滤已选 + 改动即写 + 目录缺失降级
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -27,34 +27,33 @@ const src = readFileSync(new URL('../lib/client/dashboard.js', import.meta.url),
 const ksrc = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
 const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
 
-// ===== ① GUI 源码断言：6 个下拉 + 继承语义 + laneModels 部分合并写通道 + 首选编辑（task-mvnxckhq）=====
-test('①力度路由小节：三档×双角色 6 个 ModelCfg 下拉 + 空=继承板级 + laneModels 部分合并写通道（首选编辑写回 [首选,...其余原样]）', () => {
+// ===== ① GUI 源码断言：六槽有序链编辑器（task-mvokikl3）+ 整槽数组读写 + laneModels 部分合并写通道 =====
+test('①力度路由小节：三档×双角色 6 个 OrderedModelsEditor 链编辑器 + 空链=继承板级 + 槽位写整个有序数组（非仅首选）', () => {
   // 小节标题在模型行之后
   assert.ok(src.indexOf("'力度路由'") >= 0, '缺「力度路由」小节标题')
   const iVer = src.indexOf("cfgKey: 'verifierModel'")
   const iLane = src.indexOf("'力度路由'")
   const iTimeout = src.indexOf('两级超时（软超时只提醒主窗口')
   assert.ok(iVer >= 0 && iLane > iVer && iTimeout > iLane, '力度路由小节必须在模型行之后、两级超时之前')
-  // 6 个下拉：三档表 × 双角色 map 展开（3 档 × worker/verifier = 6 实例，源码层为一张三档表 + 双角色两行）
+  // 三档表 map 展开（3 档 × worker/verifier = 6 个链编辑器实例）
   assert.match(src, /\[\['light', '轻档'\], \['standard', '标档'\], \['heavy', '重档'\]\]\.map\(function \(ln\)/)
-  // 槽位=有序数组（同档优先序，第一位=首选）：读侧 laneFirst 取第一位，整槽原数组走 laneList 传入（写回保序用）
-  assert.match(src, /function laneFirst\(x\) \{ return Array\.isArray\(x\) \? \(x\[0\] \|\| ''\) : \(typeof x === 'string' \? x : ''\) \}/, '缺 laneFirst 首选读侧helper')
-  assert.match(src, /React\.createElement\(ModelCfg, \{ label: ln\[1\] \+ ' Worker', lane: ln\[0\], laneRole: 'worker', inheritLabel: '继承板级', value: laneFirst\(laneObj\.worker\), laneList: laneObj\.worker \}\)/)
-  assert.match(src, /React\.createElement\(ModelCfg, \{ label: ln\[1\] \+ ' Verifier', lane: ln\[0\], laneRole: 'verifier', inheritLabel: '继承板级', value: laneFirst\(laneObj\.verifier\), laneList: laneObj\.verifier \}\)/)
-  // 继承语义：空选项文案「继承板级」（继承上方 Worker/Verifier 模型行）
-  assert.equal((src.match(/inheritLabel: '继承板级'/g) || []).length, 2, 'map 内 worker/verifier 两槽位空选项均为「继承板级」')
-  assert.ok(src.indexOf('空 = 继承上方 Worker/Verifier 模型行') >= 0, '缺「空=继承板级模型行」注一句')
-  // 注释：GUI 只编辑首选，完整排序走对话/RPC
-  assert.ok(src.indexOf('完整排序走对话/RPC') >= 0, '缺「完整排序走对话/RPC」注释')
-  // 写通道：ModelCfg lane 分支走 set-board-config key='laneModels' 部分合并对象；
-  // 首选编辑写回 [首选, ...其余原样]（不清空已有序——laneList.slice(1) 保留次选及以后），空串=清整槽
-  assert.match(src, /var first = \(val \|\| ''\)\.trim\(\)/)
-  assert.match(src, /var rest = Array\.isArray\(props\.laneList\) \? props\.laneList\.slice\(1\) : \[\]/, '缺「其余原样」保留逻辑（slice(1)）')
-  assert.match(src, /patch\[lane\] = \{\}; patch\[lane\]\[laneRole\] = first \? \[first\]\.concat\(rest\) : \[\]/, '缺「[首选, ...其余原样]」写回形态')
-  assert.match(src, /rpc\('set-board-config', \{ key: 'laneModels', value: patch \}\)/)
-  // 读侧：下拉值取 props.laneModels[档][角色]
+  // 读侧：整槽数组原样传入（非仅首选——laneFirst 首选单选形态已退役，链编辑器消费完整有序数组）
   assert.match(src, /\(props\.laneModels && props\.laneModels\[ln\[0\]\]\) \|\| \{\}/)
-  // 两段式语义保持（选中≠保存，点 ✓ 才提交）——ModelCfg 既有契约不走即点即写
+  assert.match(src, /React\.createElement\(OrderedModelsEditor, \{ label: ln\[1\] \+ ' Worker', value: laneObj\.worker, models: routeModels, emptyHint: '继承板级'/, 'Worker 槽未接链编辑器（整槽数组读）')
+  assert.match(src, /React\.createElement\(OrderedModelsEditor, \{ label: ln\[1\] \+ ' Verifier', value: laneObj\.verifier, models: routeModels, emptyHint: '继承板级'/, 'Verifier 槽未接链编辑器（整槽数组读）')
+  // 空链占位语义「继承板级」（空槽=继承上方板级模型行）
+  assert.equal((src.match(/emptyHint: '继承板级'/g) || []).length, 2, 'map 内 worker/verifier 两槽位空链占位均为「继承板级」')
+  assert.ok(src.indexOf('空链 = 继承上方 Worker/Verifier 模型行') >= 0, '缺「空链=继承板级模型行」注一句')
+  // 语义一句「按序取第一个健康模型」
+  assert.ok(src.indexOf('按序取第一个健康模型') >= 0, '缺「按序取第一个健康模型」语义标注')
+  // 写通道：改动即写 set-board-config key='laneModels' 部分合并，槽位值=整个有序数组 nextArr（非仅首选）
+  assert.match(src, /function saveLaneSlot\(lane, role, nextArr\) \{ var patch = \{\}; patch\[lane\] = \{\}; patch\[lane\]\[role\] = nextArr/, '缺 saveLaneSlot 整槽数组写')
+  assert.match(src, /rpc\('set-board-config', \{ key: 'laneModels', value: patch \}\)/)
+  // 首选单选形态退役：laneFirst helper 与 ModelCfg laneList 接线不再存在
+  assert.ok(src.indexOf('function laneFirst(') < 0, 'laneFirst 首选形态应已退役（链编辑器读整槽数组）')
+  assert.ok(src.indexOf('laneList:') < 0, 'ModelCfg 不再接 laneList（六槽已迁链编辑器）')
+  assert.ok(src.indexOf('完整排序走对话/RPC') < 0, '「完整排序走对话/RPC」旧注释应已移除（GUI 可编完整链）')
+  // 板级模型行仍是 ModelCfg 两段式（选中≠保存，点 ✓ 才提交）——既有契约不走即点即写
   assert.match(src, /function pick\(v\) \{ setVal\(v\); setDirty\(v !== \(props\.value \|\| ''\)\) \}/)
 })
 
@@ -268,14 +267,20 @@ test('⑥模型路由弹层：板级/六槽/备用链三区齐全，池配置弹
   assert.ok(ksrc.indexOf("var _fbm = useState(state.fallbackModels), fbMs = _fbm[0], setFbMs = _fbm[1]") >= 0, 'TopPanel 缺 fbMs state')
 })
 
-// ===== ⑦ 备用链 GUI：文本编辑 → 数组写入通道 + kernel 透传 =====
-test('⑦备用链：FallbackCfg 逗号/换行分隔 + 失焦保存 + set-board-config fallbackModels 数组写通道 + kernel 透传', () => {
-  assert.ok(src.indexOf('function FallbackCfg(props)') >= 0, '缺 FallbackCfg 组件')
-  assert.match(src, /val\.split\(\/\[\\n,，;；\]\+\/\)/, '缺逗号/换行（含全角）分隔解析')
-  assert.match(src, /onBlur: save/, '失焦保存（onBlur）缺失')
-  assert.match(src, /rpc\('set-board-config', \{ key: 'fallbackModels', value: arr \}\)/, '缺 fallbackModels 数组写通道')
-  assert.match(src, /r && r\.ok === false/, 'host 拒写（ok:false）未展示（不静默吞）')
-  assert.ok(src.indexOf("React.createElement(FallbackCfg, { value: props.fbModels })") >= 0, 'ModelRoutePopover 未接 FallbackCfg')
+// ===== ⑦ 备用链 GUI：OrderedModelsEditor 链编辑器（FallbackCfg/textarea 退役）→ 数组写入通道 + kernel 透传 =====
+test('⑦备用链：FallbackCfg/textarea 退役 + OrderedModelsEditor 同款链编辑器 + set-board-config fallbackModels 整链数组写通道 + kernel 透传', () => {
+  // FallbackCfg 文本编辑组件退役（task-mvokikl3，用户原话「不要直接让用户填文本，要支持下拉选择」）
+  assert.ok(src.indexOf('function FallbackCfg(props)') < 0, 'FallbackCfg 文本编辑组件应已退役')
+  // 弹层区（ModelRoutePopover→PoolCfgPopover 区间）不再含 textarea 文本框
+  const iMr7 = src.indexOf('function ModelRoutePopover(props)')
+  const iPc7 = src.indexOf('function PoolCfgPopover(props)')
+  assert.ok(iMr7 >= 0 && iPc7 > iMr7)
+  assert.ok(src.slice(iMr7, iPc7).indexOf("React.createElement('textarea'") < 0, '模型路由弹层区不得再含 textarea（备用链改链编辑器）')
+  // 备用链接同款链编辑器 + 跨档逃生索语义标注
+  assert.match(src, /React\.createElement\(OrderedModelsEditor, \{ label: '备用链', value: props\.fbModels, models: routeModels, emptyHint: '无（不启用）', onSave: saveFallbackChain \}\)/, '备用链未接 OrderedModelsEditor')
+  assert.ok(src.indexOf('跨档逃生索') >= 0, '缺「档位链全不可用时的跨档逃生索」语义标注')
+  // 写通道：整个有序数组（改动即写，host 逐项合法清单校验）
+  assert.match(src, /function saveFallbackChain\(nextArr\) \{ return rpc\('set-board-config', \{ key: 'fallbackModels', value: nextArr \}\) \}/, '缺 saveFallbackChain 整链数组写')
   // kernel 透传：fetchTasks 回读 + cfgKnobs 快照/比对 + TopPanel 订阅
   assert.ok(ksrc.indexOf('state.fallbackModels = (d && d.fallbackModels) || null') >= 0, 'fetchTasks 缺 fallbackModels 回读')
   assert.match(ksrc, /laneModels: null, fallbackModels: null/, 'state 初始缺 fallbackModels: null')
@@ -303,7 +308,34 @@ test('⑧在跑模型可见：modelSourceBadge 角标（档/备/降/卡）+ 成�
 
 // ===== ⑨ 产物含模型路由弹层标记 =====
 test('⑨产物：lib/client.js 已重组装且含模型路由弹层/在跑模型可见标记', () => {
-  for (const m of ['ModelRoutePopover', 'FallbackCfg', '备用模型链', '板级模型', 'modelSourceBadge', '在跑模型：', "state.fallbackModels = (d && d.fallbackModels) || null", "'cpu'"]) {
+  for (const m of ['ModelRoutePopover', 'OrderedModelsEditor', '备用模型链', '板级模型', 'modelSourceBadge', '在跑模型：', "state.fallbackModels = (d && d.fallbackModels) || null", "'cpu'"]) {
     assert.ok(built.indexOf(m) >= 0, 'client.js 缺标记：' + m + '（需 npm run build-client 重组装）')
   }
+  // 退役形态不得残留在产物里
+  assert.ok(built.indexOf('function FallbackCfg(props)') < 0, 'client.js 残留 FallbackCfg（需 npm run build-client 重组装）')
+  assert.ok(built.indexOf('function laneFirst(') < 0, 'client.js 残留 laneFirst（需 npm run build-client 重组装）')
+})
+
+// ===== ⑩ 链编辑器组件本体（task-mvokikl3）：芯片 ×/↑ 交互 + 下拉过滤已选 + 改动即写 + 目录缺失降级 =====
+test('⑩OrderedModelsEditor：组件存在 + 芯片行（×移除/↑前移）+ 下拉过滤已在链中 + 改动即写（onSave→rpc→fetchTasks）+ 目录缺失降级文本输入', () => {
+  assert.ok(src.indexOf('function OrderedModelsEditor(props)') >= 0, '缺 OrderedModelsEditor 组件')
+  // 组件须定义在 ModelRoutePopover 之前（弹层内复用 7 处：六槽+备用链）
+  assert.ok(src.indexOf('function OrderedModelsEditor(props)') < src.indexOf('function ModelRoutePopover(props)'), 'OrderedModelsEditor 须定义在 ModelRoutePopover 之前')
+  // 下拉过滤已在链中的（链内唯一，重复添加无意义）
+  assert.match(src, /models\.filter\(function \(m\) \{ return list\.indexOf\(m\.id\) < 0 \}\)/, '下拉未过滤已在链中的模型')
+  // × 移除：splice 掉第 i 片
+  assert.match(src, /function removeAt\(i\) \{ var next = list\.slice\(\); next\.splice\(i, 1\); commit\(next\) \}/, '缺 × 移除交互')
+  // ↑ 前移一位：与前一顺位交换（首片不渲染 ↑）
+  assert.match(src, /function upAt\(i\) \{ if \(i <= 0\) return; var next = list\.slice\(\); var t = next\[i - 1\]; next\[i - 1\] = next\[i\]; next\[i\] = t; commit\(next\) \}/, '缺 ↑ 前移交互')
+  // 添加：追加到链尾（concat）+ 已在链中的不加
+  assert.match(src, /commit\(list\.concat\(\[v\]\)\)/, '添加未追加到链尾')
+  // 改动即写：commit 走 props.onSave（rpc 通道）→ 成功后 fetchTasks 回读；host 拒写 ok:false 亮 ⚠️ 不静默吞
+  assert.match(src, /Promise\.resolve\(props\.onSave\(next\)\)/, '改动即写未走 props.onSave')
+  assert.match(src, /r && r\.ok === false/, 'host 拒写（ok:false）未展示（不静默吞）')
+  // 空链占位语义（继承下一级/无）
+  assert.match(src, /props\.emptyHint \|\| '无'/, '缺空链占位（emptyHint）')
+  // 目录不可用降级文本输入（不丢功能）
+  assert.match(src, /placeholder: 'provider\/model'/, '缺目录缺失降级文本输入')
+  // 弹层取一次 list-models 下发 7 处（routeModels），避免每编辑器各发一次 RPC
+  assert.match(src, /var _rm = useState\(null\), routeModels = _rm\[0\], setRouteModels = _rm\[1\]/, 'ModelRoutePopover 缺 routeModels 目录 state')
 })

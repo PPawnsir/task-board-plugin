@@ -3,7 +3,7 @@
 //   ① README 双份逐字一致——根 README 是唯一手写源，包内那份由 npm run sync-readme 生成，禁止手改；
 //   ② 拆解官工作流指南——何时拆 / draft-pending 门禁 / outputSchema 提案契约 / host 物化 draft 子卡 /
 //      逐张 publish / 幂等重拆语义，全部落字；
-//   ③ 力度路由使用指南——调档（task_update size）/ 配表（⚙️ 力度路由 6 下拉 + laneModels 部分合并）/
+//   ③ 力度路由使用指南——调档（task_update size）/ 配表（模型路由弹层力度路由 6 链编辑器 + laneModels 部分合并）/
 //      四级取模链 / modelSource 留档审计 / 按档位记分；
 //   ④ 工具表「16 个 Agent 工具」——任务管理 9 + 需求拆解 1 + 调研上下文 1 + 池治理 3 + 子代理上报 2，
 //      旧「14 个」字样清零；
@@ -51,7 +51,7 @@ test('③力度路由使用指南：调档 / 配表 / 四级取模链 / modelSou
     'laneModels',
     'set-board-config',
     '部分合并',                 // 只合显式槽位
-    '共 6 个模型下拉',          // ⚙️ 弹层三档 × 双角色
+    '共 6 条有序链编辑器',      // 模型路由弹层三档 × 双角色（task-mvokikl3 链式编辑器，原「共 6 个模型下拉」退役）
     '取模链四级',
     '卡级 `model` 特例',
     'modelSource',              // 命中跳留档审计
