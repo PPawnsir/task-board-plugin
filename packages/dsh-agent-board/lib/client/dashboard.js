@@ -981,13 +981,18 @@
       var wTotal = state.maxWorkers // 分母=并发上限而非当前池实例数，空闲也显示 0/上限
       var vActive = vBusy.length
       var vTotal = state.maxVerifiers
+      // 拆解官可见性（task-mvomad6c ①）：decomposer 与 hook 同归 verifiers 桶，靠条目 role 择出——
+      // 在跑时于 Verifier 计数旁独立亮「🧩 拆解中 ×N」。Verifier x/y 计数口径不变（并发位占用语义：
+      // decomposer 计 verifier 位，剔掉会让水位失真）；缺 role 字段的老快照条目零渲染（能力检测）。
+      var decBusy = vBusy.filter(function (v) { return v.role === 'decomposer' })
       // 在跑子代理模型可见（task-mvnyc8vo）：每个 busy run 渲染 model 小芯片 + 取模来源角标，
       // 与执行池成员卡同口径；缺 model 字段的老数据条目不渲染芯片。
       var chips = wBusy.concat(vBusy).filter(function (m) { return !!m.model })
       return React.createElement('span', { style: { fontSize: 9, color: C.text2, display: 'inline-flex', gap: 4, alignItems: 'center' } },
         // 池水位标注（反馈 n-mut9rzoq3flu / n-muyg4wl9208c）：裸数字第一屏无解，补可见文字标签 + title
         React.createElement('span', { title: '活跃 Worker 数/上限（⚡ = 在跑）', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('zap', 10), 'Worker ' + wActive + '/' + wTotal),
-        React.createElement('span', { title: '活跃 Verifier 数/上限（✓ = 在跑）', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('check', 10), 'Verifier ' + vActive + '/' + vTotal),
+        React.createElement('span', { title: '活跃 Verifier 数/上限（✓ = 在跑；拆解官在跑也占 Verifier 并发位，见右侧 🧩 计数）', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('check', 10), 'Verifier ' + vActive + '/' + vTotal),
+        decBusy.length ? React.createElement('span', { title: '拆解官运行中（占 Verifier 并发位，源卡：' + decBusy.map(function (m) { return m.taskId || '-' }).join('、') + '）——读码产出子任务提案，落定后源卡亮「🧩 已提案」徽标', style: { display: 'inline-flex', alignItems: 'center', gap: 2, color: C.brand, fontWeight: 600 } }, '🧩 拆解中 ×' + decBusy.length) : null,
         chips.map(function (m) {
           return React.createElement('span', { key: m.id, title: '在跑模型：' + m.model + '（任务 ' + (m.taskId || '-') + (m.modelSource ? '，取模来源：' + (MODEL_SRC_LABEL[m.modelSource] || m.modelSource) : '') + '）', style: { display: 'inline-flex', alignItems: 'center', gap: 2, padding: '0 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, maxWidth: 150 } },
             React.createElement('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, m.model),
@@ -1271,11 +1276,14 @@
       // v74 一次性模型：每个活跃卡片 = 一个在跑的 run（随任务结算销毁），没有常驻成员
       function memberCard(m, role) {
         var isW = role === 'worker'
+        // 拆解官可见性（task-mvomad6c ①同族）：verifiers 桶里的 decomposer 条目不再冒充「Verifier · 执行中」
+        // （缺 role 的老快照条目 isDec=false，维持原标签——零回归）
+        var isDec = !isW && m.role === 'decomposer'
         var curTask = m.taskId ? getTask(m.taskId) : null
         return React.createElement('div', { key: m.id, style: { minWidth: 170, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, borderTop: '3px solid ' + (isW ? C.brand : C.warn) } },
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 } },
             React.createElement('span', { style: { display: 'inline-flex', color: isW ? C.brand : C.warn } }, ic(isW ? 'zap' : 'clipboard-check', 13)),
-            React.createElement('span', { style: { fontSize: 12, fontWeight: 700, color: C.text } }, (isW ? 'Worker' : 'Verifier') + ' · 执行中'),
+            React.createElement('span', { style: { fontSize: 12, fontWeight: 700, color: C.text } }, (isW ? 'Worker' : (isDec ? '🧩 拆解官' : 'Verifier')) + ' · 执行中'),
             React.createElement('span', { style: { marginLeft: 'auto', fontSize: 9, padding: '1px 6px', borderRadius: 3, background: C.brand, color: C_INV } }, '忙碌')),
           m.model ? React.createElement('div', { style: { fontSize: 9, color: C.text2, marginBottom: 3, display: 'flex', alignItems: 'center', gap: 3 }, title: '本次取模：' + m.model + (m.modelSource ? '（' + (MODEL_SRC_LABEL[m.modelSource] || m.modelSource) + '）' : '') }, React.createElement('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '🧬 ' + m.model), modelSourceBadge(m.modelSource)) : null,
           curTask ? React.createElement('div', { onClick: function () { state.detailId = curTask.id; state.view = 'board'; notify() }, style: { fontSize: 10, color: C.brand, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: curTask.title }, '→ ' + curTask.title) : React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '→ ' + m.taskId),

@@ -1935,9 +1935,12 @@ export function createDispatch(ctx, state, deps) {
         } catch (e) { console.error('[task-board] touches 展示态计算异常（本轮跳过）:', String(e)) }
         // ⑤ UI 池状态：来自活跃 run（一次性模型：没有成员名册，只有在跑的任务）。
         // hook run 也归「verifiers」区展示（同一格里都是非 Worker 的一次性 run）。
+        // 条目带 role（task-mvomad6c 拆解官可见性①数据面）：decomposer 与 hook 同归 verifiers 桶，
+        // 客户端靠 role 把拆解官择出单亮「🧩 拆解中」——此前不带角色，池条上拆解官混在 Verifier 堆里隐形。
+        // 纯透出字段，不改桶归属/并发位/结算任何语义；老消费方多读一个字段零影响。
         try {
           d.poolStatus = { workers: [], verifiers: [] }
-          Object.keys(runs).forEach(function (k) { var rc = runs[k]; if (!rc) return; d.poolStatus[rc.role === 'worker' ? 'workers' : 'verifiers'].push({ id: k, num: '-', busy: true, taskId: rc.taskId, runId: String(rc.id), done: 0, queueLen: 0, suspect: false, model: rc.model || '', modelSource: rc.modelSource || '' }) })
+          Object.keys(runs).forEach(function (k) { var rc = runs[k]; if (!rc) return; d.poolStatus[rc.role === 'worker' ? 'workers' : 'verifiers'].push({ id: k, num: '-', busy: true, taskId: rc.taskId, runId: String(rc.id), done: 0, queueLen: 0, suspect: false, role: rc.role || '', model: rc.model || '', modelSource: rc.modelSource || '' }) })
         } catch (e) { console.error('[task-board] 池状态快照异常（本轮跳过）:', String(e)) }
         if (info.length > 0) { d.dispatchInfo = info.join('; '); d.dispatchInfoAt = new Date().toISOString() }
         else if (d.dispatchInfo && (!d.dispatchInfoAt || Date.now() - new Date(d.dispatchInfoAt).getTime() > 90000)) { delete d.dispatchInfo; delete d.dispatchInfoAt } // 瞬时通知：90s TTL 过期即清，不再永久残留

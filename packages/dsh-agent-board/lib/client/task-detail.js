@@ -474,26 +474,33 @@
             canCancel(task) ? React.createElement('button', { onClick: function () { cancelTask(task.id, task.title, setActionMsg) }, title: '取消任务（取消后不再派发，可在归档恢复待办）', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.warn, borderRadius: 3, background: 'transparent', color: C.warn, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('ban', 10), '取消任务') : null,
             canDelete(task) ? React.createElement('button', { onClick: function () { deleteTask(task.id, task.title, setActionMsg) }, title: '删除任务（不可恢复；执行中请先终止，已落定请用归档）', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.err, borderRadius: 3, background: 'transparent', color: C.err, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('trash-2', 10), '删除') : null) : null,
         (function () {
-          // 历史会话：无论任务处于哪个阶段都完整列出（Worker 各次 + Verifier 各次）
+          // 历史会话：无论任务处于哪个阶段都完整列出（Worker 各次 + Verifier 各次 + 拆解官各次）
           var runs = historyRuns(task)
           if (!runs.length) return null
-          var roleMeta = { worker: { label: 'W', color: C.brand, tip: 'Worker' }, verifier: { label: 'V', color: C.warn, tip: 'Verifier' } }
-          var wN = 0, vN = 0
+          // 拆解官可见性（task-mvomad6c ③）：decomposer 角色标签 🧩（此前 fallback 进 worker 桶被误标 W）。
+          var roleMeta = { worker: { label: 'W', color: C.brand, tip: 'Worker' }, verifier: { label: 'V', color: C.warn, tip: 'Verifier' }, decomposer: { label: '🧩', color: C.brand, tip: '拆解官' } }
+          // 序数按角色分桶：W/V 序号与旧口径逐字一致（未知角色如 hook 仍计 Worker 桶，与 fallback 标签同桶）；
+          // decomposer 独立编号（🧩 #1 #2…重拆次数一眼可读）。
+          var seqN = {}
           return React.createElement('div', { style: { marginTop: 8, padding: '6px 8px', background: C.nested, borderRadius: 6 } },
             React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('users', 10), '历史会话（点击跳转查看，含全部重试）'),
             React.createElement('div', { style: { display: 'flex', gap: 5, flexWrap: 'wrap' } },
               runs.map(function (r, i) {
                 var rm = roleMeta[r.role] || roleMeta.worker
-                var seq = r.role === 'verifier' ? (++vN) : (++wN)
-                var isCur = (r.role === 'worker' && task.claimedBy === r.id) || (r.role === 'verifier' && task.verifierRun === r.id)
+                var seqKey = roleMeta[r.role] ? r.role : 'worker'
+                seqN[seqKey] = (seqN[seqKey] || 0) + 1; var seq = seqN[seqKey]
+                // 拆解官在跑高亮：源卡不动卡面状态（无 claimedBy/verifierRun 可比对），以留档 running 未关账为在跑口径
+                var isCur = (r.role === 'worker' && task.claimedBy === r.id) || (r.role === 'verifier' && task.verifierRun === r.id) || (r.role === 'decomposer' && r.outcome === 'running' && !r.endedAt)
                 var okMark = r.outcome === 'completed' ? ' ✅' : (r.outcome === 'running' ? ' ⏳' : (r.outcome ? ' ⚠' : ''))
                 // 续跑标记（卡2 落的 runs[i].resume 字段；卡3 Step3 在此显式标注）：同一条会话的第二次及以后
                 // 派发是「冷复活续跑」而不是新开 Worker，不标出来会让人把「第 2/3 次」误读成又开了一个新会话。
                 // 只读 r.resume，不猜（老留档没有该字段 → 零渲染，与改造前逐字一致）。
                 var rsMark = r.resume === true ? ' ↻' : ''
+                // 耗时展示（task-mvomad6c ③顺带补齐全角色）：落定 run 显 at→endedAt 净耗时，在跑显已跑时长
+                var durTxt = r.at ? (r.endedAt ? ' · 耗时 ' + fmtDur(new Date(r.at).getTime(), new Date(r.endedAt).getTime()) : ' · 已跑 ' + elapsedSince(r.at)) : ''
                 return React.createElement('button', {
                   key: i, onClick: function () { if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(r.id) },
-                  title: rm.tip + ' 第 ' + seq + ' 次' + (r.resume === true ? '（↻ 冷复活续跑：沿用上一次的子会话，非新开）' : '') + (r.at ? ' · ' + ago(r.at) : '') + (r.model ? ' · ' + r.model : '') + (r.outcome ? ' · ' + r.outcome : '') + '（' + r.id + '）',
+                  title: rm.tip + ' 第 ' + seq + ' 次' + (r.resume === true ? '（↻ 冷复活续跑：沿用上一次的子会话，非新开）' : '') + (r.at ? ' · ' + ago(r.at) : '') + (r.model ? ' · ' + r.model : '') + (r.outcome ? ' · ' + r.outcome : '') + durTxt + '（' + r.id + '）',
                   style: { fontSize: 10, padding: '2px 8px', border: '1px solid ' + (isCur ? rm.color : C.border), borderRadius: 3, background: isCur ? C.card : 'transparent', color: rm.color, cursor: 'pointer', fontWeight: isCur ? 600 : 400 }
                 }, '→ ' + rm.tip + ' #' + seq + (r.at ? ' · ' + ago(r.at) : '') + okMark + rsMark)
               })))

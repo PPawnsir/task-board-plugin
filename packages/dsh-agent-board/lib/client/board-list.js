@@ -157,6 +157,39 @@
       return React.createElement('span', { title: b.tip, style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + b.color + ' 14%, transparent)', color: b.color, fontWeight: 600, whiteSpace: 'nowrap' } }, b.txt)
     }
 
+    // ===== 拆解官状态徽标（task-mvomad6c ②，源卡列表行「🧩 拆解中 / 已提案 ×N」）=====
+    // 纯函数现算（不入 state、不落库、不引用 C/ago——自包含，可直接被单测提取执行），
+    // 返回 { txt, tone('brand'|'warn'), tip }，色板映射留给渲染层 decomposePhaseBadge。
+    // 数据源 = t.runs 留档（role='decomposer'）+ 同板子卡提案批：
+    //   在跑   → 末条 decomposer 留档 outcome='running' 且无 endedAt；**超龄守卫**：at 距今
+    //            ≥ hardMin（留档自带，缺省 120）分钟视为 host 重启残留（sweepZombieRuns 只扫
+    //            落定卡，draft/pending 源卡的 running 留档不会被关账）——不亮「拆解中」，继续下判；
+    //   已提案 → 同板存在 proposalOf===本卡 id 且 status='draft' 的子卡（拆解官物化的待确认提案批；
+    //            逐张 publish 后 draft 消失、徽标同步熄灭——「待确认」语义精准跟随）；
+    //   其余（从未拆解 / 判定不拆 / 失败 / 提案已全发布）→ null 不渲染，老卡零 DOM 变化。
+    function decomposeBadgeOf(t, allTasks) {
+      if (!t || !Array.isArray(t.runs)) return null
+      var last = null
+      for (var i = t.runs.length - 1; i >= 0; i--) { if (t.runs[i] && t.runs[i].role === 'decomposer') { last = t.runs[i]; break } }
+      if (last && last.outcome === 'running' && !last.endedAt) {
+        var ageMs = last.at ? (Date.now() - new Date(last.at).getTime()) : Infinity
+        if (isFinite(ageMs) && ageMs < (last.hardMin || 120) * 60000) {
+          return { txt: '🧩 拆解中', tone: 'brand', tip: '拆解官正在读本卡并产出子任务提案（run ' + last.id + '）；拆解期间本卡不派 Worker，落定后转「🧩 已提案」' }
+        }
+      }
+      var kidsN = 0
+      var list = Array.isArray(allTasks) ? allTasks : []
+      for (var k = 0; k < list.length; k++) { var x = list[k]; if (x && x.proposalOf === t.id && x.status === 'draft') kidsN++ }
+      if (kidsN) return { txt: '🧩 已提案 ×' + kidsN, tone: 'warn', tip: '拆解官已产出 ' + kidsN + ' 张草稿子卡：确认后逐张发布（详情页「发布」或 task_update publish=true），全发布后本徽标熄灭' }
+      return null
+    }
+    function decomposePhaseBadge(t) {
+      var b = decomposeBadgeOf(t, state.tasks)
+      if (!b) return null
+      var color = b.tone === 'warn' ? C.warn : C.brand
+      return React.createElement('span', { title: b.tip, style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + color + ' 14%, transparent)', color: color, fontWeight: 600, whiteSpace: 'nowrap' } }, b.txt)
+    }
+
     function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); var delOk = !state.selectMode && canDelete(t); var cs = (state.childStats && state.childStats[t.id]) || null; var csDone = cs ? (typeof cs.settled === 'number' ? cs.settled : cs.resolved) : 0; var epic = !!(cs && cs.total > 0); var parentT = t.parentId ? getTask(t.parentId) : null; var depWaitTitle = ''; var depWaitN = 0; if (depBlock) { t.dependsOn.forEach(function (id) { var d = getTask(id); if (!d || (d.status !== 'resolved' && d.status !== 'archived')) { depWaitN++; if (!depWaitTitle) depWaitTitle = d && d.title ? d.title : id } }) } var durB = cardDur(t);
       // 无障碍（反馈 n-mut9rzpyc7p1）：卡片根以 button 角色进 Tab 序（aria-label=标题+状态），
       // Enter/Space 触发与点击相同的激活行为（多选=切换选中，否则开详情）；
@@ -167,6 +200,8 @@
             // hook 相位徽章：与 📦 徽章**并存**（相位是 epic 的附加过程态，不是替代进度）
             epic ? hookPhaseBadge(t) : null,
             t.frozen ? React.createElement('span', { title: '已冻结：不参与自动派发（详情页可「解除冻结」）', style: { color: C.brand, fontWeight: 600 } }, '❄ 冻结') : null,
+            // 拆解官徽标（task-mvomad6c ②）：源卡「🧩 拆解中 / 已提案 ×N」，非拆解卡零渲染
+            decomposePhaseBadge(t),
             (Array.isArray(t.waitingForTouches) && t.waitingForTouches.length) ? React.createElement('span', { title: '等文件锁释放：' + t.waitingForTouches.join('、') + '（touches 冲突，详情页可 force 越权派发）', style: { color: C.warn, fontWeight: 600 } }, '🔒 等文件释放') : null,
             React.createElement('span', { title: pm.label, style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: C.nested, border: '1px solid ' + C.border } }, pm.short),
             (t.retryCount || 0) + (t.rejectCount || 0) > 0 ? React.createElement('span', { title: '重试 ' + (t.retryCount || 0) + ' 次 / 驳回 ' + (t.rejectCount || 0) + ' 次', style: { color: C.warn, fontWeight: 600 } }, '⟳' + ((t.retryCount || 0) + (t.rejectCount || 0))) : null,
@@ -238,15 +273,18 @@
               (function () {
                 var runs = historyRuns(t)
                 if (!runs.length) return React.createElement('span', { style: { fontSize: 9, color: C.text2, opacity: 0.6, padding: '2px 0' } }, '无历史会话')
-                var wN = 0, vN = 0
+                // 拆解官可见性同族修正（task-mvomad6c ③）：runs 行此前 W/V 二元标签，decomposer 被误标 W——
+                // 加 🧩 标签与独立序数（W/V 序号口径逐字不变）
+                var wN = 0, vN = 0, dN = 0
                 return React.createElement('span', { style: { display: 'inline-flex', gap: 5, flexWrap: 'wrap' } }, runs.map(function (r, i) {
-                  var seq = r.role === 'verifier' ? (++vN) : (++wN)
+                  var isD = r.role === 'decomposer'
+                  var seq = r.role === 'verifier' ? (++vN) : (isD ? (++dN) : (++wN))
                   var isV = r.role === 'verifier'
                   return React.createElement('button', {
                     key: i, onClick: function (e) { e.stopPropagation(); if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(r.id) },
-                    title: (isV ? 'Verifier' : 'Worker') + ' 第 ' + seq + ' 次' + (r.at ? ' · ' + ago(r.at) : '') + (r.model ? ' · ' + r.model : '') + '（' + r.id + '）',
+                    title: (isV ? 'Verifier' : (isD ? '拆解官' : 'Worker')) + ' 第 ' + seq + ' 次' + (r.at ? ' · ' + ago(r.at) : '') + (r.model ? ' · ' + r.model : '') + '（' + r.id + '）',
                     style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + (isV ? C.warn : C.brand), borderRadius: 3, background: 'transparent', color: isV ? C.warn : C.brand, cursor: 'pointer' }
-                  }, '→ ' + (isV ? 'V' : 'W') + '#' + seq)
+                  }, '→ ' + (isV ? 'V' : (isD ? '🧩' : 'W')) + '#' + seq)
                 }))
               })()))
         }))

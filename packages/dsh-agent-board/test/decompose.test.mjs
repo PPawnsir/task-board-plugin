@@ -12,6 +12,7 @@
 //      epic 发布预检 epicPrecheck 不再对拆解子卡报「无调研包」missing
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { DECOMPOSE_SCHEMA, DECOMPOSE_MAX_CHILDREN, buildDecomposerPrompt, applyDecomposeProposal } from '../lib/policy.mjs'
 import { epicPrecheck, epicPrecheckNote } from '../lib/core.mjs'
 import { createDispatch } from '../lib/dispatch.mjs'
@@ -468,4 +469,105 @@ test('⑦ 物化子卡 context.files 自动 = touches；epicPrecheck 不再报 m
   assert.equal(pre2.total, 2)
   assert.equal(pre2.missing.length, 0, '物化子卡自带 touches 调研包 → 预检零 missing')
   assert.equal(epicPrecheckNote(pre2), '', '预检全绿不产生 warning 文案')
+})
+
+// ===== ⑧ 拆解官可见性·数据面（task-mvomad6c，用户点菜 C「从没见过这个子 agent 触发」）=====
+// ⑧a dispatch 池快照条目带 role（客户端择出 decomposer 的前提；桶归属/并发位语义不变）
+// ⑧b rpc get-tasks 防幽灵过滤放行 decomposer（源卡恒 draft/pending 永不在活跃集，不放行必被摘——
+//    池条隐形真根）；幽灵 worker/verifier 条目仍被摘（既有口径不变）
+test('⑧ 数据面：poolStatus 条目带 role + get-tasks 防幽灵过滤放行 decomposer（幽灵照摘）', async function () {
+  // ⑧a 行为级：活跃 decomposer rec → 池快照 verifiers 桶条目 role='decomposer'
+  var src = mkTask({ id: 'src1', title: '待拆源卡', status: 'pending' })
+  var board = mkBoard([src])
+  var h = mkDispatch(board, { subagents: {
+    list: function () { return ['p1'] },
+    getProvider: function () { return { inheritsParentContext: false } },
+    startActivation: async function () { throw new Error('不应 spawn（skip-decomposing 守卫拦住唯一 pending 卡）') },
+    interrupt: function () {},
+  } })
+  h.runs['src1'] = { id: 'dec-1', role: 'decomposer', taskId: 'src1', startedAt: Date.now(), settled: false, model: '', modelSource: 'parent' }
+  await h.dispatch.poolCycle(SID)
+  assert.equal(board.poolStatus.workers.length, 0)
+  assert.equal(board.poolStatus.verifiers.length, 1)
+  assert.equal(board.poolStatus.verifiers[0].role, 'decomposer', '池快照条目带 role（客户端择出前提）')
+  // 源码钉线：装配行透出 role
+  var dsrc = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  assert.ok(dsrc.indexOf("role: rc.role || ''") >= 0, 'dispatch poolStatus 装配缺 role 透出')
+  // ⑧b 行为级：get-tasks 过滤——decomposer（源卡 draft）豁免，幽灵 worker/verifier 照摘
+  var b2 = mkBoard([mkTask({ id: 'src2', status: 'draft' })])
+  b2.poolStatus = { workers: [{ id: 'w-g', busy: true, taskId: 'ghost-w' }], verifiers: [
+    { id: 'v-live-dec', busy: true, taskId: 'src2', role: 'decomposer' },
+    { id: 'v-ghost', busy: true, taskId: 'ghost-v', role: 'verifier' },
+  ] }
+  var h2 = mkRpcHandlers(b2)
+  var got = await h2['get-tasks']({})
+  assert.deepEqual(got.poolStatus.workers, [], '幽灵 worker 仍被摘（既有口径不变）')
+  assert.equal(got.poolStatus.verifiers.length, 1, 'decomposer 条目豁免防幽灵过滤（源卡 draft 也留住）')
+  assert.equal(got.poolStatus.verifiers[0].id, 'v-live-dec')
+  assert.equal(got.poolStatus.verifiers[0].role, 'decomposer')
+  // 源码钉线：豁免分支存在
+  var rsrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  assert.ok(rsrc.indexOf("__act[v.taskId] || v.role === 'decomposer'") >= 0, 'rpc 防幽灵过滤缺 decomposer 豁免')
+})
+
+// ===== ⑨ 拆解官可见性·GUI 源码断言（task-mvomad6c ①②③露出点）=====
+test('⑨ GUI：池条「🧩 拆解中 ×N」+ 成员卡 🧩 拆解官 + 详情页 decomposer 行 + 卡面徽标接线', function () {
+  var dash = readFileSync(new URL('../lib/client/dashboard.js', import.meta.url), 'utf8')
+  var bl = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+  var td = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  // ① 池条：role 择出 + 独立计数字段；Verifier 计数口径不变（含 decomposer 的并发位语义）
+  assert.match(dash, /var decBusy = vBusy\.filter\(function \(v\) \{ return v\.role === 'decomposer' \}\)/, 'PoolStatus 缺 decomposer 择出')
+  assert.ok(dash.indexOf("'🧩 拆解中 ×' + decBusy.length") >= 0, '池条缺「🧩 拆解中 ×N」字段')
+  assert.match(dash, /var vActive = vBusy\.length/, 'Verifier 计数口径被动（应保持并发位语义）')
+  // ①同族 TeamView 成员卡：decomposer 不再冒充「Verifier · 执行中」
+  assert.ok(dash.indexOf("isDec ? '🧩 拆解官' : 'Verifier'") >= 0, '成员卡缺 🧩 拆解官标签')
+  // ③ 详情页 runs 行：roleMeta.decomposer + 序数按角色分桶 + 在跑高亮 + title 耗时
+  assert.ok(td.indexOf("decomposer: { label: '🧩', color: C.brand, tip: '拆解官' }") >= 0, '详情页 roleMeta 缺 decomposer 条目')
+  assert.match(td, /var seqKey = roleMeta\[r\.role\] \? r\.role : 'worker'/, '详情页序数未按角色分桶')
+  assert.ok(td.indexOf("r.role === 'decomposer' && r.outcome === 'running' && !r.endedAt") >= 0, '缺 decomposer 在跑高亮口径')
+  assert.ok(td.indexOf("' · 耗时 ' + fmtDur(") >= 0, '详情页 runs 行 title 缺耗时展示')
+  // ② 卡面徽标：纯函数 + Card 渲染接线
+  assert.match(bl, /function decomposeBadgeOf\(t, allTasks\)/, '缺 decomposeBadgeOf 纯函数')
+  assert.ok(bl.indexOf('decomposePhaseBadge(t),') >= 0, 'Card 徽标区未接 decomposePhaseBadge')
+  // 归档行同族修正：runs 行 🧩 标签
+  assert.ok(bl.indexOf("isD ? '拆解官' : 'Worker'") >= 0, '归档行 runs 缺拆解官标签')
+})
+
+// ===== ⑩ 卡面徽标三态行为级（decomposeBadgeOf 纯函数提取执行，与 lane-gui ②b 同手法）=====
+test('⑩ decomposeBadgeOf 三态：在跑（含超龄守卫）/ 已提案 ×N / 无', function () {
+  var bl = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+  var m = bl.match(/function decomposeBadgeOf\(t, allTasks\) \{[\s\S]*?\n    \}/)
+  assert.ok(m, '未能从 board-list.js 提取 decomposeBadgeOf')
+  var decomposeBadgeOf = new Function(m[0] + '\nreturn decomposeBadgeOf')()
+  // 在跑：末条 decomposer 留档 running 无 endedAt 且未超龄
+  var tRun = { id: 's1', runs: [{ role: 'decomposer', id: 'd1', at: new Date().toISOString(), outcome: 'running', hardMin: 120 }] }
+  var b1 = decomposeBadgeOf(tRun, [tRun])
+  assert.ok(b1 && b1.txt === '🧩 拆解中' && b1.tone === 'brand', '在跑 → 🧩 拆解中（brand 色）')
+  // 超龄守卫：重启残留（at 3h 前 > hardMin 120min）不亮「拆解中」，无提案批 → null
+  var tStale = { id: 's2', runs: [{ role: 'decomposer', id: 'd2', at: new Date(Date.now() - 3 * 3600000).toISOString(), outcome: 'running', hardMin: 120 }] }
+  assert.equal(decomposeBadgeOf(tStale, [tStale]), null, '超龄 running 留档（重启残留）不亮拆解中')
+  // 已提案：留档已关账 + 同板 2 张 proposalOf draft 子卡
+  var tDone = { id: 's3', runs: [{ role: 'decomposer', id: 'd3', at: '2026-01-01T00:00:00Z', outcome: 'completed', endedAt: '2026-01-01T00:03:00Z' }] }
+  var kids = [
+    { id: 's3-1', parentId: 's3', proposalOf: 's3', status: 'draft' },
+    { id: 's3-2', parentId: 's3', proposalOf: 's3', status: 'draft' },
+  ]
+  var b3 = decomposeBadgeOf(tDone, [tDone].concat(kids))
+  assert.ok(b3 && b3.txt === '🧩 已提案 ×2' && b3.tone === 'warn', '已提案 ×N（draft 提案批计数，warn 色）')
+  // 提案全发布（draft→pending）→ 徽标熄灭
+  var kidsPub = kids.map(function (k) { return Object.assign({}, k, { status: 'pending' }) })
+  assert.equal(decomposeBadgeOf(tDone, [tDone].concat(kidsPub)), null, '提案批全发布后徽标熄灭')
+  // 无：从未拆解（无 runs）/ 有 runs 但无 decomposer / 失败且无提案批
+  assert.equal(decomposeBadgeOf({ id: 's4' }, []), null, '无 runs 字段 → null')
+  assert.equal(decomposeBadgeOf({ id: 's5', runs: [{ role: 'worker', id: 'w1', outcome: 'completed' }] }, []), null, '无 decomposer 留档 → null')
+  var tFail = { id: 's6', runs: [{ role: 'decomposer', id: 'd6', at: '2026-01-01T00:00:00Z', outcome: 'timeout/error', endedAt: '2026-01-01T00:01:00Z' }] }
+  assert.equal(decomposeBadgeOf(tFail, [tFail]), null, '失败且无提案批 → null（失败原因由源卡消息承载）')
+})
+
+// ===== ⑪ 产物标记（task-mvomad6c：改完源必须重组装，pretest 已挂 build-client）=====
+test('⑪ 产物：lib/client.js 含拆解官可见性标记', function () {
+  var built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  for (const mk of ['🧩 拆解中 ×', '🧩 已提案 ×', 'decomposeBadgeOf', "tip: '拆解官'"]) {
+    assert.ok(built.indexOf(mk) >= 0, 'client.js 缺标记：' + mk + '（需 npm run build-client 重组装）')
+  }
 })

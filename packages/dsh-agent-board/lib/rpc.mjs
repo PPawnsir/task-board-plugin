@@ -302,7 +302,12 @@ export function createRpc(ctx, state, deps) {
     }
     handle('get-tasks', async function (args) { var sid = rpcSessionId(args); var d = await rt(sid); d.sessionId = sid; d.isRoot = await isRootPersistent(sid)
       // poolStatus 防幽灵：只保留指向当前活跃任务的条目（重启后内存 runs 清空，文件快照可能残留）
-      if (d.poolStatus) { var __act = {}; (d.tasks || []).forEach(function (t) { if (t.status === 'in-progress' || t.status === 'verifying') __act[t.id] = true }); d.poolStatus.workers = (d.poolStatus.workers || []).filter(function (w) { return __act[w.taskId] }); d.poolStatus.verifiers = (d.poolStatus.verifiers || []).filter(function (v) { return __act[v.taskId] }) }
+      // decomposer 豁免（task-mvomad6c 拆解官可见性①，主窗口裁决放行）：其源卡全程停 draft/pending
+      //（recIsLive 口径，dispatch.mjs），永不在 __act 活跃集——按通用口径过滤会把在跑拆解官的
+      // poolStatus 条目当幽灵摘光（池条「🧩 拆解中」永不亮的数据面根因）。新鲜度由 poolCycle 每轮
+      // 从活跃 run 重建快照兜底（重启残留 ≤1 个心跳周期自清）；老快照条目无 role 字段不命中豁免，
+      // 行为与现状逐字一致。纯读路径放行，不动调度/并发位/结算任何语义。
+      if (d.poolStatus) { var __act = {}; (d.tasks || []).forEach(function (t) { if (t.status === 'in-progress' || t.status === 'verifying') __act[t.id] = true }); d.poolStatus.workers = (d.poolStatus.workers || []).filter(function (w) { return __act[w.taskId] }); d.poolStatus.verifiers = (d.poolStatus.verifiers || []).filter(function (v) { return __act[v.taskId] || v.role === 'decomposer' }) }
       // 学习飞轮 v1：把 feedbackEnabled 显式放进返回体（normalizeBoard 已按老看板补默认 true），
       // 客户端据此做能力检测——开关关闭时渲染层不生成候选、不显示「沉淀」按钮。
       d.feedbackEnabled = cfg(d).feedbackEnabled
