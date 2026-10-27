@@ -102,7 +102,7 @@ export var DECOMPOSE_SCHEMA = {
           modelHint: { type: 'string' },
           touches: { type: 'array', items: { type: 'string' } },
           acceptance: { type: 'string' },
-          dependsOnIdx: { type: 'array', items: { type: 'number' } },
+          dependsOn: { type: 'array', items: { type: 'string' } },
         },
       },
     },
@@ -115,7 +115,7 @@ export var DECOMPOSE_SCHEMA = {
 // ③ size 判档语义：light=单点小改/文档/配置，standard=常规模块改动（缺省），heavy=跨模块/高风险/需强推理；
 //    modelHint 仅在有特殊理由时填（如超长上下文）；
 // ④ children 上限 DECOMPOSE_MAX_CHILDREN 张；verdict=keep 表示源卡不用拆；
-// ⑤ dependsOnIdx 只许引用本批**前排**子卡下标（0 起）——物化侧据此翻译成本批真实 id，按构造天然无环。
+// ⑤ dependsOn 只许引用本批**前排**子卡的序号（'1' 起，string）——物化侧翻译成本批真实 id，按构造天然无环；无法解析的序号丢弃并在该子卡 messages 留痕。
 export function buildDecomposerPrompt(t, pack) {
   var p = '你是任务看板的拆解官（一次性 run）。你的唯一交付物是**结构化拆解提案**（由 outputSchema 强箍：verdict/children/rationale），提案落定后本会话即销毁。\n\n'
   p += '源卡：' + t.id + ' · ' + String(t.title || '') + '\n'
@@ -129,7 +129,7 @@ export function buildDecomposerPrompt(t, pack) {
   p += '1. 第一步必须先用 read 工具读上面文件清单里的文件（按所给行号范围），从**实现侧**拆（按模块/文件边界切分）；禁止不读代码就拍脑袋拆，禁止只做需求侧转述。\n'
   p += '2. 每张子卡必须 10~30 分钟可独立完成并验收：touches 精确到文件（文件级排他锁，同批子卡 touches 不得互相重叠），acceptance 必须是可执行命令（如 "node --test test/xxx.test.mjs"）。\n'
   p += '3. size 判档：light=单点小改/文档/配置；standard=常规模块改动（缺省）；heavy=跨模块/高风险/需强推理。modelHint 仅在有特殊理由时填（如某子卡需超长上下文模型），否则留空。\n'
-  p += '4. children 上限 ' + DECOMPOSE_MAX_CHILDREN + ' 张；有先后顺序的用 dependsOnIdx 标注（只许引用本批**前排**子卡的下标，0 起）。\n'
+  p += '4. children 上限 ' + DECOMPOSE_MAX_CHILDREN + ' 张；有先后顺序时用 dependsOn 引用同批序号（只许引用本批**前排**子卡，序号 1 起计：如第 2 张依赖第 1 张填 ["1"]）。\n'
   p += '5. 源卡本身不大、不必拆时：verdict=keep，并在 rationale 写清理由。\n'
   p += '\n权限边界：你没有任何建卡工具——不要尝试创建/修改看板任务。提案由宿主读结构化结果后自动物化为 draft 子卡（源卡状态不变，由主窗口确认后逐张 publish）。\n'
   return p
@@ -146,7 +146,7 @@ function decomposeChildId(d, parentId, n) {
 //   · 校验先于清理——提案畸形/run 失败时**绝不清**旧批提案（失败不毁已有资产）；
 //   · 幂等：提案有效才清旧批（proposalOf===源卡 id 且仍 draft 的提案子卡整批移除；已 publish/落定的绝不碰）；
 //   · 子卡落位：status=draft、parentId=源卡、size（合法才落）、model=modelHint（空不落）、touches/acceptance/
-//     description 落位、dependsOnIdx → 本批真实 id（只收前排下标，天然无环）、上限 DECOMPOSE_MAX_CHILDREN 截断；
+//     description 落位、dependsOn 序号 → 本批真实 id（只收前排序号，天然无环；坏序号丢弃+该子卡 messages 留痕）、上限 DECOMPOSE_MAX_CHILDREN 截断；
 //   · 源卡自身状态不变（仍 draft/pending，由用户处置），只追加 messages 提案摘要行 + history 审计行。
 // 返回 { ok, verdict, children?:[{id,title}], error? }——非空返回值驱动 mutateLocked 写盘。
 export function applyDecomposeProposal(d, t, proposal, now) {
@@ -180,17 +180,26 @@ export function applyDecomposeProposal(d, t, proposal, now) {
     ah(t, t.status, t.status, 'system', '拆解官判定无需拆分（rationale 落源卡消息）')
     return { ok: true, verdict: 'keep', children: [] }
   }
-  // 物化：先分配整批 id（dependsOnIdx → 真实 id 翻译要求全员 id 已知），再逐张落 draft 子卡。
+  // 物化：先分配整批 id（dependsOn 序号 → 真实 id 翻译要求全员 id 已知），再逐张落 draft 子卡。
   var ids = []
   for (var k = 0; k < kids.length; k++) ids.push(decomposeChildId(d, t.id, k + 1))
   var created = []
   for (var k2 = 0; k2 < kids.length; k2++) {
     var c = kids[k2]
+    // dependsOn 序号引用 → 真实任务 id（task-mvr44rm3）：序号 '1' 起计，指本批第 n 张提案；先全批建卡
+    // 拿到真实 id 再映射。只认**前排**（序号 1..k2，当前位 k2+1）——按构造天然无环。无法解析的序号
+    //（非数字/越界/自引用/后排）一律丢弃，并在该子卡 messages 留一条「依赖序号无法解析」：
+    // 发布前审阅子卡详情即可见，主窗口可 publish 后用 task_update dependsOn 手工补挂。
     var deps = []
-    var di = Array.isArray(c.dependsOnIdx) ? c.dependsOnIdx : []
-    for (var dj = 0; dj < di.length; dj++) {
-      var idx = di[dj]
-      if (typeof idx === 'number' && isFinite(idx) && idx >= 0 && idx < k2 && deps.indexOf(ids[idx]) < 0) deps.push(ids[idx])
+    var unres = []
+    var dr = Array.isArray(c.dependsOn) ? c.dependsOn : []
+    for (var dj = 0; dj < dr.length; dj++) {
+      var ref = String(dr[dj] == null ? '' : dr[dj]).trim()
+      if (!ref) continue
+      var n = /^\d+$/.test(ref) ? parseInt(ref, 10) : NaN
+      if (!(n >= 1 && n <= k2)) { if (unres.indexOf(ref) < 0) unres.push(ref); continue }
+      var rid = ids[n - 1]
+      if (deps.indexOf(rid) < 0) deps.push(rid)
     }
     var child = {
       id: ids[k2],
@@ -225,6 +234,7 @@ export function applyDecomposeProposal(d, t, proposal, now) {
     if (sz === 'light' || sz === 'standard' || sz === 'heavy') child.size = sz
     var mh = typeof c.modelHint === 'string' ? c.modelHint.trim() : ''
     if (mh) child.model = mh
+    if (unres.length) child.messages.push({ kind: 'decompose', text: '🧩 依赖序号无法解析（' + unres.slice(0, 10).map(function (u) { return String(u).slice(0, 20) }).join('、') + '）——已丢弃；只认同批**前排**子卡序号（1 起计），如需依赖可 publish 后用 task_update dependsOn 手工补挂', at: stamp, by: 'decomposer' })
     d.tasks.push(child)
     created.push(child)
   }

@@ -3,9 +3,10 @@
 //   ① DECOMPOSE_SCHEMA 常量形状（白名单字段 / required / enum / 上限常量）
 //   ② task_decompose 门禁：子代理拒 + 源卡状态门禁（draft/pending 以外拒）+ 在跑幂等拒 + spawn 接线
 //   ③ mock 桩全链：startActivation(delivery=caller + outputSchema 透传) → result.structured=split
-//      → draft 子卡落位（size/model/touches/acceptance/dependsOnIdx→真实 id）+ 源卡消息 + 通知
+//      → draft 子卡落位（size/model/touches/acceptance/dependsOn 序号→真实 id）+ 源卡消息 + 通知
 //   ④ verdict=keep（源卡记 rationale、零子卡）与 structured 缺失（失败消息+通知、零子卡）两条路径
 //   ⑤ 幂等重拆：旧 draft 提案批清除、已发布旧提案保留、失败不毁旧批、keep 清残留 draft
+//   ⑤b dependsOn 序号接线（task-mvr44rm3）：'1' 起序号→真实 id+顺序=引用顺序；坏序号丢弃+子卡 messages 留痕；无依赖零影响
 //   ⑥ decomposer 不占 activeW（poolCycle：活跃 decomposer rec 下 pending 卡照常派 Worker）
 //      + 拆解期源卡不被派 Worker（skip-decomposing 守卫）+ recIsLive 不回收在跑 decomposer
 //   ⑦ 物化子卡自带调研包（task-mvnrtpxo）：context.files 自动 = touches（拆解官调研结论），
@@ -140,7 +141,7 @@ test('① DECOMPOSE_SCHEMA 常量形状：白名单字段 / required / enum / �
   assert.equal(item.properties.acceptance.type, 'string')
   assert.equal(item.properties.modelHint.type, 'string')
   assert.deepEqual(item.properties.touches, { type: 'array', items: { type: 'string' } })
-  assert.deepEqual(item.properties.dependsOnIdx, { type: 'array', items: { type: 'number' } })
+  assert.deepEqual(item.properties.dependsOn, { type: 'array', items: { type: 'string' } })
   assert.equal(props.rationale.type, 'string')
   // 白名单字段核验（递归收集 schema 键，不得出现 type/properties/required/items/enum 以外的键）
   var allowed = { type: 1, properties: 1, required: 1, items: 1, enum: 1 }
@@ -160,7 +161,7 @@ test('① DECOMPOSE_SCHEMA 常量形状：白名单字段 / required / enum / �
   assert.match(p, /npm test/)
   assert.match(p, /实现侧/)
   assert.match(p, /10~30 分钟/)
-  assert.match(p, /dependsOnIdx/)
+  assert.match(p, /有先后顺序时用 dependsOn 引用同批序号/)
   assert.match(p, /没有任何建卡工具/)
 })
 
@@ -261,7 +262,7 @@ test('③ 全链：startActivation(caller + outputSchema) → structured=split �
     rationale: '两个文件族天然可切',
     children: [
       { title: '子卡A', description: '做 A', size: 'light', touches: ['lib/a.mjs'], acceptance: 'node --test test/a.test.mjs' },
-      { title: '子卡B', description: '做 B', size: 'heavy', modelHint: 'kimi/kimi-k3', touches: ['lib/b.mjs'], acceptance: 'node --test test/b.test.mjs', dependsOnIdx: [0] },
+      { title: '子卡B', description: '做 B', size: 'heavy', modelHint: 'kimi/kimi-k3', touches: ['lib/b.mjs'], acceptance: 'node --test test/b.test.mjs', dependsOn: ['1'] },
     ],
   }
   var h = mkDispatch(board, { subagents: mkDecomposeSubagents(calls, { output: [{ type: 'text', text: '提案完毕' }], stopReason: 'completed', structured: proposal }) })
@@ -296,7 +297,7 @@ test('③ 全链：startActivation(caller + outputSchema) → structured=split �
   assert.equal(a.context.notes, '', 'notes 留空不重复 description')
   assert.equal(b.context.notes, '')
   assert.equal(b.size, 'heavy'); assert.equal(b.model, 'kimi/kimi-k3', 'modelHint 落 model')
-  assert.deepEqual(b.dependsOn, [a.id], 'dependsOnIdx[0] 翻译成本批真实 id')
+  assert.deepEqual(b.dependsOn, [a.id], "dependsOn['1'] 序号翻译成本批真实 id")
   assert.equal(b.history[0].actor, 'decomposer')
   assert.ok(b.id.indexOf('epic1-') === 0, '子卡 id 由源卡派生')
   // 源卡：状态不变 + 摘要消息 + run 留档关账
@@ -371,7 +372,7 @@ test('⑤ 幂等重拆：applyDecomposeProposal 清旧批 draft / 保留已发�
   var r1 = applyDecomposeProposal(board, src, { verdict: 'split', children: [{ title: '旧A', description: '', size: 'standard', touches: [], acceptance: 'x' }] }, '2026-01-01T01:00:00Z')
   assert.equal(r1.ok, true); assert.equal(r1.children.length, 1)
   // 重拆：新提案落地 → 旧 draft 提案被清（id 是派生量会被新批复用，按标题认旧批），新批落位
-  var r2 = applyDecomposeProposal(board, src, { verdict: 'split', children: [{ title: '新A', description: '', size: 'light', touches: [], acceptance: 'y' }, { title: '新B', description: '', size: 'standard', touches: [], acceptance: 'z', dependsOnIdx: [0] }] }, '2026-01-01T02:00:00Z')
+  var r2 = applyDecomposeProposal(board, src, { verdict: 'split', children: [{ title: '新A', description: '', size: 'light', touches: [], acceptance: 'y' }, { title: '新B', description: '', size: 'standard', touches: [], acceptance: 'z', dependsOn: ['1'] }] }, '2026-01-01T02:00:00Z')
   assert.equal(r2.ok, true); assert.equal(r2.children.length, 2)
   assert.ok(!board.tasks.some(function (x) { return x.title === '旧A' }), '旧 draft 提案被清')
   assert.equal(board.tasks.filter(function (x) { return x.parentId === 'r1' }).length, 2)
@@ -397,17 +398,57 @@ test('⑤ 幂等重拆：applyDecomposeProposal 清旧批 draft / 保留已发�
   for (var i = 0; i < 9; i++) many.push({ title: '批' + i, description: '', size: 'standard', touches: [], acceptance: 'c' + i })
   var r6 = applyDecomposeProposal(board, src, { verdict: 'split', children: many }, '2026-01-01T06:00:00Z')
   assert.equal(r6.children.length, 8, 'children 上限 8 截断')
-  // dependsOnIdx 防御：越界/自引用/后排引用一律丢弃（本批无环）
+  // dependsOn 序号防御（task-mvr44rm3）：非法/越界/自引用/后排序号一律丢弃 + 该子卡 messages 留痕（本批无环）
   var board2 = mkBoard([mkTask({ id: 'r2', status: 'draft' })])
   var src2 = board2.tasks[0]
   applyDecomposeProposal(board2, src2, { verdict: 'split', children: [
-    { title: 'A0', description: '', size: 'standard', touches: [], acceptance: 'a', dependsOnIdx: [0, 1, 7, -1] },
-    { title: 'B1', description: '', size: 'standard', touches: [], acceptance: 'b', dependsOnIdx: [1, 0] },
+    { title: 'A0', description: '', size: 'standard', touches: [], acceptance: 'a', dependsOn: ['0', '1', '2', '9', '-1', 'x'] },
+    { title: 'B1', description: '', size: 'standard', touches: [], acceptance: 'b', dependsOn: ['2', '1', '1'] },
   ] }, '2026-01-01T07:00:00Z')
   var a0 = board2.tasks.find(function (x) { return x.title === 'A0' })
   var b1 = board2.tasks.find(function (x) { return x.title === 'B1' })
-  assert.deepEqual(a0.dependsOn, [], '自引用/后排/越界全丢')
-  assert.deepEqual(b1.dependsOn, [a0.id], '只收前排下标（去重）')
+  assert.deepEqual(a0.dependsOn, [], '首卡无前排可引：自/越界/负数/非数字序号全丢')
+  assert.ok(a0.messages.some(function (m) { return m.kind === 'decompose' && /依赖序号无法解析/.test(m.text) }), '坏序号在该子卡 messages 留痕')
+  assert.deepEqual(b1.dependsOn, [a0.id], '只收前排序号（去重）')
+  assert.ok(b1.messages.some(function (m) { return m.kind === 'decompose' && /依赖序号无法解析/.test(m.text) }), '自引用序号丢弃+留痕')
+})
+
+// ===== ⑤b dependsOn 序号接线（task-mvr44rm3 定稿）：同批序号引用物化为真实任务 id =====
+test('⑤b dependsOn 序号引用：真实 id 映射+顺序=引用顺序+坏序号丢弃留痕+无依赖零影响', function () {
+  // ① 有效序号引用：['1','2'] 指本批第 1/2 张提案，映射真实 id，deps 顺序=引用顺序
+  var src = mkTask({ id: 'w1', status: 'draft' })
+  var board = mkBoard([src])
+  var r = applyDecomposeProposal(board, src, { verdict: 'split', children: [
+    { title: '基建', description: '', size: 'standard', touches: [], acceptance: 'a' },
+    { title: '中游', description: '', size: 'standard', touches: [], acceptance: 'b', dependsOn: ['1'] },
+    { title: '下游', description: '', size: 'standard', touches: [], acceptance: 'c', dependsOn: ['2', '1'] },
+  ] }, '2026-01-01T01:00:00Z')
+  assert.equal(r.ok, true)
+  var k1 = board.tasks.find(function (x) { return x.title === '基建' })
+  var k2 = board.tasks.find(function (x) { return x.title === '中游' })
+  var k3 = board.tasks.find(function (x) { return x.title === '下游' })
+  assert.deepEqual(k1.dependsOn, [], '无依赖提案零影响')
+  assert.deepEqual(k2.dependsOn, [k1.id], "序号 '1' → 本批第 1 张真实 id")
+  assert.deepEqual(k3.dependsOn, [k2.id, k1.id], '序号引用映射为真实 id 且顺序=引用顺序')
+  assert.equal(k1.messages.length, 0, '有效/无引用不产生留痕消息')
+  // ② 坏序号：越界/非数字丢弃 + 该子卡 messages 留一条「依赖序号无法解析」；有效序号照常映射
+  var board3 = mkBoard([mkTask({ id: 'w2', status: 'draft' })])
+  var src3 = board3.tasks[0]
+  var r3 = applyDecomposeProposal(board3, src3, { verdict: 'split', children: [
+    { title: '甲', description: '', size: 'standard', touches: [], acceptance: 'a', dependsOn: ['9', 'abc'] },
+    { title: '乙', description: '', size: 'standard', touches: [], acceptance: 'b', dependsOn: ['1', '5', 'x'] },
+  ] }, '2026-01-01T02:00:00Z')
+  assert.equal(r3.ok, true, '坏序号不阻断物化')
+  var jia = board3.tasks.find(function (x) { return x.title === '甲' })
+  var yi = board3.tasks.find(function (x) { return x.title === '乙' })
+  assert.deepEqual(jia.dependsOn, [], '越界/非数字序号丢弃')
+  assert.deepEqual(yi.dependsOn, [jia.id], '混合：有效序号照常映射')
+  var tj = jia.messages.filter(function (m) { return m.kind === 'decompose' && /依赖序号无法解析/.test(m.text) })
+  assert.equal(tj.length, 1, '子卡 messages 留一条「依赖序号无法解析」')
+  assert.match(tj[0].text, /9、abc/, '留痕带坏序号明细')
+  var ty = yi.messages.filter(function (m) { return m.kind === 'decompose' && /依赖序号无法解析/.test(m.text) })
+  assert.equal(ty.length, 1, '后排溢出+非数字同样留痕')
+  assert.match(ty[0].text, /5、x/, '留痕带坏序号明细')
 })
 
 // ===== ⑥ decomposer 不占 activeW + 拆解期源卡不派 Worker + recIsLive 不回收 =====
