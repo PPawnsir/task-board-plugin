@@ -74,7 +74,8 @@ export function overlapsTouches(mine, theirs) {
 //（卡 messages + 主窗口通知 + 工具返回体 warning 三通道，接线在 rpc.mjs board_report progress 分支）。
 export var PLAN_GATE_PREFIX = '计划改动：'
 // 「计划改动：」前缀识别 + 路径清单解析：换行/逗号/分号/顿号分隔（中英文逗号都认），兼容 markdown
-// 列表符（- / * / •）与行内代码反引号包裹；每条先剥行尾注释再过 normTouch 归一（Windows 反斜杠、./ 前缀、尾斜杠），
+// 列表符（- / * / •）与行内代码反引号包裹；每条先剥行尾注释、过像路径判定（纯散文行丢弃，task-mvqfl7in）再过
+// normTouch 归一（Windows 反斜杠、./ 前缀、尾斜杠），
 // 去重保序。全角/半角冒号都识别。
 // 行尾注释剥离（task-mvnrtpxo，task-mvnnkv7x-2 误报实证）：Worker 自然写法「path（L663 语义注释）」
 // 整行被当路径 → 与 touches 不匹配 → 假越界警示。每条目截掉首个全角/半角括号起始的尾巴（/[（(].*$/），
@@ -88,11 +89,19 @@ export function parsePlanFiles(question) {
   var parts = q.slice(m[0].length).split(/[\n,，;；、]+/)
   var out = []
   for (var i = 0; i < parts.length; i++) {
-    // 顺序：列表符 → 行尾注释 → 反引号 → trim → 归一（注释须先于反引号剥，否则「`path`（注释）」形态残留尾反引号）
+    // 顺序：列表符 → 行尾注释 → 反引号 → trim → 像路径判定 → 归一（注释须先于反引号剥，否则「`path`（注释）」形态残留尾反引号）
     var v = parts[i].trim().replace(/^[-*•]\s+/, '')
     v = v.replace(/[（(].*$/, '').replace(/\s+—\s+.*$/, '').trim() // 剥行尾注释再归一
-    v = normTouch(v.replace(/^`+|`+$/g, '').trim())
-    if (v && out.indexOf(v) < 0) out.push(v)
+    v = v.replace(/^`+|`+$/g, '').trim()
+    // 像路径判定（task-mvqfl7in，n-mvqfiofr0kt9 误报实证）：注释剥离只救带括号/破折号的说明行，
+    // 无路径特征的纯散文行（如「调研文件清单」「只动解析不动闸口比对」）仍整行被当文件参与
+    // touches 比对 → 假越界警示。含路径分隔符（'/' 或 Windows 反斜杠——normTouch 同源等价）
+    // 或以代码扩展名结尾（宽正则，.mjs/.md/.json/.py/.yml 等）才入选，纯散文行直接丢弃；
+    // 条目全被丢光走既有「空清单」语义（rpc.mjs 有前缀但零路径 → 重报提示自纠正）。
+    // 判定在归一前做：`lib/`、`D:\dir` 的分隔符证据会被 normTouch 剥尾斜杠/改写，先记再归一。
+    var likePath = /[\/\\]/.test(v) || /\.[a-z0-9]{1,6}$/i.test(v)
+    v = normTouch(v)
+    if (v && likePath && out.indexOf(v) < 0) out.push(v)
   }
   return out
 }

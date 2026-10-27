@@ -1040,6 +1040,27 @@ test('parsePlanFiles: 剥行尾注释——全角/半角括号尾巴 + 「 — �
   assert.deepEqual(core.planOutsideTouches(['lib/core.mjs'], core.parsePlanFiles('计划改动：lib/core.mjs（L75-L91 语义注释）')), [])
 })
 
+// 像路径判定（task-mvqfl7in，n-mvqfiofr0kt9 误报实证：注释剥离只救带括号/破折号的说明行，
+// 无路径特征的纯散文行仍整行被当文件参与 touches 比对 → 假越界警示，Worker 被迫改纯路径清单才过）
+test('parsePlanFiles: 像路径判定——纯散文行直接丢弃；路径行/裸扩展名行/反斜杠行/尾斜杠行不受影响；混合清单只留路径；全散文=空清单重报语义', () => {
+  // 纯散文行（无 / 无 \ 无扩展名）不进清单——昨天的实证误报形态：说明文字整行被当文件比对
+  assert.deepEqual(core.parsePlanFiles('计划改动：这是一段纯说明文字'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：\n- 调研文件清单\n- 只动解析不动闸口比对'), [])
+  // 裸扩展名行（无 / 但以代码扩展名结尾）不受影响——像路径判定或一条件的扩展名分支（宽正则）
+  assert.deepEqual(core.parsePlanFiles('计划改动：README.md'), ['README.md'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：plan.mjs、CHANGELOG.md'), ['plan.mjs', 'CHANGELOG.md'])
+  // Windows 反斜杠目录行（无扩展名，归一前含分隔符证据）不受影响——判定在归一前做
+  assert.deepEqual(core.parsePlanFiles('计划改动：D:\\deepseek-work\\lib'), ['D:/deepseek-work/lib'])
+  // 尾部斜杠目录行（`lib/` 归一为裸目录名）不受影响——分隔符证据在归一前，与既有归一断言同口径
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/'), ['lib'])
+  // 混合清单：散文行丢弃、路径行保留，保序去重
+  assert.deepEqual(core.parsePlanFiles('计划改动：\n- 调研文件清单\n- lib/core.mjs\n- 闸口解析补刀\n- lib/core.mjs'), ['lib/core.mjs'])
+  // 误报直接复现：路径行+散文行同报，散文行不再触发假越界
+  assert.deepEqual(core.planOutsideTouches(['lib/core.mjs'], core.parsePlanFiles('计划改动：lib/core.mjs（语义注释）\n这是一段纯说明文字')), [])
+  // 全散文条目全被丢光 = 空数组 → 调用方既有「有前缀但零路径」重报提示语义（rpc.mjs planGateApply 空清单分支）
+  assert.deepEqual(core.planOutsideTouches(['lib/**'], core.parsePlanFiles('计划改动：\n- 纯说明行一\n- 纯说明行二')), [])
+})
+
 test('touchCovers: 单向覆盖——touch 模式 ⊇ 计划文件（与 matchOne 对称语义方向相反）', () => {
   assert.equal(core.touchCovers('lib/core.mjs', 'lib/core.mjs'), true)   // 精确
   assert.equal(core.touchCovers('lib/core.mjs', 'lib/rpc.mjs'), false)
