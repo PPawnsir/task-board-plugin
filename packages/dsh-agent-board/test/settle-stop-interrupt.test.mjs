@@ -12,6 +12,10 @@
 // 用例 E 走 rpc 直调 harness（verify-timing.test.mjs 同款薄桩）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { readFileSync } from 'node:fs'
 import { createMockCtx } from './helpers/mock-ctx.mjs'
 import * as plugin from '../index.mjs'
 import { createRpc } from '../lib/rpc.mjs'
@@ -296,7 +300,7 @@ function mkGateTask(over) {
   return Object.assign({ id: 'g1', title: '续跑闸卡', description: '', status: 'pending', priority: 'medium', tags: [], parentId: null, assignMode: 'auto', assignee: null, context: { instructions: '' }, acceptance: '', dependsOn: [], pipeline: 'full', claimedBy: null, claimedAt: null, createdAt: '2026-01-01T00:00:00Z', history: [], messages: [] }, over || {})
 }
 function mkGateBoard(tasks) { return { version: 12, ownerSession: GATE_SID, boardMode: 'auto', tasks: tasks || [] } }
-function mkGateDispatch(board, ctxOver, stateOver) {
+function mkGateDispatch(board, ctxOver, stateOver, depsOver) {
   var listeners = []
   var timerCalls = []
   var notes = []
@@ -328,13 +332,13 @@ function mkGateDispatch(board, ctxOver, stateOver) {
   var dispatch = createDispatch(
     Object.assign(base, ctxOver || {}),
     state,
-    {
+    Object.assign({
       rt: async function () { return board }, wt: async function () {}, mutateLocked: async function (sid, fn) { return fn(board) }, kickCycle: function () {},
       rootForSession: function () { return { id: GATE_SID } },
       withTimeout: function (p) { return p }, runsFor: function () { return runs }, feedbackOn: function () { return true },
       pushSysNote: function (s, text, taskId) { notes.push({ sid: s, text: text, taskId: taskId }) },
       maybeNotify: function () {}, notifyTaskDone: function () {},
-    })
+    }, depsOver || {}))
   return { dispatch: dispatch, state: state, runs: runs, listeners: listeners, timerCalls: timerCalls, notes: notes, board: board }
 }
 var flushGate = async function () { for (var i = 0; i < 8; i++) await new Promise(function (r) { setImmediate(r) }) }
@@ -507,4 +511,188 @@ test('死会话哨兵·退位（task-mvowb2hc 洞③）：会话在活跃目录 
   assert.equal(t2.status, 'in-progress', '已观测到 running：哨兵退位不误杀')
   assert.ok(h2.runs['g2'], '活跃 rec 保留（结算归事件/超时通道）')
   assert.equal(t2.runs[1].outcome, 'running', '续跑留档不被误关')
+})
+
+// ===== 挂死零产出检测（task-mvqcoz9l）：在跑 worker/verifier run 日志字节零增长判死重派+喂熔断 =====
+// 原形（2026-10-27 降级实测）：glm-5.2 续跑挂「连接开着永不响应」——会话不死（死会话哨兵查不出）、
+// 不报错（无 settle 事件）、零产出（日志零增长 7 分钟），running 假相直到人工终止。本套与死会话哨兵
+// 同 harness（mkGateDispatch，depsOver 增 sessionsRoot 注入真日志文件）：
+// <root>/b1/<childId>/session.v4.jsonl.zstd（logSizeOf 按桶探测，与生产布局一致）。
+function mkHungLogRoot(childId, bytes) {
+  var root = fs.mkdtempSync(path.join(os.tmpdir(), 'tbhung-'))
+  var dir = path.join(root, 'b1', childId)
+  fs.mkdirSync(dir, { recursive: true })
+  var logPath = path.join(dir, 'session.v4.jsonl.zstd')
+  fs.writeFileSync(logPath, Buffer.alloc(bytes || 256))
+  return { root: root, logPath: logPath }
+}
+// 挂死形态的活跃 rec（running + continuable worker）
+function hungRec(taskId, childId, model) {
+  return { id: childId, childId: childId, continuable: true, ran: true, run: null, role: 'worker', taskId: taskId, startedAt: Date.now(), model: model, settled: false }
+}
+// 预置基线：lastLogBytes 与基线时间（61s 前）——测试里 poolCycle 是快轮、墙钟不推进，60s 墙钟闸需预置跨过
+function seedBaseline(row, bytes) { row.lastLogBytes = bytes; row.zeroGrowthSince = Date.now() - 61000 }
+
+test('挂死检测①（task-mvqcoz9l）：running+日志零增长 4 轮 → 判挂死重派（settleRun 失败臂）+ 熔断连击+1 + 留档关账', async () => {
+  var L = mkHungLogRoot('child-old', 256)
+  try {
+    var t = mkGateTask({ status: 'in-progress', claimedBy: 'child-old', claimedAt: '2026-01-01T00:00:00Z', runs: [{ role: 'worker', id: 'child-old', at: '2026-01-01T00:00:00.000Z', model: 'prov/glm-5.2', outcome: 'running', hardMin: 120, continuable: true }] })
+    var board = mkGateBoard([t])
+    var sent = []
+    var h = mkGateDispatch(board, {
+      subagents: {
+        list: function () { return ['mock'] },
+        getProvider: function () { return { inheritsParentContext: false } },
+        start: async function () { throw new Error('挂死续跑命中时不该走一次性路径') },
+        startContinuable: async function () { throw new Error('挂死续跑命中时不该 fresh spawn') },
+        sendMessage: async function (p, cid, content, opts) { sent.push(cid); return 'm2' },
+        interrupt: function () {},
+        listChildren: async function () { return [{ id: 'child-old' }] },
+      },
+    }, null, { sessionsRoot: L.root })
+    h.runs['g1'] = hungRec('g1', 'child-old', 'prov/glm-5.2')
+    seedBaseline(t.runs[0], 256)
+    for (var i = 0; i < 5; i++) { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
+    // 第 1 轮零增长连击+1（基线已跨 60s），第 2-4 轮连击到 4 → 第 4 轮判挂死；第 5 轮重派续跑
+    assert.equal(t.runs[0].outcome, 'timeout/error', '挂死 run 关账（settleRun 失败臂 err 路径 → timeout/error）')
+    assert.ok(t.runs[0].endedAt, '关账写 endedAt')
+    assert.equal(t.runs[0].lastLogBytes, 256, 'lastLogBytes 每轮写回（比对锚点）')
+    assert.match(String(t.lastError || ''), /挂死/, '挂死原因落卡（lastError）')
+    assert.equal(t.retryCount, 1, '失败计数照旧（失败臂语义不变）')
+    assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/glm-5.2'], 1, '熔断连击+1（挂死=模型面故障）')
+    assert.ok(!h.state.badModels[GATE_SID + '|prov/glm-5.2'], '连击 1 < 3 不拉黑')
+    assert.equal(h.runs['g1'] && h.runs['g1'].resumed, true, '判死后卡重派（新 rec 接手）')
+    assert.deepEqual(sent, ['child-old'], '重派=续跑冷复活原子会话')
+    assert.equal(t.status, 'in-progress', '重派落卡 in-progress')
+    assert.equal(t.claimedBy, 'child-old', '认领位回原子会话')
+    assert.equal(t.runs[1].resume, true, '续跑留档照旧')
+    assert.equal(t.runs[1].outcome, 'running', '续跑留档挂 running')
+    assert.equal(t.runs[1].lastLogBytes, 256, '续跑行下轮首见重记基线（fresh 取自当前日志字节数，非复制旧行）')
+    assert.equal(t.runs[1].zeroGrowthRounds, undefined, '续跑行零增长连击从零起算（不继承上一轮连击）')
+  } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
+})
+
+test('挂死检测②：增长中 run 不误伤——活体增长清零计数刷新基线；写风暴快轮被 60s 墙钟闸兜住不秒判', async () => {
+  var L = mkHungLogRoot('child-old', 256)
+  try {
+    var t = mkGateTask({ status: 'in-progress', claimedBy: 'child-old', claimedAt: '2026-01-01T00:00:00Z', runs: [{ role: 'worker', id: 'child-old', at: '2026-01-01T00:00:00.000Z', model: 'prov/glm-5.2', outcome: 'running', hardMin: 120, continuable: true }] })
+    var h = mkGateDispatch(mkGateBoard([t]), {
+      subagents: {
+        list: function () { return ['mock'] },
+        getProvider: function () { return { inheritsParentContext: false } },
+        start: async function () { throw new Error('不该走一次性路径') },
+        startContinuable: async function () { throw new Error('不该 fresh spawn') },
+        sendMessage: async function () { return 'm2' },
+        interrupt: function () {},
+        listChildren: async function () { return [{ id: 'child-old' }] },
+      },
+    }, null, { sessionsRoot: L.root })
+    h.runs['g1'] = hungRec('g1', 'child-old', 'prov/glm-5.2')
+    await h.dispatch.poolCycle(GATE_SID); await flushGate()
+    assert.equal(t.runs[0].lastLogBytes, 256, '首见只记基线')
+    assert.equal(t.runs[0].zeroGrowthRounds, undefined, '首见不计数（绝不在第一眼判死）')
+    // 快轮零增长 4 轮（墙钟不推进）→ 连击按轮累计，但 60s 墙钟闸兜住不判死
+    for (var i = 0; i < 4; i++) { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
+    assert.equal(t.runs[0].zeroGrowthRounds, 4, '零增长连击按轮累计（每轮写回）')
+    assert.equal(t.runs[0].outcome, 'running', '60s 墙钟闸未过 → 不判死（写风暴下纯轮数会秒判刚 spawn 的 run）')
+    assert.equal(t.status, 'in-progress', '不误伤')
+    assert.ok(h.runs['g1'], '活跃 rec 保留')
+    // 活体增长 → 清零计数 + 刷新基线
+    fs.appendFileSync(L.logPath, Buffer.alloc(64))
+    await h.dispatch.poolCycle(GATE_SID); await flushGate()
+    assert.equal(t.runs[0].lastLogBytes, 320, '基线刷新到最新字节数')
+    assert.equal(t.runs[0].zeroGrowthRounds, undefined, '活体增长即清零计数')
+    // 清零后再零增长 3 轮 → 仍不判死（< 4 轮）
+    for (var i = 0; i < 3; i++) { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
+    assert.equal(t.runs[0].zeroGrowthRounds, 3, '清零后重新计数')
+    assert.equal(t.runs[0].outcome, 'running', '3 轮 < 4 不判死')
+    assert.equal(t.status, 'in-progress', '全程零误伤')
+    assert.ok(!h.state.modelFailStreak || !Object.keys(h.state.modelFailStreak).length, '零熔断连击')
+  } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
+})
+
+test('挂死检测③（源码级）：N 轮阈值常量化 + 60s 墙钟闸常量 + poolCycle 挂点 + 熔断连击接线 + 边界', () => {
+  var dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  assert.match(dsp, /var HUNG_ZERO_GROWTH_ROUNDS = 4/, 'N 轮阈值常量化：连续 4 轮零增长判挂死（≈60s）')
+  assert.match(dsp, /var HUNG_ZERO_GROWTH_MS = 60000/, '60s 墙钟闸常量化（写风暴防秒判，暂不开放配置）')
+  assert.match(dsp, /async function hungZeroOutputSweep\(sid, runs, snap\) \{/, '挂死零产出检测函数')
+  assert.match(dsp, /hungN = await hungZeroOutputSweep\(sid, runs, snap\)/, 'poolCycleBody 挂点（幽灵回收之后、活跃计数之前）')
+  assert.match(dsp, /lastLogBytes/, 'run 留档基线字段（每轮写回）')
+  assert.match(dsp, /zeroGrowthRounds/, '零增长连击字段（每轮写回）')
+  assert.match(dsp, /if \(isHungKillFailure\(s\)\) return true/, '挂死前缀进 isModelKillFailure 白名单 = 计入熔断连击')
+  assert.match(dsp, /isHungKillFailure\(errText\) \? HUNG_CIRCUIT_WHY : undefined/, 'settleWorker 失败臂挂死熔断文案分态')
+  assert.match(dsp, /rec\.role === 'worker' \|\| rec\.role === 'verifier'/, '边界：只盖 worker/verifier 在跑 rec（decomposer/hook 不盖）')
+  assert.match(dsp, /Date\.now\(\) - since >= HUNG_ZERO_GROWTH_MS/, '判死双闸：轮数 × 墙钟距基线时长')
+})
+
+test('挂死检测④：挂死三连击 → badModels 熔断+健康表 circuit+系统通知（挂死分态文案）；worker 三连败阻塞语义照旧适用（挂死=失败）', async () => {
+  var L = mkHungLogRoot('child-old', 256)
+  try {
+    var t = mkGateTask({ status: 'in-progress', claimedBy: 'child-old', claimedAt: '2026-01-01T00:00:00Z', runs: [{ role: 'worker', id: 'child-old', at: '2026-01-01T00:00:00.000Z', model: 'prov/glm-5.2', outcome: 'running', hardMin: 120, continuable: true }] })
+    var board = mkGateBoard([t])
+    var sent = []
+    var h = mkGateDispatch(board, {
+      subagents: {
+        list: function () { return ['mock'] },
+        getProvider: function () { return { inheritsParentContext: false } },
+        start: async function () { throw new Error('不该走一次性路径') },
+        startContinuable: async function () { throw new Error('挂死场景只走续跑通道，不该 fresh spawn') },
+        sendMessage: async function (p, cid) { sent.push(cid); return 'm2' },
+        interrupt: function () {},
+        listChildren: async function () { return [{ id: 'child-old' }] },
+      },
+    }, null, { sessionsRoot: L.root })
+    h.runs['g1'] = hungRec('g1', 'child-old', 'prov/glm-5.2')
+    seedBaseline(t.runs[0], 256)
+    var round = async function () { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
+    // 挂死 #1（第 1-4 轮，连击 1）→ 重派续跑（健康闸放行）→ 预置新行基线已跨 60s → 挂死 #2（连击 2）→ 同上 → 挂死 #3（连击 3 → 熔断）
+    for (var i = 0; i < 4; i++) await round()
+    assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/glm-5.2'], 1, '挂死 #1 连击 1')
+    await round(); seedBaseline(t.runs[t.runs.length - 1], 256)
+    for (var i = 0; i < 4; i++) await round()
+    assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/glm-5.2'], 2, '挂死 #2 连击 2')
+    await round(); seedBaseline(t.runs[t.runs.length - 1], 256)
+    for (var i = 0; i < 4; i++) await round()
+    assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/glm-5.2'], 3, '挂死 #3 连击 3')
+    assert.equal(h.state.badModels[GATE_SID + '|prov/glm-5.2'], true, '三连击 → badModels 熔断')
+    assert.equal(h.state.modelHealth[GATE_SID]['prov/glm-5.2'].state, 'circuit', '健康表 circuit 覆盖态')
+    var circNotes = h.notes.filter(function (n) { return /挂死零产出/.test(n.text) })
+    assert.ok(circNotes.length >= 1, '系统通知带挂死分态文案（非秒拆文案）')
+    assert.match(circNotes[circNotes.length - 1].text, /prov\/glm-5\.2/)
+    assert.match(circNotes[circNotes.length - 1].text, /后续取模链跳过该模型/)
+    // worker 三连败阻塞语义照旧适用（挂死=失败）：retryCount 3 → blocked，不再自动重派
+    //（熔断后恢复走续跑健康闸 → fresh spawn 健康取模链，该链已有「续跑健康闸①」用例覆盖）
+    assert.equal(t.status, 'blocked', 'worker 失败 x3 → blocked（挂死按失败计数，三连败阻塞语义不变）')
+    assert.equal(t.retryCount, 3, '三次挂死各计一次失败')
+    assert.equal(sent.length, 2, '熔断前两次重派走 sendMessage 续跑，blocked 后零重派投递')
+  } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
+})
+
+test('挂死检测⑤：verifier 在跑 run 同样盖到——判挂死走 settleVerifier 失败臂（verifyRetries 重排 + 既有即时熔断语义）', async () => {
+  var L = mkHungLogRoot('ver-old', 256)
+  try {
+    var t = mkGateTask({ status: 'verifying', verifierRun: 'ver-old', verifierRunAt: '2026-01-01T00:00:00Z', runs: [{ role: 'verifier', id: 'ver-old', at: '2026-01-01T00:00:00.000Z', model: 'prov/vm', outcome: 'running', hardMin: 120 }] })
+    var h = mkGateDispatch(mkGateBoard([t]), {
+      subagents: {
+        list: function () { return ['mock'] },
+        getProvider: function () { return { inheritsParentContext: false } },
+        start: async function () { return { id: 'run-x', result: new Promise(function () {}), dispose: async function () {} } },
+        startContinuable: async function () { throw new Error('verifier 恒走一次性面') },
+        sendMessage: async function () { return 'm2' },
+        interrupt: function () {},
+        listChildren: async function () { return [{ id: 'ver-old' }] },
+      },
+    }, null, { sessionsRoot: L.root })
+    // verifier rec 形态与生产一致（一次性面：无 childId，run.id 即子会话 id）
+    h.runs['g1'] = { id: 'ver-old', run: { id: 'ver-old', dispose: async function () {} }, role: 'verifier', taskId: 'g1', startedAt: Date.now(), model: 'prov/vm', settled: false }
+    seedBaseline(t.runs[0], 256)
+    for (var i = 0; i < 4; i++) { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
+    assert.equal(t.runs[0].outcome, 'timeout/error', '挂死 verifier 关账（失败臂）')
+    assert.equal(t.verifyRetries, 1, 'verifier 失败臂计数（重新排队审查）')
+    assert.equal(t.status, 'verifying', '卡仍 verifying（重新排队）')
+    assert.match(String(t.lastError || ''), /挂死/, '挂死原因落卡')
+    assert.equal(h.state.badModels[GATE_SID + '|prov/vm'], true, 'verifier 失败即时熔断（既有 verifier 语义，非连击）')
+    var cur = h.runs['g1']
+    assert.ok(!cur || String(cur.id) !== 'ver-old', '原挂死 verifier rec 已摘除（busyTaskIds 释放，新 verifier 当轮接手）')
+  } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
 })
