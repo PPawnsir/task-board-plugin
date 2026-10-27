@@ -435,6 +435,40 @@ test('续跑健康闸③（task-mvowb2hc 洞④回归）：健康模型续跑逐
   assert.equal(t.claimedBy, 'child-old', '认领位回原子会话')
 })
 
+test('续跑健康闸④（task-mvd3li6 连败软闸）：原模型 recentRuns ≥2 全败 → 放弃续跑改 fresh spawn（取模链软闸跳过病模型取次选）', async () => {
+  // 病模型在档位槽首位（真实形态：glm-5.2 在 laneModels.light.worker）——续跑闸拦截后 fresh spawn
+  // 经取模链软闸跳过病模型，槽内次选接手（完整修复链路：闸拦截 + 链跳过两级都在）
+  var t = mkGateTask({ size: 'light', runs: [gateResumeRow('prov/glm-5.3-flash')] })
+  var board = mkGateBoard([t])
+  board.laneModels = { light: { worker: ['prov/glm-5.3-flash', 'prov/alt-model'], verifier: [] }, standard: { worker: [], verifier: [] }, heavy: { worker: [], verifier: [] } }
+  var sent = []
+  var h = mkGateDispatch(board, {
+    subagents: {
+      list: function () { return ['mock'] },
+      getProvider: function () { return { inheritsParentContext: false } },
+      start: async function () { throw new Error('不该走一次性路径') },
+      startContinuable: async function () { return { childId: 'child-new', messageId: 'm1' } },
+      sendMessage: async function (p, cid, content, opts) { sent.push({ cid: cid, text: content[0].text }); return 'm2' },
+    },
+  })
+  // 病模型种法：聚合表 recentRuns ≥2 全败（settleRunRecord 每次结算喂给的形态，直种等效）
+  h.state.modelHealth[GATE_SID] = { 'prov/glm-5.3-flash': { state: 'unknown', observed: 'unknown', lastSeen: null, lastProbe: null, note: '测试种入', observedNote: '测试种入', recentRuns: [{ ok: false, at: '2026-01-01T00:00:00.000Z', latencyMs: null }, { ok: false, at: '2026-01-01T00:01:00.000Z', latencyMs: null }] } }
+  var origErr = console.error; console.error = function () {}
+  try {
+    await h.dispatch.poolCycle(GATE_SID)
+    await flushGate()
+    assert.deepEqual(sent, [], '连败软闸拦截：零续跑投递（不再空烧病模型）')
+    var note = (t.messages || []).find(function (m) { return m.kind === 'resume-fallback' })
+    assert.ok(note && /续跑放弃/.test(note.text), '续跑放弃留痕（resume-fallback 消息）')
+    assert.match(note.text, /prov\/glm-5\.3-flash/)
+    assert.equal(t.claimedBy, 'child-new', '回退 fresh spawn 落卡（新 Worker）')
+    var last = t.runs[t.runs.length - 1]
+    assert.equal(last.model, 'prov/alt-model', 'fresh spawn 走健康取模链：槽内软闸跳过病模型，次选接手')
+    assert.equal(last.modelSource, 'lane', 'modelSource=lane 留档')
+    assert.equal(Object.keys(h.state.badModels).length, 0, '软熔断不落 badModels 黑名单（与硬熔断语义分治）')
+  } finally { console.error = origErr }
+})
+
 test('死会话哨兵（task-mvowb2hc 洞③）：sendMessage 返回但会话不在活跃目录 → 立即失败重派不留 running 假相', async () => {
   var t = mkGateTask({ runs: [gateResumeRow('prov/glm-5.3-flash')] })
   var board = mkGateBoard([t])
@@ -630,13 +664,17 @@ test('挂死检测④：挂死三连击 → badModels 熔断+健康表 circuit+�
   try {
     var t = mkGateTask({ status: 'in-progress', claimedBy: 'child-old', claimedAt: '2026-01-01T00:00:00Z', runs: [{ role: 'worker', id: 'child-old', at: '2026-01-01T00:00:00.000Z', model: 'prov/glm-5.2', outcome: 'running', hardMin: 120, continuable: true }] })
     var board = mkGateBoard([t])
+    board.workerModel = 'prov/glm-5.2' // 连败软闸拦截后的 fresh spawn 带板级模型，连击可继续累计到 3
     var sent = []
     var h = mkGateDispatch(board, {
       subagents: {
         list: function () { return ['mock'] },
         getProvider: function () { return { inheritsParentContext: false } },
         start: async function () { throw new Error('不该走一次性路径') },
-        startContinuable: async function () { throw new Error('挂死场景只走续跑通道，不该 fresh spawn') },
+        // task-mvd3li6 连败软闸（healthyModel 增读 recentRuns≥2 全败）后：挂死 #2 的重派续跑被
+        // 续跑健康闸拦截改 fresh spawn（这正是「报错一次+挂死一次→第二次派发跳过病模型」的机制），
+        // fresh spawn 走 startContinuable——mock 放行（仲裁裁决 A，2026-10-27）
+        startContinuable: async function () { return { childId: 'child-new', messageId: 'm1' } },
         sendMessage: async function (p, cid) { sent.push(cid); return 'm2' },
         interrupt: function () {},
         listChildren: async function () { return [{ id: 'child-old' }] },
@@ -645,7 +683,8 @@ test('挂死检测④：挂死三连击 → badModels 熔断+健康表 circuit+�
     h.runs['g1'] = hungRec('g1', 'child-old', 'prov/glm-5.2')
     seedBaseline(t.runs[0], 256)
     var round = async function () { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
-    // 挂死 #1（第 1-4 轮，连击 1）→ 重派续跑（健康闸放行）→ 预置新行基线已跨 60s → 挂死 #2（连击 2）→ 同上 → 挂死 #3（连击 3 → 熔断）
+    // 挂死 #1（第 1-4 轮，连击 1）→ 重派续跑（健康闸放行：1 次失败 < 2 未达软闸线）→ 预置新行基线已跨 60s →
+    // 挂死 #2（连击 2）→ 续跑健康闸拦截（连败软闸，recentRuns 2 全败）改 fresh spawn（板级模型接手）→ 挂死 #3（连击 3 → 熔断）
     for (var i = 0; i < 4; i++) await round()
     assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/glm-5.2'], 1, '挂死 #1 连击 1')
     await round(); seedBaseline(t.runs[t.runs.length - 1], 256)
@@ -664,7 +703,9 @@ test('挂死检测④：挂死三连击 → badModels 熔断+健康表 circuit+�
     //（熔断后恢复走续跑健康闸 → fresh spawn 健康取模链，该链已有「续跑健康闸①」用例覆盖）
     assert.equal(t.status, 'blocked', 'worker 失败 x3 → blocked（挂死按失败计数，三连败阻塞语义不变）')
     assert.equal(t.retryCount, 3, '三次挂死各计一次失败')
-    assert.equal(sent.length, 2, '熔断前两次重派走 sendMessage 续跑，blocked 后零重派投递')
+    // task-mvd3li6 连败软闸后：挂死 #1 重派走续跑（1<2 未达软闸线），挂死 #2 起软闸拦截改 fresh spawn，
+    // blocked 后零投递——sendMessage 只发生 1 次（核心语义不变：三连击→熔断→blocked 全保留）
+    assert.equal(sent.length, 1, '首连重派走 sendMessage 续跑；二连起连败软闸拦截改 fresh spawn，blocked 后零投递')
   } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
 })
 

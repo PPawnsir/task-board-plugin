@@ -154,21 +154,89 @@ export function createDispatch(ctx, state, deps) {
       } catch (_) {}
       return until
     }
+    // ===== 模型目录获取（task-mvd3li6 目录失效闸数据源）：与 rpc.mjs enumModels 同源（llm.listProviders+listModels）=====
+    // 返回 { "provider/model": true } 目录映射；null = 目录不可得 → 目录闸整体跳过（保守语义③，不误伤）：
+    //   ① llm 服务缺失/缺 listProviders/listModels 方法（老宿主）；② listProviders 未返回数组或抛错；
+    //   ③ 任一 provider 的 listModels 抛错或未返回数组（部分枚举=目录不完整，宁可跳过闸也不误杀在册模型）；
+    //   ④ 枚举结果为空（退化形态：网关零模型时全候选都会被误判目录外，同样保守跳过）。
+    // 每次 spawnOneShot/续跑闸现取一次（刻意不缓存：模型从宿主配置删除/改名要当轮生效，缓存会放走已删模型）。
+    async function modelDirectory() {
+      var llm = ctx.get && ctx.get('llm')
+      if (!llm || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') return null
+      var providers = null
+      try { providers = llm.listProviders() } catch (_) { return null }
+      if (!Array.isArray(providers)) return null
+      var out = {}
+      for (var i = 0; i < providers.length; i++) {
+        try {
+          var models = await llm.listModels(providers[i].id)
+          if (!Array.isArray(models)) return null
+          for (var j = 0; j < models.length; j++) { if (models[j] && models[j].id) out[providers[i].id + '/' + models[j].id] = true }
+        } catch (_) { return null } // 任一 provider 枚举失败 → 目录不完整 → 保守跳过（不误伤）
+      }
+      if (!Object.keys(out).length) return null
+      return out
+    }
+    // 存在闸谓词（同步；dir=modelDirectory() 结果）：目录可得且模型不在目录 → true（配置已失效）。
+    // dir 为 null（目录不可得）恒 false——闸整体跳过，只留连败软闸生效。
+    function outOfDir(modelId, dir) { return !!(dir && modelId && !dir[modelId]) }
+    // ===== 目录失效留痕（task-mvd3li6）：取模候选不在当前模型目录 → 卡 messages 记「配置已失效」，per 模型去重 =====
+    // 同模型重复取模只记一条（防每轮重派刷屏，与冷却嗅探「未后延零留痕」同纪律）；
+    // 顺带在健康表 observedNote 落同款分态（GUI 健康点可读出「为什么被跳过」）。写卡失败静默吞掉
+    // （留痕是附属动作，绝不阻断取模主流程）。
+    async function traceStaleModel(sid, taskId, model) {
+      if (!model) return
+      console.error('[task-board] 配置已失效：' + model + '（已从模型目录移除），取模跳过该候选')
+      try {
+        var he = healthEntry(sid, model)
+        if (he.observedNote !== '配置已失效（已从模型目录移除）') { he.observedNote = '配置已失效（已从模型目录移除）'; he.note = he.observedNote }
+      } catch (_) {}
+      try {
+        await mutateLocked(sid, function (d) {
+          var t2 = d.tasks.find(function (x) { return x.id === taskId })
+          if (!t2) return null
+          if (!Array.isArray(t2.messages)) t2.messages = []
+          var text = '⚠️ 配置已失效：' + model + '（已从模型目录移除），本 run 取模跳过'
+          for (var i = t2.messages.length - 1; i >= 0; i--) {
+            if (t2.messages[i] && t2.messages[i].kind === 'stale-model' && t2.messages[i].text === text) return null // 已记过，零改动零留痕
+          }
+          t2.messages.push({ kind: 'stale-model', text: text, at: new Date().toISOString(), by: 'system' })
+          return { ok: true }
+        }, true) // skipKick：只是留痕，不踢 poolCycle
+      } catch (_) {}
+    }
     // ===== 备用模型链健康判定（task-mvnqxlpn）：不在 badModels 熔断名单且不在 modelCooldown 冷却期 =====
     // 两张表各管各的（熔断=连续失败布尔，冷却=额度窗口时间戳），任一命中即不健康。
     // 消费点=spawnOneShot 取模链：候选被判不健康时先扫板级 fallbackModels 找首个健康者（链本身逐项过本检查）。
-    function healthyModel(sid, modelId) {
+    // ===== 健康面拓宽（task-mvd3li6）：在既有熔断/冷却双闸之上增读 modelHealth 聚合表 =====
+    //   ① 近期连败软闸：聚合表 recentRuns（近 5 次 run 成败，settleRunRecord 每次结算喂给）≥2 且全败 →
+    //      不健康（软熔断：不落 badModels 黑名单，仅取模/续跑跳过）。一次成功即复位——recentRuns 滚动
+    //      窗口本就有归零语义（成功条目进窗「全败」即不成立），确认复用零新增簿记。原形：glm-5.2
+    //      「78s 报错一次+挂死一次」病了还被优先调度/续跑——第二次派发即被本闸拦下改走健康取模链。
+    //   ② 目录失效闸：dir 可得且模型不在目录（已从宿主配置删除/改名）→ 视为不健康跳过。
+    // dir 为可选第三参：既有调用点（不带 dir）= 目录闸跳过，行为逐字不变（零回归）。
+    function healthyModel(sid, modelId, dir) {
       if (!modelId) return false
       var h = syncModelHealth(sid, modelId)
       if (h.state === 'circuit') return false
       if (h.state === 'cooldown') return false
+      if (outOfDir(modelId, dir)) return false
+      var rr = h.recentRuns
+      if (Array.isArray(rr) && rr.length >= 2) {
+        var allBad = true
+        for (var i = 0; i < rr.length; i++) { if (rr[i] && rr[i].ok) { allBad = false; break } }
+        if (allBad) return false
+      }
       return true
     }
     // 扫备用链找首个健康模型（保持链序=主窗口配置的能力水位优先级）；链尽/空链返回 ''。
-    function pickHealthyFallback(sid, fbList) {
+    // task-mvd3li6 起 async + dir + taskId：链上目录外模型跳过并留痕（traceStaleModel，per 模型去重）；
+    // 目录不可得（dir 缺省/null）零留痕，行为与旧签名逐字一致（既有调用点零回归）。
+    async function pickHealthyFallback(sid, fbList, dir, taskId) {
       if (!Array.isArray(fbList)) return ''
       for (var fi = 0; fi < fbList.length; fi++) {
-        if (healthyModel(sid, fbList[fi])) return fbList[fi]
+        if (outOfDir(fbList[fi], dir)) { await traceStaleModel(sid, taskId, fbList[fi]); continue }
+        if (healthyModel(sid, fbList[fi], dir)) return fbList[fi]
       }
       return ''
     }
@@ -559,6 +627,10 @@ export function createDispatch(ctx, state, deps) {
       var dsnap = await rt(sid)
       if (role === 'worker' || role === 'verifier') {
         var roleKey = role === 'verifier' ? 'verifier' : 'worker'
+        // 目录失效闸数据源（task-mvd3li6）：取一次当前模型目录（llm.listProviders+listModels，与 rpc enumModels
+        // 同源）；null=目录不可得（llm 缺失老宿主/枚举异常/空目录）→ 目录闸整体跳过不误伤（保守语义③，
+        // 既有熔断/冷却/连败软闸照常生效，行为不因宿主能力缺失而变）。
+        var dir = await modelDirectory()
         var cands = []
         var tm = typeof t.model === 'string' ? t.model.trim() : ''
         if (tm) cands.push([tm, 'card'])
@@ -567,12 +639,13 @@ export function createDispatch(ctx, state, deps) {
         var laneCfg = cfg(dsnap).laneModels
         if (sz && laneCfg[sz]) {
           // 档位槽=有序数组（task-mvnxckhq 同档优先序，第一位=首选）：槽内按序取第一个**健康**模型
-          // （healthyModel 双闸：不过 badModels 熔断、不在 modelCooldown 冷却期；偏好序非故障序——
+          // （healthyModel 四闸：不过 badModels 熔断、不在 modelCooldown 冷却期、目录可得时不在目录外
+          // 【目录失效闸 task-mvd3li6】、近期连败未达软闸线【连败软闸 task-mvd3li6】；偏好序非故障序——
           // 首选病即次选赢，不降级不绕链）。槽内全病 → 以首项为代表照常入链，由既有熔断/冷却分支
           // 照旧消费 fallbackModels → 降档 → parent（既有链逐字不动）；空数组槽位=不命中，降下一级。
           var lvList = Array.isArray(laneCfg[sz][roleKey]) ? laneCfg[sz][roleKey] : []
           var lv = ''
-          for (var li = 0; li < lvList.length; li++) { if (healthyModel(sid, lvList[li])) { lv = lvList[li]; break } }
+          for (var li = 0; li < lvList.length; li++) { if (healthyModel(sid, lvList[li], dir)) { lv = lvList[li]; break } }
           if (!lv && lvList.length) lv = lvList[0] // 槽内全病：首项代表入链（既有熔断/冷却分支照旧兜底）
           if (lv) cands.push([lv, 'lane'])
         }
@@ -586,9 +659,13 @@ export function createDispatch(ctx, state, deps) {
         // 留痕：命中即 run.modelSource='fallback' + 卡 messages 记「原模型 X 冷却/熔断，切备用 Y」。
         var fbList = cfg(dsnap).fallbackModels
         for (var mi = 0; mi < cands.length; mi++) {
+          // ===== 目录失效闸（task-mvd3li6）：候选不在当前模型目录（已从宿主配置删除/改名）→ 跳过该候选 =====
+          // 覆盖卡级特例/档位/板级全路径——卡级特例只豁免健康闸（连败软闸/熔断/冷却），**不豁免存在闸**
+          // （原形：本体板已删除的失效模型钉在卡级特例上还在被派）。目录不可得（dir=null）→ 整体跳过不误伤。
+          if (outOfDir(cands[mi][0], dir)) { await traceStaleModel(sid, t.id, cands[mi][0]); continue }
           if (badModels[modelKey(sid, cands[mi][0])]) {
             // 熔断候选：先扫备用链找首个健康者（链本身逐项过健康检查），命中即切备用（不再降下一跳）
-            var fbHit = pickHealthyFallback(sid, fbList)
+            var fbHit = await pickHealthyFallback(sid, fbList, dir, t.id)
             if (fbHit) {
               console.error('[task-board] model ' + cands[mi][0] + ' (' + cands[mi][1] + ' 级) circuited, switch to fallback ' + fbHit)
               try {
@@ -619,7 +696,7 @@ export function createDispatch(ctx, state, deps) {
           if (cdUntil) {
             var cdFrom = modelOverride
             // 冷却候选：同样先扫备用链找首个健康者，链尽才走 C5 降档链
-            var fbCd = pickHealthyFallback(sid, fbList)
+            var fbCd = await pickHealthyFallback(sid, fbList, dir, t.id)
             if (fbCd) {
               modelOverride = fbCd
               modelSource = 'fallback'
@@ -643,6 +720,7 @@ export function createDispatch(ctx, state, deps) {
               var dmList = dl && Array.isArray(dl[roleKey]) ? dl[roleKey] : []
               for (var dmi = 0; dmi < dmList.length; dmi++) {
                 var dm = dmList[dmi]
+                if (outOfDir(dm, dir)) { console.error('[task-board] cooldown 降档候选 ' + dm + ' 不在当前模型目录（配置已失效），继续降档'); await traceStaleModel(sid, t.id, dm); continue }
                 if (badModels[modelKey(sid, dm)]) { console.error('[task-board] cooldown 降档候选 ' + dm + ' 熔断中，继续降档'); continue }
                 if (cooldownLive(dm)) { console.error('[task-board] cooldown 降档候选 ' + dm + ' 同在冷却期，继续降档'); continue }
                 cdPicked = dm; break
@@ -963,9 +1041,14 @@ export function createDispatch(ctx, state, deps) {
       // 已被熔断/冷却时照样续跑（实证：病模型续跑 38 分钟零产出）。修：续跑前查目标会话模型健康
       // （badModels 熔断 + modelCooldown 冷却，healthyModel 双闸同款），病模型 → 放弃续跑返回 fallback，
       // 调用方落回 fresh spawn 走健康取模链（链自动跳过病模型），原因随 resume-fallback 消息留档。
+      // task-mvd3li6 起健康面拓宽同款适用：近期连败软闸（recentRuns ≥2 全败）+ 目录失效闸（原模型
+      // 已从模型目录移除，续跑也救不回已删模型）一并拦下；目录不可得（dir=null）时目录闸跳过不误伤。
       var origModel = resumeModelOf(t)
-      if (origModel && !healthyModel(sid, origModel)) {
-        return { fallback: '续跑放弃：原模型 ' + origModel + ' 熔断/冷却中（续跑健康闸）——改走健康取模链重跑' }
+      if (origModel) {
+        var dir = await modelDirectory()
+        if (!healthyModel(sid, origModel, dir)) {
+          return { fallback: '续跑放弃：原模型 ' + origModel + ' 熔断/冷却/近期连败或配置已失效（续跑健康闸）——改走健康取模链重跑' }
+        }
       }
       var parent = rootForSession(sid)
       if (!parent) return { fallback: 'root 会话不在线，无法授权续跑' }

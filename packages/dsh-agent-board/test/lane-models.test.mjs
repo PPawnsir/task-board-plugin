@@ -592,3 +592,137 @@ test('备用链F5：无备用链配置时冷却降档/熔断降跳与现状逐�
   } finally { console.error = origErr }
 })
 
+// ===== 连败软闸 + 目录失效闸（task-mvd3li6）：healthyModel 增读 modelHealth recentRuns + 模型目录 =====
+// 断言清单（对应任务验收口径）：
+//   S1 连败软闸：recentRuns ≥2 且全败 → 取模跳过该模型（槽内次选赢）；1 次失败不闸（行为不变）；软熔断不落 badModels
+//   S2 一次成功复位：成功条目进 recentRuns 滚动窗 → 「全败」不成立 → 该模型重新被取（聚合表归零语义复用）
+//   D1 目录失效闸·卡级特例：模型已从模型目录移除 → 跳过该级降下一跳 + 卡 messages 留痕「配置已失效：X（已从模型目录移除）」
+//   D2 目录失效闸·档位槽：槽内目录外模型跳过取次选；槽全目录外 → 代表入链被存在闸拦下降下一跳
+//   D3 目录失效闸·备用链：链上目录外项跳过取下一个健康者（留痕）
+//   D4 目录不可得（llm 缺失/空目录/provider 枚举失败）→ 目录闸整体跳过，行为逐字不变（保守语义不误伤）
+// 病模型种法：state.modelHealth 直种 health entry（recentRuns 为聚合表近 5 次 run 成败，settleRunRecord 喂给）
+function seedRunsHealth(state, model, runs) {
+  if (!state.modelHealth) state.modelHealth = {}
+  if (!state.modelHealth[SID]) state.modelHealth[SID] = {}
+  state.modelHealth[SID][model] = { state: 'unknown', observed: 'unknown', lastSeen: null, lastProbe: null, note: '测试种入', observedNote: '测试种入', recentRuns: runs }
+}
+
+test('连败软闸S1：recentRuns ≥2 全败 → 槽内取模跳过该模型次选赢（软熔断不落 badModels）；单次失败不闸', async function () {
+  var origErr = console.error; console.error = function () {}
+  try {
+    // 槽 [first, second]，first 近 2 次全败 → 软闸 → second 赢（modelSource 仍 lane）
+    var calls = []
+    var b = laneArrBoard({ size: 'heavy' }, { heavy: { worker: ['lw/first', 'lw/second'], verifier: [] } })
+    var st = { badModels: {} }
+    seedRunsHealth(st, 'lw/first', [{ ok: false, at: '2026-01-01T00:00:00.000Z', latencyMs: 78000 }, { ok: false, at: '2026-01-01T00:01:00.000Z', latencyMs: null }])
+    var sr = await mkDispatch(b, { subagents: mkActivationSubagents(calls) }, st).spawnOneShot(SID, b.tasks[0], 'worker')
+    assert.ok(sr)
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'lw', model: 'second' }, '连败两次 → 槽内跳过该模型次选赢')
+    assert.equal(sr.modelSource, 'lane', '仍记 lane 跳（软闸=槽内健康判定，不走降档）')
+    assert.equal(Object.keys(st.badModels).length, 0, '软熔断不落 badModels 黑名单（与硬熔断语义分治）')
+    // 单次失败（< 2）不闸：first 照取（取模行为不变）
+    var calls2 = []
+    var b2 = laneArrBoard({ size: 'heavy' }, { heavy: { worker: ['lw/first', 'lw/second'], verifier: [] } })
+    var st2 = { badModels: {} }
+    seedRunsHealth(st2, 'lw/first', [{ ok: false, at: '2026-01-01T00:00:00.000Z', latencyMs: 78000 }])
+    await mkDispatch(b2, { subagents: mkActivationSubagents(calls2) }, st2).spawnOneShot(SID, b2.tasks[0], 'worker')
+    assert.deepEqual(calls2[0].request.agentOptions, { provider: 'lw', model: 'first' }, '单次失败未达软闸线，取模行为不变')
+  } finally { console.error = origErr }
+})
+
+test('连败软闸S2：一次成功即复位——成功条目进 recentRuns 后该模型重新被取（聚合表归零语义复用）', async function () {
+  var origErr = console.error; console.error = function () {}
+  try {
+    var calls = []
+    var b = laneArrBoard({ size: 'heavy' }, { heavy: { worker: ['lw/first', 'lw/second'], verifier: [] } })
+    var st = { badModels: {} }
+    seedRunsHealth(st, 'lw/first', [{ ok: false, at: '2026-01-01T00:00:00.000Z', latencyMs: 78000 }, { ok: true, at: '2026-01-01T00:01:00.000Z', latencyMs: 80 }])
+    var sr = await mkDispatch(b, { subagents: mkActivationSubagents(calls) }, st).spawnOneShot(SID, b.tasks[0], 'worker')
+    assert.ok(sr)
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'lw', model: 'first' }, '成功条目进窗 → 「全败」不成立 → 软闸复位 first 重新被取')
+    assert.equal(sr.modelSource, 'lane')
+  } finally { console.error = origErr }
+})
+
+test('目录闸D1：卡级特例模型已从模型目录移除 → 跳过该级降下一跳 + 卡 messages 留痕（特例只豁免健康闸不豁免存在闸）', async function () {
+  var origErr = console.error; console.error = function () {}
+  try {
+    var calls = []
+    var b = laneBoard({ model: 'gone/gone-m', size: 'heavy' })
+    await mkDispatch(b, { subagents: mkActivationSubagents(calls), get: mkLlmCtx({ lw: [{ id: 'lane-w' }], bw: [{ id: 'board-w' }] }).get }).spawnOneShot(SID, b.tasks[0], 'worker')
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'lw', model: 'lane-w' }, '卡级特例目录外 → 跳过该级降 lane')
+    assert.equal(b.tasks[0].runs[0].modelSource, 'lane')
+    var sm = (b.tasks[0].messages || []).filter(function (m) { return m.kind === 'stale-model' })
+    assert.equal(sm.length, 1, '卡 messages 记一条配置失效留痕')
+    assert.match(sm[0].text, /配置已失效：gone\/gone-m（已从模型目录移除）/, '留痕含模型与失效说明')
+  } finally { console.error = origErr }
+})
+
+test('目录闸D2：档位槽目录外模型跳过取次选；槽全目录外 → 代表入链被存在闸拦下降下一跳（留痕）', async function () {
+  var origErr = console.error; console.error = function () {}
+  try {
+    // 形态1：槽 [gone/gone-a, lw/second]，目录含 lw/second → 槽内跳过 gone-a 取 second
+    var calls = []
+    var b1 = laneArrBoard({ size: 'heavy' }, { heavy: { worker: ['gone/gone-a', 'lw/second'], verifier: [] } })
+    await mkDispatch(b1, { subagents: mkActivationSubagents(calls), get: mkLlmCtx({ lw: [{ id: 'second' }], bw: [{ id: 'board-w' }] }).get }).spawnOneShot(SID, b1.tasks[0], 'worker')
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'lw', model: 'second' }, '槽内目录外模型跳过，次选赢')
+    // 形态2：槽全目录外 → 首项代表入链 → cands 循环存在闸拦下 → 降板级
+    var calls2 = []
+    var b2 = laneArrBoard({ size: 'heavy' }, { heavy: { worker: ['gone/gone-a', 'gone/gone-b'], verifier: [] } })
+    await mkDispatch(b2, { subagents: mkActivationSubagents(calls2), get: mkLlmCtx({ lw: [{ id: 'lane-w' }], bw: [{ id: 'board-w' }] }).get }).spawnOneShot(SID, b2.tasks[0], 'worker')
+    assert.deepEqual(calls2[0].request.agentOptions, { provider: 'bw', model: 'board-w' }, '槽全目录外 → 代表被存在闸拦下降板级')
+    var sm2 = (b2.tasks[0].messages || []).filter(function (m) { return m.kind === 'stale-model' })
+    assert.equal(sm2.length, 1, '代表级留痕一条（per 模型去重）')
+    assert.match(sm2[0].text, /配置已失效：gone\/gone-a（已从模型目录移除）/)
+  } finally { console.error = origErr }
+})
+
+test('目录闸D3：备用链目录外项跳过取下一个健康者 + 留痕；候选健康时备用链零触发（行为不变）', async function () {
+  var origErr = console.error; console.error = function () {}
+  try {
+    // 候选（lane）冷却 → 备用链 [gone/fb-a, fb/fb-b]，目录含 fb/fb-b → 跳过 gone/fb-a 取 fb-b（留痕一条）
+    var calls = []
+    var b = laneBoard({ size: 'heavy' }, { fallbackModels: ['gone/fb-a', 'fb/fb-b'] })
+    var st = { modelCooldown: { 'lw/lane-w': Date.now() + 3600000 } }
+    await mkDispatch(b, { subagents: mkActivationSubagents(calls), get: mkLlmCtx({ lw: [{ id: 'lane-w' }], fb: [{ id: 'fb-b' }] }).get }, st).spawnOneShot(SID, b.tasks[0], 'worker')
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'fb', model: 'fb-b' }, '备用链目录外项跳过取下一个健康者')
+    assert.equal(b.tasks[0].runs[0].modelSource, 'fallback')
+    var sm = (b.tasks[0].messages || []).filter(function (m) { return m.kind === 'stale-model' })
+    assert.equal(sm.length, 1, '备用链目录外留痕一条')
+    assert.match(sm[0].text, /配置已失效：gone\/fb-a（已从模型目录移除）/)
+    // 候选健康（无冷却/熔断）→ 备用链不触发（零留痕零跳过，行为不变）
+    var calls2 = []
+    var b2 = laneBoard({ size: 'heavy' }, { fallbackModels: ['gone/fb-a'] })
+    await mkDispatch(b2, { subagents: mkActivationSubagents(calls2), get: mkLlmCtx({ lw: [{ id: 'lane-w' }] }).get }).spawnOneShot(SID, b2.tasks[0], 'worker')
+    assert.deepEqual(calls2[0].request.agentOptions, { provider: 'lw', model: 'lane-w' }, '候选健康 → 备用链不触发')
+    assert.equal((b2.tasks[0].messages || []).filter(function (m) { return m.kind === 'stale-model' }).length, 0, '零留痕')
+  } finally { console.error = origErr }
+})
+
+test('目录闸D4：目录不可得（llm 缺失/空目录/provider 枚举失败）→ 目录闸整体跳过行为逐字不变（保守语义）', async function () {
+  var origErr = console.error; console.error = function () {}
+  try {
+    // 形态1：llm 缺失（get → null，老宿主）→ 卡级特例照取（目录闸跳过，行为不变）
+    var calls = []
+    var b1 = laneBoard({ model: 'cm/card-m', size: 'heavy' })
+    await mkDispatch(b1, { subagents: mkActivationSubagents(calls) }).spawnOneShot(SID, b1.tasks[0], 'worker')
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'cm', model: 'card-m' }, 'llm 缺失 → 目录闸跳过，卡级特例照取')
+    assert.equal((b1.tasks[0].messages || []).filter(function (m) { return m.kind === 'stale-model' }).length, 0, '零留痕')
+    // 形态2：枚举结果为空目录 → 保守跳过（不误判全候选目录外）
+    var calls2 = []
+    var b2 = laneBoard({ model: 'cm/card-m', size: 'heavy' })
+    await mkDispatch(b2, { subagents: mkActivationSubagents(calls2), get: mkLlmCtx({}).get }).spawnOneShot(SID, b2.tasks[0], 'worker')
+    assert.deepEqual(calls2[0].request.agentOptions, { provider: 'cm', model: 'card-m' }, '空目录 → 保守跳过，行为不变')
+    // 形态3：provider 枚举抛错（目录不完整）→ 保守跳过
+    var calls3 = []
+    var b3 = laneBoard({ model: 'cm/card-m', size: 'heavy' })
+    var boomLlm = { get: function (name) {
+      if (name !== 'llm') return null
+      return { listProviders: function () { return [{ id: 'broken' }] }, listModels: async function () { throw new Error('gateway boom') } }
+    } }
+    await mkDispatch(b3, { subagents: mkActivationSubagents(calls3), get: boomLlm.get }).spawnOneShot(SID, b3.tasks[0], 'worker')
+    assert.deepEqual(calls3[0].request.agentOptions, { provider: 'cm', model: 'card-m' }, 'provider 枚举失败 → 保守跳过，行为不变')
+    assert.equal((b3.tasks[0].messages || []).filter(function (m) { return m.kind === 'stale-model' }).length, 0, '零留痕')
+  } finally { console.error = origErr }
+})
+
