@@ -8,6 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import * as core from '../lib/core.mjs'
 // 粒度治理（软闸门）住在 lib/policy.mjs（策略层，纯函数）、usage 聚合住在 lib/usage.mjs，
 // 均由 index.mjs 薄壳 re-export（对外契约不变），这里仍从 index.mjs 导入直接断言
@@ -3635,8 +3636,13 @@ const flush = () => new Promise(r => setImmediate(r))
 // 子进程探针源码（可续跑 Worker⑤ 用）：只在子进程里执行「真跑一次 continuable 派发 + 真读会话日志 + 真结算」。
 // 为什么必须子进程：findRunLog 走 os.homedir()（进程内首次调用即缓存），临时 HOME 只有在进程启动前
 // 设好才生效——同进程改 env 既无效又会带偏其它用例与真实看板目录。
+// CWD 解耦（task-mvr44r4m）：探针源码是字符串模板，其相对导入按子进程 CWD 解析——从仓库根跑会 ERR_MODULE_NOT_FOUND。
+// 修法：在本测试文件用 import.meta.url 换算出包内 lib 的 file:// 绝对 URL（Windows 下 ESM import 拒收裸盘符路径），
+// 注入探针源码头部的占位符，子进程 env/CWD 怎么变都不受影响。
+const PROBE_LIB_DISPATCH = new URL('../lib/dispatch.mjs', import.meta.url).href
+const PROBE_REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url)).replace(/[\\/]+$/, '') // git 仓库根（包外三层），钉 cwd 锁死回归
 const PROBE_CONTINUABLE_SOURCE = `
-const { createDispatch } = await import('./lib/dispatch.mjs')
+const { createDispatch } = await import(${JSON.stringify(PROBE_LIB_DISPATCH)})
 const SID = 'session-test-0000-0000-000000000000'
 const listeners = []
 const runs = {}
@@ -3799,7 +3805,8 @@ test('可续跑 Worker⑤：idle 后从子会话 v4 日志读到助手文本 →
   fs.mkdirSync(path.join(tmp, '.dsh', 'sessions', 'b1', 'child-ok'), { recursive: true })
   fs.writeFileSync(path.join(tmp, '.dsh', 'sessions', 'b1', 'child-ok', 'session.v4.jsonl.zstd'), Buffer.concat(chunks))
   try {
-    const child = spawnSync(process.execPath, ['-e', PROBE_CONTINUABLE_SOURCE], { env: Object.assign({}, process.env, { HOME: tmp, USERPROFILE: tmp }), encoding: 'utf8' })
+    // cwd 显式钉到仓库根（PROBE_REPO_ROOT）：锁死「仓库根 CWD 跑探针」回归——import 已绝对锚定，CWD 不再影响解析。
+    const child = spawnSync(process.execPath, ['-e', PROBE_CONTINUABLE_SOURCE], { cwd: PROBE_REPO_ROOT, env: Object.assign({}, process.env, { HOME: tmp, USERPROFILE: tmp }), encoding: 'utf8' })
     assert.equal(child.status, 0, 'probe 失败: ' + child.stderr)
     const out = JSON.parse(child.stdout.trim().split('\n').pop())
     assert.equal(out.status, 'verifying')                 // 文本通道：有助手文本 → 正常推进 verifying
@@ -4058,11 +4065,12 @@ test('可续跑 Worker⑪（卡2⑤）：workerContinuable=false → 续跑机�
 
 // 子进程探针（卡2 续跑基线护栏）：真建 v4 日志 → 真续跑 → 区分「续跑轮没产出（旧文本不得冒充交付物）」
 // 与「续跑轮真产出（正常推进 verifying）」。必须子进程：findRunLog 走 os.homedir() 且进程内首次调用即缓存。
+// CWD 解耦（task-mvr44r4m）：相对导入改为头部注入的 PROBE_LIB_DISPATCH file:// 绝对 URL（import.meta.url 换算），与 CWD 无关。
 const PROBE_RESUME_BASELINE_SOURCE = `
 const fs = await import('node:fs')
 const path = await import('node:path')
 const zlib = await import('node:zlib')
-const { createDispatch } = await import('./lib/dispatch.mjs')
+const { createDispatch } = await import(${JSON.stringify(PROBE_LIB_DISPATCH)})
 const SID = 'session-test-0000-0000-000000000000'
 const childId = 'child-old'
 const logDir = path.join(process.env.HOME, '.dsh', 'sessions', 'b1', childId)
@@ -4110,7 +4118,8 @@ console.log(JSON.stringify({ stale: stale, ok: { status: t.status, deliverable: 
 test('可续跑 Worker⑫（卡2 续跑基线）：续跑轮没产出 → 残留旧文本不得冒充交付物（按失败重排）；真产出 → 正常推进 verifying', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tbc2-'))
   try {
-    const child = spawnSync(process.execPath, ['-e', PROBE_RESUME_BASELINE_SOURCE], { env: Object.assign({}, process.env, { HOME: tmp, USERPROFILE: tmp }), encoding: 'utf8' })
+    // cwd 显式钉到仓库根（PROBE_REPO_ROOT）：锁死「仓库根 CWD 跑探针」回归——import 已绝对锚定，CWD 不再影响解析。
+    const child = spawnSync(process.execPath, ['-e', PROBE_RESUME_BASELINE_SOURCE], { cwd: PROBE_REPO_ROOT, env: Object.assign({}, process.env, { HOME: tmp, USERPROFILE: tmp }), encoding: 'utf8' })
     assert.equal(child.status, 0, 'probe 失败: ' + child.stderr)
     const out = JSON.parse(child.stdout.trim().split('\n').pop())
     assert.deepEqual(out.sent, ['child-old', 'child-old'])   // 两轮都是真续跑（sendMessage 冷复活）
