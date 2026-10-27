@@ -1,0 +1,305 @@
+// dsh-agent-board — 故障 E2E：挂死零产出 60s 判死重派（task-mvqi3uj4-4，真循环形态）
+// 事故类「挂死零产出」（原形：glm-5.2 连接开着永不响应，日志零增长 7 分钟人工才发现）的端到端回归。
+// 机制锚点：hungZeroOutputSweep（lib/dispatch.mjs）双闸 = 连续 4 轮零增长 × 距基线 ≥60s 墙钟
+//（HUNG_ZERO_GROWTH_ROUNDS / HUNG_ZERO_GROWTH_MS 常量）；logSizeOf 走 findRunLog(sessionsRoot)。
+// 与薄桩 mkGateDispatch（settle-stop-interrupt.test.mjs 挂死①-⑤）互补——本套是「真循环形态」：
+//   · 真 harness：真实 index.mjs apply(mockCtx)（与 integration.test.mjs 同一卡1 harness），不改生产代码；
+//   · 真日志：pinHomedir 钉 USERPROFILE 到临时 HOME（Windows 下 findRunLog 回退 os.homedir() 所必须），
+//     往 <home>/.dsh/sessions/<桶>/<childId>/session.v4.jsonl.zstd 写真 zstd 帧后停笔（零增长）；
+//   · 真派发循环：kickCycle 50ms 去抖（advance(50)）驱动 spawn，15s 心跳（tick）驱动 sweep 轮；
+//   · 墙钟闸：虚拟时钟推不动 Date.now 墙钟——patchBoard 把 zeroGrowthSince 按真实时间倒推 61s
+//     （integration.test.mjs「patchBoard 把 claimedAt 按真实时间倒推」同款先例），再驱 4 轮心跳 → 判死。
+// 断言纪律：E2E 下连击表（modelFailStreak/badModels）在 dispatch 闭包内不可直读——全部走行为证据：
+//   卡面 runs 行（model/modelSource/outcome/endedAt/zeroGrowthRounds）、lastError、sendMessages、
+//   新 spawn 的 request.agentOptions 有无（prov/hung 三连熔断后新 spawn 不再带它 = 拉黑生效）。
+// 故障注入：board.workerModel='prov/hung'（patchBoard 注入；set-board-config 对非在册 id 会拒写——
+//   mock llm 空 provider 清单下 enumModels 返回 [] 走拒写分支，故走 patchBoard）；
+//   continuable worker spawn 后测试写真日志帧再停笔 = 「会话在但不干活」的挂死形态。
+// 时钟纪律：Date.now 真实墙钟不动；advance(50) 只在 spawn 轮用（kickCycle 去抖），sweep 轮全走
+//   tick()（手动触发 15s 心跳 interval，不动虚拟时间）——续跑死亡哨兵 5s / 软硬超时臂 30min/120min
+//   均是 timer.timeout 虚拟定时，全程永不触发，判死唯一来源 = 挂死 sweep（真双闸）。
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import zlib from 'node:zlib'
+import { createMockCtx } from './helpers/mock-ctx.mjs'
+import * as plugin from '../index.mjs'
+
+// ===== 测试工具（与 integration.test.mjs 同形）=====
+// 一帧 v4 日志（与 lib/usage.mjs readLogFrames 同形：多帧 zstd 顺序拼接，帧内 jsonl）
+function frameOf(events) { return zlib.zstdCompressSync(Buffer.from(events.map(function (e) { return JSON.stringify(e) }).join('\n') + '\n', 'utf8')) }
+
+// 写一份 continuable 子会话日志（写真日志帧后停笔 = 零增长挂死形态）；返回日志路径与字节数。
+// 布局与真实一致 <home>/.dsh/sessions/<桶>/<childId>/session.v4.jsonl.zstd（findRunLog 按桶探测）
+function writeChildLog(env, childId, text) {
+  var dir = path.join(env.home, '.dsh', 'sessions', 'test-bucket', childId)
+  fs.mkdirSync(dir, { recursive: true })
+  var ev = { type: 'assistant/message', time: Date.now(), seq: 1, data: { message: { content: [{ type: 'text', text: text }] } } }
+  var p = path.join(dir, 'session.v4.jsonl.zstd')
+  fs.writeFileSync(p, frameOf([ev]))
+  return { path: p, bytes: fs.statSync(p).size }
+}
+
+// 把 os.homedir() 钉到本用例临时 HOME（Windows 下认 USERPROFILE）；返回恢复闭包（finally 里先于 cleanup 调）
+function pinHomedir(env) {
+  var had = Object.prototype.hasOwnProperty.call(process.env, 'USERPROFILE')
+  var prev = process.env.USERPROFILE
+  process.env.USERPROFILE = env.home
+  return function () { if (had) process.env.USERPROFILE = prev; else delete process.env.USERPROFILE }
+}
+
+// 建卡封装：显式 description 避开空描述软提示；其余字段按需透传
+async function createTask(env, id, extra) {
+  var args = { sessionId: env.sid, id: id, title: '挂死E2E任务 ' + id, description: '挂死零产出 E2E 用例 ' + id }
+  if (extra) { for (var k in extra) args[k] = extra[k] }
+  var r = await env.rpc('create-task', args)
+  assert.equal(r.ok, true, 'create-task 成功: ' + id)
+  assert.equal(r.task.status, 'pending', '非 Team 模式即建即 pending: ' + id)
+  return r.task
+}
+
+// 墙钟倒推（integration.test.mjs 先例）：patchBoard 把某行 zeroGrowthSince 按真实墙钟倒推 61s——
+// 虚拟时钟推不动 Date.now 墙钟，只能倒推基线；61s > HUNG_ZERO_GROWTH_MS(60000) 墙钟闸即过。
+// 补丁前先走真时钟排水窗（150ms）：waitFor 只等到了 sweep 的写盘，poolCycleBody 尾部的大锁段
+//（池快照每轮重写）仍在飞——不排水补丁会被「读旧文档的在飞写」覆盖（stale doc 回写），
+// zeroGrowthSince 丢失墙钟闸永不过（mock-ctx cleanup 的 100ms 静默窗同款先例）。
+async function pushBackBaseline(env, taskId, childId) {
+  await new Promise(function (r) { setTimeout(r, 150) }) // 真时钟排水窗：烧完上一轮 poolCycle 的在飞写盘
+  env.patchBoard(function (d) {
+    var t = d.tasks.find(function (x) { return x.id === taskId })
+    var row = (t.runs || []).find(function (r) { return String(r.id) === String(childId) && r.outcome === 'running' })
+    assert.ok(row, '墙钟倒推目标行存在（在跑 run 留档）')
+    row.zeroGrowthSince = (typeof row.zeroGrowthSince === 'number' ? row.zeroGrowthSince : Date.now()) - 61000
+  })
+}
+
+// 心跳驱 N 轮零增长：tick() 手动触发 15s 心跳 interval → poolCycle → sweep 轮；每轮 waitFor 计数
+// 落盘再进下一轮（真 fs I/O 不定长，确保上一轮 sweep 写盘完成后才打下一轮心跳）。
+// 只驱动「行还开着」的轮次（判死轮由调用方 tick 后 waitFor 关账结局——判死轮 outcome 已翻走）。
+async function driveZeroGrowthRounds(env, taskId, childId, rounds) {
+  for (var i = 1; i <= rounds; i++) {
+    await env.clock.tick()
+    var target = i
+    await env.waitFor(function () {
+      var t = env.task(taskId)
+      var row = (t.runs || []).find(function (r) { return String(r.id) === String(childId) && r.outcome === 'running' })
+      return row && row.zeroGrowthRounds === target ? row : null
+    }, '零增长第 ' + target + ' 轮计数落盘')
+  }
+}
+
+// 看某行基线字段是否已落（首轮 sweep 记基线的 waitFor 条件）
+function baselineOf(env, taskId, childId) {
+  return function () {
+    var t = env.task(taskId)
+    var row = (t.runs || []).find(function (r) { return String(r.id) === String(childId) && r.outcome === 'running' })
+    return row && typeof row.lastLogBytes === 'number' && typeof row.zeroGrowthSince === 'number' ? row : null
+  }
+}
+
+// 共用引导（机械段）：独立临时 HOME + USERPROFILE 钉死 → 真 apply → 故障注入（板级模型钉 prov/hung）
+// → 建卡 → 自动派发（continuable spawn，模型=prov/hung）。返回 { env, unpin, child, log }。
+// 挂死编排段（写真日志帧/基线/倒推/心跳轮）由各用例内联——真循环形态的编排本身就是被测行为。
+async function bootHungBoard(env, taskId) {
+  var unpin = pinHomedir(env)
+  plugin.apply(env.ctx)
+  await createTask(env, taskId, { pipeline: 'full', acceptance: 'npm test' }) // 建卡先落盘（板文件存在后才能 patchBoard）
+  env.patchBoard(function (d) { d.workerModel = 'prov/hung' }) // 故障注入：spawn 前落盘（下一轮取模链读到）
+  await env.clock.advance(50) // kickCycle 50ms 去抖 → poolCycle → continuable spawn（模型=prov/hung）
+  await env.waitFor(function () { return env.continuables.length >= 1 }, 'worker spawn 发生')
+  var child = env.continuables[0]
+  await env.waitFor(function () {
+    var x = env.task(taskId)
+    var r = x && x.runs && x.runs[0]
+    return x && x.status === 'in-progress' && r && r.outcome === 'running' && r.model === 'prov/hung' ? x : null
+  }, '落卡 in-progress 且 runs[0] running（model=prov/hung）')
+  return { env: env, unpin: unpin, child: child }
+}
+
+// ===== E2E①：真日志零增长 4 轮 × 墙钟倒推 61s → 判死关账 + 自动重派续跑（真循环全链）=====
+// 场景（真循环形态）：建卡 → continuable worker spawn 于 prov/hung → 写真日志帧后停笔（零增长）→
+// 首轮 sweep 扫过只记基线 → patchBoard 把 zeroGrowthSince 倒推 61s → tick 驱 4 轮心跳 → 判死。
+test('E2E挂死①：真日志零增长+墙钟倒推 61s → 4 轮心跳判死关账；判死后自动重派冷复活原子会话', async () => {
+  var env = createMockCtx()
+  var boot = null
+  try {
+    boot = await bootHungBoard(env, 'task-hung-1')
+    var child1 = boot.child
+    // 写真日志帧后停笔（零增长）：「会话在但不干活」的挂死形态——真文件落 <home>/.dsh/sessions/
+    var log = writeChildLog(env, child1.childId, '初始帧：worker 已 spawn，此后零产出（挂死形态）')
+    // 首轮 sweep 扫过只记基线：lastLogBytes/zeroGrowthSince 落 runs 留档，不计数不判死
+    await env.clock.tick()
+    var row0 = await env.waitFor(baselineOf(env, 'task-hung-1', child1.childId), '首轮 sweep 记基线（lastLogBytes/zeroGrowthSince）')
+    assert.equal(row0.lastLogBytes, log.bytes, '基线=真日志当前字节数（logSizeOf→findRunLog→statSync）')
+    assert.equal(row0.zeroGrowthRounds, undefined, '首见只记基线不计数（绝不在第一眼判死）')
+    assert.equal(row0.outcome, 'running', '基线轮不判死')
+    // 墙钟倒推 61s（虚拟时钟推不动 Date.now，只能倒推基线）
+    await pushBackBaseline(env, 'task-hung-1', child1.childId)
+    // tick 驱 4 轮心跳 → 判死（双闸：4 轮零增长 × 距基线 ≥60s）
+    await driveZeroGrowthRounds(env, 'task-hung-1', child1.childId, 3)
+    await env.clock.tick()
+    await env.waitFor(function () { var x = env.task('task-hung-1'); return x && x.runs[0] && x.runs[0].outcome === 'timeout/error' ? x : null }, '第 4 轮判死关账')
+    // 断言②：判死后自动重派发生（真循环：sweep 判死结算→同一轮 pickDispatch→tryResumeWorker）；
+    // 连败软闸未达线（1 次失败 < 2，recentRuns 仅 1 条全败）→ 续跑健康闸放行 → 冷复活原子会话。
+    // 先等重派完成再断言（判死轮的 pending 态随即被续跑翻走，直接断言 pending 有竞态）
+    await env.waitFor(function () {
+      var x = env.task('task-hung-1')
+      var r2 = x && x.runs && x.runs.find(function (r) { return r.resume === true })
+      return r2 && r2.outcome === 'running' && x.claimedBy === child1.childId ? r2 : null
+    }, '判死后自动重派（续跑行落卡）')
+    // 断言①：lastError 含「挂死」、runs[0] outcome=timeout/error、endedAt 落账（结算后稳定字段）
+    var t = env.task('task-hung-1')
+    assert.match(String(t.lastError || ''), /挂死/, '挂死原因落卡（lastError）')
+    assert.match(String(t.lastError || ''), /零产出/, 'lastError 带零产出诊断')
+    assert.equal(t.runs[0].outcome, 'timeout/error', '挂死 run 关账（settleRun 失败臂 err 路径）')
+    assert.ok(t.runs[0].endedAt, '关账写 endedAt')
+    assert.equal(t.runs[0].zeroGrowthRounds, 4, '判死轮计数=4（双闸轮数半边）')
+    assert.equal(t.retryCount, 1, '失败计数照旧（失败臂语义不变）')
+    assert.ok((t.history || []).some(function (h) { return h.from === 'in-progress' && h.to === 'pending' }), '失败臂重排留史（in-progress→pending）')
+    t = env.task('task-hung-1')
+    var resumeRow = t.runs.find(function (r) { return r.resume === true })
+    assert.equal(resumeRow.id, child1.childId, '重派目标=原原子会话（同一 childId）')
+    assert.equal(resumeRow.model, 'prov/hung', '续跑行 model 补齐归因（原模型经健康闸放行）')
+    assert.equal(t.status, 'in-progress', '重派落卡 in-progress')
+    assert.equal(t.claimedBy, child1.childId, '认领位回原子会话')
+    var sm = env.sendMessages.find(function (m) { return m.childId === child1.childId })
+    assert.ok(sm, '重派=sendMessage 冷复活原子会话（sendMessages 记录）')
+    assert.match(String((sm.content || [])[0] && sm.content[0].text || ''), /断点续跑/, '冷复活文本=断点续跑指令')
+  } finally {
+    if (boot) boot.unpin()
+    await env.cleanup()
+  }
+})
+
+// ===== E2E②：同病模型三连挂死 → 熔断拉黑行为证据（新 spawn 不再选 prov/hung）=====
+// 连击表（modelFailStreak/badModels）在 dispatch 闭包内不可直读——行为证据链：
+//   挂死#1（连击1）→ 重派续跑冷复活（健康闸放行）→ 挂死#2（连击2）→ 重派被连败软闸拦截改 fresh spawn
+//   （recentRuns 2 全败，板级模型接手）→ 挂死#3（连击3）→ 熔断拉黑（卡 blocked）→ 新卡 spawn
+//   不再选 prov/hung（request.agentOptions 缺席 + modelSource=parent = 取模链跳过熔断模型）。
+test('E2E挂死②：同病模型三连挂死 → 熔断拉黑——新 spawn 不再选 prov/hung（agentOptions 缺席+modelSource=parent）', async () => {
+  var env = createMockCtx()
+  var boot = null
+  try {
+    boot = await bootHungBoard(env, 'task-hung-c')
+    var child1 = boot.child
+    // ---- 挂死 #1：写真日志帧 → 基线 → 倒推 61s → 4 轮心跳 → 判死（连击 1）----
+    var log1 = writeChildLog(env, child1.childId, '初始帧 #1')
+    await env.clock.tick()
+    await env.waitFor(baselineOf(env, 'task-hung-c', child1.childId), '挂死#1 基线落档')
+    await pushBackBaseline(env, 'task-hung-c', child1.childId)
+    await driveZeroGrowthRounds(env, 'task-hung-c', child1.childId, 3)
+    await env.clock.tick()
+    await env.waitFor(function () { var x = env.task('task-hung-c'); return x && x.runs[0] && x.runs[0].outcome === 'timeout/error' ? x : null }, '挂死#1 判死关账')
+    // 挂死#1 后重派：连败软闸未达线（1 次失败）→ 冷复活同一会话（runs[1] resume）
+    await env.waitFor(function () {
+      var x = env.task('task-hung-c')
+      var r2 = x && x.runs && x.runs.find(function (r) { return r.resume === true })
+      return r2 && r2.outcome === 'running' && x.claimedBy === child1.childId ? r2 : null
+    }, '挂死#1 后冷复活（resume 行落卡）')
+    assert.equal(env.sendMessages.length, 1, '挂死#1 重派=sendMessage 冷复活恰一次')
+    // ---- 挂死 #2：续跑行基线 → 倒推 61s → 4 轮心跳 → 判死（连击 2）----
+    await env.clock.tick() // sweep 对续跑行首见记基线（同一会话日志未涨=复活后仍挂死）
+    await env.waitFor(baselineOf(env, 'task-hung-c', child1.childId), '挂死#2 基线落档（续跑行）')
+    await pushBackBaseline(env, 'task-hung-c', child1.childId)
+    await driveZeroGrowthRounds(env, 'task-hung-c', child1.childId, 3)
+    await env.clock.tick()
+    await env.waitFor(function () {
+      var x = env.task('task-hung-c')
+      var r2 = x && x.runs && x.runs.find(function (r) { return r.resume === true })
+      return r2 && r2.outcome === 'timeout/error' ? r2 : null
+    }, '挂死#2 判死关账（resume 行）')
+    // 挂死#2 后重派：连败软闸达线（recentRuns 2 全败）→ 续跑健康闸拦截 → fresh spawn（板级模型接手）
+    await env.waitFor(function () {
+      var x = env.task('task-hung-c')
+      return x && x.runs && x.runs.length >= 3 && x.runs[2].outcome === 'running' && !x.runs[2].resume ? x.runs[2] : null
+    }, '挂死#2 后 fresh spawn 落卡（续跑健康闸拦截改新会话）')
+    var t2 = env.task('task-hung-c')
+    assert.equal(t2.runs[2].model, 'prov/hung', 'fresh spawn 走板级模型（连击 2 < 3 未熔断，链首项照常在册）')
+    assert.equal(t2.runs[2].modelSource, 'board', 'modelSource=board 留档')
+    assert.equal(t2.runs[2].continuable, true, 'fresh spawn 是新 continuable 会话')
+    assert.ok(t2.messages && t2.messages.some(function (m) { return m.kind === 'resume-fallback' }), '续跑放弃留痕（resume-fallback 消息）')
+    var child2 = env.continuables[1]
+    assert.ok(child2 && child2.childId !== child1.childId, 'fresh spawn 是新子会话（非冷复活）')
+    assert.equal(env.sendMessages.length, 1, '连败软闸拦截后零第二次冷复活投递')
+    // ---- 挂死 #3：写真日志帧 → 基线 → 倒推 61s → 4 轮心跳 → 判死（连击 3 → 熔断拉黑 + 卡 blocked）----
+    var log2 = writeChildLog(env, child2.childId, '初始帧 #2（fresh spawn 后停笔）')
+    await env.clock.tick()
+    await env.waitFor(baselineOf(env, 'task-hung-c', child2.childId), '挂死#3 基线落档（fresh spawn 行）')
+    assert.equal(env.task('task-hung-c').runs[2].lastLogBytes, log2.bytes, 'fresh spawn 行基线=其真日志字节数')
+    await pushBackBaseline(env, 'task-hung-c', child2.childId)
+    await driveZeroGrowthRounds(env, 'task-hung-c', child2.childId, 3)
+    await env.clock.tick()
+    await env.waitFor(function () {
+      var x = env.task('task-hung-c')
+      return x && x.status === 'blocked' && x.runs[2] && x.runs[2].outcome === 'timeout/error' ? x : null
+    }, '挂死#3 判死关账 + 三连败 → 卡 blocked（worker 失败 x3 语义）')
+    var t3 = env.task('task-hung-c')
+    assert.match(String(t3.lastError || ''), /挂死/, '挂死#3 原因落卡')
+    // ---- 熔断行为证据：新卡 spawn 不再选 prov/hung（badModels 已拉黑，备用链空 → 父模型兜底）----
+    await createTask(env, 'task-hung-d', { pipeline: 'full', acceptance: 'npm test' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 3 }, '新卡 spawn 发生（熔断后取模链跳过病模型）')
+    var child3 = env.continuables[2]
+    await env.waitFor(function () {
+      var x = env.task('task-hung-d')
+      return x && x.status === 'in-progress' && x.runs && x.runs[0] && x.runs[0].outcome === 'running' ? x : null
+    }, '新卡落卡')
+    assert.equal(child3.request && child3.request.agentOptions, undefined, '新 spawn 不再带 prov/hung（agentOptions 缺席=熔断拉黑生效）')
+    var t4 = env.task('task-hung-d')
+    assert.equal(t4.runs[0].model, '', '新 spawn 模型留档为空（父模型兜底）')
+    assert.equal(t4.runs[0].modelSource, 'parent', 'modelSource=parent（取模链跳过熔断模型，槽位/备用链均无健康者）')
+  } finally {
+    if (boot) boot.unpin()
+    await env.cleanup()
+  }
+})
+
+// ===== E2E③：活体增长不误伤反例（settle-stop-interrupt 挂死②薄桩断言搬真循环）=====
+// 增长中 run 不误伤：追加真日志字节 → 推进一轮 → 清零计数+刷新基线（zeroGrowthRounds 删除）；
+// 且增长刷新的基线是真实墙钟 now——随后快轮 4 连零增长（轮数达 4）被 60s 墙钟闸兜住不判死
+// （写风暴下纯轮数会秒判刚 spawn 的 run——双闸的墙钟半边在真循环里直证）。
+test('E2E挂死③：活体增长清零计数+刷新基线不误伤；增长后快轮 4 连被 60s 墙钟闸兜住', async () => {
+  var env = createMockCtx()
+  var boot = null
+  try {
+    boot = await bootHungBoard(env, 'task-hung-l')
+    var child = boot.child
+    var log = writeChildLog(env, child.childId, '初始帧：worker 已 spawn')
+    await env.clock.tick()
+    var row = await env.waitFor(baselineOf(env, 'task-hung-l', child.childId), '基线落档')
+    assert.equal(row.lastLogBytes, log.bytes, '基线=真日志字节数')
+    // 墙钟倒推 61s → 3 轮零增长（轮数 3 < 4，未达轮数闸）
+    await pushBackBaseline(env, 'task-hung-l', child.childId)
+    await driveZeroGrowthRounds(env, 'task-hung-l', child.childId, 3)
+    assert.equal(env.task('task-hung-l').runs[0].outcome, 'running', '3 轮 < 4 不判死')
+    // 反例：追加真日志帧（活体增长）→ 推进一轮 → 清零计数+刷新基线
+    var ev2 = { type: 'assistant/message', time: Date.now(), seq: 2, data: { message: { content: [{ type: 'text', text: '活体增长帧：worker 真在干活' }] } } }
+    fs.appendFileSync(log.path, frameOf([ev2]))
+    var grown = fs.statSync(log.path).size
+    await env.clock.tick()
+    await env.waitFor(function () {
+      var x = env.task('task-hung-l'); var r = x && x.runs[0]
+      return r && r.lastLogBytes === grown && r.zeroGrowthRounds === undefined ? r : null
+    }, '活体增长：清零计数+刷新基线（薄桩挂死②同款断言）')
+    assert.equal(env.task('task-hung-l').runs[0].lastLogBytes, grown, '基线刷新到最新字节数')
+    // 增长后的基线是真实墙钟 now：再快轮 4 连零增长（轮数达 4）→ 60s 墙钟闸兜住不判死
+    await driveZeroGrowthRounds(env, 'task-hung-l', child.childId, 3)
+    await env.clock.tick()
+    var t = await env.waitFor(function () {
+      var x = env.task('task-hung-l'); var r = x && x.runs[0]
+      return r && r.zeroGrowthRounds === 4 && r.outcome === 'running' ? r : null
+    }, '零增长轮数按真实心跳累计到 4')
+    assert.equal(t.zeroGrowthRounds, 4, '轮数半边达线（4 轮零增长）')
+    assert.equal(t.outcome, 'running', '60s 墙钟闸兜住：活体增长刷新基线后快轮 4 连不判死（写风暴防秒判）')
+    // 全程零误伤：卡在跑、零 lastError、零重派
+    var card = env.task('task-hung-l')
+    assert.equal(card.status, 'in-progress', '全程零误伤（卡保持 in-progress）')
+    assert.ok(!card.lastError, '零 lastError（未判死）')
+    assert.equal(env.continuables.length, 1, '零重派（无冷复活/新 spawn）')
+    assert.equal(env.sendMessages.length, 0, '零续跑投递')
+  } finally {
+    if (boot) boot.unpin()
+    await env.cleanup()
+  }
+})
