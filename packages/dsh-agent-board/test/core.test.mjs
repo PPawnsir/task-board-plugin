@@ -1062,6 +1062,29 @@ test('parsePlanFiles: 像路径判定——纯散文行直接丢弃；路径行/
   assert.deepEqual(core.planOutsideTouches(['lib/**'], core.parsePlanFiles('计划改动：\n- 纯说明行一\n- 纯说明行二')), [])
 })
 
+// 像路径判定收紧（task-mvr44s0y，n-mvqfiofr0kt9 追加样本）：全角标点拆段 + 含路径碎片散文段两类残留根治
+test('parsePlanFiles: 收紧——全角分隔长说明段不进清单；含路径碎片的散文段整条丢弃（选定语义：取前缀或丢弃二选一取丢弃）；路径优先混合行截到路径前缀；引号包裹路径含空格不受影响', () => {
+  // ① 全角标点拆段（n-mvqfiofr0kt9 追加样本）：中文逗号分隔的长说明段（散文在前、路径碎片在后）整段不进清单
+  assert.deepEqual(core.parsePlanFiles('计划改动：本次重构 lib/core.mjs 的 parsePlanFiles，补全测试断言，顺带更新 README'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：修复 lib/core.mjs 的解析，更新 test/x.mjs 的断言'), [])
+  // 全散文 = 空数组 → rpc.mjs 既有「未解析到路径 → 重报提示」自纠正语义
+  assert.deepEqual(core.planOutsideTouches(['lib/**'], core.parsePlanFiles('计划改动：已完成调研，计划只动解析器，比对逻辑不动')), [])
+  // 混合清单：全角分隔散文段丢弃、正常路径行保留
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs\n修 parsePlanFiles 的解析，补全测试断言，更新 README'), ['lib/core.mjs'])
+  // ② 含路径碎片的散文段（n-mvqfiofr0kt9 追加样本）：说明在前、路径碎片在中 → 整条丢弃（选定语义锁死）
+  assert.deepEqual(core.parsePlanFiles('计划改动：故障层复用 test/helpers/fault-provider.mjs 可变目录'), [])
+  // 全角标点粘连散文（无空格）同理丢弃——截断类含全角冒号
+  assert.deepEqual(core.parsePlanFiles('计划改动：故障层：复用test/helpers/fault-provider.mjs'), [])
+  // 路径优先混合行：「路径+空格+说明」「路径+全角标点+说明」截到首个空白/全角标点前的路径前缀
+  assert.deepEqual(core.parsePlanFiles('计划改动：test/helpers/fault-provider.mjs 故障层可变目录复用点'), ['test/helpers/fault-provider.mjs'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs—解析器'), ['lib/core.mjs'])
+  // 截出的路径前缀参与 touches 比对：散文段不触发假越界，路径前缀正常判定
+  assert.deepEqual(core.planOutsideTouches(['test/helpers/**'], core.parsePlanFiles('计划改动：test/helpers/fault-provider.mjs 故障层可变目录')), [])
+  assert.deepEqual(core.planOutsideTouches(['lib/**'], core.parsePlanFiles('计划改动：lib/core.mjs 修复点，test/x.mjs 另行处理')), ['test/x.mjs'])
+  // 引号包裹路径含空格不受影响（「除非引号包裹」例外分支：取首对反引号内容）
+  assert.deepEqual(core.parsePlanFiles('计划改动：`my docs/a b.md`（注释）'), ['my docs/a b.md'])
+})
+
 test('touchCovers: 单向覆盖——touch 模式 ⊇ 计划文件（与 matchOne 对称语义方向相反）', () => {
   assert.equal(core.touchCovers('lib/core.mjs', 'lib/core.mjs'), true)   // 精确
   assert.equal(core.touchCovers('lib/core.mjs', 'lib/rpc.mjs'), false)
