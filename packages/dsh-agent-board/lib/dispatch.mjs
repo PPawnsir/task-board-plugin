@@ -252,11 +252,29 @@ export function createDispatch(ctx, state, deps) {
     // listChildren 查不出）、不报错（无 settle 事件）、零产出（日志零增长 7 分钟），running 假相直到
     // 人工终止。熔断/冷却/哨兵全部够不着它（哨兵只盖「会话不在目录」，这里盖「会话在但不干活」）。
     // 判死口径：连续 HUNG_ZERO_GROWTH_ROUNDS 轮（缺省 4 ≈ 4×15s 心跳）日志零增长 **且距基线
-    // ≥HUNG_ZERO_GROWTH_MS**（墙钟闸）——poolCycle 不只心跳驱动，每次写盘都 kickCycle（写风暴下
-    // 4 轮可在 1s 内跑完），纯轮数会对刚 spawn 的 run 秒判；双闸 = 「≥4 轮零增长且真跨 60s」。
+    // ≥自适应墙钟阈值**——poolCycle 不只心跳驱动，每次写盘都 kickCycle（写风暴下 4 轮可在 1s
+    // 内跑完），纯轮数会对刚 spawn 的 run 秒判；双闸 = 「≥4 轮零增长且真跨墙钟阈值」。
     // 常量化暂不开放配置（实证再调）。
     var HUNG_ZERO_GROWTH_ROUNDS = 4
-    var HUNG_ZERO_GROWTH_MS = 60000
+    // ===== 挂死墙钟阈值自适应（task-mvrg3962）：慢模型不再误杀 =====
+    // 生产事故（2026-10-28 用户目击「只卡了下而已」）：cmss/zhanlu/deepseek-v4.1-flash 首 token
+    // 实测延迟 77~132s（健康表 latencyMs 有案），run 起飞 60s 还在等第一个 token → 固定 60s 墙钟闸
+    // 误杀。慢模型（网关系）与挂死的「零产出窗口」在 60s 尺度不可区分。修法：墙钟闸 =
+    // max(180s 地板, 3×该模型健康表最近观测 latencyMs)；无延迟数据回退 180s 地板。轮数闸（4 轮）
+    // 保留——写风暴防秒判语义不变。熔断喂连击/重派链路均不动。
+    var HUNG_WALL_FLOOR_MS = 180000
+    var HUNG_WALL_LATENCY_MULT = 3
+    // 取自适应墙钟阈值：读健康表该模型最近观测 latencyMs（observeModel 落表，run/探测双源）。
+    // 只读不建表（healthEntry 会建空条目，sweep 每轮调用不能产生副作用写）。返回
+    // { ms: 生效阈值, latencyMs: 依据的实测延迟（null=无数据走地板） }。
+    function hungWallOf(sid, model) {
+      var latency = null
+      try {
+        var e = modelHealth[sid] && modelHealth[sid][model]
+        if (e && typeof e.latencyMs === 'number' && e.latencyMs > 0) latency = e.latencyMs
+      } catch (e2) { /* 读表失败按无数据走地板（宁少勿多） */ }
+      return { ms: latency ? Math.max(HUNG_WALL_FLOOR_MS, HUNG_WALL_LATENCY_MULT * latency) : HUNG_WALL_FLOOR_MS, latencyMs: latency }
+    }
     var HUNG_KILL_PREFIX = 'run 挂死：' // 判死失败文本前缀（进 isModelKillFailure 白名单 = 计入熔断连击）
     var HUNG_CIRCUIT_WHY = '挂死零产出（会话日志字节持续不涨），已熔断' // 挂死触发的熔断文案分态（挂死≠秒拆）
     // 挂死型模型面失败识别：判死结算的错误文本（HUNG_KILL_PREFIX 开头）与宿主秒拆/activation 异常
@@ -2012,7 +2030,7 @@ export function createDispatch(ctx, state, deps) {
     // listChildren 查不出）、不报错（无 settle 事件）、零产出（日志零增长 7 分钟），running 假相直到
     // 人工终止。熔断/冷却/哨兵全部够不着它。修法：每轮对在跑 worker/verifier run 比对会话日志字节数
     // （logSizeOf）与 run 留档的 lastLogBytes（新字段，每轮写回）：连续 HUNG_ZERO_GROWTH_ROUNDS 轮
-    // 零增长且距基线 ≥HUNG_ZERO_GROWTH_MS → 判定挂死：settleRun 失败臂（记「挂死零产出」，errText
+    // 零增长且距基线 ≥自适应墙钟阈值（max(180s, 3×实测 latencyMs)，task-mvrg3962）→ 判定挂死：settleRun 失败臂（记「挂死零产出」，errText
     // 前缀 HUNG_KILL_PREFIX 进 isModelKillFailure 白名单）+ 计入该模型熔断连击（挂死=模型面故障）+
     // 卡重派（settleWorker 失败臂回 pending / settleVerifier 失败臂重排审查）。活体增长即清零计数。
     // 边界（宁少勿多）：
@@ -2061,7 +2079,11 @@ export function createDispatch(ctx, state, deps) {
             row.zeroGrowthRounds = (row.zeroGrowthRounds || 0) + 1
             any = true
             var since = typeof row.zeroGrowthSince === 'number' ? row.zeroGrowthSince : 0
-            if (row.zeroGrowthRounds >= HUNG_ZERO_GROWTH_ROUNDS && since && Date.now() - since >= HUNG_ZERO_GROWTH_MS) hung.push(rec)
+            // 自适应墙钟闸（task-mvrg3962）：按该模型健康表实测延迟缩放，慢模型不误杀；判定时点
+            // 的生效阈值随手带上（判死文案引用同一份数据，避免 kill 时表已变导致文案与判定脱节）。
+            var wall = hungWallOf(sid, rec.model)
+            rec.__hungWall = wall
+            if (row.zeroGrowthRounds >= HUNG_ZERO_GROWTH_ROUNDS && since && Date.now() - since >= wall.ms) hung.push(rec)
           } catch (e) { console.error('[task-board] 挂死检测判定失败 (run ' + (rec && rec.id) + '):', String(e)) }
         })
         return any ? d : null // 无改动返回 null → 不写盘（安静板纪律；有活跃 run 时主锁本就每轮写池快照，增量零额外写）
@@ -2074,7 +2096,13 @@ export function createDispatch(ctx, state, deps) {
         try {
           if (hrec.settled || runsFor(sid)[hrec.taskId] !== hrec) continue // 结算通道已抢先，不重复判
           killed++
-          var why = HUNG_KILL_PREFIX + '连续 ' + HUNG_ZERO_GROWTH_ROUNDS + ' 轮（≈' + Math.round(HUNG_ZERO_GROWTH_MS / 1000) + 's）会话日志零增长（零产出），判挂死按模型面故障结算重派'
+          // 判死文案带出实际生效阈值与依据（task-mvrg3962）：如「阈值 240s（=3×80s 实测延迟）」，
+          // 无数据走地板则「阈值 180s（地板值，无实测延迟）」——排查时一眼分清误杀 vs 真挂死口径。
+          var wall = hrec.__hungWall || hungWallOf(sid, hrec.model)
+          var wallTxt = Math.round(wall.ms / 1000) + 's' + (wall.latencyMs
+            ? '（=3×' + Math.round(wall.latencyMs / 1000) + 's 实测延迟）'
+            : '（地板值，无实测延迟）')
+          var why = HUNG_KILL_PREFIX + '连续 ' + HUNG_ZERO_GROWTH_ROUNDS + ' 轮会话日志零增长（零产出），超自适应墙钟阈值 ' + wallTxt + '，判挂死按模型面故障结算重派'
           console.log('[task-board] 挂死零产出判死（' + sid + '）：task ' + hrec.taskId + ' run ' + hrec.id + ' ' + why)
           // err 传裸字符串（settleRun 只做 !!err / String(err)）：new Error 会被 String(err) 包上
           // 'Error: ' 前缀，isModelKillFailure 的前缀锚定（index 0）失效 → 熔断连击漏喂。
