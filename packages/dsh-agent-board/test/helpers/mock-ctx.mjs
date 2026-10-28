@@ -45,6 +45,7 @@ import { Readable } from 'node:stream'
  * @property {Array}  interrupts     interrupt 记录：{ childId, authority }
  * @property {Array}  children       listChildren 剧本（可整组替换返回值）
  * @property {(childId:string, status:'running'|'idle')=>void} emitStatus  重放 agent/status 事件（continuable 结算触发器）
+ * @property {(childId:string, frame?:Object)=>void} emitFrame  重放 agent/assistant-stream 帧事件（AssistantStreamFrame start/chunk/end 三态；frame 缺省={ type:'chunk', index:1, time:Date.now() }，可显式传 reasoning-delta chunk）
  * @property {Array}  sent           root.followup 捕获的消息（makeMsg 形态：content[0].text 取文本）
  * @property {Object} root           假 root agent（followup 记录器；刻意不带 whenIdle → 回执立即投递分支）
  * @property {Object} spSections     systemPrompt 注册段记录器
@@ -301,6 +302,14 @@ export function createMockCtx(opts) {
       var set = listeners['agent/status']
       if (!set) return
       set.forEach(function (fn) { fn({ agent: { session: { id: childId } }, status: status }) })
+    },
+
+    // 重放 host 事件 agent/assistant-stream（挂死检测 v2 的帧观测面：start/chunk/end 三态；
+    // 缺省 frame = chunk 帧，测试可显式传 reasoning-delta 等任意形状）。缺省 createMockCtx 不自动发帧。
+    emitFrame: function (childId, frame) {
+      var set = listeners['agent/assistant-stream']
+      if (!set) return
+      set.forEach(function (fn) { fn({ agent: { session: { id: childId } }, frame: frame || { type: 'chunk', index: 1, time: Date.now() } }) })
     },
 
     board: function () {
