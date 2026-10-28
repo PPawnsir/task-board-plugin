@@ -86,7 +86,8 @@ export function createDispatch(ctx, state, deps) {
     }
     function syncModelHealth(sid, model, cooldownOverride) {
       var e = healthEntry(sid, model), until = typeof cooldownOverride === 'number' ? cooldownOverride : cooldownLive(model)
-      e.state = e.observed === 'healthy' ? 'healthy' : 'unknown'
+      // task-mvrqdw4k：degraded 派生（状态优先级 circuit > cooldown > degraded > healthy/unknown——覆盖臂在下方，顺序即优先级）
+      e.state = e.observed === 'healthy' ? 'healthy' : (e.observed === 'degraded' ? 'degraded' : 'unknown')
       e.note = e.observedNote || '尚无健康信号'
       delete e.until
       if (until) { e.state = 'cooldown'; e.until = until; e.note = e.cooldownNote || '模型冷却中' }
@@ -99,11 +100,16 @@ export function createDispatch(ctx, state, deps) {
       var e = healthEntry(sid, model), at = new Date().toISOString()
       var latency = Number(opts.latencyMs)
       e.lastSeen = at
-      e.observed = ok ? 'healthy' : 'unknown'
+      // task-mvrqdw4k：探测空响应分治——ok=true 🟢健康；opts.degraded 🟡降级（链路存活，供应商怪癖，
+      // 只由探测降级存活臂置入）；其余照旧 unknown（失败臂）。被动 run 观察臂语义逐字不变。
+      e.observed = ok ? 'healthy' : (opts.degraded ? 'degraded' : 'unknown')
       if (isFinite(latency) && latency >= 0) e.latencyMs = Math.round(latency)
       if (opts.probe) {
         e.lastProbe = at
-        e.observedNote = ok ? '主动探测通过' : ('主动探测失败' + (opts.note ? '：' + opts.note : ''))
+        e.observedNote = ok ? '主动探测通过'
+          : (opts.degraded
+              ? '主动探测：链路存活但极简请求零内容（EMPTY_RESPONSE 供应商怪癖）' + (opts.note ? '：' + opts.note : '')
+              : '主动探测失败' + (opts.note ? '：' + opts.note : ''))
       } else {
         e.recentRuns.push({ ok: !!ok, at: at, latencyMs: isFinite(latency) && latency >= 0 ? Math.round(latency) : null })
         if (e.recentRuns.length > 5) e.recentRuns = e.recentRuns.slice(-5)
@@ -220,6 +226,8 @@ export function createDispatch(ctx, state, deps) {
       var h = syncModelHealth(sid, modelId)
       if (h.state === 'circuit') return false
       if (h.state === 'cooldown') return false
+      // task-mvrqdw4k：degraded（🟡空响应降级存活）刻意不拦——探测管可调性，模型仍可被路由选用；
+      // 行为质量另有 recentRuns 连败软闸兜底（下方），探测放宽不放跑真坏模型。
       if (outOfDir(modelId, dir)) return false
       var rr = h.recentRuns
       if (Array.isArray(rr) && rr.length >= 2) {
@@ -309,21 +317,24 @@ export function createDispatch(ctx, state, deps) {
     // ===== 主动模型嗅探：llm.stream 极短直调（无子代理/系统提示/工具，首探 maxTokens=1）=====
     // finish=stop/max-tokens 等均证明模型链路可用；error/aborted/无 finish 才算失败。失败文本复用既有冷却登记，
     // 但不改 badModels 熔断判定。同模型全局只在飞一次，15s 硬超时带 AbortSignal，绝不阻塞 poolCycle 派发。
-    // ===== 空响应重试（task-mvrfp1rj）：探测只裁存活性，但「一个 token 都吐不出」仍属不可调用 =====
+    // ===== 空响应重试（task-mvrfp1rj）+ 错误码分治（task-mvrqdw4k 用户拍板）：探测只裁存活性 =====
     // 实证（cmss/zhanlu 系 glm-5.2、deepseek-v4.1-flash）：maxTokens=1 的极简请求被供应商以「terminal stop
     // 零内容块」退回，宿主 adapter 归成 EMPTY_RESPONSE 错误（逐字文案，宿主 checkout grep 实测）：
     //   ① dsh-llm-pi-ai mapStopReason：model "<m>" returned a completed response with no content
     //   ② dsh-llm-deepseek          ：DeepSeek Messages returned no content
-    // 于是探测记失败 → 取模链跳过实际可用的模型（用户 2026-10-28 现场：探测不通过就跳过，但模型本身可用）。
-    // 校准口径（用户拍板·最终版）：
+    // 可用性实证（task-mvrqdw4k 三重，决定性）：v4.1-flash 正产出当轮对话、两次「失败」皆我方固定 60s 挂死闸
+    // 误杀（已修为自适应）——它是慢不是死，纯空响应=供应商怪癖，不该判死。
+    // 校准口径（用户拍板·错误码分治矩阵）：
     //   ① 首探 maxTokens=1（最省 token；一次通即证明链路可用）；
     //   ② 首探「空响应」→ 自动以 maxTokens=8 重试一次（给模型吐 token 的余地，消掉 length 截断型空响应大头）；
     //   ③ 重试有内容 → 🟢 探测通过（存活 = 可调用）；
-    //   ④ 重试仍空 → 🔴 探测失败（额度尽/生成链断都属不可调用），照旧 observeModel 失败 + 喂冷却嗅探
-    //      （quota 类文本由 parseModelCooldown 既有正则接管，本卡不新增嗅探分支）；
+    //   ④ 重试仍空 → 按文本/码信号分治（classifyEmptyResponse）：纯空响应=🟡 degraded 存活（链路通，供应商
+    //      怪癖）——observeModel 记降级不记失败、不喂冷却嗅探、路由仍可选用；额度/凭据/连接信号=真错，维持
+    //      失败臂照旧 observeModel 失败 + 喂冷却嗅探（quota 文本优先级高于空响应判定，⑬b/⑬d 契约保留）；
     //   ⑤ 真错误/aborted/超时/无 finish 语义逐字不变，且不触发重试（一次定性，省一次请求也省一次误判）。
-    // 边界：只动 probeModel 的判定与文案；探测调度节奏（probeNextAt/probeIntervalMin）与熔断联动不动——
-    // 质量面另有 recentRuns 行为闸兜底（探测放宽不放跑真坏模型，这正是双层设计的意义）。
+    // 放宽不放跑真坏模型（闭环论证）：额度真耗尽有两条独立通道——①宿主直接抛 QUOTA_EXCEEDED（探测即降级）；
+    // ②若网关伪装成空响应，真派发 run 会失败 → recentRuns 软闸（≥2 全败）跳过它——探测管可调性、行为闸管质量。
+    // 边界：只动探测判定/健康状态派生/UI 映射与断言；探测调度节奏（probeNextAt/probeIntervalMin）与熔断联动不动。
     var PROBE_MAX_TOKENS = 1        // 首探极简：1 token 证链路通
     var PROBE_MAX_TOKENS_RETRY = 8  // 空响应重试：给模型吐 token 的余地
     var PROBE_TIMEOUT_MS = 15000    // 整体硬超时（与既有 15s 口径一致；重试只吃剩余预算，不额外延长探测窗口）
@@ -334,7 +345,21 @@ export function createDispatch(ctx, state, deps) {
       if (String(code || '') === 'EMPTY_RESPONSE') return true
       return /no content/i.test(String(text || ''))
     }
-    // 单次探测请求：返回 { status:'ok' } | { status:'empty', text } | { status:'fail', text }。
+    // 错误码分治信号（task-mvrqdw4k）：宿主把额度/凭据问题单独编码（QUOTA_EXCEEDED_CODE/INVALID_CREDENTIAL_CODE
+    // 与 EMPTY_RESPONSE_CODE 并列导出），网关包装文本同样带字样——空响应文本/码命中额度/凭据/连接信号 → 真错，
+    // 维持失败臂（冷却嗅探接管）；纯空响应（无任何真错信号）→ 🟡degraded 存活（供应商怪癖：链路通但极简请求零内容）。
+    var QUOTA_SIGNAL_RE = /429|RATE_LIMIT|QUOTA_EXCEEDED|rate.?limit|限额|额度|quota/i
+    var CREDENTIAL_SIGNAL_RE = /INVALID_CREDENTIAL|\b401\b|invalid[ _-]?api[ _-]?key|unauthorized|凭据|凭证/i
+    // 空响应分治：返回 'degraded'（纯空响应=链路存活）| 'fail'（额度/凭据/连接信号=真错，走失败臂）。
+    // 判定顺序：额度 > 凭据 > 连接 > degraded（与 parseModelCooldown 先限流后连接的保守口径一致）。
+    function classifyEmptyResponse(code, text) {
+      var s = String(text || ''), c = String(code || '')
+      if (QUOTA_SIGNAL_RE.test(s) || /QUOTA/i.test(c)) return 'fail'
+      if (CREDENTIAL_SIGNAL_RE.test(s) || /CREDENTIAL/i.test(c)) return 'fail'
+      if (CONNECTIVITY_RE.test(s)) return 'fail'
+      return 'degraded'
+    }
+    // 单次探测请求：返回 { status:'ok' } | { status:'empty', text, code } | { status:'fail', text }。
     // deadline = 整体硬超时截止时刻（两次尝试共用同一 15s 预算：探测总时长口径不变）。
     // 每次尝试独立 AbortController/计时器；probeAbort 指向当前在飞尝试（dispose 时统一 abort）。
     async function probeOnce(llm, model, maxTokens, deadline) {
@@ -358,13 +383,13 @@ export function createDispatch(ctx, state, deps) {
         }
         if (timedOut) return { status: 'fail', text: 'probe timeout ' + Math.round(remain) + 'ms' }
         if (!finished) return { status: 'fail', text: '模型探测流未返回 finish' }
-        if (failure) return isEmptyResponse(failureCode, failure) ? { status: 'empty', text: failure } : { status: 'fail', text: failure }
+        if (failure) return isEmptyResponse(failureCode, failure) ? { status: 'empty', text: failure, code: failureCode } : { status: 'fail', text: failure }
         return { status: 'ok' }
       } catch (e) {
         // 抛错形态（provider 直接 throw LlmError）：code 可能带 EMPTY_RESPONSE，文本兜底同一谓词
         if (timedOut) return { status: 'fail', text: 'probe timeout ' + Math.round(remain) + 'ms' }
         var text = String(e && e.message || e)
-        return isEmptyResponse(e && e.code, text) ? { status: 'empty', text: text } : { status: 'fail', text: text }
+        return isEmptyResponse(e && e.code, text) ? { status: 'empty', text: text, code: String(e && e.code || '') } : { status: 'fail', text: text }
       } finally {
         try { if (typeof disposeTimer === 'function') disposeTimer() } catch (_) {}
       }
@@ -383,16 +408,33 @@ export function createDispatch(ctx, state, deps) {
           if (outcome.status === 'empty') {
             // 空响应 = 唯一触发重试的形态（真错误/超时/无 finish 一次定性，不重试）
             if (probeDisposed || Date.now() >= deadline) {
-              outcome = { status: 'fail', text: '空响应且无重试预算（' + PROBE_TIMEOUT_MS + 'ms 硬超时已用尽）：' + outcome.text }
+              // 无重试预算：仍是空响应=链路存活信号，同样按错误码分治（预算耗尽是我方调度约束，非模型健康信号）
+              var budgetText = '空响应且无重试预算（' + PROBE_TIMEOUT_MS + 'ms 硬超时已用尽，零内容）：' + outcome.text
+              outcome = classifyEmptyResponse(outcome.code, outcome.text) === 'degraded'
+                ? { status: 'degraded', text: budgetText }
+                : { status: 'fail', text: budgetText }
             } else {
               outcome = await probeOnce(llm, model, PROBE_MAX_TOKENS_RETRY, deadline)
-              // 重试仍空 = 不可调用（额度尽/生成链断）：落探测失败臂；文案标明重试口径便于排查与嗅探归因
-              if (outcome.status === 'empty') outcome = { status: 'fail', text: 'maxTokens=' + PROBE_MAX_TOKENS_RETRY + ' 重试仍空（EMPTY_RESPONSE）：' + outcome.text }
+              // 重试仍空 = 按错误码分治（task-mvrqdw4k 用户拍板）：纯空响应=🟡degraded 存活（供应商怪癖，链路通）
+              // ——不喂冷却、路由仍可选用；额度/凭据/连接信号=真错，维持失败臂（quota 文本优先级高于空响应判定，
+              // ⑬b/⑬d 契约保留）。文案标明重试口径便于排查与嗅探归因。
+              if (outcome.status === 'empty') {
+                var emptyText = 'maxTokens=' + PROBE_MAX_TOKENS_RETRY + ' 重试仍空（EMPTY_RESPONSE）：' + outcome.text
+                outcome = classifyEmptyResponse(outcome.code, outcome.text) === 'degraded'
+                  ? { status: 'degraded', text: emptyText }
+                  : { status: 'fail', text: emptyText }
+              }
             }
           }
           if (outcome.status === 'ok') {
             observeModel(sid, model, true, { probe: true, latencyMs: Date.now() - started })
             return true
+          }
+          if (outcome.status === 'degraded') {
+            // 🟡 降级存活臂（task-mvrqdw4k）：记存活不记失败——observeModel 落 degraded 派生态；
+            // 不调 sniffModelCooldown（冷却表零登记）；recentRuns 不动（探测本就不进 recentRuns，观察臂已隔开）。
+            observeModel(sid, model, false, { probe: true, degraded: true, latencyMs: Date.now() - started, note: String(outcome.text || '').slice(0, 300) })
+            return 'degraded'
           }
           var text = String(outcome.text || '模型探测失败').slice(0, 300)
           observeModel(sid, model, false, { probe: true, latencyMs: Date.now() - started, note: text })
@@ -415,19 +457,21 @@ export function createDispatch(ctx, state, deps) {
     async function probeConfiguredModels(sid, d) {
       var c = cfg(d), models = core.configuredModelIds(d)
       for (var i = 0; i < models.length; i++) syncModelHealth(sid, models[i])
-      if (!c.probeEnabled) return { disabled: true, models: models, probed: 0 }
+      if (!c.probeEnabled) return { disabled: true, models: models, probed: 0, degraded: 0 }
       var llm = ctx.get && ctx.get('llm')
-      if (!llm || typeof llm.stream !== 'function') return { disabled: false, unavailable: true, models: models, probed: 0 }
-      var probed = 0, healthy = 0
+      if (!llm || typeof llm.stream !== 'function') return { disabled: false, unavailable: true, models: models, probed: 0, degraded: 0 }
+      var probed = 0, healthy = 0, degraded = 0
       for (var m = 0; m < models.length; m++) {
         if (probeDisposed) break
         var before = probeInFlight[models[m]] ? false : true
-        var ok = await probeModel(sid, models[m])
-        if (ok === null) continue
+        var outcome = await probeModel(sid, models[m])
+        if (outcome === null) continue
         if (before) probed++
-        if (ok === true) healthy++
+        // task-mvrqdw4k：probeModel 三态消费——true=🟢存活、'degraded'=🟡降级存活（供应商怪癖）、false=失败
+        if (outcome === true) healthy++
+        else if (outcome === 'degraded') degraded++
       }
-      return { disabled: false, models: models, probed: probed, healthy: healthy }
+      return { disabled: false, models: models, probed: probed, healthy: healthy, degraded: degraded }
     }
     // 15s 调度心跳驱动间隔闸：配置变化立即重排，探测在后台跑，不 await 进派发主链。
     function maybeProbeModels(sid, d) {

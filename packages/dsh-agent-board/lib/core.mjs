@@ -336,7 +336,9 @@ export function modelHealthView(d, bucket, opts) {
   var sid = String(opts.sid || ''), now = Number(opts.now) || Date.now(), out = {}
   for (var i = 0; i < ids.length; i++) {
     var id = ids[i], raw = health[id] || {}
-    var state = raw.observed === 'healthy' ? 'healthy' : 'unknown'
+    // task-mvrqdw4k：degraded 派生（公开视图与内部 syncModelHealth 同口径；circuit/cooldown 覆盖在下方，优先级不变）——
+    // get-tasks 是 UI 健康点唯一数据源，不透出 degraded 则 GUI 永远回退 ⚪未知、降级态不可见。
+    var state = raw.observed === 'healthy' ? 'healthy' : (raw.observed === 'degraded' ? 'degraded' : 'unknown')
     var note = raw.observedNote || raw.note || '尚无健康信号'
     var until = Number(cooldown[id]) || 0, cooling = until > now
     if (cooling) { state = 'cooldown'; note = raw.cooldownNote || '模型冷却中' }

@@ -549,35 +549,81 @@ test('⑬c空响应重试：首探 maxTokens=1 空 → maxTokens=8 重试有内�
   assert.equal(Object.keys(state.badModels).length, 0, '探测通过不碰熔断表')
 })
 
-// ===== ⑬d 重试仍空（task-mvrfp1rj·用户拍板）：判不可调用 = 探测失败，照旧喂冷却嗅探 =====
-// 推翻「空响应=🟡降级存活」的旧设计：一个 8 token 余量都吐不出内容的模型就是不可调用（额度尽/生成链断）。
-test('⑬d重试仍空：判探测失败（不可调用）照旧喂冷却嗅探；quota 类文本由既有嗅探接管', async () => {
+// ===== ⑬d 空响应分治（task-mvrqdw4k·用户拍板，修正 task-mvrfp1rj 的「重试仍空=不可调用」旧口径）=====
+// 可用性实证（三重，决定性）：v4.1-flash 正产出当轮对话、两次「失败」皆我方固定 60s 挂死闸误杀（已修自适应）
+// ——它是慢不是死，纯空响应=供应商怪癖判 🟡degraded 存活（不喂冷却/路由仍可选用）；额度/凭据/连接信号=真错维持失败臂。
+test('⑬d空响应分治：重试仍空（纯 EMPTY_RESPONSE）判 🟡degraded 存活不喂冷却；quota 文本仍由既有嗅探接管走失败臂', async () => {
   var calls = [], board = seed(SID); board.workerModel = 'p/a'
   var state = { modelHealth: {}, modelCooldown: {}, badModels: {} }
   var origErr = console.error; console.error = function () {}
   try {
     var result = await mkDispatch(board, mkProbeScriptCtx(calls, ['empty', 'empty']), state).probeConfiguredModels(SID, board)
     assert.equal(result.probed, 1)
-    assert.equal(result.healthy, 0, '8 token 余量都吐不出内容 = 不可调用，不记存活（🟡 档不用于空响应）')
-    assert.deepEqual(calls.map(function (x) { return x.maxTokens }), [1, 8])
+    assert.equal(result.healthy, 0, '纯空响应不记 🟢存活（healthy 计数不含它）')
+    assert.equal(result.degraded, 1, '纯空响应=供应商怪癖，记 🟡degraded（degraded 计数含它）')
+    assert.deepEqual(calls.map(function (x) { return x.maxTokens }), [1, 8], '重试节奏不变（首探 1 token → 重试 8 token）')
     var h = state.modelHealth[SID]['p/a']
-    assert.equal(h.state, 'unknown', '探测失败态（既有失败臂：observed=unknown，冷却/熔断覆盖态另行覆盖）')
-    assert.equal(h.observed, 'unknown')
-    assert.match(h.observedNote, /主动探测失败/)
-    assert.match(h.observedNote, /maxTokens=8 重试仍空/)
-    assert.ok(h.lastProbe, '失败也留 lastProbe（既有失败臂不变）')
-    assert.equal('p/a' in state.modelCooldown, false, '空响应文本不含 quota/连接关键词 → 既有嗅探不命中，不误登记冷却')
-    assert.equal(Object.keys(state.badModels).length, 0, '探测失败不碰 badModels 熔断表（与既有口径一致）')
+    assert.equal(h.state, 'degraded', '🟡降级存活态（syncModelHealth degraded 派生）')
+    assert.equal(h.observed, 'degraded', 'observeModel 记降级不记失败')
+    assert.match(h.observedNote, /链路存活但极简请求零内容/, '降级 note 标明供应商怪癖（含「零内容」）')
+    assert.match(h.observedNote, /maxTokens=8 重试仍空/, '文案保留重试口径便于排查')
+    assert.ok(h.lastProbe, '降级也留 lastProbe（探测确实跑过）')
+    assert.equal('p/a' in state.modelCooldown, false, '纯空响应不喂冷却嗅探（冷却表零登记）')
+    assert.equal(Object.keys(state.badModels).length, 0, '探测不碰 badModels 熔断表（与既有口径一致）')
 
-    // 同一「重试仍空」路径，重试文本带额度字样 → 既有嗅探正则接管，冷却照旧登记
+    // 同一「重试仍空」路径，重试文本带额度字样 → 失败臂，既有嗅探正则接管（quota 优先级高于空响应判定，契约保留）
     var calls2 = [], state2 = { modelHealth: {}, modelCooldown: {}, badModels: {} }
     var quotaText = '429 额度不足：' + EMPTY_RESPONSE_TEXT
     var r2 = await mkDispatch(board, mkProbeScriptCtx(calls2, ['empty', { empty: quotaText }]), state2).probeConfiguredModels(SID, board)
     assert.equal(r2.healthy, 0)
+    assert.equal(r2.degraded, 0, '额度信号=真错，不判 degraded（quota 文本优先级高于空响应判定）')
     assert.deepEqual(calls2.map(function (x) { return x.maxTokens }), [1, 8])
-    assert.ok(state2.modelCooldown['p/a'] > Date.now(), 'quota 类文本由 parseModelCooldown 接管（探测失败照旧喂嗅探）')
+    assert.ok(state2.modelCooldown['p/a'] > Date.now(), 'quota 类文本由 parseModelCooldown 接管（失败臂照旧喂嗅探）')
     assert.equal(state2.modelHealth[SID]['p/a'].state, 'cooldown')
     assert.match(state2.modelHealth[SID]['p/a'].cooldownNote, /额度限流/)
+
+    // 凭据类（task-mvrqdw4k 矩阵第 3 行）：空响应文本带凭据字样 → 失败臂（该供应商全模型不可用），不判 degraded
+    var calls3 = [], state3 = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+    var credText = '401 invalid api key：' + EMPTY_RESPONSE_TEXT
+    var r3 = await mkDispatch(board, mkProbeScriptCtx(calls3, ['empty', { empty: credText }]), state3).probeConfiguredModels(SID, board)
+    assert.equal(r3.healthy, 0)
+    assert.equal(r3.degraded, 0, '凭据信号=真错，不判 degraded')
+    assert.equal(state3.modelHealth[SID]['p/a'].state, 'unknown', '凭据类走失败臂（observed=unknown）')
+    assert.match(state3.modelHealth[SID]['p/a'].observedNote, /主动探测失败/)
+    assert.equal('p/a' in state3.modelCooldown, false, '凭据文本不命中额度/连接嗅探（不误登记冷却）')
+
+    // 连接信号（矩阵第 4 行）：空响应文本带连接字样 → 失败臂，连接嗅探照旧登记短冷却（语义逐字不变）
+    var calls4 = [], state4 = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+    var connText = 'ECONNRESET：' + EMPTY_RESPONSE_TEXT
+    var r4 = await mkDispatch(board, mkProbeScriptCtx(calls4, ['empty', { empty: connText }]), state4).probeConfiguredModels(SID, board)
+    assert.equal(r4.healthy, 0)
+    assert.equal(r4.degraded, 0, '连接信号=真错，不判 degraded（连接/超时语义逐字不变）')
+    assert.ok(state4.modelCooldown['p/a'] > Date.now(), '连接类文本由 parseModelCooldown 接管（连接短冷却）')
+    assert.equal(state4.modelHealth[SID]['p/a'].state, 'cooldown')
+  } finally { console.error = origErr }
+})
+
+// ===== ⑯ degraded 放行（task-mvrqdw4k）：healthyModel 只拦 circuit/cooldown，degraded 必须放行 = 路由仍可选用 =====
+// 闭环论证：额度真耗尽有两条独立通道兜底——①宿主直接抛 QUOTA_EXCEEDED（探测即降级冷却）；②若网关伪装成空响应，
+// 真派发 run 会失败 → recentRuns 软闸（≥2 全败）跳过它——探测放宽不放跑真坏模型（探测管可调性、行为闸管质量）。
+test('⑯degraded放行：降级态模型仍被路由选用（healthyModel 不拦 degraded），公开视图同口径透出 🟡', async () => {
+  var spawnCalls = []
+  var board = seed(SID)
+  board.tasks = [mkTask({ size: 'heavy' })]  // in-progress + spawn-pending（mkTask 缺省，spawn 落闸重验要求）
+  board.laneModels.heavy.worker = ['p/a']
+  var state = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+  // 直种 degraded 观察态（probeConfiguredModels 空响应分治的同款产物，⑬d 已断言落账路径）
+  state.modelHealth[SID] = { 'p/a': { state: 'degraded', observed: 'degraded', observedNote: '主动探测：链路存活但极简请求零内容（EMPTY_RESPONSE 供应商怪癖）', lastProbe: '2026-10-28T00:00:00.000Z', lastSeen: '2026-10-28T00:00:00.000Z', note: '主动探测：链路存活但极简请求零内容', recentRuns: [] } }
+  var origErr = console.error; console.error = function () {}
+  try {
+    var sr = await mkDispatch(board, { subagents: mkActivationSubagents(spawnCalls) }, state).spawnOneShot(SID, board.tasks[0], 'worker')
+    assert.ok(sr)
+    assert.deepEqual(spawnCalls[0].request.agentOptions, { provider: 'p', model: 'a' }, 'degraded 模型仍被路由选用（healthyModel 只拦 circuit/cooldown）')
+    assert.equal(sr.modelSource, 'lane', '档位槽直取（degraded 放行：未降下一跳/未走备用链/未回父模型）')
+    // 公开健康视图（get-tasks 数据源 modelHealthView）：degraded 派生同口径透出，UI 才能显示 🟡降级
+    var view = modelHealthView(board, state.modelHealth[SID], { sid: SID, modelCooldown: state.modelCooldown, badModels: state.badModels })
+    assert.equal(view['p/a'].state, 'degraded', '公开视图透出 degraded（仲裁放行的单行派生）')
+    assert.match(view['p/a'].note, /链路存活但极简请求零内容/, '视图 note 随降级态透出')
   } finally { console.error = origErr }
 })
 
@@ -662,6 +708,9 @@ test('⑭被动健康面：Verifier 成功 run 记健康/延迟/近5次，失败
 test('⑮模型路由健康点：🟢🟡🔴⚪ + 悬浮详情 + 主动探测配置 + build 产物标记', () => {
   assert.ok(src.indexOf('function ModelHealthDot(props)') >= 0)
   for (const icon of ['🟢', '🟡', '🔴', '⚪']) assert.ok(src.indexOf(icon) >= 0, '缺健康点图标 ' + icon)
+  // task-mvrqdw4k 错误码分治：degraded（🟡降级，与 cooldown 同图标不同文案）挂 MODEL_HEALTH_META，源与产物双锁定
+  assert.ok(src.indexOf("degraded: { icon: '🟡', label: '降级'") >= 0, '健康点缺 🟡降级档（task-mvrqdw4k 错误码分治）')
+  assert.ok(built.indexOf("degraded: { icon: '🟡', label: '降级'") >= 0, 'client.js 缺 🟡降级档（需 npm run build-client）')
   assert.ok(src.indexOf("role: 'img'") >= 0 && src.indexOf("'aria-label': props.model + ' ' + label") >= 0, '健康点缺可访问名称')
   for (const text of ['最近探测：', '最近信号：', '最近延迟：', '次 run：']) assert.ok(src.indexOf(text) >= 0, '悬浮详情缺 ' + text)
   assert.match(src, /React\.createElement\(ModelHealthDot, \{ model: m, health: props\.health \}\)/, '链芯片未接健康点')

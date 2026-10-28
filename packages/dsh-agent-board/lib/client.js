@@ -2697,9 +2697,10 @@ function apply(ctx) {
         React.createElement('button', { onClick: reopen, title: '重新显示首用引导横幅（board 视图顶部定位行）', style: { padding: '0px 5px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text, cursor: 'pointer', lineHeight: '14px' } }, '重新显示'))
     }
 
-    // ===== 模型健康点（task-mvoulhm7）：🟢健康 / 🟡冷却中至HH:mm / 🔴熔断 / ⚪未知 =====
+    // ===== 模型健康点（task-mvoulhm7）：🟢健康 / 🟡降级（链路存活，task-mvrqdw4k 空响应分治） / 🟡冷却中至HH:mm / 🔴熔断 / ⚪未知 =====
     // 数据只来自 get-tasks.modelHealth；title 悬浮展示探测/run 时间、最近延迟与近 5 次 run 聚合。
-    var MODEL_HEALTH_META = { healthy: { icon: '🟢', label: '健康', color: C.ok }, cooldown: { icon: '🟡', label: '冷却中', color: C.warn }, circuit: { icon: '🔴', label: '熔断', color: C.err }, unknown: { icon: '⚪', label: '未知', color: C.text2 } }
+    // degraded（task-mvrqdw4k）：纯 EMPTY_RESPONSE=供应商怪癖（链路通但极简请求零内容），与 cooldown 同图标不同文案。
+    var MODEL_HEALTH_META = { healthy: { icon: '🟢', label: '健康', color: C.ok }, degraded: { icon: '🟡', label: '降级', color: C.warn }, cooldown: { icon: '🟡', label: '冷却中', color: C.warn }, circuit: { icon: '🔴', label: '熔断', color: C.err }, unknown: { icon: '⚪', label: '未知', color: C.text2 } }
     function healthHhmm(ts) { var d = new Date(Number(ts)); return isNaN(d.getTime()) ? '' : ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) }
     function healthTimeText(v) { if (!v) return ''; var d = new Date(v); return isNaN(d.getTime()) ? String(v) : d.toLocaleString() }
     function ModelHealthDot(props) {
