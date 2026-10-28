@@ -564,11 +564,11 @@ function mkHungLogRoot(childId, bytes) {
 function hungRec(taskId, childId, model) {
   return { id: childId, childId: childId, continuable: true, ran: true, run: null, role: 'worker', taskId: taskId, startedAt: Date.now(), model: model, settled: false }
 }
-// 预置基线：lastLogBytes 与基线时间（181s 前）——测试里 poolCycle 是快轮、墙钟不推进，180s 墙钟地板（task-mvrg3962
-// 自适应阈值：无延迟数据模型走 180s 地板）需预置跨过
-function seedBaseline(row, bytes) { row.lastLogBytes = bytes; row.zeroGrowthSince = Date.now() - 181000 }
+// 预置基线：lastLogBytes 与基线时间（601s 前）——测试里 poolCycle 是快轮、墙钟不推进，600s 墙钟地板
+//（task-mvrt9tn5 定稿：固定值，不读健康表）需预置跨过
+function seedBaseline(row, bytes) { row.lastLogBytes = bytes; row.zeroGrowthSince = Date.now() - 601000 }
 
-test('挂死检测①（task-mvqcoz9l）：running+日志零增长 4 轮 → 判挂死重派（settleRun 失败臂）+ 熔断连击+1 + 留档关账', async () => {
+test('挂死检测①（task-mvqcoz9l）：running+日志零增长 40 轮 → 判挂死重派（settleRun 失败臂）+ 熔断连击+1 + 留档关账', async () => {
   var L = mkHungLogRoot('child-old', 256)
   try {
     var t = mkGateTask({ status: 'in-progress', claimedBy: 'child-old', claimedAt: '2026-01-01T00:00:00Z', runs: [{ role: 'worker', id: 'child-old', at: '2026-01-01T00:00:00.000Z', model: 'prov/glm-5.2', outcome: 'running', hardMin: 120, continuable: true }] })
@@ -587,13 +587,15 @@ test('挂死检测①（task-mvqcoz9l）：running+日志零增长 4 轮 → 判
     }, null, { sessionsRoot: L.root })
     h.runs['g1'] = hungRec('g1', 'child-old', 'prov/glm-5.2')
     seedBaseline(t.runs[0], 256)
-    for (var i = 0; i < 5; i++) { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
-    // 第 1 轮零增长连击+1（基线已跨 180s 地板——本用例模型无延迟数据），第 2-4 轮连击到 4 → 第 4 轮判挂死；第 5 轮重派续跑
+    for (var i = 0; i < 41; i++) { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
+    // 第 1-40 轮零增长计数到 40（基线已跨 600s 地板——本用例模型无延迟数据，固定阈值对无数据模型同值 600s），
+    // 第 40 轮判挂死；第 41 轮重派续跑
     assert.equal(t.runs[0].outcome, 'timeout/error', '挂死 run 关账（settleRun 失败臂 err 路径 → timeout/error）')
     assert.ok(t.runs[0].endedAt, '关账写 endedAt')
     assert.equal(t.runs[0].lastLogBytes, 256, 'lastLogBytes 每轮写回（比对锚点）')
     assert.match(String(t.lastError || ''), /挂死/, '挂死原因落卡（lastError）')
-    assert.match(String(t.lastError || ''), /阈值 180s（地板值，无实测延迟）/, '无延迟数据 → 180s 地板生效且文案带依据（task-mvrg3962 断言①）')
+    assert.match(String(t.lastError || ''), /超挂死墙钟阈值 600s/, '阈值 600s 直述（task-mvrt9tn5 断言③：固定值文案，不分态）')
+    assert.doesNotMatch(String(t.lastError || ''), /3×|实测延迟|地板值/, '假精确回归锁：无数据模型不再出现「3×0s」假精确 / 分态文案（干预定稿断言）')
     assert.equal(t.retryCount, 1, '失败计数照旧（失败臂语义不变）')
     assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/glm-5.2'], 1, '熔断连击+1（挂死=模型面故障）')
     assert.ok(!h.state.badModels[GATE_SID + '|prov/glm-5.2'], '连击 1 < 3 不拉黑')
@@ -608,7 +610,7 @@ test('挂死检测①（task-mvqcoz9l）：running+日志零增长 4 轮 → 判
   } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
 })
 
-test('挂死检测②：增长中 run 不误伤——活体增长清零计数刷新基线；写风暴快轮被 180s 墙钟地板兜住不秒判', async () => {
+test('挂死检测②：增长中 run 不误伤——活体增长清零计数刷新基线；写风暴快轮被 600s 墙钟地板兜住不秒判', async () => {
   var L = mkHungLogRoot('child-old', 256)
   try {
     var t = mkGateTask({ status: 'in-progress', claimedBy: 'child-old', claimedAt: '2026-01-01T00:00:00Z', runs: [{ role: 'worker', id: 'child-old', at: '2026-01-01T00:00:00.000Z', model: 'prov/glm-5.2', outcome: 'running', hardMin: 120, continuable: true }] })
@@ -627,10 +629,10 @@ test('挂死检测②：增长中 run 不误伤——活体增长清零计数刷
     await h.dispatch.poolCycle(GATE_SID); await flushGate()
     assert.equal(t.runs[0].lastLogBytes, 256, '首见只记基线')
     assert.equal(t.runs[0].zeroGrowthRounds, undefined, '首见不计数（绝不在第一眼判死）')
-    // 快轮零增长 4 轮（墙钟不推进）→ 连击按轮累计，但 180s 墙钟地板兜住不判死
-    for (var i = 0; i < 4; i++) { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
-    assert.equal(t.runs[0].zeroGrowthRounds, 4, '零增长连击按轮累计（每轮写回）')
-    assert.equal(t.runs[0].outcome, 'running', '180s 墙钟地板未过 → 不判死（写风暴下纯轮数会秒判刚 spawn 的 run）')
+    // 快轮零增长 40 轮（墙钟不推进）→ 连击按轮累计，但 600s 墙钟地板兜住不判死
+    for (var i = 0; i < 40; i++) { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
+    assert.equal(t.runs[0].zeroGrowthRounds, 40, '零增长连击按轮累计（每轮写回）')
+    assert.equal(t.runs[0].outcome, 'running', '600s 墙钟地板未过 → 不判死（写风暴下纯轮数会秒判刚 spawn 的 run）')
     assert.equal(t.status, 'in-progress', '不误伤')
     assert.ok(h.runs['g1'], '活跃 rec 保留')
     // 活体增长 → 清零计数 + 刷新基线
@@ -638,22 +640,21 @@ test('挂死检测②：增长中 run 不误伤——活体增长清零计数刷
     await h.dispatch.poolCycle(GATE_SID); await flushGate()
     assert.equal(t.runs[0].lastLogBytes, 320, '基线刷新到最新字节数')
     assert.equal(t.runs[0].zeroGrowthRounds, undefined, '活体增长即清零计数')
-    // 清零后再零增长 3 轮 → 仍不判死（< 4 轮）
+    // 清零后再零增长 3 轮 → 仍不判死（3 < 40 轮）
     for (var i = 0; i < 3; i++) { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
     assert.equal(t.runs[0].zeroGrowthRounds, 3, '清零后重新计数')
-    assert.equal(t.runs[0].outcome, 'running', '3 轮 < 4 不判死')
+    assert.equal(t.runs[0].outcome, 'running', '3 轮 < 40 不判死')
     assert.equal(t.status, 'in-progress', '全程零误伤')
     assert.ok(!h.state.modelFailStreak || !Object.keys(h.state.modelFailStreak).length, '零熔断连击')
   } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
 })
 
-test('挂死检测③（源码级）：N 轮阈值常量化 + 180s 墙钟地板常量 + 自适应阈值（task-mvrg3962）+ poolCycle 挂点 + 熔断连击接线 + 边界', () => {
+test('挂死检测③（源码级）：40 轮阈值常量化 + 600s 墙钟地板常量（task-mvrt9tn5 定稿：延迟缩放删除）+ poolCycle 挂点 + 熔断连击接线 + 边界', () => {
   var dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
-  assert.match(dsp, /var HUNG_ZERO_GROWTH_ROUNDS = 4/, 'N 轮阈值常量化：连续 4 轮零增长判挂死（轮数闸语义不变）')
-  assert.match(dsp, /var HUNG_WALL_FLOOR_MS = 180000/, '墙钟地板 180s 常量化（task-mvrg3962：无延迟数据回退地板）')
-  assert.match(dsp, /var HUNG_WALL_LATENCY_MULT = 3/, '实测延迟倍率 3× 常量化（慢模型 77~132s 首 token 不再被 60s 闸误杀）')
-  assert.match(dsp, /function hungWallOf\(sid, model\)/, '自适应墙钟阈值函数（读健康表 latencyMs）')
-  assert.match(dsp, /Math\.max\(HUNG_WALL_FLOOR_MS, HUNG_WALL_LATENCY_MULT \* latency\)/, '阈值 = max(180s 地板, 3×实测 latencyMs)')
+  assert.match(dsp, /var HUNG_ZERO_GROWTH_ROUNDS = 40/, 'N 轮阈值常量化：连续 40 轮零增长判挂死（600s/15s 心跳换算，干预定稿锁死值）')
+  assert.match(dsp, /var HUNG_WALL_FLOOR_MS = 600000/, '墙钟地板 600s 常量化（task-mvrt9tn5：三连误杀实证定稿，对齐最长正常静默）')
+  assert.doesNotMatch(dsp, /HUNG_WALL_LATENCY_MULT|function hungWallOf/, '延迟缩放已删（3×latencyMs 方向作废：延迟与长生成静默无关）')
+  assert.doesNotMatch(dsp, /超自适应墙钟阈值/, '判死文案不再引用自适应阈值')
   assert.match(dsp, /async function hungZeroOutputSweep\(sid, runs, snap\) \{/, '挂死零产出检测函数')
   assert.match(dsp, /hungN = await hungZeroOutputSweep\(sid, runs, snap\)/, 'poolCycleBody 挂点（幽灵回收之后、活跃计数之前）')
   assert.match(dsp, /lastLogBytes/, 'run 留档基线字段（每轮写回）')
@@ -661,8 +662,8 @@ test('挂死检测③（源码级）：N 轮阈值常量化 + 180s 墙钟地板�
   assert.match(dsp, /if \(isHungKillFailure\(s\)\) return true/, '挂死前缀进 isModelKillFailure 白名单 = 计入熔断连击')
   assert.match(dsp, /isHungKillFailure\(errText\) \? HUNG_CIRCUIT_WHY : undefined/, 'settleWorker 失败臂挂死熔断文案分态')
   assert.match(dsp, /rec\.role === 'worker' \|\| rec\.role === 'verifier'/, '边界：只盖 worker/verifier 在跑 rec（decomposer/hook 不盖）')
-  assert.match(dsp, /Date\.now\(\) - since >= wall\.ms/, '判死双闸：轮数 × 自适应墙钟（判定时点阈值随 rec 带出供文案引用）')
-  assert.match(dsp, /超自适应墙钟阈值/, '判死文案带出实际生效阈值（排查时一眼分清误杀 vs 真挂死）')
+  assert.match(dsp, /Date\.now\(\) - since >= HUNG_WALL_FLOOR_MS/, '判死双闸：40 轮 × 600s 墙钟地板（固定常量直比）')
+  assert.match(dsp, /超挂死墙钟阈值 ' \+ wallTxt/, '判死文案带出实际生效阈值（固定值直述，排查时一眼分清误杀 vs 真挂死）')
 })
 
 test('挂死检测④：挂死三连击 → badModels 熔断+健康表 circuit+系统通知（挂死分态文案）；worker 三连败阻塞语义照旧适用（挂死=失败）', async () => {
@@ -689,15 +690,15 @@ test('挂死检测④：挂死三连击 → badModels 熔断+健康表 circuit+�
     h.runs['g1'] = hungRec('g1', 'child-old', 'prov/glm-5.2')
     seedBaseline(t.runs[0], 256)
     var round = async function () { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
-    // 挂死 #1（第 1-4 轮，连击 1）→ 重派续跑（健康闸放行：1 次失败 < 2 未达软闸线）→ 预置新行基线已跨 180s 地板 →
+    // 挂死 #1（第 1-40 轮，连击 1）→ 重派续跑（健康闸放行：1 次失败 < 2 未达软闸线）→ 预置新行基线已跨 600s 地板 →
     // 挂死 #2（连击 2）→ 续跑健康闸拦截（连败软闸，recentRuns 2 全败）改 fresh spawn（板级模型接手）→ 挂死 #3（连击 3 → 熔断）
-    for (var i = 0; i < 4; i++) await round()
+    for (var i = 0; i < 40; i++) await round()
     assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/glm-5.2'], 1, '挂死 #1 连击 1')
     await round(); seedBaseline(t.runs[t.runs.length - 1], 256)
-    for (var i = 0; i < 4; i++) await round()
+    for (var i = 0; i < 40; i++) await round()
     assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/glm-5.2'], 2, '挂死 #2 连击 2')
     await round(); seedBaseline(t.runs[t.runs.length - 1], 256)
-    for (var i = 0; i < 4; i++) await round()
+    for (var i = 0; i < 40; i++) await round()
     assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/glm-5.2'], 3, '挂死 #3 连击 3')
     assert.equal(h.state.badModels[GATE_SID + '|prov/glm-5.2'], true, '三连击 → badModels 熔断')
     assert.equal(h.state.modelHealth[GATE_SID]['prov/glm-5.2'].state, 'circuit', '健康表 circuit 覆盖态')
@@ -733,7 +734,7 @@ test('挂死检测⑤：verifier 在跑 run 同样盖到——判挂死走 settl
     // verifier rec 形态与生产一致（一次性面：无 childId，run.id 即子会话 id）
     h.runs['g1'] = { id: 'ver-old', run: { id: 'ver-old', dispose: async function () {} }, role: 'verifier', taskId: 'g1', startedAt: Date.now(), model: 'prov/vm', settled: false }
     seedBaseline(t.runs[0], 256)
-    for (var i = 0; i < 4; i++) { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
+    for (var i = 0; i < 40; i++) { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
     assert.equal(t.runs[0].outcome, 'timeout/error', '挂死 verifier 关账（失败臂）')
     assert.equal(t.verifyRetries, 1, 'verifier 失败臂计数（重新排队审查）')
     assert.equal(t.status, 'verifying', '卡仍 verifying（重新排队）')
@@ -744,15 +745,16 @@ test('挂死检测⑤：verifier 在跑 run 同样盖到——判挂死走 settl
   } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
 })
 
-// ===== 挂死阈值自适应（task-mvrg3962）：max(180s, 3×实测 latencyMs)——慢模型不再被 60s 闸误杀 =====
-// 生产事故（2026-10-28 用户目击）：cmss/zhanlu/deepseek-v4.1-flash 首 token 实测 77~132s（健康表
-// latencyMs 有案），run 起飞 60s 还在等第一个 token → 固定 60s 墙钟闸误杀。断言：
-//   ② 有 80s 延迟数据 → 阈值 240s：基线仅跨 100s（旧 60s 闸必误杀的反例场景）不判死；
-//   ③ 超阈值真挂死（基线跨 241s）照判，文案带「阈值 240s（=3×80s 实测延迟）」依据。
-test('挂死检测⑥（task-mvrg3962）：健康表 latencyMs=80s → 阈值 240s——跨 100s（旧 60s 闸必误杀）不判死；跨 241s 照判且文案带依据', async () => {
+// ===== 挂死阈值定稿（task-mvrt9tn5 二度校准）：固定 600s，延迟缩放作废 =====
+// 三轮生产误杀实证（2026-10-28）：慢模型长生成段 180s+ 零日志被杀；kimi-k3（健康表实测延迟 2s 的
+// 快模型）正常干活 10 分钟同样被 180s 闸（=3×2s 地板）误杀——延迟（首 token 速度）与「长生成
+// 静默时长」无关。断言（干预定稿）：
+//   ① 600s 内静默不判（含 2s 延迟快模型形态——延迟数据在表也不缩放阈值）；
+//   ② 超 600s 真挂死照判，文案「阈值 600s」直述，无「3×」假精确。
+test('挂死检测⑥（task-mvrt9tn5）：2s 延迟快模型 600s 内静默不判（延迟不缩放阈值）；超 600s 照判且文案「阈值 600s」直述', async () => {
   var L = mkHungLogRoot('child-slow', 256)
   try {
-    var t = mkGateTask({ status: 'in-progress', claimedBy: 'child-slow', claimedAt: '2026-01-01T00:00:00Z', runs: [{ role: 'worker', id: 'child-slow', at: '2026-01-01T00:00:00.000Z', model: 'prov/slow-flash', outcome: 'running', hardMin: 120, continuable: true }] })
+    var t = mkGateTask({ status: 'in-progress', claimedBy: 'child-slow', claimedAt: '2026-01-01T00:00:00Z', runs: [{ role: 'worker', id: 'child-slow', at: '2026-01-01T00:00:00.000Z', model: 'prov/kimi-k3', outcome: 'running', hardMin: 120, continuable: true }] })
     var board = mkGateBoard([t])
     var sent = []
     var h = mkGateDispatch(board, {
@@ -766,24 +768,25 @@ test('挂死检测⑥（task-mvrg3962）：健康表 latencyMs=80s → 阈值 24
         listChildren: async function () { return [{ id: 'child-slow' }] },
       },
     }, null, { sessionsRoot: L.root })
-    h.runs['g1'] = hungRec('g1', 'child-slow', 'prov/slow-flash')
-    // 预置健康表：该模型最近观测延迟 80s（observeModel 落表形态）→ 生效阈值 = max(180s, 3×80s) = 240s
+    h.runs['g1'] = hungRec('g1', 'child-slow', 'prov/kimi-k3')
+    // 预置健康表：该模型最近观测延迟 2s（kimi-k3 健康表实测形态）——定稿后阈值固定 600s，延迟数据不再参与缩放
     h.state.modelHealth[GATE_SID] = h.state.modelHealth[GATE_SID] || {}
-    h.state.modelHealth[GATE_SID]['prov/slow-flash'] = { state: 'healthy', observed: 'healthy', lastSeen: new Date().toISOString(), latencyMs: 80000, note: '最近 run 成功', observedNote: '最近 run 成功', recentRuns: [{ ok: true, at: new Date().toISOString(), latencyMs: 80000 }] }
-    // ---- 阶段 A（不误杀反例）：基线跨 100s（> 旧 60s 闸、> 180s 地板、< 240s 阈值）+ 4 轮零增长 → 不判死 ----
+    h.state.modelHealth[GATE_SID]['prov/kimi-k3'] = { state: 'healthy', observed: 'healthy', lastSeen: new Date().toISOString(), latencyMs: 2000, note: '最近 run 成功', observedNote: '最近 run 成功', recentRuns: [{ ok: true, at: new Date().toISOString(), latencyMs: 2000 }] }
+    // ---- 阶段 A（不误杀反例）：基线跨 599s（< 600s 阈值）+ 40 轮零增长 → 不判死（旧 3×latencyMs=6s / 180s 地板在此必误杀）----
     seedBaseline(t.runs[0], 256)
-    t.runs[0].zeroGrowthSince = Date.now() - 100000 // 压掉 seedBaseline 的 181s，只跨 100s
-    for (var i = 0; i < 4; i++) { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
-    assert.equal(t.runs[0].zeroGrowthRounds, 4, '轮数半边达线（4 轮零增长——轮数闸语义不变）')
-    assert.equal(t.runs[0].outcome, 'running', '100s < 240s 阈值 → 不判死（旧 60s 闸在此必误杀慢模型首 token 窗口）')
-    assert.equal(t.status, 'in-progress', '慢模型不误杀（task-mvrg3962 断言②）')
-    assert.ok(!h.state.modelFailStreak || !h.state.modelFailStreak[GATE_SID + '|prov/slow-flash'], '零误杀 → 零熔断连击')
+    t.runs[0].zeroGrowthSince = Date.now() - 599000 // 压掉 seedBaseline 的 601s，只跨 599s
+    for (var i = 0; i < 40; i++) { await h.dispatch.poolCycle(GATE_SID); await flushGate() }
+    assert.equal(t.runs[0].zeroGrowthRounds, 40, '轮数半边达线（40 轮零增长——轮数闸语义不变）')
+    assert.equal(t.runs[0].outcome, 'running', '599s < 600s 阈值 → 不判死（2s 延迟模型正常干活的 3 分钟+ 静默窗口不被误杀）')
+    assert.equal(t.status, 'in-progress', '快模型不误杀（task-mvrt9tn5 断言①：延迟数据在表也不缩放阈值）')
+    assert.ok(!h.state.modelFailStreak || !h.state.modelFailStreak[GATE_SID + '|prov/kimi-k3'], '零误杀 → 零熔断连击')
     assert.equal(sent.length, 0, '未判死 → 无重派投递')
-    // ---- 阶段 B（真挂死照判）：基线倒推 241s（> 240s 阈值）→ 下一轮判死，文案带阈值依据 ----
-    t.runs[0].zeroGrowthSince = Date.now() - 241000
+    // ---- 阶段 B（真挂死照判）：基线倒推 601s（> 600s 阈值）→ 下一轮判死，文案「阈值 600s」直述 ----
+    t.runs[0].zeroGrowthSince = Date.now() - 601000
     await h.dispatch.poolCycle(GATE_SID); await flushGate()
-    assert.equal(t.runs[0].outcome, 'timeout/error', '超阈值真挂死照判（task-mvrg3962 断言③）——关账走 settleRun 失败臂')
-    assert.match(String(t.lastError || ''), /阈值 240s（=3×80s 实测延迟）/, '判死文案带出实际生效阈值与依据（240s=3×80s）')
-    assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/slow-flash'], 1, '真挂死照喂熔断连击（挂死=模型面故障语义不变）')
+    assert.equal(t.runs[0].outcome, 'timeout/error', '超阈值真挂死照判（task-mvrt9tn5 断言②）——关账走 settleRun 失败臂')
+    assert.match(String(t.lastError || ''), /超挂死墙钟阈值 600s/, '判死文案固定值直述（600s，不引用延迟）')
+    assert.doesNotMatch(String(t.lastError || ''), /3×|实测延迟|地板值/, '假精确回归锁：不再出现「3×Ns 实测延迟」/分态文案')
+    assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/kimi-k3'], 1, '真挂死照喂熔断连击（挂死=模型面故障语义不变）')
   } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
 })

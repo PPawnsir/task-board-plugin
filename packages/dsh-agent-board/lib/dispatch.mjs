@@ -61,6 +61,8 @@ export function createDispatch(ctx, state, deps) {
     var notifyLateApprove = (typeof deps.notifyLateApprove === 'function') ? deps.notifyLateApprove : null // 迟到复核 notice 级通知（三连根修②，未接线 → 静默跳过）
     // 派发即回执：spawn 成功后入 45s 聚合队列的「🚀 已派发」区（老 host 未注入 → 静默跳过）
     var notifyDispatched = deps.notifyDispatched
+    // 拆解官回执（task-mvrqiu6x）：拆解官落定 split/keep → 「🧩 已拆解」聚合分区（老 host 未注入 → 静默跳过）
+    var notifyDecomposed = deps.notifyDecomposed
     // 共享状态别名（本体由 index.mjs apply 统一构建并逐模块注入）
     var dispatchedEver = state.dispatchedEver
     var badModels = state.badModels
@@ -259,30 +261,21 @@ export function createDispatch(ctx, state, deps) {
     // 原形（2026-10-27 降级实测）：glm-5.2 续跑挂上「连接开着永不响应」形态——会话不死（死会话哨兵
     // listChildren 查不出）、不报错（无 settle 事件）、零产出（日志零增长 7 分钟），running 假相直到
     // 人工终止。熔断/冷却/哨兵全部够不着它（哨兵只盖「会话不在目录」，这里盖「会话在但不干活」）。
-    // 判死口径：连续 HUNG_ZERO_GROWTH_ROUNDS 轮（缺省 4 ≈ 4×15s 心跳）日志零增长 **且距基线
-    // ≥自适应墙钟阈值**——poolCycle 不只心跳驱动，每次写盘都 kickCycle（写风暴下 4 轮可在 1s
-    // 内跑完），纯轮数会对刚 spawn 的 run 秒判；双闸 = 「≥4 轮零增长且真跨墙钟阈值」。
+    // 判死口径：连续 HUNG_ZERO_GROWTH_ROUNDS 轮（≈40 ≈ 600s/15s 心跳）日志零增长 **且距基线
+    // ≥600s 墙钟地板**——poolCycle 不只心跳驱动，每次写盘都 kickCycle（写风暴下轮数可在 1s
+    // 内跑完），纯轮数会对刚 spawn 的 run 秒判；双闸 = 「≥40 轮零增长且真跨 600s 墙钟」。
     // 常量化暂不开放配置（实证再调）。
-    var HUNG_ZERO_GROWTH_ROUNDS = 4
-    // ===== 挂死墙钟阈值自适应（task-mvrg3962）：慢模型不再误杀 =====
-    // 生产事故（2026-10-28 用户目击「只卡了下而已」）：cmss/zhanlu/deepseek-v4.1-flash 首 token
-    // 实测延迟 77~132s（健康表 latencyMs 有案），run 起飞 60s 还在等第一个 token → 固定 60s 墙钟闸
-    // 误杀。慢模型（网关系）与挂死的「零产出窗口」在 60s 尺度不可区分。修法：墙钟闸 =
-    // max(180s 地板, 3×该模型健康表最近观测 latencyMs)；无延迟数据回退 180s 地板。轮数闸（4 轮）
-    // 保留——写风暴防秒判语义不变。熔断喂连击/重派链路均不动。
-    var HUNG_WALL_FLOOR_MS = 180000
-    var HUNG_WALL_LATENCY_MULT = 3
-    // 取自适应墙钟阈值：读健康表该模型最近观测 latencyMs（observeModel 落表，run/探测双源）。
-    // 只读不建表（healthEntry 会建空条目，sweep 每轮调用不能产生副作用写）。返回
-    // { ms: 生效阈值, latencyMs: 依据的实测延迟（null=无数据走地板） }。
-    function hungWallOf(sid, model) {
-      var latency = null
-      try {
-        var e = modelHealth[sid] && modelHealth[sid][model]
-        if (e && typeof e.latencyMs === 'number' && e.latencyMs > 0) latency = e.latencyMs
-      } catch (e2) { /* 读表失败按无数据走地板（宁少勿多） */ }
-      return { ms: latency ? Math.max(HUNG_WALL_FLOOR_MS, HUNG_WALL_LATENCY_MULT * latency) : HUNG_WALL_FLOOR_MS, latencyMs: latency }
-    }
+    // ===== 挂死墙钟阈值定稿（task-mvrt9tn5 二度校准）：固定 600s，放弃延迟缩放 =====
+    // 三轮生产误杀实证（2026-10-28）：①慢网关模型长生成段 180s+ 零日志被 180s 闸误杀；
+    // ②kimi-k3（健康表实测延迟 2s 的快模型）正常干活 10 分钟同样被 180s 闸误杀（=3×2s 地板）——
+    // 结论：延迟（首 token 速度）与「长生成静默时长」无关，慢模型慢在长生成，快模型做大任务
+    // 同样有 3 分钟+ 无日志窗口，3×latencyMs 缩放（task-mvrg3962）方向作废。定稿：墙钟地板直接
+    // 600s（10 分钟，对齐观测到的最长正常静默），删延迟缩放（简化，也根除「3×0s=0s 假精确回落」
+    // 的延迟数据缺失洞）。轮数闸按墙钟换算常量化：600s/15s 心跳 ≈ 40 轮。判死语义不变：
+    // 600s 零增长 + 轮数达线才判（真挂死 7 分钟实证，600s 仍能抓住，只是晚 3 分钟——可接受）。
+    // 熔断喂连击/重派链路均不动。
+    var HUNG_WALL_FLOOR_MS = 600000
+    var HUNG_ZERO_GROWTH_ROUNDS = 40 // ≈ HUNG_WALL_FLOOR_MS / 15s 心跳：轮数半边与墙钟半边同尺度（写风暴防秒判语义保留）
     var HUNG_KILL_PREFIX = 'run 挂死：' // 判死失败文本前缀（进 isModelKillFailure 白名单 = 计入熔断连击）
     var HUNG_CIRCUIT_WHY = '挂死零产出（会话日志字节持续不涨），已熔断' // 挂死触发的熔断文案分态（挂死≠秒拆）
     // 挂死型模型面失败识别：判死结算的错误文本（HUNG_KILL_PREFIX 开头）与宿主秒拆/activation 异常
@@ -1408,17 +1401,25 @@ export function createDispatch(ctx, state, deps) {
     // 三分支：verdict=split → applyDecomposeProposal 物化（幂等清旧批 draft 提案）+ 源卡摘要消息 + 通知；
     //         verdict=keep → 源卡记「无需拆分：rationale」；
     //         run 失败 / structured 缺失 / 提案畸形 → 源卡记失败原因 + 通知（源卡与旧提案批都不动）。
-    // 通知走 pushSysNote 且**不带 taskId**：源卡停在 draft/pending，带 taskId 的系统通知会在回执冲刷时
-    // 被「任务仍在执行中」过滤器整行丢弃（notify.mjs deliver 段）——提案到位是必须送达的信号。
+    // 通知（task-mvrqiu6x）：split/keep 成功改走 notifyDecomposed（pushReceipt 聚合内核出「🧩 已拆解」分区，
+    // 受 notifyDone 开关约束）——源卡按设计停在 draft/pending，旧实现借 pushSysNote 系统通道绕行
+    // 「带 taskId 会被仍在执行中过滤器丢弃」的墙，代价是成功信号伪装成「⚠️ 系统异常」；
+    // 失败分支保持 pushSysNote 🚨 不变（异常就该是异常）。
     async function settleDecompose(sid, rec, res, err) {
       var failed = !!err || (res && res.stopReason && res.stopReason !== 'completed')
       var errText = err ? String(err) : (res && (res.diagnostic || res.stopReason) || '')
       var structured = (res && res.structured && typeof res.structured === 'object') ? res.structured : null
       var applied = null
+      var srcTitle = ''
+      // 完成回执开关（设置区「通知」notifyDone，task-mvrqiu6x）：同一次持锁回调里读看板文档（零额外读盘，
+      // 与 settleWorker/settleVerifier 写法一致）；缺字段 → cfg 归一为 true，宁可多报不漏报。
+      var doneOn = true
       try {
         applied = await mutateLocked(sid, function (d) {
           var t = d.tasks.find(function (x) { return x.id === rec.taskId })
           if (!t) return null
+          srcTitle = t.title
+          doneOn = cfg(d).notifyDone !== false
           if (!Array.isArray(t.messages)) t.messages = []
           if (failed) {
             t.messages.push({ kind: 'decompose', text: '🧩 拆解官 run 失败（' + String(errText || '未知错误').slice(0, 200) + '）——源卡未改动，可重试 task_decompose', at: new Date().toISOString(), by: 'system' })
@@ -1432,9 +1433,14 @@ export function createDispatch(ctx, state, deps) {
         }, true) // skipKick：物化的是 draft 子卡（不参与派发），无需踢 poolCycle
       } catch (e) { console.error('[task-board] settle decompose failed (task ' + rec.taskId + '):', String(e)); applied = null }
       try {
-        if (applied && applied.ok && applied.verdict === 'split') pushSysNote(sid, '🧩 拆解提案已就位（' + applied.children.length + ' 张草稿子卡，源卡 ' + rec.taskId + '），确认后逐张 publish')
-        else if (applied && applied.ok && applied.verdict === 'keep') pushSysNote(sid, '🧩 拆解官判定源卡（' + rec.taskId + '）无需拆分，理由已落源卡消息')
-        else pushSysNote(sid, '🚨 拆解官 run 未产出可用提案（源卡 ' + rec.taskId + '）：' + String((applied && applied.error) || errText || 'structured 缺失').slice(0, 200))
+        // 拆解官正式回执：走 notifyDecomposed（「🧩 已拆解」聚合分区，notifyDone 闸门同完成回执口径；
+        // 源卡 messages 的「🧩 拆解提案已就位/无需拆分」留痕已由 applyDecomposeProposal 落卡，
+        // 关开关时留痕照旧不丢）——成功信号不再借系统通道伪装异常。
+        if (applied && applied.ok && applied.verdict === 'split') {
+          if (doneOn && typeof notifyDecomposed === 'function') notifyDecomposed(sid, { sourceId: rec.taskId, sourceTitle: srcTitle, verdict: 'split', children: applied.children, reason: '' })
+        } else if (applied && applied.ok && applied.verdict === 'keep') {
+          if (doneOn && typeof notifyDecomposed === 'function') notifyDecomposed(sid, { sourceId: rec.taskId, sourceTitle: srcTitle, verdict: 'keep', children: [], reason: structured ? String(structured.rationale == null ? '' : structured.rationale).trim().slice(0, 150) : '' })
+        } else pushSysNote(sid, '🚨 拆解官 run 未产出可用提案（源卡 ' + rec.taskId + '）：' + String((applied && applied.error) || errText || 'structured 缺失').slice(0, 200)) // 失败分支：异常就是异常，保持 🚨 系统通道（文案逐字不变）
       } catch (e) { console.error('[task-board] decompose notify failed:', String(e)) }
     }
 
@@ -2138,7 +2144,7 @@ export function createDispatch(ctx, state, deps) {
     // listChildren 查不出）、不报错（无 settle 事件）、零产出（日志零增长 7 分钟），running 假相直到
     // 人工终止。熔断/冷却/哨兵全部够不着它。修法：每轮对在跑 worker/verifier run 比对会话日志字节数
     // （logSizeOf）与 run 留档的 lastLogBytes（新字段，每轮写回）：连续 HUNG_ZERO_GROWTH_ROUNDS 轮
-    // 零增长且距基线 ≥自适应墙钟阈值（max(180s, 3×实测 latencyMs)，task-mvrg3962）→ 判定挂死：settleRun 失败臂（记「挂死零产出」，errText
+    // 零增长且距基线 ≥600s 墙钟地板（固定值，task-mvrt9tn5 二度校准：延迟缩放作废）→ 判定挂死：settleRun 失败臂（记「挂死零产出」，errText
     // 前缀 HUNG_KILL_PREFIX 进 isModelKillFailure 白名单）+ 计入该模型熔断连击（挂死=模型面故障）+
     // 卡重派（settleWorker 失败臂回 pending / settleVerifier 失败臂重排审查）。活体增长即清零计数。
     // 边界（宁少勿多）：
@@ -2187,11 +2193,8 @@ export function createDispatch(ctx, state, deps) {
             row.zeroGrowthRounds = (row.zeroGrowthRounds || 0) + 1
             any = true
             var since = typeof row.zeroGrowthSince === 'number' ? row.zeroGrowthSince : 0
-            // 自适应墙钟闸（task-mvrg3962）：按该模型健康表实测延迟缩放，慢模型不误杀；判定时点
-            // 的生效阈值随手带上（判死文案引用同一份数据，避免 kill 时表已变导致文案与判定脱节）。
-            var wall = hungWallOf(sid, rec.model)
-            rec.__hungWall = wall
-            if (row.zeroGrowthRounds >= HUNG_ZERO_GROWTH_ROUNDS && since && Date.now() - since >= wall.ms) hung.push(rec)
+            // 墙钟闸（task-mvrt9tn5 定稿）：固定 600s 地板——延迟与长生成静默时长无关（三连误杀实证），不再读健康表缩放
+            if (row.zeroGrowthRounds >= HUNG_ZERO_GROWTH_ROUNDS && since && Date.now() - since >= HUNG_WALL_FLOOR_MS) hung.push(rec)
           } catch (e) { console.error('[task-board] 挂死检测判定失败 (run ' + (rec && rec.id) + '):', String(e)) }
         })
         return any ? d : null // 无改动返回 null → 不写盘（安静板纪律；有活跃 run 时主锁本就每轮写池快照，增量零额外写）
@@ -2204,13 +2207,10 @@ export function createDispatch(ctx, state, deps) {
         try {
           if (hrec.settled || runsFor(sid)[hrec.taskId] !== hrec) continue // 结算通道已抢先，不重复判
           killed++
-          // 判死文案带出实际生效阈值与依据（task-mvrg3962）：如「阈值 240s（=3×80s 实测延迟）」，
-          // 无数据走地板则「阈值 180s（地板值，无实测延迟）」——排查时一眼分清误杀 vs 真挂死口径。
-          var wall = hrec.__hungWall || hungWallOf(sid, hrec.model)
-          var wallTxt = Math.round(wall.ms / 1000) + 's' + (wall.latencyMs
-            ? '（=3×' + Math.round(wall.latencyMs / 1000) + 's 实测延迟）'
-            : '（地板值，无实测延迟）')
-          var why = HUNG_KILL_PREFIX + '连续 ' + HUNG_ZERO_GROWTH_ROUNDS + ' 轮会话日志零增长（零产出），超自适应墙钟阈值 ' + wallTxt + '，判挂死按模型面故障结算重派'
+          // 判死文案带出实际生效阈值（task-mvrt9tn5）：固定值直述「阈值 600s」——不引用健康表延迟，
+          // 也不再有「3×0s」假精确 / 「地板值，无实测延迟」分态（缩放已删，阈值对任何模型同值）。
+          var wallTxt = Math.round(HUNG_WALL_FLOOR_MS / 1000) + 's'
+          var why = HUNG_KILL_PREFIX + '连续 ' + HUNG_ZERO_GROWTH_ROUNDS + ' 轮会话日志零增长（零产出），超挂死墙钟阈值 ' + wallTxt + '，判挂死按模型面故障结算重派'
           console.log('[task-board] 挂死零产出判死（' + sid + '）：task ' + hrec.taskId + ' run ' + hrec.id + ' ' + why)
           // err 传裸字符串（settleRun 只做 !!err / String(err)）：new Error 会被 String(err) 包上
           // 'Error: ' 前缀，isModelKillFailure 的前缀锚定（index 0）失效 → 熔断连击漏喂。
