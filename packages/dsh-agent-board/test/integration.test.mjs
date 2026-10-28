@@ -397,6 +397,47 @@ test('集成f·回执聚合过滤：45s 窗口聚合为一条，已归档任务�
   } finally { await env.cleanup() }
 })
 
+// ===== 场景 f2：拆解官结算（task-mvrqiu6x）——失败分支 🚨 系统异常区照旧，split 成功才出「🧩 已拆解」分区 =====
+// draft 源卡 → task_decompose 工具 → decomposer 一次性 run 落定（无 structured）→ settleDecompose 失败臂
+// pushSysNote（sysNotesBuf 易失随回执冲刷）；开窗任务的完成回执到点冲刷时一并投递，且不产生「🧩 已拆解」回执。
+test('集成f2·拆解官结算：draft 源卡 task_decompose → structured 缺失 → 🚨 系统异常区，无 🧩 回执', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    // draft 源卡（Team 模式语义：先拆后发，源卡停 draft 待用户确认发布）
+    var r = await env.rpc('create-task', { sessionId: env.sid, id: 'task-dc1', title: '集成需求卡', description: '集成套件拆解源卡', draft: true })
+    assert.equal(r.ok, true, 'draft 源卡创建')
+    assert.equal(r.task.status, 'draft')
+    // 拆解官 spawn（一次性 run，label decomposer:task-dc1）
+    var dc = await env.tools.get('task_decompose').execute({ taskId: 'task-dc1' })
+    assert.equal(dc.ok, true, 'task_decompose 成功: ' + JSON.stringify(dc))
+    var vrun = await env.waitFor(function () { return env.lastRun('decomposer:task-dc1') }, 'decomposer spawn 发生')
+    assert.equal(vrun.req.label, 'decomposer:task-dc1')
+    // run 落定但无 structured（宿主/provider 不支持 outputSchema）→ settleDecompose 失败臂 pushSysNote（不带 taskId）
+    vrun.resolveWith('拆解官自由文本，无结构化提案')
+    await env.waitFor(function () { var t = env.task('task-dc1'); return t && (t.messages || []).some(function (m) { return /拆解官未返回结构化提案/.test(m.text) }) }, '失败原因落源卡消息')
+    assert.equal(env.task('task-dc1').status, 'draft', '源卡状态不变')
+    // 开窗任务：完成回执入队（pushReceipt 挂 45s 冲刷窗口），失败 sysNote 随窗冲刷
+    await createTask(env, 'task-dc2', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 1 }, '开窗任务 spawn 发生')
+    // 等派发收尾落卡（claimedBy=真实子会话）：完成回执的 isDispatched 判定依赖它——
+    // 抢在落卡前 board_report 会落成「未派发完成」，回执被正确地静默（本用例要验的是投递面）。
+    var child = env.continuables[0]
+    await env.waitFor(function () { var t = env.task('task-dc2'); return t && t.status === 'in-progress' && t.claimedBy === child.childId ? t : null }, '开窗任务落卡 in-progress')
+    var rep = await env.tools.get('board_report').execute({ taskId: 'task-dc2', kind: 'complete', summary: 'f2 交付', changes: '', selfTest: '', diffStat: '' })
+    assert.equal(rep.ok, true)
+    // 45s 聚合窗口到点 → 冲刷：完成回执 + 🚨 系统异常（失败分支不产生「🧩 已拆解」回执）
+    await env.clock.advance(45000)
+    await env.waitFor(function () { return env.sent.length >= 1 }, '失败信号随回执冲刷投递')
+    var text = env.sent[0].content[0].text
+    assert.ok(text.indexOf('⚠️ 系统异常 1 条：') >= 0, '失败分支仍落 ⚠️ 系统异常区')
+    assert.ok(text.indexOf('🚨 拆解官 run 未产出可用提案（源卡 task-dc1）') >= 0, '失败文案逐字')
+    assert.ok(text.indexOf('已拆解') < 0, '失败不产生「🧩 已拆解」回执')
+    assert.ok(text.indexOf('f2 交付') >= 0, '完成回执（开窗任务）照常投递')
+  } finally { await env.cleanup() }
+})
+
 // ===== 场景 g：歧义通知 25s 去抖——连报两次只投最新一条 =====
 // 同一任务 25s 窗口内两次上报歧义：第一次调度被第二次顶替（escNotifyTimers 身份不匹配静默丢弃），
 // 到点只投一条且内容是最新疑问（deliverEscalation 投递时才读 escalation.question）。

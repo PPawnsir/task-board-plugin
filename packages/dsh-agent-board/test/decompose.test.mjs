@@ -30,6 +30,7 @@ function mkBoard(tasks, over) { return Object.assign({ version: 12, ownerSession
 function mkDispatch(board, ctxOver, depsOver) {
   var runs = {}
   var notes = []
+  var deco = []
   var dispatch = createDispatch(
     Object.assign({ fs: {}, effect: function () {}, get: function () { return null } }, ctxOver || {}),
     { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: {} },
@@ -42,8 +43,10 @@ function mkDispatch(board, ctxOver, depsOver) {
       sessionCwd: function () { return '' }, withTimeout: function (p) { return p }, runsFor: function () { return runs }, feedbackOn: function () { return true },
       pushSysNote: function (sid, text, taskId) { notes.push({ text: text, taskId: taskId || null }) },
       maybeNotify: function () {}, notifyTaskDone: function () {},
+      // 拆解官正式回执（task-mvrqiu6x）：split/keep 成功走 notifyDecomposed（不再借 pushSysNote 系统异常通道）
+      notifyDecomposed: function (sid, payload) { deco.push(payload) },
     }, depsOver || {}))
-  return { dispatch: dispatch, runs: runs, notes: notes }
+  return { dispatch: dispatch, runs: runs, notes: notes, deco: deco }
 }
 // 新宿主桩（spawn-activation.test.mjs 同形）：startActivation 记录 spec，result 直接落定注入值
 function mkDecomposeSubagents(calls, resultValue, opts) {
@@ -306,8 +309,14 @@ test('③ 全链：startActivation(caller + outputSchema) → structured=split �
   assert.equal(dmsg.length, 1); assert.match(dmsg[0].text, /拆解提案已就位（2 张草稿子卡）/)
   var drec = src.runs.filter(function (r) { return r.role === 'decomposer' })
   assert.equal(drec.length, 1); assert.equal(drec[0].outcome, 'completed')
-  // 通知：pushSysNote 送达且不带 taskId（源卡 draft，带 taskId 会被回执冲刷过滤丢弃）
-  assert.ok(h.notes.some(function (n) { return /拆解提案已就位/.test(n.text) && n.taskId === null }), 'pushSysNote 不带 taskId 送达')
+  // 通知（task-mvrqiu6x）：split 成功走正式回执 notifyDecomposed（「🧩 已拆解」聚合分区），
+  // 不再借 pushSysNote 系统通道伪装「⚠️ 系统异常」；源卡 messages 留痕已在上方断言。
+  assert.equal(h.notes.length, 0, 'split 成功不再落 pushSysNote 系统异常通道')
+  assert.equal(h.deco.length, 1, 'split 成功发拆解回执')
+  assert.equal(h.deco[0].sourceId, 'epic1')
+  assert.equal(h.deco[0].sourceTitle, '大任务')
+  assert.equal(h.deco[0].verdict, 'split')
+  assert.equal(h.deco[0].children.length, 2, '回执带本批子卡（标题列表来源）')
   // 活跃表已摘除（结算链收口）
   assert.equal(h.runs['epic1'], undefined)
 })
@@ -341,7 +350,10 @@ test('④ verdict=keep（记 rationale 零子卡）与 structured 缺失（失�
   assert.equal(src1.status, 'pending', '源卡状态不变')
   var m1 = src1.messages.filter(function (m) { return m.kind === 'decompose' })
   assert.equal(m1.length, 1); assert.match(m1[0].text, /无需拆分：单点小改不必拆/)
-  assert.ok(h1.notes.some(function (n) { return /无需拆分/.test(n.text) }), 'keep 通知送达')
+  assert.equal(h1.deco.length, 1, 'keep 也走正式回执（同分区「无需拆分」文案）')
+  assert.equal(h1.deco[0].verdict, 'keep')
+  assert.match(h1.deco[0].reason, /单点小改不必拆/)
+  assert.equal(h1.notes.length, 0, 'keep 成功不落 pushSysNote 系统异常通道')
   // structured 缺失：源卡记失败原因 + 通知，零子卡
   var src2 = mkTask({ id: 'k2', status: 'draft' })
   var board2 = mkBoard([src2])
@@ -352,7 +364,8 @@ test('④ verdict=keep（记 rationale 零子卡）与 structured 缺失（失�
   assert.equal(board2.tasks.length, 1, 'structured 缺失不产子卡')
   var m2 = src2.messages.filter(function (m) { return m.kind === 'decompose' })
   assert.equal(m2.length, 1); assert.match(m2[0].text, /structured 缺失/)
-  assert.ok(h2.notes.some(function (n) { return /未产出可用提案/.test(n.text) }), '失败通知送达')
+  assert.ok(h2.notes.some(function (n) { return /未产出可用提案/.test(n.text) }), '失败通知仍走 pushSysNote（异常就该是异常）')
+  assert.equal(h2.deco.length, 0, 'structured 缺失不产生拆解回执')
   // run 失败臂：stopReason=error → 源卡记失败原因
   var src3 = mkTask({ id: 'k3', status: 'draft' })
   var board3 = mkBoard([src3])

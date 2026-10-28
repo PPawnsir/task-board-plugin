@@ -75,6 +75,7 @@ export function apply(ctx) {
       withTimeout: session.withTimeout, runsFor: session.runsFor, feedbackOn: session.feedbackOn, epicSplitOn: session.epicSplitOn,
       pushSysNote: notify.pushSysNote, maybeNotify: notify.maybeNotify, notifyTaskDone: notify.notifyTaskDone,
       notifyDispatched: notify.notifyDispatched, notifyLateReject: notify.notifyLateReject,
+      notifyDecomposed: notify.notifyDecomposed, // 拆解官回执（task-mvrqiu6x）：「🧩 已拆解」聚合分区接线
       notifyLateApprove: notify.notifyLateApprove, // 迟到复核分态通知（三连根修②，task-mvf7nve8）
     })
     storeDeps.poolCycle = dispatch.poolCycle // 晚绑定收口

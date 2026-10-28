@@ -4253,7 +4253,7 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
 // 函数声明提升后被头部 var x = deps.x 赋值覆盖，是永不执行的死代码——改错地方不产生效果，挪赋值顺序即引爆）。
 // 此处断言六个函数的定义只存在于 notify.mjs，任何模块再长出副本即红。
 test('notify 单一来源：notifyTaskDone/flushReceipts/deliverEscalation 等函数定义只存在于 lib/notify.mjs', () => {
-  const names = ['deliverEscalation', 'notifyMainWindow', 'maybeNotify', 'notifyTaskDone', 'notifyDispatched', 'pushSysNote', 'flushReceipts']
+  const names = ['deliverEscalation', 'notifyMainWindow', 'maybeNotify', 'notifyTaskDone', 'notifyDispatched', 'notifyDecomposed', 'pushSysNote', 'flushReceipts']
   const others = ['../index.mjs', '../lib/policy.mjs', '../lib/usage.mjs', '../lib/session.mjs', '../lib/store.mjs', '../lib/dispatch.mjs', '../lib/rpc.mjs']
   const notifySrc = readFileSync(new URL('../lib/notify.mjs', import.meta.url), 'utf8')
   for (const name of names) {
@@ -4353,6 +4353,167 @@ test('派发回执④：deps 未注入 notifyDispatched（老 host）→ 静默�
   assert.equal(h.state.receiptBuf.s1.items.length, 1)
 })
 
+// ===== 拆解官回执（task-mvrqiu6x）：notifyDecomposed 入 45s 聚合队列「🧩 已拆解」分区 =====
+test('拆解回执①：notifyDecomposed 入队（kind=decomposed）→ flush 出「🧩 已拆解」分区（split/keep 文案）', async () => {
+  const h = mkNotify({ board: { tasks: [mkTask({ id: 'src1', title: '需求卡', status: 'draft' })] } })
+  h.notify.notifyDecomposed('s1', { sourceId: 'src1', sourceTitle: '需求卡', verdict: 'split', children: [{ id: 'src1-1', title: '子卡A' }, { id: 'src1-2', title: '子卡B' }], reason: '' })
+  const buf = h.state.receiptBuf.s1
+  assert.equal(buf.items.length, 1)
+  assert.equal(buf.items[0].kind, 'decomposed')
+  assert.equal(buf.items[0].id, 'src1')
+  pushFour(h)
+  await new Promise(r => setImmediate(r))
+  assert.equal(h.captured.length, 1)
+  const txt = textOf(h.captured[0])
+  assert.match(txt, /🧩 已拆解 1 个（待确认发布）：/)
+  assert.match(txt, /需求卡 \(src1\) — split：2 张子卡（子卡A、子卡B）/)
+  assert.equal(h.captured[0].source.kind, 'plugin:dsh-agent-board')
+  // keep 判定：同分区「无需拆分」文案（断言③）
+  const h2 = mkNotify({ board: { tasks: [mkTask({ id: 'src2', title: '无需拆卡', status: 'draft' })] } })
+  h2.notify.notifyDecomposed('s1', { sourceId: 'src2', sourceTitle: '无需拆卡', verdict: 'keep', children: [], reason: '结构单一' })
+  pushFour(h2)
+  await new Promise(r => setImmediate(r))
+  const txt2 = textOf(h2.captured[0])
+  assert.match(txt2, /🧩 已拆解 1 个（待确认发布）：/)
+  assert.match(txt2, /无需拆卡 \(src2\) — keep：无需拆分/)
+})
+
+test('拆解回执②：源卡停 draft/pending（非 in-progress）→ decomposed 回执不被投递过滤器丢弃（关键回归）', async () => {
+  // 源卡 draft/pending 是设计常态——正是原实现绕行系统通道借 pushSysNote 的原因；
+  // 此处把 deliver 投递过滤器的「decomposed 豁免」钉死，防后人把「非 in-progress 丢弃」改成通用规则误伤
+  for (const st of ['draft', 'pending']) {
+    const h = mkNotify({ board: { tasks: [mkTask({ id: 'src9', title: '需求卡', status: st })] } })
+    h.notify.notifyDecomposed('s1', { sourceId: 'src9', sourceTitle: '需求卡', verdict: 'split', children: [{ id: 'src9-1', title: '子卡X' }], reason: '' })
+    pushFour(h)
+    await new Promise(r => setImmediate(r))
+    assert.equal(h.captured.length, 1, st + ' 状态消息应投递')
+    const txt = textOf(h.captured[0])
+    assert.match(txt, /🧩 已拆解 1 个（待确认发布）：/, st + ' 拆解回执不得被「任务非 in-progress」过滤器丢弃')
+    assert.match(txt, /需求卡 \(src9\) — split：1 张子卡（子卡X）/)
+  }
+})
+
+test('拆解回执⑥：源卡已 archived → decomposed 回执被丢弃（人已手动归档=已知悉）', async () => {
+  const h = mkNotify({ board: { tasks: [mkTask({ id: 'srcA', title: '已归档卡', status: 'archived' })] } })
+  h.notify.notifyDecomposed('s1', { sourceId: 'srcA', sourceTitle: '已归档卡', verdict: 'split', children: [{ id: 'srcA-1', title: '子卡Y' }], reason: '' })
+  assert.equal(h.state.receiptBuf.s1.items.length, 1) // 入队照常，flush 时投递前过滤
+  pushFour(h)
+  await new Promise(r => setImmediate(r))
+  assert.equal(h.captured.length, 1)
+  const txt = textOf(h.captured[0])
+  assert.doesNotMatch(txt, /🧩 已拆解/)   // 源卡已 archived → 拆解回执被吞（唯一离场规则）
+  assert.match(txt, /✅ 完成 4 个：/)      // 完成回执（主通道）照常投递
+})
+
+test('拆解回执⑦：同一批重复上报 → 幂等零重复；换一批子卡/verdict → 指纹不同正常新回执', () => {
+  const h = mkNotify({ board: { tasks: [] } })
+  const payload = { sourceId: 'srcI', sourceTitle: '幂等卡', verdict: 'split', children: [{ id: 'srcI-1', title: 'A' }, { id: 'srcI-2', title: 'B' }] }
+  h.notify.notifyDecomposed('s1', payload)
+  h.notify.notifyDecomposed('s1', payload) // 同一批提案重复上报 → 幂等键（源卡id|verdict|子卡id集）一致 → 吞掉
+  assert.equal(h.state.receiptBuf.s1.items.length, 1)
+  h.notify.notifyDecomposed('s1', Object.assign({}, payload, { children: [{ id: 'srcI-3', title: 'C' }] })) // 换一批子卡
+  assert.equal(h.state.receiptBuf.s1.items.length, 2)
+  h.notify.notifyDecomposed('s1', { sourceId: 'srcI', sourceTitle: '幂等卡', verdict: 'keep', children: [] }) // verdict 变 → 新指纹
+  assert.equal(h.state.receiptBuf.s1.items.length, 3)
+})
+
+// 拆解官结算分支 harness（task-mvrqiu6x）：decomposer 一次性 run 以给定结果落定 → settleDecompose 三分支。
+// 与 runVerifierFuseCase 同构：createDispatch 直调 + mock subagents.start（run.result 由用例给定）+
+// pushSysNote/notifyDecomposed 捕获；源卡 draft（设计常态），spawnOneShot 直调（拆解官由 task_decompose 派生）。
+async function runDecomposeCase(opts) {
+  const o = opts || {}
+  const t = mkTask({ id: 'dec-src', title: '待拆解源卡', status: 'draft' })
+  const board = mkBoard([t])
+  if (o.notifyDone === false) board.notifyDone = false
+  const notes = []
+  const deco = []
+  const runs = {}
+  const listeners = []
+  const ctx = {
+    fs: {}, get: function () { return null }, timer: null,
+    effect: function (f) { var d = f(); return function () { if (typeof d === 'function') d() } },
+    on: function (name, fn) { listeners.push({ name: name, fn: fn }); return function () {} },
+    subagents: {
+      list: () => ['mock'],
+      getProvider: () => ({ inheritsParentContext: false }),
+      // spawn 本身成功；run.result 由用例给定（structured 分支 / 纯文本 / 失败）
+      start: async () => ({ id: 'run-dec', result: o.result, dispose: async function () {} }),
+      startContinuable: async () => ({ childId: 'child-x', messageId: 'm1' }),
+    },
+  }
+  const dispatch = createDispatch(ctx, { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: { [FULL_SID]: runs } }, {
+    rt: async () => board, wt: async () => {}, mutateLocked: async (sid, fn) => fn(board), kickCycle: () => {},
+    rootForSession: () => ({ id: FULL_SID }),
+    withTimeout: (p) => p, runsFor: () => runs, feedbackOn: () => true,
+    pushSysNote: (sid, text) => { notes.push(text) }, maybeNotify: () => {}, notifyTaskDone: () => {},
+    notifyDecomposed: (sid, payload) => { deco.push(payload) },
+  })
+  const rec = await dispatch.spawnOneShot(FULL_SID, board.tasks[0], 'decomposer')
+  assert.ok(rec, 'decomposer spawn 应成功（源卡 draft）')
+  const flushN = () => new Promise(r => setImmediate(r))
+  for (var i = 0; i < 8; i++) await flushN()
+  return { notes: notes, deco: deco, board: board }
+}
+
+test('拆解回执④split：settleDecompose split 成功 → notifyDecomposed 正式回执（不再伪装 ⚠️ 系统异常）', async () => {
+  const r = await runDecomposeCase({ result: Promise.resolve({ output: [{ type: 'text', text: '' }], stopReason: 'completed', structured: { verdict: 'split', children: [{ title: '子卡A', size: 'light', touches: [], acceptance: 'x' }] } }) })
+  assert.equal(r.deco.length, 1, 'split 成功应发拆解回执')
+  assert.equal(r.deco[0].sourceId, 'dec-src')
+  assert.equal(r.deco[0].sourceTitle, '待拆解源卡')
+  assert.equal(r.deco[0].verdict, 'split')
+  assert.equal(r.deco[0].children.length, 1)
+  assert.equal(r.deco[0].children[0].id, 'dec-src-1') // decomposeChildId：parentId-N
+  assert.equal(r.notes.length, 0, '成功信号不得再借 pushSysNote 伪装成 ⚠️ 系统异常')
+  const t = r.board.tasks.find(x => x.id === 'dec-src')
+  assert.equal(t.status, 'draft', '源卡状态不变')
+  assert.ok(t.messages.some(m => /🧩 拆解提案已就位/.test(m.text)), '源卡 messages 留痕照旧')
+})
+
+test('拆解回执③keep：settleDecompose keep → 同分区「无需拆分」回执（不落系统异常）', async () => {
+  const r = await runDecomposeCase({ result: Promise.resolve({ output: [{ type: 'text', text: '' }], stopReason: 'completed', structured: { verdict: 'keep', rationale: '结构单一' } }) })
+  assert.equal(r.deco.length, 1, 'keep 应发拆解回执')
+  assert.equal(r.deco[0].sourceId, 'dec-src')
+  assert.equal(r.deco[0].verdict, 'keep')
+  assert.equal(r.deco[0].reason, '结构单一')
+  assert.equal(r.notes.length, 0, 'keep 成功也不落 ⚠️ 系统异常')
+  const t2 = r.board.tasks.find(x => x.id === 'dec-src')
+  assert.ok(t2.messages.some(m => /🧩 拆解官判定无需拆分/.test(m.text)), 'rationale 落源卡消息照旧')
+})
+
+test('拆解回执④失败：run 失败/structured 缺失 → 仍落「⚠️ 系统异常」区且不产生 decomposed 回执', async () => {
+  const r1 = await runDecomposeCase({ result: Promise.reject(new Error('provider timeout')) })
+  assert.equal(r1.deco.length, 0, 'run 失败不产生拆解回执')
+  assert.equal(r1.notes.length, 1)
+  assert.match(r1.notes[0], /🚨 拆解官 run 未产出可用提案（源卡 dec-src）/, '失败分支保持 🚨 系统通道逐字不变')
+  const t1 = r1.board.tasks.find(x => x.id === 'dec-src')
+  assert.ok(t1.messages.some(m => /🧩 拆解官 run 失败/.test(m.text)), '失败原因落源卡消息照旧')
+
+  const r2 = await runDecomposeCase({ result: Promise.resolve({ output: [{ type: 'text', text: '自由文本' }], stopReason: 'completed' }) })
+  assert.equal(r2.deco.length, 0, 'structured 缺失不产生拆解回执')
+  assert.equal(r2.notes.length, 1)
+  assert.match(r2.notes[0], /🚨 拆解官 run 未产出可用提案/, 'structured 缺失走同一 🚨 失败臂')
+})
+
+test('拆解回执⑤：notifyDone=false → 拆解回执不入队；源卡 messages 留痕照旧不丢', async () => {
+  const r = await runDecomposeCase({ notifyDone: false, result: Promise.resolve({ output: [{ type: 'text', text: '' }], stopReason: 'completed', structured: { verdict: 'split', children: [{ title: '子卡A', size: 'light', touches: [], acceptance: 'x' }] } }) })
+  assert.equal(r.deco.length, 0, '完成回执开关关 → 拆解回执不入队')
+  assert.equal(r.notes.length, 0, '开关只闸回执，成功路径也不再落系统异常')
+  const t3 = r.board.tasks.find(x => x.id === 'dec-src')
+  assert.ok(t3.messages.some(m => /🧩 拆解提案已就位/.test(m.text)), '关开关时源卡 messages 留痕照旧不丢')
+  const r2 = await runDecomposeCase({ notifyDone: false, result: Promise.reject(new Error('boom')) })
+  assert.equal(r2.notes.length, 1, '失败分支不受 notifyDone 影响（异常就该是异常）')
+})
+
+test('拆解回执⑧：settleDecompose 三分支与 index 接线在位（源面断言，防接线回退）', () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  // split/keep 成功走 notifyDecomposed（notifyDone 闸门 + 老 host 未注入静默），失败分支保持 🚨 pushSysNote
+  assert.match(dsp, /if \(doneOn && typeof notifyDecomposed === 'function'\) notifyDecomposed\(sid, \{ sourceId: rec\.taskId, sourceTitle: srcTitle, verdict: 'split'/)
+  assert.match(dsp, /if \(doneOn && typeof notifyDecomposed === 'function'\) notifyDecomposed\(sid, \{ sourceId: rec\.taskId, sourceTitle: srcTitle, verdict: 'keep'/)
+  assert.match(dsp, /else pushSysNote\(sid, '🚨 拆解官 run 未产出可用提案（源卡 ' \+ rec\.taskId \+ '）：'/)
+  const idx = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
+  assert.match(idx, /notifyDecomposed: notify\.notifyDecomposed/) // index.mjs 接线在位
+})
+
 // ===== 回执开关进设置（task-muuwgcro）：板级 notifyDispatch/notifyDone 双布尔（缺省 true）+ 两处闸门 =====
 // 用户指令：「回执可以做一个开关，放到设置里」。语义：设置区「通知」小节可分别关掉「派发回执」与
 // 「完成回执」；歧义裁决通知（notifyMainWindow）是裁决通道不是回执，不接入开关。
@@ -4443,14 +4604,15 @@ test('回执开关③b：notifyDone=false → worker 三连败转 blocked 也不
 test('回执开关③/④：完成/阻塞回执闸门在结算调用方；歧义裁决通道零开关（源码级断言）', () => {
   const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
   const noti = readFileSync(new URL('../lib/notify.mjs', import.meta.url), 'utf8')
-  // 完成回执：三个结算函数（worker/verifier/hook）都在同一次持锁回调里取 notifyDone（零额外读盘）
-  assert.equal((dsp.match(/doneOn = cfg\(d\)\.notifyDone !== false/g) || []).length, 3)
-  assert.equal((dsp.match(/if \(doneOn && /g) || []).length, 5) // worker 2 + verifier 2 + hook-closed 1
+  // 完成回执：四个结算函数（worker/verifier/hook + 拆解官 decompose，task-mvrqiu6x 起后者也受 notifyDone 约束）
+  // 都在同一次持锁回调里取 notifyDone（零额外读盘）
+  assert.equal((dsp.match(/doneOn = cfg\(d\)\.notifyDone !== false/g) || []).length, 4)
+  assert.equal((dsp.match(/if \(doneOn && /g) || []).length, 7) // worker 2 + verifier 2 + hook-closed 1 + decompose split/keep 2
   assert.match(dsp, /if \(doneOn && result\.task && result\.task\.status === 'resolved'\) notifyTaskDone\(sid, result\.task, 'resolved'\)/)
   assert.match(dsp, /if \(doneOn && result\.task && result\.task\.status === 'blocked'\) notifyTaskDone\(sid, result\.task, 'blocked'\)/)
   assert.match(dsp, /if \(result\.blocked\) \{ maybeNotify\(sid, result\.task\); if \(doneOn\) notifyTaskDone\(sid, result\.task, 'blocked'\) \}/)
   // 闸门默认 true：回调未跑到也不漏报（宁可多报）
-  assert.equal((dsp.match(/var doneOn = true/g) || []).length, 3)
+  assert.equal((dsp.match(/var doneOn = true/g) || []).length, 4) // worker/verifier/hook 各一 + settleDecompose 一
   // ④ 歧义通道零开关：通知层根本读不到板级配置（cfg 未引入），去注释后的上报代码段不含两个开关名
   assert.doesNotMatch(noti, /cfg\(/)
   const escBlock = noti.slice(noti.indexOf('// 歧义上报通知'), noti.indexOf('// ===== 任务回执通知'))

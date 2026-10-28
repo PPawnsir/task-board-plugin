@@ -2,7 +2,7 @@
 // makeMsg（纯函数，模块级 export，rpc.mjs 直接 import）：插件来源消息构造。
 // createNotify(ctx, state, deps)：歧义上报 25s 去抖通知 / 回执批量聚合（45s 或满 5 条）+ 主窗口空闲门控 /
 // 系统异常通知队列 / 投递前按看板现状过滤过期项（含 dispatched 派发回执的离场过滤）。共享状态全部经 state 显式注入。
-// 回执两类入口共用同一聚合队列：notifyTaskDone（完成/阻塞）+ notifyDispatched（派发即回执）。
+// 回执三类入口共用同一聚合队列：notifyTaskDone（完成/阻塞）+ notifyDispatched（派发即回执）+ notifyDecomposed（拆解官回执）。
 // 回执开关（板级 notifyDispatch/notifyDone，设置区「通知」小节）不在本模块判定——闸门在调用方
 // （dispatch.mjs 派发/结算处读 cfg 快照），这样歧义裁决通知（notifyMainWindow）天然不受开关影响。
 
@@ -99,6 +99,29 @@ export function createNotify(ctx, state, deps) {
       var stamp = 'dispatched|' + String(role || 'worker') + '|' + (t.claimedAt || t.verifierRunAt || '')
       pushReceipt(sid, t.id + ':' + stamp, { kind: 'dispatched', role: String(role || 'worker'), title: t.title, id: t.id, summary: '', note: '' })
     }
+    // 拆解官回执（task-mvrqiu6x）：拆解官落定（split 物化 / keep 判定）→ 完成型回执，走同一聚合队列，
+    // flush 出「🧩 已拆解」分区。源卡按设计停在 draft/pending（提案由用户确认后逐张 publish），
+    // 回执 payload 带源卡 id 供投递前过滤——只有源卡已 archived（人已手动归档=已知悉）才丢弃，
+    // draft/pending 等其余状态一律保留（这正是原设计绕行系统通道的原因，豁免断言钉死）。
+    // 幂等键 = 源卡id|verdict|子卡id 集合连接：同一批提案重复上报（拆解官重跑/结算重放）指纹一致 → 吞掉；
+    // 换一批提案（子卡 id 变）/ verdict 变 → 指纹不同 → 正常新回执。
+    function notifyDecomposed(sid, payload) {
+      if (!payload || !payload.sourceId) return
+      var kids = Array.isArray(payload.children) ? payload.children : []
+      var kidIds = []
+      for (var i = 0; i < kids.length; i++) kidIds.push(String((kids[i] && kids[i].id) == null ? '' : kids[i].id))
+      var summary
+      if (payload.verdict === 'split') {
+        var titles = []
+        for (var j = 0; j < kids.length; j++) titles.push(String((kids[j] && kids[j].title) == null ? '' : kids[j].title).trim().slice(0, 60))
+        var list = titles.join('、')
+        if (list.length > 300) list = list.slice(0, 300) + '…'
+        summary = 'split：' + kids.length + ' 张子卡（' + list + '）'
+      } else summary = 'keep：无需拆分'
+      var note = payload.reason ? String(payload.reason).slice(0, 150) : ''
+      var stamp = String(payload.sourceId) + '|decomposed|' + String(payload.verdict || '') + '|' + kidIds.join(',')
+      pushReceipt(sid, stamp, { kind: 'decomposed', id: String(payload.sourceId), title: payload.sourceTitle || String(payload.sourceId), summary: summary, note: note })
+    }
     // 系统级异常通知队列（易失，随回执冲刷）：模型熔断/spawn 失败/孤儿回收/看门狗标记
     // taskId 可选：告警类通知（软超时提醒等）语义只对「任务仍在执行中」成立，
     // 带上任务 id 后 flush 投递前可重读看板校验，任务已落定的过期告警直接丢弃
@@ -118,12 +141,17 @@ export function createNotify(ctx, state, deps) {
       function noteOf(status) { return status === 'verifying' ? '验证中' : '进行中' }
       // 组装投递文本（入参已是过滤后的存活项，避免用已丢弃项的计数）
       function composeText(items, notes) {
-        var done = [], blocked = [], dispatched = []
-        for (var i = 0; i < items.length; i++) { (items[i].kind === 'resolved' ? done : (items[i].kind === 'dispatched' ? dispatched : blocked)).push(items[i]) }
+        var done = [], blocked = [], dispatched = [], decomposed = []
+        for (var i = 0; i < items.length; i++) { (items[i].kind === 'resolved' ? done : (items[i].kind === 'decomposed' ? decomposed : (items[i].kind === 'dispatched' ? dispatched : blocked))).push(items[i]) }
         var lines = [items.length ? '📋 [任务看板] 回执摘要（' + items.length + ' 条）' : '📋 [任务看板] 系统通知', '']
         if (dispatched.length) {
           lines.push('🚀 已派发 ' + dispatched.length + ' 个：')
           for (var d = 0; d < dispatched.length && d < 8; d++) lines.push('  · ' + dispatched[d].title + ' (' + dispatched[d].id + ') — ' + (dispatched[d].role === 'verifier' ? 'Verifier 验收中' : 'Worker 执行中'))
+        }
+        if (decomposed.length) {
+          // 拆解官正式回执分区（task-mvrqiu6x）：源卡标题 (源卡id) — split：M 张子卡（标题列表）/ keep：无需拆分
+          lines.push('🧩 已拆解 ' + decomposed.length + ' 个（待确认发布）：')
+          for (var m = 0; m < decomposed.length && m < 8; m++) lines.push('  · ' + decomposed[m].title + ' (' + decomposed[m].id + ')' + (decomposed[m].summary ? ' — ' + decomposed[m].summary.slice(0, 120) : ''))
         }
         if (done.length) {
           lines.push('✅ 完成 ' + done.length + ' 个：')
@@ -169,6 +197,11 @@ export function createNotify(ctx, state, deps) {
             var it = items[j]
             var tt = findTask(it.id)
             if (tt && tt.status === 'archived') continue
+            // 拆解回执豁免（task-mvrqiu6x）：kind='decomposed' 的源卡按设计停在 draft/pending（拆解提案
+            // 由用户确认后发布）——不得因「任务非 in-progress」被丢（这正是原设计绕行系统通道的原因，
+            // 此豁免由断言钉死，防后人把「非 in-progress 丢弃」改成通用规则误伤）；唯一离场规则是
+            // 源卡已 archived（上面那条，人已手动归档=已知悉）。rt 读盘失败（tt 为 null）时同样保留。
+            if (it.kind === 'decomposed') { keptItems.push(it); continue }
             if (it.kind === 'dispatched' && tt && tt.status !== 'in-progress') continue
             keptItems.push(it)
           }
@@ -217,5 +250,5 @@ export function createNotify(ctx, state, deps) {
       } catch (e) { console.error('[task-board] late approve notify failed:', String(e)) }
     }
 
-    return { maybeNotify: maybeNotify, notifyTaskDone: notifyTaskDone, notifyDispatched: notifyDispatched, pushSysNote: pushSysNote, notifyBoardCorrupt: notifyBoardCorrupt, notifyLateReject: notifyLateReject, notifyLateApprove: notifyLateApprove }
+    return { maybeNotify: maybeNotify, notifyTaskDone: notifyTaskDone, notifyDispatched: notifyDispatched, notifyDecomposed: notifyDecomposed, pushSysNote: pushSysNote, notifyBoardCorrupt: notifyBoardCorrupt, notifyLateReject: notifyLateReject, notifyLateApprove: notifyLateApprove }
 }
