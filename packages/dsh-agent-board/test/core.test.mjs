@@ -3717,8 +3717,11 @@ test('可续跑 Worker①：worker 走 startContinuable（rec 持 childId），v
   // verifier 的 rec 仍是旧形态（有 run、无 continuable）
   assert.equal(h.runs['v1'].continuable, undefined)
   assert.equal(String(h.runs['v1'].id), 'run-1')
-  // 订阅已注册且事件名正确（回退开关不影响的公共通道）
-  assert.deepEqual(h.listeners.map(l => l.name), ['agent/status'])
+  // 订阅已注册且事件名正确（回退开关不影响的公共通道）；挂死检测 v2 起帧活性订阅一并建立——
+  // 两种订阅都在位即可，顺序不断言死（防未来再加订阅又炸）
+  const names = h.listeners.map(l => l.name)
+  assert.ok(names.includes('agent/status'), 'agent/status 订阅在位')
+  assert.ok(names.includes('agent/assistant-stream'), 'agent/assistant-stream 订阅在位（帧活性）')
 })
 
 test('可续跑 Worker②：agent/status running→idle → settle 推进任务（真跑事件回调，非源码断言）', async () => {
