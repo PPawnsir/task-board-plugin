@@ -448,6 +448,33 @@ function mkProbeBoard() {
   d.laneModels.heavy.worker = ['p/b', 'p/a']; d.fallbackModels = ['p/c']
   return d
 }
+// EMPTY_RESPONSE 宿主逐字文案（dsh-llm-pi-ai mapStopReason：model "<m>" returned a completed
+// response with no content；dsh-llm-deepseek 另作 '<…> returned no content'）——探测侧按文本特征识别。
+var EMPTY_RESPONSE_TEXT = 'model "p/a" returned a completed response with no content'
+// 探测响应脚本桩（task-mvrfp1rj）：script 按「第 N 次 llm.stream 调用」取一步
+//   'stop'        正常完成（finish/stop）
+//   'empty'       宿主空响应（finish/error + failure.code=EMPTY_RESPONSE，逐字文案见上）
+//   { empty: t }  自定义文本的空响应（验 quota 类文本由既有嗅探接管）
+//   { error: t }  真错误（finish/error，无 code——超时/限流/连接等形态）
+//   'nofinish'    流结束但零 finish 块
+function mkProbeScriptCtx(calls, script) {
+  var llm = {
+    stream: function (options) {
+      var step = script[Math.min(calls.length, script.length - 1)]
+      calls.push(options)
+      return (async function * () {
+        if (step === 'nofinish') return
+        if (step === 'empty' || (step && step.empty)) {
+          yield { type: 'finish', reason: { kind: 'error', failure: { message: (step && step.empty) || EMPTY_RESPONSE_TEXT, code: 'EMPTY_RESPONSE' } } }
+          return
+        }
+        if (step && step.error) { yield { type: 'finish', reason: { kind: 'error', failure: { message: step.error } } }; return }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })()
+    },
+  }
+  return { get: function (name) { return name === 'llm' ? llm : null } }
+}
 
 // ===== ⑬ 主动嗅探：极短 llm.stream 直调 + 仅配置集合 + 关闭零请求 + 429 复用冷却 =====
 test('⑬主动探测：maxTokens=1 无系统/工具/子代理，仅已配置去重集合；probeEnabled=false 零请求', async () => {
@@ -470,6 +497,7 @@ test('⑬主动探测：maxTokens=1 无系统/工具/子代理，仅已配置去
   assert.equal(h.state, 'healthy')
   assert.ok(h.lastProbe && h.lastSeen)
   assert.equal(typeof h.latencyMs, 'number')
+  assert.equal(calls.filter(function (x) { return x.maxTokens === 8 }).length, 0, '一次成功不触发重试（8 token 重试只在空响应后出现）')
 
   var offCalls = [], offBoard = mkProbeBoard(); offBoard.probeEnabled = false
   var offState = { modelHealth: {}, modelCooldown: {}, badModels: {} }
@@ -488,10 +516,109 @@ test('⑬b主动探测失败：429 finish error 复用冷却登记，不污染 b
     var result = await mkDispatch(board, mkProbeCtx(calls, '429 RATE_LIMIT'), state).probeConfiguredModels(SID, board)
     assert.equal(result.probed, 1)
     assert.equal(result.healthy, 0)
+    assert.equal(calls.length, 1, '真错误一次定性：不触发空响应 8 token 重试')
+    assert.equal(calls[0].maxTokens, 1)
     assert.ok(state.modelCooldown['p/a'] > Date.now())
     assert.equal(state.modelHealth[SID]['p/a'].state, 'cooldown')
     assert.ok(state.modelHealth[SID]['p/a'].lastProbe)
     assert.equal(Object.keys(state.badModels).length, 0)
+  } finally { console.error = origErr }
+})
+
+// ===== ⑬c 空响应重试（task-mvrfp1rj）：首探 maxTokens=1 空 → 8 重试有内容 = 🟢 探测通过 =====
+// 语义矩阵（用户 2026-10-28 拍板）：①1 token 空→8 重试一次；②重试有内容→🟢；④真错误/超时/无 finish 不重试。
+test('⑬c空响应重试：首探 maxTokens=1 空 → maxTokens=8 重试有内容 → 🟢探测通过，不喂冷却', async () => {
+  var calls = [], board = seed(SID); board.workerModel = 'p/a'
+  var state = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+  var result = await mkDispatch(board, mkProbeScriptCtx(calls, ['empty', 'stop']), state).probeConfiguredModels(SID, board)
+  assert.equal(result.probed, 1)
+  assert.equal(result.healthy, 1, '重试有内容 = 探测通过（存活）')
+  assert.equal(calls.length, 2, '空响应触发且只触发一次重试')
+  assert.deepEqual(calls.map(function (x) { return x.maxTokens }), [1, 8], '首探 1 token → 重试 8 token')
+  for (var i = 0; i < calls.length; i++) {
+    assert.equal(calls[i].messages[0].content[0].text, 'ping')
+    assert.equal('system' in calls[i], false)
+    assert.equal('tools' in calls[i], false)
+    assert.equal('sessionId' in calls[i], false, '重试同样是最小直调（不创建/绑定子会话）')
+  }
+  var h = state.modelHealth[SID]['p/a']
+  assert.equal(h.state, 'healthy')
+  assert.equal(h.observed, 'healthy')
+  assert.match(h.observedNote, /主动探测通过/)
+  assert.equal('p/a' in state.modelCooldown, false, '存活不喂冷却')
+  assert.equal(Object.keys(state.badModels).length, 0, '探测通过不碰熔断表')
+})
+
+// ===== ⑬d 重试仍空（task-mvrfp1rj·用户拍板）：判不可调用 = 探测失败，照旧喂冷却嗅探 =====
+// 推翻「空响应=🟡降级存活」的旧设计：一个 8 token 余量都吐不出内容的模型就是不可调用（额度尽/生成链断）。
+test('⑬d重试仍空：判探测失败（不可调用）照旧喂冷却嗅探；quota 类文本由既有嗅探接管', async () => {
+  var calls = [], board = seed(SID); board.workerModel = 'p/a'
+  var state = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+  var origErr = console.error; console.error = function () {}
+  try {
+    var result = await mkDispatch(board, mkProbeScriptCtx(calls, ['empty', 'empty']), state).probeConfiguredModels(SID, board)
+    assert.equal(result.probed, 1)
+    assert.equal(result.healthy, 0, '8 token 余量都吐不出内容 = 不可调用，不记存活（🟡 档不用于空响应）')
+    assert.deepEqual(calls.map(function (x) { return x.maxTokens }), [1, 8])
+    var h = state.modelHealth[SID]['p/a']
+    assert.equal(h.state, 'unknown', '探测失败态（既有失败臂：observed=unknown，冷却/熔断覆盖态另行覆盖）')
+    assert.equal(h.observed, 'unknown')
+    assert.match(h.observedNote, /主动探测失败/)
+    assert.match(h.observedNote, /maxTokens=8 重试仍空/)
+    assert.ok(h.lastProbe, '失败也留 lastProbe（既有失败臂不变）')
+    assert.equal('p/a' in state.modelCooldown, false, '空响应文本不含 quota/连接关键词 → 既有嗅探不命中，不误登记冷却')
+    assert.equal(Object.keys(state.badModels).length, 0, '探测失败不碰 badModels 熔断表（与既有口径一致）')
+
+    // 同一「重试仍空」路径，重试文本带额度字样 → 既有嗅探正则接管，冷却照旧登记
+    var calls2 = [], state2 = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+    var quotaText = '429 额度不足：' + EMPTY_RESPONSE_TEXT
+    var r2 = await mkDispatch(board, mkProbeScriptCtx(calls2, ['empty', { empty: quotaText }]), state2).probeConfiguredModels(SID, board)
+    assert.equal(r2.healthy, 0)
+    assert.deepEqual(calls2.map(function (x) { return x.maxTokens }), [1, 8])
+    assert.ok(state2.modelCooldown['p/a'] > Date.now(), 'quota 类文本由 parseModelCooldown 接管（探测失败照旧喂嗅探）')
+    assert.equal(state2.modelHealth[SID]['p/a'].state, 'cooldown')
+    assert.match(state2.modelHealth[SID]['p/a'].cooldownNote, /额度限流/)
+  } finally { console.error = origErr }
+})
+
+// ===== ⑬e 真失败不重试（task-mvrfp1rj）：无 finish / 超时 语义逐字不变，且不触发 8 token 重试 =====
+test('⑬e真失败不重试：无 finish 与超时仍判探测失败（语义逐字不变），不触发空响应重试', async () => {
+  var calls = [], board = seed(SID); board.workerModel = 'p/a'
+  var state = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+  var origErr = console.error; console.error = function () {}
+  try {
+    var r1 = await mkDispatch(board, mkProbeScriptCtx(calls, ['nofinish']), state).probeConfiguredModels(SID, board)
+    assert.equal(r1.healthy, 0)
+    assert.equal(calls.length, 1, '无 finish 一次定性，不重试')
+    assert.match(state.modelHealth[SID]['p/a'].observedNote, /未返回 finish/)
+
+    // 超时：计时器到点 abort（宿主真实行为），probe timeout 文案照旧，同样不重试
+    var calls2 = [], state2 = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+    var hangCtx = {
+      timer: {
+        timeout: function (fn) { var t = setTimeout(fn, 0); return function () { clearTimeout(t) } },
+        interval: function () { return function () {} }, // 心跳注册（本用例不需要真跑）
+      },
+      get: function (name) {
+        if (name !== 'llm') return null
+        return {
+          stream: function (options) {
+            calls2.push(options)
+            return (async function * () {
+              await new Promise(function (_, reject) {
+                if (options.signal.aborted) return reject(new Error('aborted'))
+                options.signal.addEventListener('abort', function () { reject(new Error('aborted')) })
+              })
+            })()
+          },
+        }
+      },
+    }
+    var r2 = await mkDispatch(board, hangCtx, state2).probeConfiguredModels(SID, board)
+    assert.equal(r2.healthy, 0)
+    assert.equal(calls2.length, 1, '超时一次定性，不重试')
+    assert.match(state2.modelHealth[SID]['p/a'].observedNote, /probe timeout/, '超时文案沿用既有口径')
+    assert.equal('p/a' in state2.modelCooldown, false, 'probe timeout 文本不命中冷却嗅探（既有口径）')
   } finally { console.error = origErr }
 })
 

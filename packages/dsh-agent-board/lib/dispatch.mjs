@@ -306,9 +306,69 @@ export function createDispatch(ctx, state, deps) {
     }
     // 连击归零：任一可归因 run 正常完成即证明模型链路恢复（settleRunRecord completed 路径调用）
     function resetModelFailure(sid, model) { if (model) delete modelFailStreak[modelKey(sid, model)] }
-    // ===== 主动模型嗅探：llm.stream 极短直调（无子代理/系统提示/工具，maxTokens=1）=====
+    // ===== 主动模型嗅探：llm.stream 极短直调（无子代理/系统提示/工具，首探 maxTokens=1）=====
     // finish=stop/max-tokens 等均证明模型链路可用；error/aborted/无 finish 才算失败。失败文本复用既有冷却登记，
     // 但不改 badModels 熔断判定。同模型全局只在飞一次，15s 硬超时带 AbortSignal，绝不阻塞 poolCycle 派发。
+    // ===== 空响应重试（task-mvrfp1rj）：探测只裁存活性，但「一个 token 都吐不出」仍属不可调用 =====
+    // 实证（cmss/zhanlu 系 glm-5.2、deepseek-v4.1-flash）：maxTokens=1 的极简请求被供应商以「terminal stop
+    // 零内容块」退回，宿主 adapter 归成 EMPTY_RESPONSE 错误（逐字文案，宿主 checkout grep 实测）：
+    //   ① dsh-llm-pi-ai mapStopReason：model "<m>" returned a completed response with no content
+    //   ② dsh-llm-deepseek          ：DeepSeek Messages returned no content
+    // 于是探测记失败 → 取模链跳过实际可用的模型（用户 2026-10-28 现场：探测不通过就跳过，但模型本身可用）。
+    // 校准口径（用户拍板·最终版）：
+    //   ① 首探 maxTokens=1（最省 token；一次通即证明链路可用）；
+    //   ② 首探「空响应」→ 自动以 maxTokens=8 重试一次（给模型吐 token 的余地，消掉 length 截断型空响应大头）；
+    //   ③ 重试有内容 → 🟢 探测通过（存活 = 可调用）；
+    //   ④ 重试仍空 → 🔴 探测失败（额度尽/生成链断都属不可调用），照旧 observeModel 失败 + 喂冷却嗅探
+    //      （quota 类文本由 parseModelCooldown 既有正则接管，本卡不新增嗅探分支）；
+    //   ⑤ 真错误/aborted/超时/无 finish 语义逐字不变，且不触发重试（一次定性，省一次请求也省一次误判）。
+    // 边界：只动 probeModel 的判定与文案；探测调度节奏（probeNextAt/probeIntervalMin）与熔断联动不动——
+    // 质量面另有 recentRuns 行为闸兜底（探测放宽不放跑真坏模型，这正是双层设计的意义）。
+    var PROBE_MAX_TOKENS = 1        // 首探极简：1 token 证链路通
+    var PROBE_MAX_TOKENS_RETRY = 8  // 空响应重试：给模型吐 token 的余地
+    var PROBE_TIMEOUT_MS = 15000    // 整体硬超时（与既有 15s 口径一致；重试只吃剩余预算，不额外延长探测窗口）
+    // EMPTY_RESPONSE 识别（双路）：结构化 code 优先（宿主 finish.failure.code，常量见 dsh-llm/lib/types/error.js），
+    // 文本特征兜底（兼容只给 message 的旧宿主/网关包装文本）。只认「completed 但零内容」；
+    // 429/连接/超时等真错误文本一律 false，走既有失败臂（冷却登记口径不变）。
+    function isEmptyResponse(code, text) {
+      if (String(code || '') === 'EMPTY_RESPONSE') return true
+      return /no content/i.test(String(text || ''))
+    }
+    // 单次探测请求：返回 { status:'ok' } | { status:'empty', text } | { status:'fail', text }。
+    // deadline = 整体硬超时截止时刻（两次尝试共用同一 15s 预算：探测总时长口径不变）。
+    // 每次尝试独立 AbortController/计时器；probeAbort 指向当前在飞尝试（dispose 时统一 abort）。
+    async function probeOnce(llm, model, maxTokens, deadline) {
+      var ac = new AbortController(), timedOut = false, disposeTimer = null
+      var remain = Math.max(1, deadline - Date.now())
+      var slash = model.indexOf('/')
+      try {
+        if (ctx.timer && typeof ctx.timer.timeout === 'function') disposeTimer = ctx.timer.timeout(function () { timedOut = true; ac.abort() }, remain)
+        else { var nativeTimer = setTimeout(function () { timedOut = true; ac.abort() }, remain); disposeTimer = function () { clearTimeout(nativeTimer) } }
+        probeAbort[model] = ac
+        var stream = llm.stream({ provider: model.slice(0, slash), model: model.slice(slash + 1), messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }], maxTokens: maxTokens, signal: ac.signal })
+        var finished = false, failure = '', failureCode = ''
+        for await (var chunk of stream) {
+          if (!chunk || chunk.type !== 'finish') continue
+          finished = true
+          var reason = chunk.reason || {}
+          if (reason.kind === 'error' || reason.kind === 'aborted') {
+            failure = String((reason.failure && reason.failure.message) || reason.kind || '模型探测失败')
+            failureCode = String((reason.failure && reason.failure.code) || '')
+          }
+        }
+        if (timedOut) return { status: 'fail', text: 'probe timeout ' + Math.round(remain) + 'ms' }
+        if (!finished) return { status: 'fail', text: '模型探测流未返回 finish' }
+        if (failure) return isEmptyResponse(failureCode, failure) ? { status: 'empty', text: failure } : { status: 'fail', text: failure }
+        return { status: 'ok' }
+      } catch (e) {
+        // 抛错形态（provider 直接 throw LlmError）：code 可能带 EMPTY_RESPONSE，文本兜底同一谓词
+        if (timedOut) return { status: 'fail', text: 'probe timeout ' + Math.round(remain) + 'ms' }
+        var text = String(e && e.message || e)
+        return isEmptyResponse(e && e.code, text) ? { status: 'empty', text: text } : { status: 'fail', text: text }
+      } finally {
+        try { if (typeof disposeTimer === 'function') disposeTimer() } catch (_) {}
+      }
+    }
     async function probeModel(sid, model) {
       if (probeDisposed) return null
       if (probeInFlight[model]) return probeInFlight[model]
@@ -316,36 +376,40 @@ export function createDispatch(ctx, state, deps) {
       if (!llm || typeof llm.stream !== 'function') return null
       var slash = model.indexOf('/')
       if (slash <= 0 || slash === model.length - 1) return null
-      var started = Date.now(), ac = new AbortController(), timedOut = false, disposeTimer = null
+      var started = Date.now(), deadline = started + PROBE_TIMEOUT_MS
       var promise = (async function () {
         try {
-          if (ctx.timer && typeof ctx.timer.timeout === 'function') disposeTimer = ctx.timer.timeout(function () { timedOut = true; ac.abort() }, 15000)
-          else { var nativeTimer = setTimeout(function () { timedOut = true; ac.abort() }, 15000); disposeTimer = function () { clearTimeout(nativeTimer) } }
-          var stream = llm.stream({ provider: model.slice(0, slash), model: model.slice(slash + 1), messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }], maxTokens: 1, signal: ac.signal })
-          var finished = false, failure = ''
-          for await (var chunk of stream) {
-            if (!chunk || chunk.type !== 'finish') continue
-            finished = true
-            var reason = chunk.reason || {}
-            if (reason.kind === 'error' || reason.kind === 'aborted') failure = String((reason.failure && reason.failure.message) || reason.kind || '模型探测失败')
+          var outcome = await probeOnce(llm, model, PROBE_MAX_TOKENS, deadline)
+          if (outcome.status === 'empty') {
+            // 空响应 = 唯一触发重试的形态（真错误/超时/无 finish 一次定性，不重试）
+            if (probeDisposed || Date.now() >= deadline) {
+              outcome = { status: 'fail', text: '空响应且无重试预算（' + PROBE_TIMEOUT_MS + 'ms 硬超时已用尽）：' + outcome.text }
+            } else {
+              outcome = await probeOnce(llm, model, PROBE_MAX_TOKENS_RETRY, deadline)
+              // 重试仍空 = 不可调用（额度尽/生成链断）：落探测失败臂；文案标明重试口径便于排查与嗅探归因
+              if (outcome.status === 'empty') outcome = { status: 'fail', text: 'maxTokens=' + PROBE_MAX_TOKENS_RETRY + ' 重试仍空（EMPTY_RESPONSE）：' + outcome.text }
+            }
           }
-          if (!finished) throw new Error('模型探测流未返回 finish')
-          if (failure) throw new Error(failure)
-          observeModel(sid, model, true, { probe: true, latencyMs: Date.now() - started })
-          return true
-        } catch (e) {
-          var text = timedOut ? 'probe timeout 15000ms' : String(e && e.message || e).slice(0, 300)
+          if (outcome.status === 'ok') {
+            observeModel(sid, model, true, { probe: true, latencyMs: Date.now() - started })
+            return true
+          }
+          var text = String(outcome.text || '模型探测失败').slice(0, 300)
           observeModel(sid, model, false, { probe: true, latencyMs: Date.now() - started, note: text })
           if (!probeDisposed) { try { await sniffModelCooldown(sid, '', model, text) } catch (_) {} }
           return false
+        } catch (e) {
+          // 兜底臂（probeOnce 自吞错，理论不可达）：语义与旧实现逐字一致
+          var failText = String(e && e.message || e).slice(0, 300)
+          observeModel(sid, model, false, { probe: true, latencyMs: Date.now() - started, note: failText })
+          if (!probeDisposed) { try { await sniffModelCooldown(sid, '', model, failText) } catch (_) {} }
+          return false
         } finally {
-          try { if (typeof disposeTimer === 'function') disposeTimer() } catch (_) {}
           delete probeInFlight[model]
           delete probeAbort[model]
         }
       })()
       probeInFlight[model] = promise
-      probeAbort[model] = ac
       return promise
     }
     async function probeConfiguredModels(sid, d) {
