@@ -276,6 +276,10 @@ export function createDispatch(ctx, state, deps) {
     // 熔断喂连击/重派链路均不动。
     var HUNG_WALL_FLOOR_MS = 600000
     var HUNG_ZERO_GROWTH_ROUNDS = 40 // ≈ HUNG_WALL_FLOOR_MS / 15s 心跳：轮数半边与墙钟半边同尺度（写风暴防秒判语义保留）
+    // 挂死检测 v2：assistant-stream 帧活性优先，日志双闸只兜无帧流/不可映射的旧路径。
+    // 120s 只标疑似不杀；600s 才走既有判死结算。帧时间戳只在内存刷新，持久化仅承担 sweep 基线与状态转换。
+    var HUNG_FRAME_SUSPECT_MS = 120000
+    var HUNG_FRAME_KILL_MS = 600000
     var HUNG_KILL_PREFIX = 'run 挂死：' // 判死失败文本前缀（进 isModelKillFailure 白名单 = 计入熔断连击）
     var HUNG_CIRCUIT_WHY = '挂死零产出（会话日志字节持续不涨），已熔断' // 挂死触发的熔断文案分态（挂死≠秒拆）
     // 挂死型模型面失败识别：判死结算的错误文本（HUNG_KILL_PREFIX 开头）与宿主秒拆/activation 异常
@@ -982,7 +986,8 @@ export function createDispatch(ctx, state, deps) {
       // hold 终止据此 dispose 销毁子会话（老契约路径无 activation，act=null，保持 interrupt 留存）。
       var rec = useContinuable
         ? { id: childId, childId: childId, continuable: true, ran: false, run: null, act: actForSettle, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, size: laneSize || undefined, settled: false }
-        : { id: String(run.id), run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, size: laneSize || undefined, settled: false }
+        // activation 的 run.id=act.childId，可接 assistant-stream；老 start 的 run.id=provider run id，留空走日志闸。
+        : { id: String(run.id), frameSessionId: hasActivationApi(subagents) ? String(run.id) : '', run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, size: laneSize || undefined, settled: false }
       // ===== 新宿主 continuable 结算兜底臂（v0.2.1 实证 2026-10-24：activation.result 只认拆除落定）=====
       // 原形：rate-limit 子会话 turn/end error → 管理器拆除 activation → result 落定——
       // 但 agent/status 事件面在 v0.2.1 的 Scoped 事件体系下对插件全局订阅不再可达（子会话死亡 8 分钟零结算实证），
@@ -1764,12 +1769,47 @@ export function createDispatch(ctx, state, deps) {
         })
       } catch (e) { console.error('[task-board] agent/status 处理失败:', String(e)) }
     }
+    // 可映射帧流的会话 id：continuable 用 childId；activation 一次性 run 在创建时显式记录 childId。
+    // 老 start 的 provider run id 不是会话身份，frameSessionId 为空，sweep 自动保留日志双闸。
+    function frameSessionIdOf(rec) {
+      if (!rec) return ''
+      return String(rec.continuable ? (rec.childId || '') : (rec.frameSessionId || ''))
+    }
+    var frameStreamSeen = false // 本 host 生命周期是否见过任意 assistant-stream 帧（薄桩/mock 零帧时全局兜底）
+    function onAssistantFrame(payload) {
+      try {
+        if (!payload || !payload.frame) return
+        var agent = payload.agent
+        var cid = agent ? String((agent.session && agent.session.id) || agent.id || '') : ''
+        if (!cid) return
+        frameStreamSeen = true
+        var table = state.activeRuns
+        Object.keys(table).forEach(function (sid) {
+          var rr = table[sid]; if (!rr) return
+          Object.keys(rr).forEach(function (k) {
+            var rec = rr[k]
+            if (!rec || rec.settled) return
+            var mapped = frameSessionIdOf(rec)
+            // 事件本身就是身份证据：手工重建/旧形态 rec 若 id 命中，也可安全建立映射；
+            // 老 start 的 provider run id 通常不命中，保持日志闸。
+            if (!mapped && String(rec.id || '') === cid) { rec.frameSessionId = cid; mapped = cid }
+            if (mapped !== cid) return
+            // start/chunk/end 全算活；chunk 不过滤 chunk.type，reasoning-delta 同样刷新。只进内存，绝不逐帧写盘。
+            rec.lastFrameAt = Date.now()
+            rec.frameDirty = true // sweep 据此识别“本轮前有新帧”；不能拿持久基线与时间戳比大小（E2E 会倒推基线）
+          })
+        })
+      } catch (e) { console.error('[task-board] agent/assistant-stream 处理失败:', String(e)) }
+    }
     // 注册（cordis 标准事件订阅）：返回的 disposer 交给 ctx.effect 回收。
     // 老宿主/测试桩上没有 ctx.on 时静默跳过——派发照常，只是没有事件结算通道（一次性路径本就不需要）。
     if (typeof ctx.on === 'function') {
       try {
         ctx.effect(function () { return ctx.on('agent/status', onAgentStatus) })
       } catch (e) { console.error('[task-board] agent/status 订阅失败:', String(e)) }
+      try {
+        ctx.effect(function () { return ctx.on('agent/assistant-stream', onAssistantFrame) })
+      } catch (e) { console.error('[task-board] agent/assistant-stream 订阅失败:', String(e)) }
     }
 
     async function settleWorker(sid, rec, output, failed, errText) {
@@ -2163,10 +2203,13 @@ export function createDispatch(ctx, state, deps) {
         if (rec && !rec.settled && (rec.role === 'worker' || rec.role === 'verifier')) cands.push(rec)
       })
       if (!cands.length || !snap || snap.__noPersist || !Array.isArray(snap.tasks)) return 0
-      // ⑤ 字节预读在锁外：logSizeOf = findRunLog（readdirSync 逐桶探测）+ statSync，不进锁段
+      // ⑤ 字节预读在锁外且只服务兜底候选：帧流已生效且 rec 可映射时不再读日志。
       var sizes = {}
-      cands.forEach(function (rec) { sizes[String(rec.id)] = logSizeOf(String(rec.childId || rec.id)) })
-      var hung = []
+      cands.forEach(function (rec) {
+        if (frameStreamSeen && frameSessionIdOf(rec)) return
+        sizes[String(rec.id)] = logSizeOf(String(rec.childId || rec.id))
+      })
+      var hung = [], hungWhy = {}
       await mutateLocked(sid, function (d) {
         if (!d || !Array.isArray(d.tasks)) return null
         var any = false
@@ -2182,6 +2225,46 @@ export function createDispatch(ctx, state, deps) {
               if (r0 && String(r0.id) === rid && r0.outcome === 'running') { row = r0; break } // 本轮在跑的那条（同 id 首派+续跑取最新）
             }
             if (!row) return // ② 留档缺失：无锚点不判
+            // ===== v2 帧活性主路径：全局见过帧 + 本 rec 有可映射会话 id 才启用 =====
+            // 薄桩/mock/老 host 零帧，或老 start provider run id 不可映射 → 直接落下方原日志双闸，存量语义逐字不变。
+            if (frameStreamSeen && frameSessionIdOf(rec)) {
+              var nowFrame = Date.now()
+              var lastFrameAt = Number(rec.lastFrameAt || 0)
+              var frameSince = typeof row.frameSilenceSince === 'number' ? row.frameSilenceSince : 0
+              // 事件只置内存 dirty，sweep 消费后才算“帧恢复”：删持久基线；静默未满 600s 时同步清疑似标卡。
+              // 刻意不比较 frameSince < lastFrameAt——E2E 倒推持久基线也满足该大小关系，会把判死编排误吃成恢复。
+              var hadFrame = rec.frameDirty === true
+              rec.frameDirty = false
+              if (hadFrame) {
+                var recoverySilence = frameSince ? nowFrame - frameSince : 0
+                if (frameSince) { delete row.frameSilenceSince; any = true }
+                if (t.stuckSince && recoverySilence < HUNG_FRAME_KILL_MS) {
+                  delete t.stuckSince
+                  ah(t, t.status, t.status, String(rec.id), 'assistant 帧恢复（静默不足 600s），清除疑似卡顿标记')
+                  any = true
+                }
+                return
+              }
+              // 零帧 sweep：基线取最近帧，未见过本会话帧则取 startedAt；仅基线缺失时写，安静轮不刷盘。
+              // E2E 可 patchBoard 倒推 frameSilenceSince（虚拟时钟推不动 Date.now），与旧日志基线同款可测性。
+              if (!frameSince) {
+                frameSince = lastFrameAt || Number(rec.startedAt || nowFrame)
+                row.frameSilenceSince = frameSince
+                any = true
+              }
+              var frameSilentMs = nowFrame - frameSince
+              if (frameSilentMs >= HUNG_FRAME_KILL_MS) {
+                hung.push(rec)
+                hungWhy[rid] = HUNG_KILL_PREFIX + '帧静默 ' + Math.round(HUNG_FRAME_KILL_MS / 1000) + 's，判挂死按模型面故障结算重派'
+                return
+              }
+              if (frameSilentMs >= HUNG_FRAME_SUSPECT_MS && !t.stuckSince) {
+                t.stuckSince = nowFrame
+                ah(t, t.status, t.status, String(rec.id), '🟡 疑似卡顿：assistant 帧静默 ' + Math.round(HUNG_FRAME_SUSPECT_MS / 1000) + 's（仅标卡，不终止）')
+                any = true
+              }
+              return
+            }
             var size = sizes[rid]
             var prev = typeof row.lastLogBytes === 'number' ? row.lastLogBytes : null
             if (prev === null) { row.lastLogBytes = size; row.zeroGrowthSince = Date.now(); any = true; return } // ③ 首见只记基线
@@ -2210,7 +2293,8 @@ export function createDispatch(ctx, state, deps) {
           // 判死文案带出实际生效阈值（task-mvrt9tn5）：固定值直述「阈值 600s」——不引用健康表延迟，
           // 也不再有「3×0s」假精确 / 「地板值，无实测延迟」分态（缩放已删，阈值对任何模型同值）。
           var wallTxt = Math.round(HUNG_WALL_FLOOR_MS / 1000) + 's'
-          var why = HUNG_KILL_PREFIX + '连续 ' + HUNG_ZERO_GROWTH_ROUNDS + ' 轮会话日志零增长（零产出），超挂死墙钟阈值 ' + wallTxt + '，判挂死按模型面故障结算重派'
+          // 帧路径只换诊断文案；settleRun 失败臂、HUNG_KILL_PREFIX、熔断与重派链全部复用。
+          var why = hungWhy[String(hrec.id)] || (HUNG_KILL_PREFIX + '连续 ' + HUNG_ZERO_GROWTH_ROUNDS + ' 轮会话日志零增长（零产出），超挂死墙钟阈值 ' + wallTxt + '，判挂死按模型面故障结算重派')
           console.log('[task-board] 挂死零产出判死（' + sid + '）：task ' + hrec.taskId + ' run ' + hrec.id + ' ' + why)
           // err 传裸字符串（settleRun 只做 !!err / String(err)）：new Error 会被 String(err) 包上
           // 'Error: ' 前缀，isModelKillFailure 的前缀锚定（index 0）失效 → 熔断连击漏喂。
