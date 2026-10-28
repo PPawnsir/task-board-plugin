@@ -14,8 +14,10 @@
   opt-in 的故障注入面；installFaults 必须先于 plugin.apply 调用，缺省 createMockCtx() 行为逐字不变
   （尤其缺省 subagents 绝不带 startActivation——hasActivationApi 路径保全，零回归红线）。
 - 调度逻辑全真：跑真实 index.mjs apply(mockCtx) 全循环——真 poolCycle 派发循环、真挂死判死双闸
-  （hungZeroOutputSweep：连续 4 轮零增长 × 距基线 ≥60s 墙钟，HUNG_ZERO_GROWTH_ROUNDS /
-  HUNG_ZERO_GROWTH_MS 常量）、真熔断拉黑（badModels，WORKER_MODEL_CIRCUIT_AFTER=3）、
+  （hungZeroOutputSweep：**帧活性双层判定**——assistant 帧静默 ≥120s 标「🟡 疑似卡顿」仅标卡不终止
+  （HUNG_FRAME_SUSPECT_MS），静默 ≥600s 判死重派并复用熔断链（HUNG_FRAME_KILL_MS）；**日志零增长
+  兜底**保留给无事件订阅能力或零帧观测宿主——连续 HUNG_ZERO_GROWTH_ROUNDS 轮零增长 × 距基线
+  ≥600s 墙钟地板 HUNG_WALL_FLOOR_MS 常量）、真熔断拉黑（badModels，WORKER_MODEL_CIRCUIT_AFTER=3）、
   真冷却登记（parseModelCooldown 中文带重置形态）、真四级取模链（card → lane → board → parent）。
 - 宿主假：假 cordis 服务（ctx.subagents 剧本化包装、ctx.get('llm') 记录器）、虚拟时钟（ctx.timer）、
   真 fs 临时 HOME——宿主本身的行为（事件顺序、持久化时机、日志落盘节奏）是理想化剧本。
@@ -147,8 +149,9 @@ B 立项时按本节契约直接实现插件，不再从零调研。
 每类新事故必须双落，缺一不算闭合：
 
 1. 单测断言锁机制——在既有单测/薄桩里锁机制常量与前缀口径（如 isModelKillFailure 拆机前缀、
-   WORKER_MODEL_CIRCUIT_AFTER 熔断阈值、HUNG_ZERO_GROWTH_ROUNDS / HUNG_ZERO_GROWTH_MS
-   挂死双闸、parseModelCooldown 限流形态、settle-stop-interrupt.test.mjs 挂死①-⑤薄桩）；
+   WORKER_MODEL_CIRCUIT_AFTER 熔断阈值、HUNG_FRAME_SUSPECT_MS / HUNG_FRAME_KILL_MS 帧活性
+   双层判定，以及日志零增长兜底双闸 HUNG_ZERO_GROWTH_ROUNDS / HUNG_WALL_FLOOR_MS、
+   parseModelCooldown 限流形态、settle-stop-interrupt.test.mjs 挂死①-⑤薄桩）；
 2. fault-e2e-* 场景锁接缝——在真实 index.mjs apply 全循环上锁端到端行为（现有
    fault-e2e-circuit.test.mjs 秒拆熔断面 / fault-e2e-hung.test.mjs 挂死判死面；薄桩直喂 settle
    只锁机制点，真循环锁「机制 × 派发循环」接缝——两套互补，同 mkGateDispatch 与
