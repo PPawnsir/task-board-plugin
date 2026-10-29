@@ -457,6 +457,7 @@ var EMPTY_RESPONSE_TEXT = 'model "p/a" returned a completed response with no con
 //   { empty: t }  自定义文本的空响应（验 quota 类文本由既有嗅探接管）
 //   { error: t }  真错误（finish/error，无 code——超时/限流/连接等形态）
 //   'nofinish'    流结束但零 finish 块
+//   'hang'        永不完成（挂起直到 signal abort——task-mvsv8zym 验超时/重试超时形态）
 function mkProbeScriptCtx(calls, script) {
   var llm = {
     stream: function (options) {
@@ -464,6 +465,13 @@ function mkProbeScriptCtx(calls, script) {
       calls.push(options)
       return (async function * () {
         if (step === 'nofinish') return
+        if (step === 'hang') {
+          await new Promise(function (_, reject) {
+            if (options.signal.aborted) return reject(new Error('aborted'))
+            options.signal.addEventListener('abort', function () { reject(new Error('aborted')) })
+          })
+          return
+        }
         if (step === 'empty' || (step && step.empty)) {
           yield { type: 'finish', reason: { kind: 'error', failure: { message: (step && step.empty) || EMPTY_RESPONSE_TEXT, code: 'EMPTY_RESPONSE' } } }
           return
@@ -665,6 +673,109 @@ test('⑬e真失败不重试：无 finish 与超时仍判探测失败（语义�
     assert.equal(calls2.length, 1, '超时一次定性，不重试')
     assert.match(state2.modelHealth[SID]['p/a'].observedNote, /probe timeout/, '超时文案沿用既有口径')
     assert.equal('p/a' in state2.modelCooldown, false, 'probe timeout 文本不命中冷却嗅探（既有口径）')
+  } finally { console.error = origErr }
+})
+
+// ===== ⑰ 探测预算独立（task-mvsv8zym）：每尝试各 20s 非共享递减 + 重试超时沿用首探判定 + 超时不覆盖既有观测 =====
+// 事故实证（2026-10-29）：旧 15s 共享 deadline 下慢模型首探耗 ~10s 空响应，重试只剩 4.6s 必超时，
+// 被我方预算饿死误记「probe timeout」=模型失败（误导主窗口两次）。记录型计时器捕获预算窗口 ms，不真等 20s。
+function mkRecordTimerCtx(base, delays) {
+  base.timer = {
+    timeout: function (fn, ms) { delays.push(ms); var t = setTimeout(fn, 0); return function () { clearTimeout(t) } },
+    interval: function () { return function () {} }, // 心跳注册（本用例不需要真跑）
+  }
+  return base
+}
+
+test('⑰a探测预算独立：每尝试各 20s 非共享递减；慢模型首探空+重试超时→沿用首探判定 🟡degraded 不喂冷却', async () => {
+  var calls = [], delays = [], board = seed(SID); board.workerModel = 'p/a'
+  var state = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+  var origErr = console.error; console.error = function () {}
+  try {
+    // 慢模型复刻（事故实证形态）：首探空响应 + 重试挂起到超时；记录型立即触发计时器
+    var ctx = mkRecordTimerCtx(mkProbeScriptCtx(calls, ['empty', 'hang']), delays)
+    var result = await mkDispatch(board, ctx, state).probeConfiguredModels(SID, board)
+    assert.equal(result.probed, 1)
+    assert.equal(result.healthy, 0)
+    assert.equal(result.degraded, 1, '重试超时沿用首探判定：首探纯空响应=🟡degraded，不再误记 fail')
+    assert.deepEqual(calls.map(function (x) { return x.maxTokens }), [1, 8], '重试节奏不变（首探 1 token → 重试 8 token）')
+    assert.deepEqual(delays, [20000, 20000], '每次尝试独立预算：两次计时器窗口各 20s（旧共享制第二次只拿残余递减值）')
+    var h = state.modelHealth[SID]['p/a']
+    assert.equal(h.state, 'degraded', '🟡降级存活态（非 fail/cooldown/unknown）')
+    assert.equal(h.observed, 'degraded')
+    assert.match(h.observedNote, /重试预算耗尽（慢模型），沿用首探判定/, '文案标明沿用首探判定')
+    assert.match(h.observedNote, /链路存活但极简请求零内容/, '降级 note 保留供应商怪癖口径')
+    assert.ok(h.lastProbe, 'degraded 也留 lastProbe（探测确实跑过）')
+    assert.equal('p/a' in state.modelCooldown, false, '重试超时+纯空响应不喂冷却')
+    assert.equal(Object.keys(state.badModels).length, 0, '不碰熔断表')
+  } finally { console.error = origErr }
+})
+
+test('⑰b重试超时+首探真错信号：沿用首探判定走失败臂，额度喂冷却/凭据不误登记', async () => {
+  var board = seed(SID); board.workerModel = 'p/a'
+  var origErr = console.error; console.error = function () {}
+  try {
+    // 额度类：首探空响应文本带额度字样 + 重试超时 → 沿用首探判定=fail → 嗅探登记冷却
+    var calls = [], delays = [], state = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+    var quotaText = '429 额度不足：' + EMPTY_RESPONSE_TEXT
+    var ctx = mkRecordTimerCtx(mkProbeScriptCtx(calls, [{ empty: quotaText }, 'hang']), delays)
+    var r = await mkDispatch(board, ctx, state).probeConfiguredModels(SID, board)
+    assert.equal(r.healthy, 0)
+    assert.equal(r.degraded, 0, '额度信号=真错，沿用首探判定不判 degraded')
+    assert.deepEqual(delays, [20000, 20000], '重试同样拿独立 20s 预算')
+    assert.ok(state.modelCooldown['p/a'] > Date.now(), '沿用首探判定后仍喂嗅探（quota 真错）')
+    assert.equal(state.modelHealth[SID]['p/a'].state, 'cooldown')
+    assert.match(state.modelHealth[SID]['p/a'].observedNote, /重试预算耗尽（慢模型），沿用首探判定/)
+
+    // 凭据类：沿用首探判定走失败臂但不误登记冷却（CREDENTIAL 不命中额度/连接嗅探）
+    var calls2 = [], delays2 = [], state2 = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+    var credText = '401 invalid api key：' + EMPTY_RESPONSE_TEXT
+    var ctx2 = mkRecordTimerCtx(mkProbeScriptCtx(calls2, [{ empty: credText }, 'hang']), delays2)
+    var r2 = await mkDispatch(board, ctx2, state2).probeConfiguredModels(SID, board)
+    assert.equal(r2.healthy, 0)
+    assert.equal(r2.degraded, 0, '凭据信号=真错，沿用首探判定不判 degraded')
+    assert.equal(state2.modelHealth[SID]['p/a'].state, 'unknown', '凭据类走失败臂（observed=unknown）')
+    assert.match(state2.modelHealth[SID]['p/a'].observedNote, /重试预算耗尽（慢模型），沿用首探判定/)
+    assert.equal('p/a' in state2.modelCooldown, false, '凭据文本不命中额度/连接嗅探（不误登记冷却）')
+  } finally { console.error = origErr }
+})
+
+test('⑰c超时不覆盖既有观测：先 healthy 再超时→仍 healthy+note 更新+延迟保留；首探超时新条目仍 unknown', async () => {
+  var board = seed(SID); board.workerModel = 'p/a'
+  var origErr = console.error; console.error = function () {}
+  try {
+    // 先 healthy：正常探测通过
+    var state = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+    var calls = []
+    await mkDispatch(board, mkProbeScriptCtx(calls, ['stop']), state).probeConfiguredModels(SID, board)
+    var h = state.modelHealth[SID]['p/a']
+    assert.equal(h.state, 'healthy')
+    assert.match(h.observedNote, /主动探测通过/)
+    var latBefore = h.latencyMs
+    assert.equal(typeof latBefore, 'number')
+    // 再超时：hang + 立即触发计时器 → 判定保留，observed/state/latency 不倒退
+    var calls2 = [], delays2 = []
+    var ctx2 = mkRecordTimerCtx(mkProbeScriptCtx(calls2, ['hang']), delays2)
+    await mkDispatch(board, ctx2, state).probeConfiguredModels(SID, board)
+    assert.deepEqual(calls2.map(function (x) { return x.maxTokens }), [1], '首探超时无重试（⑬e 契约保留）')
+    assert.equal(h.state, 'healthy', '超时不覆盖既有 healthy 观测（不倒退成 unknown）')
+    assert.equal(h.observed, 'healthy')
+    assert.equal(h.latencyMs, latBefore, '超时不覆写既有延迟（保留原 healthy 观测延迟）')
+    assert.match(h.observedNote, /主动探测超时（慢模型，判定保留）/, 'note 更新为超时+判定保留')
+    assert.match(h.observedNote, /probe timeout/, '保留超时细节便于排查')
+    assert.ok(h.lastProbe, '超时也留 lastProbe（探测确实跑过）')
+
+    // 首探超时+无既有观测：新条目仍 unknown + note 更新（不误记 healthy/fail/cooldown）
+    var state2 = { modelHealth: {}, modelCooldown: {}, badModels: {} }
+    var calls3 = []
+    var ctx3 = mkRecordTimerCtx(mkProbeScriptCtx(calls3, ['hang']), [])
+    var r3 = await mkDispatch(board, ctx3, state2).probeConfiguredModels(SID, board)
+    assert.equal(r3.healthy, 0)
+    var h2 = state2.modelHealth[SID]['p/a']
+    assert.equal(h2.state, 'unknown', '首探超时新条目=unknown（不误记 fail）')
+    assert.equal(h2.observed, 'unknown')
+    assert.match(h2.observedNote, /主动探测超时（慢模型，判定保留）/)
+    assert.equal('p/a' in state2.modelCooldown, false, 'probe timeout 不命中冷却嗅探（既有口径）')
   } finally { console.error = origErr }
 })
 

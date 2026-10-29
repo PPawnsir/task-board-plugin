@@ -102,6 +102,16 @@ export function createDispatch(ctx, state, deps) {
       var e = healthEntry(sid, model), at = new Date().toISOString()
       var latency = Number(opts.latencyMs)
       e.lastSeen = at
+      // ③ 探测超时/预算耗尽只更新 note（判定保留，task-mvsv8zym）：observed/state/latencyMs/recentRuns
+      // 全部保持原值——避免已 healthy/degraded 条目被超时倒退成 unknown（超时非模型健康信号）。
+      if (opts.preserveObserved) {
+        if (opts.probe) {
+          e.lastProbe = at
+          e.observedNote = '主动探测超时（慢模型，判定保留）' + (opts.note ? '：' + opts.note : '')
+          e.note = e.observedNote
+        }
+        return syncModelHealth(sid, model)
+      }
       // task-mvrqdw4k：探测空响应分治——ok=true 🟢健康；opts.degraded 🟡降级（链路存活，供应商怪癖，
       // 只由探测降级存活臂置入）；其余照旧 unknown（失败臂）。被动 run 观察臂语义逐字不变。
       e.observed = ok ? 'healthy' : (opts.degraded ? 'degraded' : 'unknown')
@@ -334,7 +344,9 @@ export function createDispatch(ctx, state, deps) {
     // 边界：只动探测判定/健康状态派生/UI 映射与断言；探测调度节奏（probeNextAt/probeIntervalMin）与熔断联动不动。
     var PROBE_MAX_TOKENS = 1        // 首探极简：1 token 证链路通
     var PROBE_MAX_TOKENS_RETRY = 8  // 空响应重试：给模型吐 token 的余地
-    var PROBE_TIMEOUT_MS = 15000    // 整体硬超时（与既有 15s 口径一致；重试只吃剩余预算，不额外延长探测窗口）
+    var PROBE_ATTEMPT_TIMEOUT_MS = 20000 // 每次尝试独立超时（task-mvsv8zym：两次尝试各拿满 20s，非共享递减——
+    // 旧 15s 共享预算下慢模型首探耗 ~10s 后重试只剩残余必超时，被我方预算饿死误记成模型失败）。
+    // 总上限 40s 不违反「绝不阻塞 poolCycle」：探测经 maybeProbeModels 后台异步跑（不 await 进派发主链）。
     // EMPTY_RESPONSE 识别（双路）：结构化 code 优先（宿主 finish.failure.code，常量见 dsh-llm/lib/types/error.js），
     // 文本特征兜底（兼容只给 message 的旧宿主/网关包装文本）。只认「completed 但零内容」；
     // 429/连接/超时等真错误文本一律 false，走既有失败臂（冷却登记口径不变）。
@@ -356,16 +368,18 @@ export function createDispatch(ctx, state, deps) {
       if (CONNECTIVITY_RE.test(s)) return 'fail'
       return 'degraded'
     }
-    // 单次探测请求：返回 { status:'ok' } | { status:'empty', text, code } | { status:'fail', text }。
-    // deadline = 整体硬超时截止时刻（两次尝试共用同一 15s 预算：探测总时长口径不变）。
+    // 单次探测请求：返回 { status:'ok' } | { status:'empty', text, code } | { status:'fail', text }
+    //   | { status:'timeout', text }（task-mvsv8zym：超时单列形态，不再与真错误混记 fail——
+    //     超时可能只是慢模型+我方预算约束，由上层按首次尝试判定落定或保留既有观测）。
+    // attemptMs = 单次尝试独立超时（每尝试各拿满全额预算，非共享递减；task-mvsv8zym）。
     // 每次尝试独立 AbortController/计时器；probeAbort 指向当前在飞尝试（dispose 时统一 abort）。
-    async function probeOnce(llm, model, maxTokens, deadline) {
+    async function probeOnce(llm, model, maxTokens, attemptMs) {
       var ac = new AbortController(), timedOut = false, disposeTimer = null
-      var remain = Math.max(1, deadline - Date.now())
+      var attempt = Math.max(1, Number(attemptMs) || 0)
       var slash = model.indexOf('/')
       try {
-        if (ctx.timer && typeof ctx.timer.timeout === 'function') disposeTimer = ctx.timer.timeout(function () { timedOut = true; ac.abort() }, remain)
-        else { var nativeTimer = setTimeout(function () { timedOut = true; ac.abort() }, remain); disposeTimer = function () { clearTimeout(nativeTimer) } }
+        if (ctx.timer && typeof ctx.timer.timeout === 'function') disposeTimer = ctx.timer.timeout(function () { timedOut = true; ac.abort() }, attempt)
+        else { var nativeTimer = setTimeout(function () { timedOut = true; ac.abort() }, attempt); disposeTimer = function () { clearTimeout(nativeTimer) } }
         probeAbort[model] = ac
         var stream = llm.stream({ provider: model.slice(0, slash), model: model.slice(slash + 1), messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }], maxTokens: maxTokens, signal: ac.signal })
         var finished = false, failure = '', failureCode = ''
@@ -378,13 +392,13 @@ export function createDispatch(ctx, state, deps) {
             failureCode = String((reason.failure && reason.failure.code) || '')
           }
         }
-        if (timedOut) return { status: 'fail', text: 'probe timeout ' + Math.round(remain) + 'ms' }
+        if (timedOut) return { status: 'timeout', text: 'probe timeout ' + Math.round(attempt) + 'ms' }
         if (!finished) return { status: 'fail', text: '模型探测流未返回 finish' }
         if (failure) return isEmptyResponse(failureCode, failure) ? { status: 'empty', text: failure, code: failureCode } : { status: 'fail', text: failure }
         return { status: 'ok' }
       } catch (e) {
         // 抛错形态（provider 直接 throw LlmError）：code 可能带 EMPTY_RESPONSE，文本兜底同一谓词
-        if (timedOut) return { status: 'fail', text: 'probe timeout ' + Math.round(remain) + 'ms' }
+        if (timedOut) return { status: 'timeout', text: 'probe timeout ' + Math.round(attempt) + 'ms' }
         var text = String(e && e.message || e)
         return isEmptyResponse(e && e.code, text) ? { status: 'empty', text: text, code: String(e && e.code || '') } : { status: 'fail', text: text }
       } finally {
@@ -398,20 +412,27 @@ export function createDispatch(ctx, state, deps) {
       if (!llm || typeof llm.stream !== 'function') return null
       var slash = model.indexOf('/')
       if (slash <= 0 || slash === model.length - 1) return null
-      var started = Date.now(), deadline = started + PROBE_TIMEOUT_MS
+      var started = Date.now()
       var promise = (async function () {
         try {
-          var outcome = await probeOnce(llm, model, PROBE_MAX_TOKENS, deadline)
+          var outcome = await probeOnce(llm, model, PROBE_MAX_TOKENS, PROBE_ATTEMPT_TIMEOUT_MS)
+          if (outcome.status === 'timeout') {
+            // ③ 首探即超时（task-mvsv8zym）：无重试（⑬e 契约保留），且不覆盖既有观测——只更新 note
+            // （判定保留）：超时可能只是慢模型+我方预算约束，已 healthy/degraded 条目不倒退成 unknown。
+            observeModel(sid, model, false, { probe: true, preserveObserved: true, note: String(outcome.text || '').slice(0, 300) })
+            return false
+          }
           if (outcome.status === 'empty') {
             // 空响应 = 唯一触发重试的形态（真错误/超时/无 finish 一次定性，不重试）
-            if (probeDisposed || Date.now() >= deadline) {
-              // 无重试预算：仍是空响应=链路存活信号，同样按错误码分治（预算耗尽是我方调度约束，非模型健康信号）
-              var budgetText = '空响应且无重试预算（' + PROBE_TIMEOUT_MS + 'ms 硬超时已用尽，零内容）：' + outcome.text
+            if (probeDisposed) {
+              // 探测已停（dispose 中断）：无重试机会，仍按错误码分治落定（停机是我方调度约束，非模型健康信号）
+              var budgetText = '空响应且探测已停（不重试，零内容）：' + outcome.text
               outcome = classifyEmptyResponse(outcome.code, outcome.text) === 'degraded'
                 ? { status: 'degraded', text: budgetText }
                 : { status: 'fail', text: budgetText }
             } else {
-              outcome = await probeOnce(llm, model, PROBE_MAX_TOKENS_RETRY, deadline)
+              var first = outcome
+              outcome = await probeOnce(llm, model, PROBE_MAX_TOKENS_RETRY, PROBE_ATTEMPT_TIMEOUT_MS)
               // 重试仍空 = 按错误码分治（task-mvrqdw4k 用户拍板）：纯空响应=🟡degraded 存活（供应商怪癖，链路通）
               // ——不喂冷却、路由仍可选用；额度/凭据/连接信号=真错，维持失败臂（quota 文本优先级高于空响应判定，
               // ⑬b/⑬d 契约保留）。文案标明重试口径便于排查与嗅探归因。
@@ -420,6 +441,14 @@ export function createDispatch(ctx, state, deps) {
                 outcome = classifyEmptyResponse(outcome.code, outcome.text) === 'degraded'
                   ? { status: 'degraded', text: emptyText }
                   : { status: 'fail', text: emptyText }
+              } else if (outcome.status === 'timeout') {
+                // ② 重试超时≠失败（task-mvsv8zym）：每尝试独立 20s 预算仍耗尽=慢模型，沿用首次尝试判定落定
+                // ——与「探测已停」分支同原则（我方预算/停机约束非模型健康信号，L407-412 对称补齐）：
+                // 首探纯空响应→🟡degraded；首探文本带额度/凭据/连接信号→fail（嗅探接管）。
+                var firstVerdict = classifyEmptyResponse(first.code, first.text)
+                outcome = firstVerdict === 'degraded'
+                  ? { status: 'degraded', text: '重试预算耗尽（慢模型），沿用首探判定：' + String(first.text || '') }
+                  : { status: 'fail', text: '重试预算耗尽（慢模型），沿用首探判定：' + String(first.text || '') }
               }
             }
           }
