@@ -97,10 +97,13 @@ export function parsePlanFiles(question) {
   for (var i = 0; i < parts.length; i++) {
     // 顺序：列表符 → 引号对提取/首空白全角标点截断 → 残留反引号 → trim → 像路径判定 → 归一
     var v = parts[i].trim().replace(/^[-*•·]\s+/, '')
+    // 残片哨兵证据取自「截断前」原文（task-mvtz2jjq）：正则残片 `/if \(isHungKillFailure/` 的首空白
+    // 截断会把斜杠后的 '(' 与 '\' 转义一起截掉、只剩 `/if`——截断后再看哨兵就丢了证据，故先记。
+    var fragSrc = v
     // 引号包裹路径（「除非引号包裹」例外分支，行内代码反引号）：取首对反引号内容为条目、可含
     // 空格，配对后尾巴（说明/注释）一并忽略；无配对落空走下方截断兜底（残留端点反引号仍剥）
     var bt = /^`+([^`]+)`+/.exec(v)
-    if (bt) { v = bt[1] } else {
+    if (bt) { v = bt[1]; fragSrc = v } else {
       // 截到首个空白/全角标点前的路径前缀（task-mvr44s0y）：截完是「行首前缀」——路径在前的
       // 混合行（「path（注释）」「path — 说明」「path 说明文字」）截出路径本体；散文段（说明在
       // 前、路径碎片在后）截完是散文首词，过不了像路径判定 → 整条丢弃（选定语义，断言锁死）
@@ -113,7 +116,15 @@ export function parsePlanFiles(question) {
     // 反斜杠——normTouch 同源等价）或以代码扩展名结尾（宽正则，.mjs/.md/.json/.py/.yml 等）才
     // 入选；条目全被丢光走既有「空清单」语义（rpc.mjs 有前缀但零路径 → 重报提示自纠正）。
     // 判定在归一前做：`lib/`、`D:\dir` 的分隔符证据会被 normTouch 剥尾斜杠/改写，先记再归一。
-    var likePath = /[\/\\]/.test(v) || /\.[a-z0-9]{1,6}$/i.test(v)
+    // 解析伪影收紧（task-mvtz2jjq，n-mvtejrusnhi6 生产实证两类碎片——「仲裁扩权后重派仍被拦」的
+    // 真凶不是闸口不认 extraTouches[闸口 rpc.mjs 已读 effectiveTouches]，而是这两类残片被误判路径
+    // 后永远不在边界内）：①含中日韩字符（CJK 统一表意 + 全角形式区）的 token 判非路径——「调用点/
+    // 接线断言仍锁」这类含半角斜杠的中文散文片即死（本仓库路径全 ASCII）；②正则/代码残片：以 '/'
+    // 开头且其后含 '(' 或 '\' 转义 → 判非路径（`/if \(...` 即死）。两者只收紧「伪路径入选」，真路径
+    // （ASCII 相对/绝对、反斜杠、尾斜杠、裸扩展名）判定与既有归一语义逐字不变。
+    var cjk = /[\u4e00-\u9fff\uff00-\uffef]/.test(v)
+    var frag = /^\//.test(fragSrc) && /[()\\]/.test(fragSrc.slice(1))
+    var likePath = !cjk && !frag && (/[\/\\]/.test(v) || /\.[a-z0-9]{1,6}$/i.test(v))
     v = normTouch(v)
     if (v && likePath && out.indexOf(v) < 0) out.push(v)
   }

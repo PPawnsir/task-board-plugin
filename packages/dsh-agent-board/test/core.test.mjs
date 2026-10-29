@@ -1086,6 +1086,38 @@ test('parsePlanFiles: 收紧——全角分隔长说明段不进清单；含路�
   assert.deepEqual(core.parsePlanFiles('计划改动：`my docs/a b.md`（注释）'), ['my docs/a b.md'])
 })
 
+// 解析伪影收紧 + 扩权边界正向锁（task-mvtz2jjq，n-mvtejrusnhi6 生产双病案）：「仲裁 expandTouches
+// 放行后重派仍被拦」的真凶不是闸口不认 extraTouches（rpc.mjs 早已读 effectiveTouches），而是
+// parsePlanFiles 的两类解析伪影被误判路径、残片永远不在边界内 → 二次拦截。
+test('parsePlanFiles: 伪影判非路径（正则残片 + 含半角斜杠的中文散文片）；既有真路径零回归；effectiveTouches 正向锁', () => {
+  // ① 正则/代码残片（生产实证片段）：以 '/' 开头且其后含 '(' 或 '\' 转义 → 非路径
+  assert.deepEqual(core.parsePlanFiles('计划改动：/if \\(isHungKillFailure(x)\\)/ 判定点'), [])
+  // 哨兵证据必须在「首空白截断」前采：截断后只剩 '/if'（旧判定含 '/' 即入选 → 假越界），同行真路径仍保留
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs\n/if \\(isHungKillFailure(x)\\)/ 判定点'), ['lib/core.mjs'])
+  assert.deepEqual(core.planOutsideTouches(['lib/**'], core.parsePlanFiles('计划改动：/if \\(isHungKillFailure(x)\\)/ 判定点')), [])
+  // ② 含半角斜杠的中文散文片（生产实证片段）：含 CJK 字符的 token 判非路径
+  assert.deepEqual(core.parsePlanFiles('计划改动：调用点/接线断言仍锁'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：调用点/接线断言仍锁 —— 说明'), [])
+  assert.deepEqual(core.planOutsideTouches(['lib/**'], core.parsePlanFiles('计划改动：调用点/接线断言仍锁')), [])
+  // 混合清单：残片丢弃、真路径保序去重（与既有收紧断言同口径）
+  assert.deepEqual(core.parsePlanFiles('计划改动：\n- 调用点/接线断言仍锁\n- lib/core.mjs\n- /if \\(x\\)/ 残片'), ['lib/core.mjs'])
+  // ③ 既有真路径零回归：相对/裸扩展名/绝对/反斜杠/尾斜杠 全不受影响
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs'), ['lib/core.mjs'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：README.md、plan.mjs'), ['README.md', 'plan.mjs'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：/usr/local/lib/x.mjs'), ['/usr/local/lib/x.mjs'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：D:\\deepseek-work\\lib'), ['D:/deepseek-work/lib'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/'), ['lib'])
+  // ④ 正向锁：有效边界 = touches ∪ extraTouches → 扩权文件过闸（闸口全链就是这条组合：
+  // rpc.planGateApply = core.effectiveTouches → core.parsePlanFiles → core.planOutsideTouches）
+  var tArb = { id: 'task-arb', touches: ['src/a.mjs'], extraTouches: ['src/extra.mjs'] }
+  var planArb = core.parsePlanFiles('计划改动：src/a.mjs\nsrc/extra.mjs')
+  assert.deepEqual(planArb, ['src/a.mjs', 'src/extra.mjs'])
+  assert.deepEqual(core.effectiveTouches(tArb), ['src/a.mjs', 'src/extra.mjs'])
+  assert.deepEqual(core.planOutsideTouches(core.effectiveTouches(tArb), planArb), [], '扩权文件在有效边界内 → 零越界（扩权即边界）')
+  // 反证：不并 extraTouches 时报越界——证明这条锁真在钉 effectiveTouches（否则断言恒真无意义）
+  assert.deepEqual(core.planOutsideTouches(tArb.touches, planArb), ['src/extra.mjs'])
+})
+
 test('touchCovers: 单向覆盖——touch 模式 ⊇ 计划文件（与 matchOne 对称语义方向相反）', () => {
   assert.equal(core.touchCovers('lib/core.mjs', 'lib/core.mjs'), true)   // 精确
   assert.equal(core.touchCovers('lib/core.mjs', 'lib/rpc.mjs'), false)

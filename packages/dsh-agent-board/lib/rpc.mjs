@@ -1020,7 +1020,10 @@ export function createRpc(ctx, state, deps) {
     // 双查第二查「撞他卡有效锁」要用它现算他卡持锁（core.planLockConflicts）。
     function planGateApply(t, planFiles, actor, pat, d) {
       // 有效边界 = touches ∪ extraTouches（task-mvonytz3：仲裁扩权登记的文件即本卡合法边界，
-      // 不再误报越界；touches 审计原值不动——边界展示带「含仲裁扩权」标注以资区别）
+      // 不再误报越界；touches 审计原值不动——边界展示带「含仲裁扩权」标注以资区别）。
+      // 含 extraTouches（task-mvtz2jjq 勘误）：此处自 task-mvonytz3 起就按有效锁集比对，此前
+      // 「闸口不认 extraTouches」的诊断系解析伪影误判——真因在 core.parsePlanFiles 把「调用点/
+      // 接线断言仍锁」这类中文散文片与 `/if \(...` 正则残片误判成路径，残片永远不在边界内。
       var boundary = core.effectiveTouches(t)
       var hasExtra = Array.isArray(t.extraTouches) && t.extraTouches.length > 0
       // 卡无有效边界 → 无越界可比；但计划仍可能撞他卡锁（无边界卡的静默漂移同样现形）
