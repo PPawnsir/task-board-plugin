@@ -20,7 +20,8 @@ import { createSession, isFullSessionId } from '../lib/session.mjs'
 import { createDispatch } from '../lib/dispatch.mjs'
 import { createNotify } from '../lib/notify.mjs'
 // host 端源码拼接（Phase 2 模块化后：薄壳 index.mjs + lib/*.mjs 领域模块），供源码级接线断言
-const HOST_SOURCES = ['../index.mjs', '../lib/policy.mjs', '../lib/usage.mjs', '../lib/session.mjs', '../lib/store.mjs', '../lib/notify.mjs', '../lib/dispatch.mjs', '../lib/rpc.mjs']
+// 拆分第 6 刀（task-mvt8c1yx-6）：角色结算搬入 lib/settle.mjs——拼接清单补入 settle.mjs（接线断言随源码重指）
+const HOST_SOURCES = ['../index.mjs', '../lib/policy.mjs', '../lib/usage.mjs', '../lib/session.mjs', '../lib/store.mjs', '../lib/notify.mjs', '../lib/dispatch.mjs', '../lib/settle.mjs', '../lib/rpc.mjs']
 function hostSrc() { return HOST_SOURCES.map(function (f) { return readFileSync(new URL(f, import.meta.url), 'utf8') }).join('\n') }
 
 function mkTask(over) { return Object.assign({ id: 't1', title: 'T', description: '', status: 'pending', priority: 'medium', tags: [], parentId: null, assignMode: 'auto', assignee: null, context: { instructions: '' }, acceptance: '', dependsOn: [], pipeline: 'full', claimedBy: null, claimedAt: null, createdAt: '2026-01-01T00:00:00Z', resolvedAt: null, history: [], messages: [] }, over || {}) }
@@ -2166,10 +2167,10 @@ test('pushRejection: 同事件判重（同时间戳/同前缀不双推）+ 空�
 
 test('驳回全量带回接线（源码级）：三条驳回路径都调 pushRejection + messages 通道在位', () => {
   const rpc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
-  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const settleSrc = readFileSync(new URL('../lib/settle.mjs', import.meta.url), 'utf8')
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
   assert.equal((rpc.match(/pushRejection\(t, /g) || []).length, 3) // board_verdict 工具 + verify-task RPC + task_verify 工具
-  assert.match(dsp, /pushRejection\(t, vsecs\.verifySummary, vsecs\.checks, t\.verification\.at, String\(rec\.id\)\)/)
+  assert.match(settleSrc, /pushRejection\(t, vsecs\.verifySummary, vsecs\.checks, t\.verification\.at, String\(rec\.id\)\)/) // Verifier 文本结算随拆分第 6 刀重指 settle 源
   assert.equal((hostSrc().match(/pushRejection\(t, /g) || []).length, 4) // 三条路径 + Verifier 文本结算
   assert.match(coreSrc, /export function pushRejection/)
   assert.match(coreSrc, /kind: 'rejection'/)
@@ -4191,9 +4192,9 @@ test('hooks 接线（源码级）：spawnOneShot 三态 prompt + settleRun 分�
   // spawnOneShot：hook 角色走 buildHookPrompt（phase 由 role 决定）
   assert.match(dsp, /if \(role === 'hook-pre' \|\| role === 'hook-post'\) \{/)
   assert.match(dsp, /buildHookPrompt\(t, role === 'hook-pre' \? 'pre' : 'post', kids\)/)
-  // settleRun：hook 分支经注入 roles.hook 进 settleHook（照 worker/verifier 结算模式）
-  assert.match(settleSrc, /else if \(rec\.role === 'hook-pre' \|\| rec\.role === 'hook-post'\) await roles\.hook\(sid, rec, output, failed, errText\)/)
-  assert.match(dsp, /applyHookSettle\(d, rec\.taskId, phase, !\(failed \|\| esc\), output, runId, errText\)/)
+  // settleRun：hook 分支模块内直调 settleHook（拆分第 6 刀撤 roles 懒注入；照 worker/verifier 结算模式）
+  assert.match(settleSrc, /else if \(rec\.role === 'hook-pre' \|\| rec\.role === 'hook-post'\) await settleHook\(sid, rec, output, failed, errText\)/)
+  assert.match(settleSrc, /applyHookSettle\(d, rec\.taskId, phase, !\(failed \|\| esc\), output, runId, errText\)/) // 持锁段随源码重指 settle 源
   // pre 闸门占用（state=running 即幂等占用）与 post 补 spawn（pending 标记驱动，复用 verifierRun 幂等位）
   assert.match(dsp, /if \(hookOn\(t, 'pre'\) && t\.hooks\.pre\.state === 'idle' && !runs\[t\.id\]\) \{/)
   assert.match(dsp, /hookSetState\(t, 'pre', 'running', 'system', '派发前置 hook run'\)/)
@@ -4238,11 +4239,12 @@ test('史诗语义层接线：poolCycle 派发分支触发父卡流转 + get-tas
   // 两模块都从 core 解构引入（接线不断）；rpc.mjs 解构表尾部随调研门禁（task-mute6zpw）、调研遵循三件套（task-mutnj3a4）、
   // tasksHash（task-mutrtwin）、hooks 浅校验（normalizeHooks/mergeHooks，本批 hooks=agent run）、
   // 自测指南归一（normalizeUserTest，task-muxyyvg0）扩展；
-  // dispatch.mjs 解构表尾部追加 hook 族（buildHookPrompt/hookOn/hookSetState/gsb）与驳回包 helper（pushRejection，task-muvg15p5）、
+  // dispatch.mjs 解构表尾部追加 hook 族（buildHookPrompt/hookOn/hookSetState/gsb）、
   // depsSatisfied（task-mv9yupm4，spawn 落闸锁内补验依赖）、
   // Verifier 验收员加餐常量（VERIFIER_PERSONA/VERIFIER_TOOL_FILTER，task-muy3gm03）、
-  // 人工/外部操作留痕单行摘要（opsLogLine，task-mvnf3gly，Team 注入段「最近人工/外部操作」小节）
-  assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER, opsLogLine \} = core/)
+  // 人工/外部操作留痕单行摘要（opsLogLine，task-mvnf3gly，Team 注入段「最近人工/外部操作」小节）；
+  // 拆分第 6 刀（task-mvt8c1yx-6）：applyHookSettle/pushRejection 随角色结算搬至 settle.mjs 解构（本表不再持有）
+  assert.match(host, /parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, hookOn, hookSetState, gsb, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER, opsLogLine \} = core/)
   // rpc.mjs 解构表尾部再随建卡派发预警（appendDispatchWarning，task-mvbealtf）、力度路由档位表（TASK_SIZES，task-mvnemvf5）、
   // 人工/外部操作留痕单行摘要（opsLogLine，task-mvnf3gly，task_list recentOps 透出）扩展
   assert.match(host, /boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint, appendDispatchWarning, TASK_SIZES, opsLogLine \} = core/)
@@ -4510,11 +4512,11 @@ test('拆解回执⑤：notifyDone=false → 拆解回执不入队；源卡 mess
 })
 
 test('拆解回执⑧：settleDecompose 三分支与 index 接线在位（源面断言，防接线回退）', () => {
-  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const settleSrc = readFileSync(new URL('../lib/settle.mjs', import.meta.url), 'utf8') // 拆分第 6 刀：settleDecompose 随源码重指 settle 源
   // split/keep 成功走 notifyDecomposed（notifyDone 闸门 + 老 host 未注入静默），失败分支保持 🚨 pushSysNote
-  assert.match(dsp, /if \(doneOn && typeof notifyDecomposed === 'function'\) notifyDecomposed\(sid, \{ sourceId: rec\.taskId, sourceTitle: srcTitle, verdict: 'split'/)
-  assert.match(dsp, /if \(doneOn && typeof notifyDecomposed === 'function'\) notifyDecomposed\(sid, \{ sourceId: rec\.taskId, sourceTitle: srcTitle, verdict: 'keep'/)
-  assert.match(dsp, /else pushSysNote\(sid, '🚨 拆解官 run 未产出可用提案（源卡 ' \+ rec\.taskId \+ '）：'/)
+  assert.match(settleSrc, /if \(doneOn && typeof notifyDecomposed === 'function'\) notifyDecomposed\(sid, \{ sourceId: rec\.taskId, sourceTitle: srcTitle, verdict: 'split'/)
+  assert.match(settleSrc, /if \(doneOn && typeof notifyDecomposed === 'function'\) notifyDecomposed\(sid, \{ sourceId: rec\.taskId, sourceTitle: srcTitle, verdict: 'keep'/)
+  assert.match(settleSrc, /else pushSysNote\(sid, '🚨 拆解官 run 未产出可用提案（源卡 ' \+ rec\.taskId \+ '）：'/)
   const idx = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
   assert.match(idx, /notifyDecomposed: notify\.notifyDecomposed/) // index.mjs 接线在位
 })
@@ -4607,17 +4609,17 @@ test('回执开关③b：notifyDone=false → worker 三连败转 blocked 也不
 })
 
 test('回执开关③/④：完成/阻塞回执闸门在结算调用方；歧义裁决通道零开关（源码级断言）', () => {
-  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const settleSrc = readFileSync(new URL('../lib/settle.mjs', import.meta.url), 'utf8') // 拆分第 6 刀：四个结算函数随源码重指 settle 源
   const noti = readFileSync(new URL('../lib/notify.mjs', import.meta.url), 'utf8')
   // 完成回执：四个结算函数（worker/verifier/hook + 拆解官 decompose，task-mvrqiu6x 起后者也受 notifyDone 约束）
   // 都在同一次持锁回调里取 notifyDone（零额外读盘）
-  assert.equal((dsp.match(/doneOn = cfg\(d\)\.notifyDone !== false/g) || []).length, 4)
-  assert.equal((dsp.match(/if \(doneOn && /g) || []).length, 7) // worker 2 + verifier 2 + hook-closed 1 + decompose split/keep 2
-  assert.match(dsp, /if \(doneOn && result\.task && result\.task\.status === 'resolved'\) notifyTaskDone\(sid, result\.task, 'resolved'\)/)
-  assert.match(dsp, /if \(doneOn && result\.task && result\.task\.status === 'blocked'\) notifyTaskDone\(sid, result\.task, 'blocked'\)/)
-  assert.match(dsp, /if \(result\.blocked\) \{ maybeNotify\(sid, result\.task\); if \(doneOn\) notifyTaskDone\(sid, result\.task, 'blocked'\) \}/)
+  assert.equal((settleSrc.match(/doneOn = cfg\(d\)\.notifyDone !== false/g) || []).length, 4)
+  assert.equal((settleSrc.match(/if \(doneOn && /g) || []).length, 7) // worker 2 + verifier 2 + hook-closed 1 + decompose split/keep 2
+  assert.match(settleSrc, /if \(doneOn && result\.task && result\.task\.status === 'resolved'\) notifyTaskDone\(sid, result\.task, 'resolved'\)/)
+  assert.match(settleSrc, /if \(doneOn && result\.task && result\.task\.status === 'blocked'\) notifyTaskDone\(sid, result\.task, 'blocked'\)/)
+  assert.match(settleSrc, /if \(result\.blocked\) \{ maybeNotify\(sid, result\.task\); if \(doneOn\) notifyTaskDone\(sid, result\.task, 'blocked'\) \}/)
   // 闸门默认 true：回调未跑到也不漏报（宁可多报）
-  assert.equal((dsp.match(/var doneOn = true/g) || []).length, 4) // worker/verifier/hook 各一 + settleDecompose 一
+  assert.equal((settleSrc.match(/var doneOn = true/g) || []).length, 4) // worker/verifier/hook 各一 + settleDecompose 一
   // ④ 歧义通道零开关：通知层根本读不到板级配置（cfg 未引入），去注释后的上报代码段不含两个开关名
   assert.doesNotMatch(noti, /cfg\(/)
   const escBlock = noti.slice(noti.indexOf('// 歧义上报通知'), noti.indexOf('// ===== 任务回执通知'))
@@ -4625,7 +4627,7 @@ test('回执开关③/④：完成/阻塞回执闸门在结算调用方；歧义
   const escCode = escBlock.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n')
   assert.doesNotMatch(escCode, /notifyDispatch|notifyDone/)
   // 三个结算点的歧义通知调用（maybeNotify）都不带任何开关闸门
-  assert.equal((dsp.match(/maybeNotify\(sid, result\.task\)/g) || []).length, 3)
+  assert.equal((settleSrc.match(/maybeNotify\(sid, result\.task\)/g) || []).length, 3)
 })
 
 test('回执开关⑤：设置弹层「通知」小节两行开关 + set-board-config 读写通道（源码 + RPC 行为）', async () => {

@@ -1,11 +1,18 @@
 // dsh-agent-board — 结算主干（lib/settle.mjs）
-// 拆分自 lib/dispatch.mjs（拆分第 5 刀，task-mvt8c1yx-5）：run 结算收尾、continuable 收尾、
-// agent/status 事件通道与 board_report 上报通道共用同一套关账/usage/摘超时臂口径。
-// 禁 import dispatch.mjs：角色结算仍由 dispatch 以懒闭包注入，健康/留档/usage 等同域依赖亦闭包注入。
+// 拆分自 lib/dispatch.mjs（拆分第 5 刀 task-mvt8c1yx-5：run 结算收尾、continuable 收尾、
+// agent/status 事件通道与 board_report 上报通道共用同一套关账/usage/摘超时臂口径；
+// 拆分第 6 刀 task-mvt8c1yx-6：四个角色结算 settleWorker/settleVerifier/settleHook/settleDecompose
+// 搬入本模块，settleRun 分路改模块内直调，撤掉 roles 懒注入）。
+// 禁 import dispatch.mjs：健康/留档/usage 同域依赖直接 import 叶子模块（core/policy/model-health/hung），
+// model-health 的冷却/熔断四方法是工厂方法（非模块导出），随已注入的 health 实例解构；通知类 deps
+// （pushSysNote/maybeNotify/notifyTaskDone/notifyLate*/notifyDecomposed/kickCycle）随工厂入参注入。
 import { statSync } from 'node:fs'
 import * as core from './core.mjs'
 import { findRunLog, readLogBytes, readLogFrames } from './usage.mjs'
-const { outputText } = core
+import { applyDecomposeProposal, pushRejectLesson } from './policy.mjs'
+import { modelKey } from './model-health.mjs'
+import { isHungKillFailure, HUNG_CIRCUIT_WHY } from './hung.mjs'
+const { outputText, cfg, ah, parseSections, resolveApply, verifyApply, lateVerdictApply, lateNoticeFp, pushRejection, applyHookSettle } = core
 
 export function createSettle(opts) {
     var state = opts.state, ctx = opts.ctx, runsFor = opts.runsFor, mutateLocked = opts.mutateLocked
@@ -13,8 +20,20 @@ export function createSettle(opts) {
     // rt/sessionsRoot 与 dispatch 同源：continuable 补停豁免须读新鲜卡面，日志兜底须读同一 sessions 根。
     var rt = opts.rt, sessionsRoot = opts.sessionsRoot
     var closeRunHistory = opts.closeRunHistory, resumeTarget = opts.resumeTarget
-    var poolHealthFor = opts.poolHealthFor, accumulateRunUsage = opts.accumulateRunUsage, roles = opts.roles
-    const { observeModel, resetModelFailure } = opts.health
+    var poolHealthFor = opts.poolHealthFor, accumulateRunUsage = opts.accumulateRunUsage
+    // 工厂入参补通知类 deps（拆分第 6 刀）：四个角色结算的消费面——按各函数实际消费逐个对；
+    // notifyLateReject/notifyLateApprove 未接线 → 静默跳过（守卫写法随行，与 dispatch 原归一口径一致）。
+    var pushSysNote = opts.pushSysNote, maybeNotify = opts.maybeNotify, notifyTaskDone = opts.notifyTaskDone
+    var notifyLateReject = (typeof opts.notifyLateReject === 'function') ? opts.notifyLateReject : null // 迟到驳回 err 级通知（未接线 → 静默跳过）
+    var notifyLateApprove = (typeof opts.notifyLateApprove === 'function') ? opts.notifyLateApprove : null // 迟到复核 notice 级通知（三连根修②，未接线 → 静默跳过）
+    var notifyDecomposed = opts.notifyDecomposed
+    var kickCycle = opts.kickCycle
+    // badModels 熔断表（settleVerifier 即时熔断臂消费）：与 dispatch 同源别名（state 共享同一引用，
+    // model-health 工厂惰性初始化语义逐字不变）。
+    var badModels = state.badModels
+    // 健康域工厂方法（拆分第 6 刀）：冷却嗅探/喂熔断/即时熔断/熔断登记四方法是 createModelHealth
+    // 工厂方法（非模块导出），从已注入的 health 实例解构——与 observeModel/resetModelFailure 同源。
+    const { observeModel, resetModelFailure, sniffModelCooldown, feedModelFailure, isModelKillFailure, markModelCircuit } = opts.health
     // run 结算：保证收尾；工具通道（board_report/board_verdict）已推进状态的话文本路径跳过
     // ===== 结算收尾三件套（task-muwkhqf8）=====
     // 无论从哪条入口进来（事件通道 settleContinuable / 上报通道 board_report），run 记录的收尾动作
@@ -112,10 +131,11 @@ export function createSettle(opts) {
       var failed = !!err || (res && res.stopReason && res.stopReason !== 'completed')
       var errText = err ? String(err) : (res && (res.diagnostic || res.stopReason) || '')
       try {
-        if (rec.role === 'worker') await roles.worker(sid, rec, output, failed, errText)
-        else if (rec.role === 'hook-pre' || rec.role === 'hook-post') await roles.hook(sid, rec, output, failed, errText)
-        else if (rec.role === 'decomposer') await roles.decompose(sid, rec, res, err)
-        else await roles.verifier(sid, rec, output, failed, errText)
+        // 角色结算分路改模块内直调（拆分第 6 刀，撤掉第 5 刀的 roles 懒注入）——四个函数搬入本模块下方。
+        if (rec.role === 'worker') await settleWorker(sid, rec, output, failed, errText)
+        else if (rec.role === 'hook-pre' || rec.role === 'hook-post') await settleHook(sid, rec, output, failed, errText)
+        else if (rec.role === 'decomposer') await settleDecompose(sid, rec, res, err)
+        else await settleVerifier(sid, rec, output, failed, errText)
       } catch (e) { console.error('[task-board] settle ' + rec.role + ' failed (task ' + rec.taskId + '):', String(e)) }
       // 历史会话留档 + usage + 超时臂收尾：三件套抽到 settleRunRecord（上报通道共用同一实现）。
       // 结局同时是**续跑资格**的唯一依据（continuable + timeout/error|incomplete → 下次重派改续跑），
@@ -236,6 +256,219 @@ export function createSettle(opts) {
       return true
     }
 
+    // ===== Worker run 结算（搬移自 lib/dispatch.mjs，拆分第 6 刀 task-mvt8c1yx-6；注释与文案零变化）=====
+    async function settleWorker(sid, rec, output, failed, errText) {
+      // 冷却嗅探②（continuable 死子路径）：失败结算文本命中限流/连接故障 → 本 run 所用模型登记冷却表。
+      // activation.result 拆除兜底臂带上来的诊断文本（含「限额将在 … 重置」/ ENOTFOUND 等）也走这里。
+      // rec.model 空 = 父模型（id 不可知）无法归因，跳过；badModels 熔断语义不受影响（两张表各管各的）。
+      if (failed && rec.model) await sniffModelCooldown(sid, rec.taskId, rec.model, errText)
+      // 完成回执开关（设置区「通知」notifyDone）：在同一次持锁回调里读看板文档（零额外读盘），
+      // 缺字段/回调未跑到时保持 true——宁可多报一条，也不因读配置失败漏报完成。
+      var doneOn = true
+      var result = await mutateLocked(sid, function (d) {
+        doneOn = cfg(d).notifyDone !== false
+        var t = d.tasks.find(function (x) { return x.id === rec.taskId })
+        if (!t) return null
+        // 工具通道已处理（board_report 已推进到 verifying/resolved 或挂了 escalation）→ 只收尾
+        if (t.status !== 'in-progress' || t.escalation) return { task: t, already: true }
+        if (failed) {
+          // 失败原因落卡（截断 300）：卡片详情页可直接查看最近失败原因，排查三连败不再靠猜
+          t.lastError = String(errText || '').slice(0, 300)
+          t.retryCount = (t.retryCount || 0) + 1
+          // ===== 宿主秒拆喂熔断（task-mvowb2hc 洞①）：spawn/续跑后即被宿主拆除（stopReason:error）
+          // = 模型面失败，计入熔断连击——原形 task-mvoutja4：glm-5.3-flash 秒拆 ×3 不计入 badModels，
+          // 熔断永不触发，档位链每轮重派都再选同一个坏模型。连续 3 次才拉黑（熔断语义不变：badModels
+          // 落黑名单 → 取模链跳过 + 健康表 circuit）；worker 自己的失误不计，成功 run 归零（settleRunRecord）。
+          if (rec.model && isModelKillFailure(errText)) feedModelFailure(sid, rec.model, isHungKillFailure(errText) ? HUNG_CIRCUIT_WHY : undefined)
+          if (t.retryCount >= 3) { var ps = t.status; t.status = 'blocked'; ah(t, ps, 'blocked', String(rec.id), 'worker 失败 x' + t.retryCount + '（' + String(errText).slice(0, 120) + '），待人工介入'); return { task: t, blocked: true } }
+          var ps2 = t.status; t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, ps2, 'pending', String(rec.id), 'worker 失败（' + String(errText).slice(0, 80) + '），重新排队 (' + t.retryCount + '/3)')
+          return { task: t, retry: true }
+        }
+        if (/\[ESCALATE\]/i.test(output || '')) {
+          t.escalation = { question: output.slice(0, 2000), at: new Date().toISOString(), by: String(rec.id) }
+          if (!Array.isArray(t.messages)) t.messages = []
+          t.messages.push({ kind: 'escalation', text: output.slice(0, 4000), at: t.escalation.at, by: String(rec.id) })
+          ah(t, 'in-progress', 'in-progress', String(rec.id), 'worker 上报歧义（文本通道），待主窗口裁决')
+          return { task: t, escalated: true }
+        }
+        // 文本降级路径：分段格式上报
+        var secs = parseSections(output)
+        delete t.retryCount; delete t.stuckSince; delete t.lastError // 成功路径：失败计数/卡死标记/最近失败原因一并清除
+        t.deliverable = { summary: secs.summary || output.slice(0, 600), changes: secs.changes || '', selfTest: secs.selfTest || '', diff: (secs.diff || '').slice(0, 4000), at: new Date().toISOString(), by: String(rec.id) }
+        resolveApply(d, t, String(rec.id), 'verifying', output || 'Worker 完成', 'worker 文本上报完成')
+        return { task: t }
+      })
+      if (!result) return
+      // already=true：工具通道（board_report）已推进状态并已发回执/歧义通知，settle 只负责 dispose，不再重复通知
+      if (result.already) return
+      if (result.escalated) maybeNotify(sid, result.task)
+      // 歧义通知（maybeNotify → notifyMainWindow）是裁决通道，不受回执开关影响：只闸下面两条完成/阻塞回执
+      if (doneOn && result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved')
+      if (doneOn && result.blocked) notifyTaskDone(sid, result.task, 'blocked')
+      kickCycle(sid) // 结算后立刻补派
+    }
+    // ===== Verifier run 结算（搬移自 lib/dispatch.mjs，拆分第 6 刀 task-mvt8c1yx-6；注释与文案零变化）=====
+    async function settleVerifier(sid, rec, output, failed, errText) {
+      // 完成回执开关同上：持锁回调内取 notifyDone
+      var doneOn = true
+      var result = await mutateLocked(sid, function (d) {
+        doneOn = cfg(d).notifyDone !== false
+        var t = d.tasks.find(function (x) { return x.id === rec.taskId })
+        if (!t) return null
+        if (t.escalation) return { task: t, already: true }
+        if (t.status !== 'verifying') {
+          // 迟到落账（验收时序三洞 ③）：verifier 结论落到已落定卡（主窗口抢批/归档早于本 run 结算）不再静默丢弃。
+          // 但「工具通道已处理」= board_verdict 已由本 run 自己落账（t.verification.by === rec.id）→ 保持 already。
+          if (t.status === 'resolved' || t.status === 'archived' || t.status === 'cancelled') {
+            if (t.verification && String(t.verification.by) === String(rec.id)) return { task: t, already: true }
+            var ltrim = (output || '').trim()
+            var lvm = ltrim.match(/^[ \t>*#\-\s]*(APPROVED|REJECTED)\b/im)
+            if (failed || !lvm) return { task: t, already: true } // 无有效结论，不落 late
+            var lapproved = lvm[1].toUpperCase() === 'APPROVED'
+            var lsecs = parseSections(ltrim)
+            var lr = lateVerdictApply(t, lapproved ? 'approved' : 'rejected', lsecs.verifySummary || ltrim.slice(0, 600), lsecs.checks || '', lsecs.userTest, new Date().toISOString(), String(rec.id), cfg(d).verifyUserGuide)
+            if (lr && lr.invalid) return { task: t, already: true } // 三连根修①：非法 verdict 零落账（防御——本路径 verdict 恒来自正则解析）
+            return { task: t, late: true, lateRejected: lr.lateRejected && lr.wasApproved }
+          }
+          return { task: t, already: true }
+        }
+        var trimmed = (output || '').trim()
+        var vm = trimmed.match(/^[ \t>*#\-\s]*(APPROVED|REJECTED)\b/im)
+        if (failed || !vm) {
+          // 失败原因落卡（截断 300）：verifier 故障/输出无法判定的原因留在卡片上供排查
+          t.lastError = String(errText || 'verifier 未给出有效结论（输出格式异常）').slice(0, 300)
+          // 失败/空输出/无法判定：verifyRetries 计数，>=3 转人工验收（deliverable 已完成，是 verifier 故障不是任务故障）
+          if (failed && rec.model) {
+            badModels[modelKey(sid, rec.model)] = true
+            // 熔断文案分态（task-mv73ym2k，实证 n-mv6ezj6vary4）：错误串含 UNKNOWN_MODEL = 模型 id 非法
+            // （mistake 类：配置写错，模型无辜）——与「连续验收失败」（quality 类）区分，不归一堆。
+            var modelIllegal = /UNKNOWN_MODEL/i.test(String(errText || ''))
+            markModelCircuit(sid, rec.model, modelIllegal ? '模型 id 配置非法，已熔断' : '验收连续失败，已熔断')
+            pushSysNote(sid, modelIllegal
+              ? '模型 ' + rec.model + ' 配置非法（不在可用清单），已熔断回退父级模型——请经 list-models 选合法 id 重配'
+              : '模型 ' + rec.model + ' 验收连续失败，已熔断回退父级模型')
+          }
+          t.verifyRetries = (t.verifyRetries || 0) + 1
+          if (t.verifyRetries >= 3) { t.escalation = { question: 'Verifier 连续 ' + t.verifyRetries + ' 次未能给出有效结论（' + (failed ? String(errText).slice(0, 150) : '输出格式异常') + '）。交付物已完成，请人工验收：看板详情页直接通过/驳回，或 task_verify 裁决。', at: new Date().toISOString(), by: 'system' }; ah(t, 'verifying', 'verifying', 'system', 'verifier 故障，转人工验收'); return { task: t, escalated: true } }
+          ah(t, 'verifying', 'verifying', 'system', 'verifier 未给出有效结论，重新排队审查 (' + t.verifyRetries + '/3)')
+          return { task: t, retry: true }
+        }
+        var approved = vm[1].toUpperCase() === 'APPROVED'
+        var vsecs = parseSections(trimmed)
+        delete t.stuckSince; delete t.verifyRetries; delete t.lastError // 成功给出结论：卡死标记/重试计数/最近失败原因一并清除
+        t.verification = { verdict: approved ? 'approved' : 'rejected', summary: vsecs.verifySummary || trimmed.slice(0, 600), checks: vsecs.checks || '', at: new Date().toISOString(), by: String(rec.id) }
+        // 自测指南落账（verifyUserGuide 开关门禁，task-muxyyvg0）：开关开且解析出「## 自测指南」段才挂
+        // userTest；缺段/开关关 → 字段不挂（client 详情块与报告「本版自测清单」段整块不渲染）
+        if (cfg(d).verifyUserGuide !== false && vsecs.userTest) t.verification.userTest = vsecs.userTest
+        verifyApply(d, t, String(rec.id), approved ? 'approved' : 'rejected', trimmed.slice(0, 200))
+        if (!approved) {
+          t.rejectCount = (t.rejectCount || 0) + 1
+          // 驳回包全量带回（task-muvg15p5）：summary + checks（逐条核对证据）落 messages，
+          // 随 buildMessages 注入重派 Worker prompt——history 里只有 200 字截断，Worker 据此无法返工
+          pushRejection(t, vsecs.verifySummary, vsecs.checks, t.verification.at, String(rec.id))
+          // 学习飞轮 v1：Verifier 驳回 → 候选教训（场景/错误做法/来源），随 t.verification.at 判重
+          pushRejectLesson(d, t, vsecs.verifySummary || trimmed, t.verification.at)
+          if (t.rejectCount >= 3) { t.status = 'blocked'; ah(t, 'in-progress', 'blocked', 'system', 'verifier 驳回 x' + t.rejectCount + '，待人工裁决') }
+          else { t.status = 'pending'; t.claimedBy = null; t.claimedAt = null; ah(t, 'in-progress', 'pending', 'system', '驳回重派：新 Worker 将携带驳回原因继续') }
+        }
+        return { task: t, approved: approved }
+      })
+      if (!result) return
+      // already=true：工具通道（board_verdict）已推进状态并已发回执，settle 只负责 dispose，不再重复通知
+      if (result.already) return
+      // 迟到通知分态（三连根修②③，task-mvf7nve8）：rejected 且卡已 approved → err 级「🚨 迟到驳回」+
+      // healthHint（banner 只 rejected 亮）；approved → notice 级「✅ 迟到复核：维持原判」。
+      // 同指纹（taskId+by+verdict，poolHealth.lastLateNotice）已投过 → 跳过，零重复通知。
+      if (result.late) {
+        var __phL = poolHealthFor(sid)
+        var __fpL = lateNoticeFp(result.task)
+        var __onceL = __phL.lastLateNotice !== __fpL
+        if (__onceL) __phL.lastLateNotice = __fpL
+        if (result.lateRejected) {
+          __phL.lateRejectNote = { taskId: result.task.id, at: Date.now() } // banner 幂等 sticky，不受去重闸影响
+          if (__onceL && notifyLateReject) notifyLateReject(sid, result.task)
+        } else if (__onceL && notifyLateApprove && result.task.lateVerdict && result.task.lateVerdict.verdict === 'approved') {
+          notifyLateApprove(sid, result.task)
+        }
+        return
+      }
+      if (result.escalated) maybeNotify(sid, result.task)
+      if (doneOn && result.task && result.task.status === 'resolved') notifyTaskDone(sid, result.task, 'resolved')
+      if (doneOn && result.task && result.task.status === 'blocked') notifyTaskDone(sid, result.task, 'blocked')
+      kickCycle(sid)
+    }
+    // ===== hook run 结算（hooks=agent run 接线②；搬移自 lib/dispatch.mjs，拆分第 6 刀 task-mvt8c1yx-6）=====
+    // 照 worker/verifier 的结算模式：mutateLocked 持锁改状态机（状态机纯函数在 core.applyHookSettle，
+    // 单测直接打它），锁外发通知 + kickCycle 补派。
+    //   hook-pre  完成 → hooks.pre.state='done'（下轮起子任务正常放行，串行闸门打开）
+    //   hook-post 完成 → hooks.post.state='done' + epic 转 verifying（收口完成，交人验收）
+    //   失败（异常/stopReason 异常）或文本 [ESCALATE] → 该点位 state='failed' + epic 转 blocked +
+    //   escalation 挂卡（歧义上报「前置准备失败，重试/跳过/放弃」），不自动重试。
+    // 幂等：epic 已有未裁决 escalation 时只收口不覆盖（主窗口裁决前不刷屏）。
+    async function settleHook(sid, rec, output, failed, errText) {
+      var phase = rec.role === 'hook-pre' ? 'pre' : 'post'
+      var esc = /\[ESCALATE\]/i.test(output || '')
+      var runId = String(rec.id)
+      // 完成回执开关（notifyDone）：hook 收口把 epic 推进到 blocked/verifying 同样算完成回执，一视同仁
+      var doneOn = true
+      var result = await mutateLocked(sid, function (d) {
+        doneOn = cfg(d).notifyDone !== false
+        var p = d.tasks.find(function (x) { return x.id === rec.taskId })
+        if (!p) return null
+        return applyHookSettle(d, rec.taskId, phase, !(failed || esc), output, runId, errText)
+      })
+      if (!result) return
+      if (result.already) return
+      if (result.blocked) { maybeNotify(sid, result.task); if (doneOn) notifyTaskDone(sid, result.task, 'blocked') }
+      if (doneOn && result.closed) notifyTaskDone(sid, result.task, 'resolved')
+      kickCycle(sid) // 结算后立刻补派（pre 完成 → 子任务开跑；post 完成 → epic 进验收）
+    }
+    // ===== 拆解官结算（task-mvnenrwk；搬移自 lib/dispatch.mjs，拆分第 6 刀 task-mvt8c1yx-6）：host 读 result.structured 物化 draft 子卡 =====
+    // 三分支：verdict=split → applyDecomposeProposal 物化（幂等清旧批 draft 提案）+ 源卡摘要消息 + 通知；
+    //         verdict=keep → 源卡记「无需拆分：rationale」；
+    //         run 失败 / structured 缺失 / 提案畸形 → 源卡记失败原因 + 通知（源卡与旧提案批都不动）。
+    // 通知（task-mvrqiu6x）：split/keep 成功改走 notifyDecomposed（pushReceipt 聚合内核出「🧩 已拆解」分区，
+    // 受 notifyDone 开关约束）——源卡按设计停在 draft/pending，旧实现借 pushSysNote 系统通道绕行
+    // 「带 taskId 会被仍在执行中过滤器丢弃」的墙，代价是成功信号伪装成「⚠️ 系统异常」；
+    // 失败分支保持 pushSysNote 🚨 不变（异常就该是异常）。
+    async function settleDecompose(sid, rec, res, err) {
+      var failed = !!err || (res && res.stopReason && res.stopReason !== 'completed')
+      var errText = err ? String(err) : (res && (res.diagnostic || res.stopReason) || '')
+      var structured = (res && res.structured && typeof res.structured === 'object') ? res.structured : null
+      var applied = null
+      var srcTitle = ''
+      // 完成回执开关（设置区「通知」notifyDone，task-mvrqiu6x）：同一次持锁回调里读看板文档（零额外读盘，
+      // 与 settleWorker/settleVerifier 写法一致）；缺字段 → cfg 归一为 true，宁可多报不漏报。
+      var doneOn = true
+      try {
+        applied = await mutateLocked(sid, function (d) {
+          var t = d.tasks.find(function (x) { return x.id === rec.taskId })
+          if (!t) return null
+          srcTitle = t.title
+          doneOn = cfg(d).notifyDone !== false
+          if (!Array.isArray(t.messages)) t.messages = []
+          if (failed) {
+            t.messages.push({ kind: 'decompose', text: '🧩 拆解官 run 失败（' + String(errText || '未知错误').slice(0, 200) + '）——源卡未改动，可重试 task_decompose', at: new Date().toISOString(), by: 'system' })
+            return { ok: false, failed: true }
+          }
+          if (!structured) {
+            t.messages.push({ kind: 'decompose', text: '🧩 拆解官未返回结构化提案（structured 缺失，可能宿主/provider 不支持 outputSchema）——源卡未改动，可重试 task_decompose', at: new Date().toISOString(), by: 'system' })
+            return { ok: false, failed: true }
+          }
+          return applyDecomposeProposal(d, t, structured, new Date().toISOString())
+        }, true) // skipKick：物化的是 draft 子卡（不参与派发），无需踢 poolCycle
+      } catch (e) { console.error('[task-board] settle decompose failed (task ' + rec.taskId + '):', String(e)); applied = null }
+      try {
+        // 拆解官正式回执：走 notifyDecomposed（「🧩 已拆解」聚合分区，notifyDone 闸门同完成回执口径；
+        // 源卡 messages 的「🧩 拆解提案已就位/无需拆分」留痕已由 applyDecomposeProposal 落卡，
+        // 关开关时留痕照旧不丢）——成功信号不再借系统通道伪装异常。
+        if (applied && applied.ok && applied.verdict === 'split') {
+          if (doneOn && typeof notifyDecomposed === 'function') notifyDecomposed(sid, { sourceId: rec.taskId, sourceTitle: srcTitle, verdict: 'split', children: applied.children, reason: '' })
+        } else if (applied && applied.ok && applied.verdict === 'keep') {
+          if (doneOn && typeof notifyDecomposed === 'function') notifyDecomposed(sid, { sourceId: rec.taskId, sourceTitle: srcTitle, verdict: 'keep', children: [], reason: structured ? String(structured.rationale == null ? '' : structured.rationale).trim().slice(0, 150) : '' })
+        } else pushSysNote(sid, '🚨 拆解官 run 未产出可用提案（源卡 ' + rec.taskId + '）：' + String((applied && applied.error) || errText || 'structured 缺失').slice(0, 200)) // 失败分支：异常就是异常，保持 🚨 系统通道（文案逐字不变）
+      } catch (e) { console.error('[task-board] decompose notify failed:', String(e)) }
+    }
     // ===== host 事件订阅：agent/status（continuable Worker 的 turn 结算触发器，task-muw5gnhv 卡1）=====
     // 事件契约（host Event 目录实证）：'agent/status'(payload: { agent, status: 'idle'|'running' })。
     // 「子代理 turn 完成」在事件面就是 running→idle；continuable 没有 run.result promise，故这是唯一可靠的
@@ -274,5 +507,7 @@ export function createSettle(opts) {
         })
       } catch (e) { console.error('[task-board] agent/status 处理失败:', String(e)) }
     }
-    return { settleRun: settleRun, settleRunRecord: settleRunRecord, settleReportedRun: settleReportedRun, onAgentStatus: onAgentStatus }
+    // settleWorker 从工厂返回集导出（拆分第 6 刀）：spawnOneShot 的 activation 拆除兜底臂/异常臂两调用点
+    // 重指本实例——同一 deps 接线（mutateLocked/health/通知类/kickCycle 同源），语义与搬移前一致。
+    return { settleRun: settleRun, settleRunRecord: settleRunRecord, settleReportedRun: settleReportedRun, onAgentStatus: onAgentStatus, settleWorker: settleWorker }
 }
