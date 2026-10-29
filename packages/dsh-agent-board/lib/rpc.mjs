@@ -833,8 +833,9 @@ export function createRpc(ctx, state, deps) {
         // （retryCount+1 / lastError=子会话被宿主拆除 / history 落「worker 失败…重新排队」，
         // retryCount=2 的卡直接被打成 blocked，与「hold=停派」语义正面冲突）。
         // 终止的账由本函数自己结（accumulateRunUsage + closeRunHistory + mutateLocked），立旗后
-        // 兜底臂/超时臂/idle 事件通道对这条 rec 的迟到落定一律空转——与落闸弃权臂（dispatch 646）
-        // 同一纪律，且补上「离开活跃表的 rec 必然已立 settled 旗」不变式的最后一个缺口。
+        // 兜底臂/超时臂/idle 事件通道对这条 rec 的迟到落定一律空转——与落闸弃权臂
+        // （lib/dispatch.mjs 的 spawn 落闸处置）同一纪律，且补上「离开活跃表的 rec 必然已立
+        // settled 旗」不变式的最后一个缺口。
         rec.settled = true
         // 清理：一次性 run 走 dispose（既有语义逐字不变）；continuable 的 rec 没有 run（持久子会话），
         // 卡2 起改走 **interrupt 留存**（task-muw5h2ps）：只打断当前 turn、不销毁子会话——否则「手动终止」

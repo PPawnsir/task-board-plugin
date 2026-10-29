@@ -607,10 +607,11 @@ export function createDispatch(ctx, state, deps) {
       // （正常完成 parked-idle 不落定、不误伤续跑）——把它接上就是失败/拆除场景的零事件依赖结算通道。
       // rec.settled 首胜旗与事件/超时/上报三通道共用：先到先结，后到被挡。
       // 归属不变式（task-mvnyk55n 驳回根修）：「rec 被摘出 runsFor 活跃表 ⇒ 摘除点已同步立
-      // rec.settled」对全部摘除路径成立（落闸弃权 646 / 续跑弃权 838 / settleRun 各入口
-      // finish 698·事件 1299 / settleReportedRun 1262 / 幽灵清扫 1735 / doTerminate 摘表即立——
+      // rec.settled」对全部摘除路径成立（落闸弃权臂 / 续跑弃权臂 / settleRun 的 finish 臂与事件臂
+      // （lib/settle.mjs）/ settleReportedRun（lib/settle.mjs）/ 幽灵清扫 / doTerminate 摘表即立——
       // 后者正是本次补上的缺口：hold 终止的 dispose 落定 result 时本臂若抢结，会把手动终止
       // 误记成 Worker 失败）。因此本臂的 settled 判即归属守卫，无需再判表项在否。
+      // （各臂按函数名定位；本文件历次拆分后行号持续漂移，此注释不再钉行号。）
       if (useContinuable && actForSettle && actForSettle.result && typeof actForSettle.result.then === 'function') {
         actForSettle.result.then(function (res) {
           if (rec.settled) return

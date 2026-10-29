@@ -11,16 +11,19 @@
 //   ④ 测试分层纪律节——事故复盘双落纪律（单测断言锁机制 + fault-e2e-* 场景锁接缝）+
 //      新事故类加卡模板指向 fault-e2e-recovery.test.mjs；
 //   ⑤ 关键契约词全文在案——startActivation / listProviders / session.v4.jsonl.zstd /
-//      五档故障名（instant-kill/hang/empty/rate-limit/slow）+ 消费点行号锚；
+//      五档故障名（instant-kill/hang/empty/rate-limit/slow）+ 消费点「文件 + 符号」锚；
 //   ⑥ 文档与源码同口径——五档故障名逐一在 fault-provider.mjs FAULT_TYPES 常量里（源码真值），
-//      dispatch.mjs 消费点符号（hasActivationApi/activationAsRun/modelDirectory/probeModel）在案，
-//      文档行号锚不悬空。
+//      消费点符号在案（dispatch.mjs: hasActivationApi/activationAsRun/activationRequestOf；拆分后
+//      model-health.mjs: modelDirectory/probeModel），文档锚不悬空。
+//   ⑦ 行号锚清扫锁（task-mvt8c1yx-8 拆分第 8 刀）：拆分令行号持续漂移，文档一律按「文件 + 函数/
+//      符号名」定位——旧行号锚（L806-823/L163-178/L294-332）与任何 L<行号> 形式一律不得回潮。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const doc = readFileSync(new URL('../docs/fault-injection.md', import.meta.url), 'utf8')
 const dispatch = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+const modelHealth = readFileSync(new URL('../lib/model-health.mjs', import.meta.url), 'utf8')
 const faultProvider = readFileSync(new URL('./helpers/fault-provider.mjs', import.meta.url), 'utf8')
 
 test('①文档存在 + 三节锚点标题在案（A/B 权衡记录 / B 路径接缝契约 / 测试分层纪律）', () => {
@@ -89,16 +92,27 @@ test('④测试分层纪律节：事故复盘双落纪律 + 新事故类加卡�
   ]) assert.ok(doc.includes(m), '测试分层纪律节缺锚点：' + m)
 })
 
-test('⑤关键契约词全文在案：五档故障名 + startActivation/listProviders/session.v4.jsonl.zstd + 行号锚', () => {
+test('⑤关键契约词全文在案：五档故障名 + startActivation/listProviders/session.v4.jsonl.zstd + 符号锚', () => {
   for (const n of ['instant-kill', 'hang', 'empty', 'rate-limit', 'slow']) {
     assert.ok(doc.includes(n), '文档缺五档故障名：' + n)
   }
   for (const m of ['startActivation', 'listProviders', 'session.v4.jsonl.zstd']) {
     assert.ok(doc.includes(m), '文档缺关键契约词：' + m)
   }
-  for (const m of ['L806-823', 'L163-178', 'L294-332']) {
-    assert.ok(doc.includes(m), '文档缺消费点行号锚：' + m)
+  // 消费点锚一律「文件 + 函数/符号名」口径（task-mvt8c1yx-8）：拆分后行号必漂，符号不漂。
+  for (const m of ['lib/dispatch.mjs', 'lib/model-health.mjs', 'spawnOneShot', 'hasActivationApi',
+    'activationAsRun', 'activationRequestOf', 'modelDirectory()', 'probeModel()']) {
+    assert.ok(doc.includes(m), '文档缺消费点符号锚：' + m)
   }
+  for (const dead of ['L806-823', 'L163-178', 'L294-332']) {
+    assert.ok(!doc.includes(dead), '文档残留旧行号锚（拆分后已漂移，按符号定位）：' + dead)
+  }
+  assert.ok(!/L\d{2,4}/.test(doc), '文档不得再出现 L<行号> 形式锚点（历次拆分会令其漂移）')
+})
+
+test('⑦行号锚清扫：lib/ 与 docs/ 不再有指向 dispatch.mjs 的 L<行号> 锚（预研清单语法说明除外）', () => {
+  assert.ok(!/dispatch\.mjs[^\n]*L\d/.test(doc), 'fault-injection.md 残留 dispatch.mjs 行号锚')
+  assert.ok(!/dispatch[^\n]*\s\d{3}\b/.test(doc), 'fault-injection.md 残留「dispatch <行号>」式锚')
 })
 
 test('⑥文档与源码同口径：五档在 FAULT_TYPES 常量里（源码真值）+ dispatch.mjs 消费点符号在案', () => {
@@ -107,8 +121,12 @@ test('⑥文档与源码同口径：五档在 FAULT_TYPES 常量里（源码真�
   for (const n of ['instant-kill', 'hang', 'empty', 'rate-limit', 'slow']) {
     assert.ok(types[1].includes("'" + n + "'"), 'FAULT_TYPES 缺五档故障名：' + n)
   }
-  // 文档引用的行号锚不悬空：引用的符号在源码里逐一在案（符号级同口径）
-  for (const s of ['hasActivationApi', 'activationAsRun', 'activationRequestOf', 'modelDirectory', 'probeModel', 'startActivation']) {
+  // 文档引用的消费点符号不悬空（符号级同口径）：spawn/activation 面仍在 dispatch.mjs，
+  // 模型目录/探测面已拆至 lib/model-health.mjs（第 2/4 刀）——文档锚指到新文件，此处回源码复检。
+  for (const s of ['hasActivationApi', 'activationAsRun', 'activationRequestOf', 'startActivation']) {
     assert.ok(dispatch.includes(s), 'dispatch.mjs 缺消费点符号：' + s)
+  }
+  for (const s of ['function modelDirectory', 'function probeModel']) {
+    assert.ok(modelHealth.includes(s), 'lib/model-health.mjs 缺消费点符号：' + s)
   }
 })

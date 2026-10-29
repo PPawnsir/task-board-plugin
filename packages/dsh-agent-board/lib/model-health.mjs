@@ -435,7 +435,8 @@ export function createModelHealth(opts) {
                   : { status: 'fail', text: emptyText }
               } else if (outcome.status === 'timeout') {
                 // ② 重试超时≠失败（task-mvsv8zym）：每尝试独立 20s 预算仍耗尽=慢模型，沿用首次尝试判定落定
-                // ——与「探测已停」分支同原则（我方预算/停机约束非模型健康信号，L407-412 对称补齐）：
+                // ——与上文「空响应且探测已停」分支同原则（我方预算/停机约束非模型健康信号，
+                // 本分支与其对称补齐，探测段内相邻两处不再互钉行号）：
                 // 首探纯空响应→🟡degraded；首探文本带额度/凭据/连接信号→fail（嗅探接管）。
                 var firstVerdict = classifyEmptyResponse(first.code, first.text)
                 outcome = firstVerdict === 'degraded'
