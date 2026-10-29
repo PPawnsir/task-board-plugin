@@ -651,19 +651,22 @@ test('挂死检测②：增长中 run 不误伤——活体增长清零计数刷
 
 test('挂死检测③（源码级）：40 轮阈值常量化 + 600s 墙钟地板常量（task-mvrt9tn5 定稿：延迟缩放删除）+ poolCycle 挂点 + 熔断连击接线 + 边界', () => {
   var dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
-  assert.match(dsp, /var HUNG_ZERO_GROWTH_ROUNDS = 40/, 'N 轮阈值常量化：连续 40 轮零增长判挂死（600s/15s 心跳换算，干预定稿锁死值）')
-  assert.match(dsp, /var HUNG_WALL_FLOOR_MS = 600000/, '墙钟地板 600s 常量化（task-mvrt9tn5：三连误杀实证定稿，对齐最长正常静默）')
+  // 拆分第 1 刀（task-mvt8c1yx，仲裁扩权放行）：挂死域（常量/isHungKillFailure/帧活性/hungZeroOutputSweep）
+  // 已拆至 lib/hung.mjs（叶子模块）——机制锁断言随源码重指 hung 源；调用点/白名单接线断言仍锁 dispatch 源。
+  var hung = readFileSync(new URL('../lib/hung.mjs', import.meta.url), 'utf8')
+  assert.match(hung, /var HUNG_ZERO_GROWTH_ROUNDS = 40/, 'N 轮阈值常量化：连续 40 轮零增长判挂死（600s/15s 心跳换算，干预定稿锁死值）')
+  assert.match(hung, /var HUNG_WALL_FLOOR_MS = 600000/, '墙钟地板 600s 常量化（task-mvrt9tn5：三连误杀实证定稿，对齐最长正常静默）')
   assert.doesNotMatch(dsp, /HUNG_WALL_LATENCY_MULT|function hungWallOf/, '延迟缩放已删（3×latencyMs 方向作废：延迟与长生成静默无关）')
   assert.doesNotMatch(dsp, /超自适应墙钟阈值/, '判死文案不再引用自适应阈值')
-  assert.match(dsp, /async function hungZeroOutputSweep\(sid, runs, snap\) \{/, '挂死零产出检测函数')
-  assert.match(dsp, /hungN = await hungZeroOutputSweep\(sid, runs, snap\)/, 'poolCycleBody 挂点（幽灵回收之后、活跃计数之前）')
-  assert.match(dsp, /lastLogBytes/, 'run 留档基线字段（每轮写回）')
-  assert.match(dsp, /zeroGrowthRounds/, '零增长连击字段（每轮写回）')
+  assert.match(hung, /async function hungZeroOutputSweep\(sid, runs, snap\) \{/, '挂死零产出检测函数')
+  assert.match(dsp, /hungN = await hung\.hungZeroOutputSweep\(sid, runs, snap\)/, 'poolCycleBody 挂点（幽灵回收之后、活跃计数之前）')
+  assert.match(hung, /lastLogBytes/, 'run 留档基线字段（每轮写回）')
+  assert.match(hung, /zeroGrowthRounds/, '零增长连击字段（每轮写回）')
   assert.match(dsp, /if \(isHungKillFailure\(s\)\) return true/, '挂死前缀进 isModelKillFailure 白名单 = 计入熔断连击')
   assert.match(dsp, /isHungKillFailure\(errText\) \? HUNG_CIRCUIT_WHY : undefined/, 'settleWorker 失败臂挂死熔断文案分态')
-  assert.match(dsp, /rec\.role === 'worker' \|\| rec\.role === 'verifier'/, '边界：只盖 worker/verifier 在跑 rec（decomposer/hook 不盖）')
-  assert.match(dsp, /Date\.now\(\) - since >= HUNG_WALL_FLOOR_MS/, '判死双闸：40 轮 × 600s 墙钟地板（固定常量直比）')
-  assert.match(dsp, /超挂死墙钟阈值 ' \+ wallTxt/, '判死文案带出实际生效阈值（固定值直述，排查时一眼分清误杀 vs 真挂死）')
+  assert.match(hung, /rec\.role === 'worker' \|\| rec\.role === 'verifier'/, '边界：只盖 worker/verifier 在跑 rec（decomposer/hook 不盖）')
+  assert.match(hung, /Date\.now\(\) - since >= HUNG_WALL_FLOOR_MS/, '判死双闸：40 轮 × 600s 墙钟地板（固定常量直比）')
+  assert.match(hung, /超挂死墙钟阈值 ' \+ wallTxt/, '判死文案带出实际生效阈值（固定值直述，排查时一眼分清误杀 vs 真挂死）')
 })
 
 test('挂死检测④：挂死三连击 → badModels 熔断+健康表 circuit+系统通知（挂死分态文案）；worker 三连败阻塞语义照旧适用（挂死=失败）', async () => {
