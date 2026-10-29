@@ -196,7 +196,8 @@ test('卡1④：helper 纯函数零 IO——fs 门面全部打爆后照跑不触
 
 // ===== ⑤ 补落账接线（源码级断言）=====
 test('卡1⑤：模型补落账接线——accumulateRunUsage 回填空 model / index re-export / helper 落在 usage.mjs', () => {
-  const disp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  // 拆分第 7 刀（task-mvt8c1yx-7，仲裁扩权放行）：accumulateRunUsage 随源码搬至 lib/settle.mjs——断言随源码重指 settle 源
+  const disp = readFileSync(new URL('../lib/settle.mjs', import.meta.url), 'utf8')
   const usage = readFileSync(new URL('../lib/usage.mjs', import.meta.url), 'utf8')
   const idx = readFileSync(new URL('../index.mjs', import.meta.url), 'utf8')
   // 补落账：run 级留账写回时，条目 model 为空且日志有模型名 → 回填（只填空不覆盖）

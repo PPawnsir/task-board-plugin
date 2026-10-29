@@ -2657,21 +2657,22 @@ test('README 双份同步记录 Token 口径（总量主显 / 近 7 天 / 有效
 })
 
 test('Token run 级留账：accumulateRunUsage 把本次用量写回对应 t.runs 条目（源码级断言）', () => {
-  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  // 拆分第 7 刀（task-mvt8c1yx-7，仲裁扩权放行）：accumulateRunUsage 随源码搬至 lib/settle.mjs——断言随源码重指 settle 源
+  const settleSrc = readFileSync(new URL('../lib/settle.mjs', import.meta.url), 'utf8')
   // 五分量原样写回 runs 条目：任何维度（按天/按模型/按阶段）都能从 runs 精确重建，不必回头猜
-  assert.match(dsp, /if \(Array\.isArray\(t\.runs\)\)/)
-  assert.match(dsp, /if \(String\(t\.runs\[ri\] && t\.runs\[ri\]\.id\) === String\(rec\.id\)\)/)
-  assert.match(dsp, /t\.runs\[ri\]\.usage = \{ input: u\.input \|\| 0, output: u\.output \|\| 0, cacheRead: u\.cacheRead \|\| 0, cacheWrite: u\.cacheWrite \|\| 0, total: u\.total \|\| 0 \}/)
-  assert.match(dsp, /break/) // 命中即停（同一 runId 只记一次）
+  assert.match(settleSrc, /if \(Array\.isArray\(t\.runs\)\)/)
+  assert.match(settleSrc, /if \(String\(t\.runs\[ri\] && t\.runs\[ri\]\.id\) === String\(rec\.id\)\)/)
+  assert.match(settleSrc, /t\.runs\[ri\]\.usage = \{ input: u\.input \|\| 0, output: u\.output \|\| 0, cacheRead: u\.cacheRead \|\| 0, cacheWrite: u\.cacheWrite \|\| 0, total: u\.total \|\| 0 \}/)
+  assert.match(settleSrc, /break/) // 命中即停（同一 runId 只记一次）
   // 倒序查找 + 找不到就跳过：runs 条目由 recordRunHistory 先行写入、closeRunHistory 更新结局，正常必存在
-  assert.match(dsp, /for \(var ri = t\.runs\.length - 1; ri >= 0; ri--\)/)
+  assert.match(settleSrc, /for \(var ri = t\.runs\.length - 1; ri >= 0; ri--\)/)
   // 有效消耗口径单点定义（host 侧），byDay 双指标记账与它同源
-  assert.match(dsp, /function effectiveOf\(u\) \{/)
-  assert.match(dsp, /return \(u\.input \|\| 0\) \+ \(u\.output \|\| 0\) \+ \(u\.cacheWrite \|\| 0\)/)
-  assert.match(dsp, /var eff = effectiveOf\(u\)/)
+  assert.match(settleSrc, /function effectiveOf\(u\) \{/)
+  assert.match(settleSrc, /return \(u\.input \|\| 0\) \+ \(u\.output \|\| 0\) \+ \(u\.cacheWrite \|\| 0\)/)
+  assert.match(settleSrc, /var eff = effectiveOf\(u\)/)
   // byDay 双指标：总 t / 有效 e 各自累加；老 number 形态脏值就地收敛成对象（不把老字段形态写坏）
-  assert.match(dsp, /if \(!cell \|\| typeof cell !== 'object'\) cell = \{ t: Number\(cell\) \|\| 0, e: 0 \}/)
-  assert.match(dsp, /t\.usage\.byDay\[dk\] = cell/)
+  assert.match(settleSrc, /if \(!cell \|\| typeof cell !== 'object'\) cell = \{ t: Number\(cell\) \|\| 0, e: 0 \}/)
+  assert.match(settleSrc, /t\.usage\.byDay\[dk\] = cell/)
 })
 
 test('readRunUsage: run 不存在 / 日志目录不可读 → null（优雅降级，不抛错）', () => {
@@ -2726,9 +2727,10 @@ test('Token 日账接线：dispatch 记 byDay 双指标（本地日）+ 仪表�
   assert.match(host, /cell\.e = \(Number\(cell\.e\) \|\| 0\) \+ eff/)       // 同一笔记一笔有效消耗
   assert.match(host, /var dk = localDayKey\(\)/)                           // 键取结算时刻本地日
   // 本地日口径：localDayKey 必须用本地 getters 拼（含 getFullYear/getMonth/getDate），不得用 toISOString
-  const dispatchSrc = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
-  const dkBody = dispatchSrc.match(/function localDayKey\(d\) \{[\s\S]{0,300}?\n    \}/)
-  assert.ok(dkBody, 'dispatch.mjs 应定义 localDayKey')
+  // （拆分第 7 刀 task-mvt8c1yx-7：localDayKey 随 accumulateRunUsage 搬至 lib/settle.mjs，断言随源码重指）
+  const settleSrc = readFileSync(new URL('../lib/settle.mjs', import.meta.url), 'utf8')
+  const dkBody = settleSrc.match(/function localDayKey\(d\) \{[\s\S]{0,300}?\n    \}/)
+  assert.ok(dkBody, 'settle.mjs 应定义 localDayKey')
   assert.match(dkBody[0], /getFullYear\(\)/)
   assert.match(dkBody[0], /getMonth\(\) \+ 1/)
   assert.match(dkBody[0], /getDate\(\)/)
@@ -5885,22 +5887,28 @@ test('僵尸 run 留档清扫：落定卡 running 无 endedAt 留档被关账+�
 
 test('僵尸 run 留档清扫接线（源码级）：sweepZombieRuns 定义 + poolCycle 挂点 + 只清扫落定卡门禁', () => {
   const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  // 拆分第 7 刀（task-mvt8c1yx-7，仲裁扩权放行）：sweepZombieRuns 随源码搬至 lib/settle.mjs
+  // ——函数体机制锁断言随源码重指 settle 源；poolCycle 挂点接线断言仍锁 dispatch 源（挂点改 settle.* 形态）。
+  const settleSrc = readFileSync(new URL('../lib/settle.mjs', import.meta.url), 'utf8')
   // ① 清扫函数定义（含「只对落定卡做」状态门禁与「无活跃 rec 才扫」护栏）
-  assert.match(dsp, /async function sweepZombieRuns\(sid, snap\) \{/)
-  assert.match(dsp, /if \(t\.status !== 'resolved' && t\.status !== 'cancelled' && t\.status !== 'archived'\) return/)
-  assert.match(dsp, /if \(rec && !rec\.settled && String\(rec\.id\) === rid\) return/)
-  assert.match(dsp, /r\.outcome = 'stale-closed'/)
-  assert.match(dsp, /r\.endedAt = new Date\(\)\.toISOString\(\)/)
-  assert.match(dsp, /r\.note = 'host 重启僵尸留档清扫'/)
-  assert.match(dsp, /if \(t\.verifierRun === rid\) \{ t\.verifierRun = null; delete t\.verifierRunAt \}/)
-  assert.match(dsp, /if \(t\.claimedBy === rid\) \{ t\.claimedBy = null; t\.claimedAt = null \}/)
-  assert.match(dsp, /return any \? d : null/) // 无改动不写盘（安静板不因清扫产生心跳写盘）
+  assert.match(settleSrc, /async function sweepZombieRuns\(sid, snap\) \{/)
+  assert.match(settleSrc, /if \(t\.status !== 'resolved' && t\.status !== 'cancelled' && t\.status !== 'archived'\) return/)
+  assert.match(settleSrc, /if \(rec && !rec\.settled && String\(rec\.id\) === rid\) return/)
+  assert.match(settleSrc, /r\.outcome = 'stale-closed'/)
+  assert.match(settleSrc, /r\.endedAt = new Date\(\)\.toISOString\(\)/)
+  assert.match(settleSrc, /r\.note = 'host 重启僵尸留档清扫'/)
+  assert.match(settleSrc, /if \(t\.verifierRun === rid\) \{ t\.verifierRun = null; delete t\.verifierRunAt \}/)
+  assert.match(settleSrc, /if \(t\.claimedBy === rid\) \{ t\.claimedBy = null; t\.claimedAt = null \}/)
+  assert.match(settleSrc, /return any \? d : null/) // 无改动不写盘（安静板不因清扫产生心跳写盘）
   // ② poolCycle 挂点：reconcile 之后、幽灵回收之前（落定卡僵尸留档 reconcile/reap 都管不到，须在空闲快进前兜到）
-  assert.match(dsp, /try \{ await sweepZombieRuns\(sid, snap\) \} catch \(e\) \{ console\.error\('\[task-board\] 僵尸留档清扫失败:/)
+  assert.match(dsp, /try \{ await settle\.sweepZombieRuns\(sid, snap\) \} catch \(e\) \{ console\.error\('\[task-board\] 僵尸留档清扫失败:/)
 })
 
 test('卡2/卡3 接线（源码级）：usage 水位线落卡 + reconcile 一次性 + 详情页 ↻ 续跑标注 + 文档收尾', () => {
   const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  // 拆分第 7 刀（task-mvt8c1yx-7，仲裁扩权放行）：usage 水位/accumulateRunUsage/reconcileRoot 随源码搬至
+  // lib/settle.mjs——②③机制锁断言随源码重指 settle 源；poolCycle 挂点接线断言仍锁 dispatch 源（settle.* 形态）。
+  const settleSrc = readFileSync(new URL('../lib/settle.mjs', import.meta.url), 'utf8')
   const usageSrc = readFileSync(new URL('../lib/usage.mjs', import.meta.url), 'utf8')
   const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   // ① usage 增量：readRunUsage 收第三参 sinceSeq，只认水位线之后的帧，并回传全份 maxSeq
@@ -5908,24 +5916,24 @@ test('卡2/卡3 接线（源码级）：usage 水位线落卡 + reconcile 一次
   assert.match(usageSrc, /if \(from > 0 && sq <= from\) continue/)
   assert.match(usageSrc, /maxSeq: -1/)
   // ② 结算侧：水位线从卡上 runs 条目读、增量累加后写回（只增不减）
-  assert.match(dsp, /function seekSeqOf\(snap, taskId, runId\) \{/)
-  assert.match(dsp, /since = seekSeqOf\(snap0, rec\.taskId, rec\.id\)/)
-  assert.match(dsp, /u = readRunUsage\(String\(rec\.id\), sessionsRoot, since\)/)
+  assert.match(settleSrc, /function seekSeqOf\(snap, taskId, runId\) \{/)
+  assert.match(settleSrc, /since = seekSeqOf\(snap0, rec\.taskId, rec\.id\)/)
+  assert.match(settleSrc, /u = readRunUsage\(String\(rec\.id\), sessionsRoot, since\)/)
   // 同 id 的续跑新条目尚未结算（usageSeq 未设）→ 必须继续往前找已结算的那条，否则水位线恒 0（踩过的坑）
-  assert.match(dsp, /if \(!r \|\| String\(r\.id\) !== String\(runId\)\) continue\s*\n\s*var w = num0\(r\.usageSeq\)\s*\n\s*if \(w > 0\) return w/)
-  assert.match(dsp, /t\.runs\[ri\]\.usageSeq = Math\.max\(num0\(t\.runs\[ri\]\.usageSeq\), num0\(u\.maxSeq\)\)/)
+  assert.match(settleSrc, /if \(!r \|\| String\(r\.id\) !== String\(runId\)\) continue\s*\n\s*var w = num0\(r\.usageSeq\)\s*\n\s*if \(w > 0\) return w/)
+  assert.match(settleSrc, /t\.runs\[ri\]\.usageSeq = Math\.max\(num0\(t\.runs\[ri\]\.usageSeq\), num0\(u\.maxSeq\)\)/)
   // ③ reconcile：per-host 一次性标记 + listChildren 存活判定 + 重建 rec/重挂超时臂 + 死会话回 pending
-  assert.match(dsp, /async function reconcileRoot\(sid\) \{/)
-  assert.match(dsp, /if \(state\.reconcileDone\[sid\]\) return/)
-  assert.match(dsp, /typeof subagents\.listChildren !== 'function'/)
-  assert.match(dsp, /await withTimeout\(q, 5000, 'reconcile listChildren'\)/)
-  assert.match(dsp, /restored: true, ran: false/)
-  assert.match(dsp, /baselineBytes: logSizeOf\(childId\)/)
-  assert.match(dsp, /armTimeouts\(sid, rec, tc, c2\)/)
-  assert.match(dsp, /last\.outcome = 'timeout\/error'; last\.endedAt = new Date\(\)\.toISOString\(\)/)
-  assert.match(dsp, /续跑观测已恢复/)
+  assert.match(settleSrc, /async function reconcileRoot\(sid\) \{/)
+  assert.match(settleSrc, /if \(state\.reconcileDone\[sid\]\) return/)
+  assert.match(settleSrc, /typeof subagents\.listChildren !== 'function'/)
+  assert.match(settleSrc, /await withTimeout\(q, 5000, 'reconcile listChildren'\)/)
+  assert.match(settleSrc, /restored: true, ran: false/)
+  assert.match(settleSrc, /baselineBytes: logSizeOf\(childId\)/)
+  assert.match(settleSrc, /armTimeouts\(sid, rec, tc, c2\)/)
+  assert.match(settleSrc, /last\.outcome = 'timeout\/error'; last\.endedAt = new Date\(\)\.toISOString\(\)/)
+  assert.match(settleSrc, /续跑观测已恢复/)
   // poolCycle 入口接线（在读 runs/snap 之前，重建的 rec 参与本轮活跃计数）
-  assert.match(dsp, /try \{ await reconcileRoot\(sid\) \} catch \(e\) \{ console\.error\('\[task-board\] reconcile 失败:'/)
+  assert.match(dsp, /try \{ await settle\.reconcileRoot\(sid\) \} catch \(e\) \{ console\.error\('\[task-board\] reconcile 失败:'/)
   // ④ 详情页 ↻ 续跑标注（读卡2 落的 runs[i].resume，不猜；老留档零渲染）
   assert.match(cli, /var rsMark = r\.resume === true \? ' ↻' : ''/)
   assert.match(cli, /↻ 冷复活续跑：沿用上一次的子会话，非新开/)
@@ -6249,7 +6257,7 @@ test('池冻结根修⑤（接线，源码级）：幽灵回收在活跃度计�
   const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
   const sto = readFileSync(new URL('../lib/store.mjs', import.meta.url), 'utf8')
   // ① 回收必须在 activeW 计数与 pickDispatch 之前（否则本轮依旧被幽灵拖住）
-  const iReap = dsp.indexOf('reapedN = await reapGhostRecs(sid, snap)')
+  const iReap = dsp.indexOf('reapedN = await settle.reapGhostRecs(sid, snap)') // 拆分第 7 刀：挂点改经 settle 实例
   const iCount = dsp.indexOf('if (rc0.role === \'worker\') activeW++')
   assert.ok(iReap > 0 && iCount > iReap, '幽灵回收必须先于活跃度计数')
   // ② 回收后重读快照（否则空闲快进的 wt(snap) 会把收尾结果覆盖回旧状态）
