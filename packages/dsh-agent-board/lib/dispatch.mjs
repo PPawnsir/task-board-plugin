@@ -8,11 +8,12 @@ import * as core from './core.mjs'
 import { readRunUsage, findRunLog, readLogBytes, readLogFrames } from './usage.mjs'
 import { splitRuleOf, pushRejectLesson, DECOMPOSE_SCHEMA, buildDecomposerPrompt, applyDecomposeProposal, TEAM_DECOMPOSE_FLOW } from './policy.mjs'
 import { createHung, isHungKillFailure, HUNG_CIRCUIT_WHY } from './hung.mjs'
-// 模型健康域（拆分第 2 刀 task-mvt8c1yx-2 + 第 3 刀 task-mvt8c1yx-3）：冷却嗅探纯函数（parseModelCooldown/hhmmOf/modelKey/CONNECTIVITY_RE）
-// 与健康表/冷却登记/模型目录/备用链健康判定/熔断连击工厂（createModelHealth）已拆至 lib/model-health.mjs
-// （叶子模块，与健康同域；health→hung 单向 import 无环）。
-// hhmmOf/modelKey/CONNECTIVITY_RE 在本文件不搬区段（降档留痕/熔断键/空响应分治）仍有调用点——单源 import 同源消费。
-import { parseModelCooldown, createModelHealth, hhmmOf, modelKey, CONNECTIVITY_RE } from './model-health.mjs'
+// 模型健康域（拆分第 2 刀 task-mvt8c1yx-2 + 第 3 刀 task-mvt8c1yx-3 + 第 4 刀 task-mvt8c1yx-4）：冷却嗅探纯函数
+// （parseModelCooldown/hhmmOf/modelKey）、健康表/冷却登记/模型目录/备用链健康判定/熔断连击工厂（createModelHealth）、
+// 主动探测域（probeOnce/probeModel/probeConfiguredModels/maybeProbeModels/探测态/disposeProbe）全量已拆至
+// lib/model-health.mjs（叶子模块，与健康同域；health→hung 单向 import 无环，cfg 由 core 直接 import）。
+// hhmmOf/modelKey 在本文件不搬区段（降档留痕/熔断键）仍有调用点——单源 import 同源使用；CONNECTIVITY_RE 随第 4 刀迁出（唯一代码消费点 classifyEmptyResponse 同域随迁），本文件不再 import。
+import { parseModelCooldown, createModelHealth, hhmmOf, modelKey } from './model-health.mjs'
 const { ah, cfg, claimApply, resolveApply, verifyApply, lateVerdictApply, lateNoticeFp, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER, opsLogLine } = core
 
 // ===== 模型冷却嗅探：限流（task-mvneq4kk）+ 连接/网关故障短窗（task-mvnx8hnm）=====
@@ -52,205 +53,25 @@ export function createDispatch(ctx, state, deps) {
     // 冷却表/健康表/熔断连击表（modelCooldown/modelHealth/modelFailStreak 惰性初始化，原「缺字段就地补」
     // 同款）已拆至 lib/model-health.mjs（拆分第 2 刀 task-mvt8c1yx-2 + 第 3 刀 task-mvt8c1yx-3）：工厂内
     // 就地补缺字段（state 共享同一引用，语义逐字不变），见下方 health 实例。
-    var probeInFlight = {}, probeAbort = {}, probeNextAt = {}, probeDisposed = false
-    // 健康域实例（拆分第 2 刀 task-mvt8c1yx-2 + 第 3 刀 task-mvt8c1yx-3）：健康表/冷却登记/冷却期判定/
-    // 模型目录/备用链健康判定/熔断连击函数集已拆至 lib/model-health.mjs（state 共享同一引用——
+    // 探测态（probeInFlight/probeAbort/probeNextAt/probeDisposed）已随第 4 刀（task-mvt8c1yx-4）迁入
+    // lib/model-health.mjs 工厂内部——卸载入口收敛为 health.disposeProbe()（下方卸载 effect 回调只调它）。
+    // 健康域实例（拆分第 2 刀 task-mvt8c1yx-2 + 第 3 刀 task-mvt8c1yx-3 + 第 4 刀 task-mvt8c1yx-4）：健康表/
+    // 冷却登记/冷却期判定/模型目录/备用链健康判定/熔断连击/主动探测（probeOnce/probeModel/probeConfiguredModels/
+    // maybeProbeModels/disposeProbe）函数集已拆至 lib/model-health.mjs（state 共享同一引用——
     // modelHealth/modelCooldown/badModels/modelFailStreak 语义逐字不变；各表惰性初始化在工厂内就地补）。
-    // disposed 读取器与 probeDisposed 同源：插件卸载后 observeModel 不再写健康表（既有语义逐字不变）；
-    // ctx/pushSysNote 随第 3 刀注入（modelDirectory 的 llm 目录获取 / feedModelFailure 的系统通知）。
-    var health = createModelHealth({ state: state, mutateLocked: mutateLocked, disposed: function () { return probeDisposed }, ctx: ctx, pushSysNote: pushSysNote })
-    // 整列别名（拆分第 2/3 刀）：既有调用点文本不动（降低 diff 风险），函数集统一来自 health 工厂实例。
-    const { healthBucket, healthEntry, syncModelHealth, observeModel, markModelCircuit, cooldownLive, sniffModelCooldown, modelDirectory, outOfDir, traceStaleModel, healthyModel, pickHealthyFallback, isModelKillFailure, feedModelFailure, resetModelFailure } = health
-    // ===== 主动模型嗅探：llm.stream 极短直调（无子代理/系统提示/工具，首探 maxTokens=1）=====
-    // finish=stop/max-tokens 等均证明模型链路可用；error/aborted/无 finish 才算失败。失败文本复用既有冷却登记，
-    // 但不改 badModels 熔断判定。同模型全局只在飞一次，15s 硬超时带 AbortSignal，绝不阻塞 poolCycle 派发。
-    // ===== 空响应重试（task-mvrfp1rj）+ 错误码分治（task-mvrqdw4k 用户拍板）：探测只裁存活性 =====
-    // 实证（cmss/zhanlu 系 glm-5.2、deepseek-v4.1-flash）：maxTokens=1 的极简请求被供应商以「terminal stop
-    // 零内容块」退回，宿主 adapter 归成 EMPTY_RESPONSE 错误（逐字文案，宿主 checkout grep 实测）：
-    //   ① dsh-llm-pi-ai mapStopReason：model "<m>" returned a completed response with no content
-    //   ② dsh-llm-deepseek          ：DeepSeek Messages returned no content
-    // 可用性实证（task-mvrqdw4k 三重，决定性）：v4.1-flash 正产出当轮对话、两次「失败」皆我方固定 60s 挂死闸
-    // 误杀（已修为自适应）——它是慢不是死，纯空响应=供应商怪癖，不该判死。
-    // 校准口径（用户拍板·错误码分治矩阵）：
-    //   ① 首探 maxTokens=1（最省 token；一次通即证明链路可用）；
-    //   ② 首探「空响应」→ 自动以 maxTokens=8 重试一次（给模型吐 token 的余地，消掉 length 截断型空响应大头）；
-    //   ③ 重试有内容 → 🟢 探测通过（存活 = 可调用）；
-    //   ④ 重试仍空 → 按文本/码信号分治（classifyEmptyResponse）：纯空响应=🟡 degraded 存活（链路通，供应商
-    //      怪癖）——observeModel 记降级不记失败、不喂冷却嗅探、路由仍可选用；额度/凭据/连接信号=真错，维持
-    //      失败臂照旧 observeModel 失败 + 喂冷却嗅探（quota 文本优先级高于空响应判定，⑬b/⑬d 契约保留）；
-    //   ⑤ 真错误/aborted/超时/无 finish 语义逐字不变，且不触发重试（一次定性，省一次请求也省一次误判）。
-    // 放宽不放跑真坏模型（闭环论证）：额度真耗尽有两条独立通道——①宿主直接抛 QUOTA_EXCEEDED（探测即降级）；
-    // ②若网关伪装成空响应，真派发 run 会失败 → recentRuns 软闸（≥2 全败）跳过它——探测管可调性、行为闸管质量。
-    // 边界：只动探测判定/健康状态派生/UI 映射与断言；探测调度节奏（probeNextAt/probeIntervalMin）与熔断联动不动。
-    var PROBE_MAX_TOKENS = 1        // 首探极简：1 token 证链路通
-    var PROBE_MAX_TOKENS_RETRY = 8  // 空响应重试：给模型吐 token 的余地
-    var PROBE_ATTEMPT_TIMEOUT_MS = 20000 // 每次尝试独立超时（task-mvsv8zym：两次尝试各拿满 20s，非共享递减——
-    // 旧 15s 共享预算下慢模型首探耗 ~10s 后重试只剩残余必超时，被我方预算饿死误记成模型失败）。
-    // 总上限 40s 不违反「绝不阻塞 poolCycle」：探测经 maybeProbeModels 后台异步跑（不 await 进派发主链）。
-    // EMPTY_RESPONSE 识别（双路）：结构化 code 优先（宿主 finish.failure.code，常量见 dsh-llm/lib/types/error.js），
-    // 文本特征兜底（兼容只给 message 的旧宿主/网关包装文本）。只认「completed 但零内容」；
-    // 429/连接/超时等真错误文本一律 false，走既有失败臂（冷却登记口径不变）。
-    function isEmptyResponse(code, text) {
-      if (String(code || '') === 'EMPTY_RESPONSE') return true
-      return /no content/i.test(String(text || ''))
-    }
-    // 错误码分治信号（task-mvrqdw4k）：宿主把额度/凭据问题单独编码（QUOTA_EXCEEDED_CODE/INVALID_CREDENTIAL_CODE
-    // 与 EMPTY_RESPONSE_CODE 并列导出），网关包装文本同样带字样——空响应文本/码命中额度/凭据/连接信号 → 真错，
-    // 维持失败臂（冷却嗅探接管）；纯空响应（无任何真错信号）→ 🟡degraded 存活（供应商怪癖：链路通但极简请求零内容）。
-    var QUOTA_SIGNAL_RE = /429|RATE_LIMIT|QUOTA_EXCEEDED|rate.?limit|限额|额度|quota/i
-    var CREDENTIAL_SIGNAL_RE = /INVALID_CREDENTIAL|\b401\b|invalid[ _-]?api[ _-]?key|unauthorized|凭据|凭证/i
-    // 空响应分治：返回 'degraded'（纯空响应=链路存活）| 'fail'（额度/凭据/连接信号=真错，走失败臂）。
-    // 判定顺序：额度 > 凭据 > 连接 > degraded（与 parseModelCooldown 先限流后连接的保守口径一致）。
-    function classifyEmptyResponse(code, text) {
-      var s = String(text || ''), c = String(code || '')
-      if (QUOTA_SIGNAL_RE.test(s) || /QUOTA/i.test(c)) return 'fail'
-      if (CREDENTIAL_SIGNAL_RE.test(s) || /CREDENTIAL/i.test(c)) return 'fail'
-      if (CONNECTIVITY_RE.test(s)) return 'fail'
-      return 'degraded'
-    }
-    // 单次探测请求：返回 { status:'ok' } | { status:'empty', text, code } | { status:'fail', text }
-    //   | { status:'timeout', text }（task-mvsv8zym：超时单列形态，不再与真错误混记 fail——
-    //     超时可能只是慢模型+我方预算约束，由上层按首次尝试判定落定或保留既有观测）。
-    // attemptMs = 单次尝试独立超时（每尝试各拿满全额预算，非共享递减；task-mvsv8zym）。
-    // 每次尝试独立 AbortController/计时器；probeAbort 指向当前在飞尝试（dispose 时统一 abort）。
-    async function probeOnce(llm, model, maxTokens, attemptMs) {
-      var ac = new AbortController(), timedOut = false, disposeTimer = null
-      var attempt = Math.max(1, Number(attemptMs) || 0)
-      var slash = model.indexOf('/')
-      try {
-        if (ctx.timer && typeof ctx.timer.timeout === 'function') disposeTimer = ctx.timer.timeout(function () { timedOut = true; ac.abort() }, attempt)
-        else { var nativeTimer = setTimeout(function () { timedOut = true; ac.abort() }, attempt); disposeTimer = function () { clearTimeout(nativeTimer) } }
-        probeAbort[model] = ac
-        var stream = llm.stream({ provider: model.slice(0, slash), model: model.slice(slash + 1), messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }], maxTokens: maxTokens, signal: ac.signal })
-        var finished = false, failure = '', failureCode = ''
-        for await (var chunk of stream) {
-          if (!chunk || chunk.type !== 'finish') continue
-          finished = true
-          var reason = chunk.reason || {}
-          if (reason.kind === 'error' || reason.kind === 'aborted') {
-            failure = String((reason.failure && reason.failure.message) || reason.kind || '模型探测失败')
-            failureCode = String((reason.failure && reason.failure.code) || '')
-          }
-        }
-        if (timedOut) return { status: 'timeout', text: 'probe timeout ' + Math.round(attempt) + 'ms' }
-        if (!finished) return { status: 'fail', text: '模型探测流未返回 finish' }
-        if (failure) return isEmptyResponse(failureCode, failure) ? { status: 'empty', text: failure, code: failureCode } : { status: 'fail', text: failure }
-        return { status: 'ok' }
-      } catch (e) {
-        // 抛错形态（provider 直接 throw LlmError）：code 可能带 EMPTY_RESPONSE，文本兜底同一谓词
-        if (timedOut) return { status: 'timeout', text: 'probe timeout ' + Math.round(attempt) + 'ms' }
-        var text = String(e && e.message || e)
-        return isEmptyResponse(e && e.code, text) ? { status: 'empty', text: text, code: String(e && e.code || '') } : { status: 'fail', text: text }
-      } finally {
-        try { if (typeof disposeTimer === 'function') disposeTimer() } catch (_) {}
-      }
-    }
-    async function probeModel(sid, model) {
-      if (probeDisposed) return null
-      if (probeInFlight[model]) return probeInFlight[model]
-      var llm = ctx.get && ctx.get('llm')
-      if (!llm || typeof llm.stream !== 'function') return null
-      var slash = model.indexOf('/')
-      if (slash <= 0 || slash === model.length - 1) return null
-      var started = Date.now()
-      var promise = (async function () {
-        try {
-          var outcome = await probeOnce(llm, model, PROBE_MAX_TOKENS, PROBE_ATTEMPT_TIMEOUT_MS)
-          if (outcome.status === 'timeout') {
-            // ③ 首探即超时（task-mvsv8zym）：无重试（⑬e 契约保留），且不覆盖既有观测——只更新 note
-            // （判定保留）：超时可能只是慢模型+我方预算约束，已 healthy/degraded 条目不倒退成 unknown。
-            observeModel(sid, model, false, { probe: true, preserveObserved: true, note: String(outcome.text || '').slice(0, 300) })
-            return false
-          }
-          if (outcome.status === 'empty') {
-            // 空响应 = 唯一触发重试的形态（真错误/超时/无 finish 一次定性，不重试）
-            if (probeDisposed) {
-              // 探测已停（dispose 中断）：无重试机会，仍按错误码分治落定（停机是我方调度约束，非模型健康信号）
-              var budgetText = '空响应且探测已停（不重试，零内容）：' + outcome.text
-              outcome = classifyEmptyResponse(outcome.code, outcome.text) === 'degraded'
-                ? { status: 'degraded', text: budgetText }
-                : { status: 'fail', text: budgetText }
-            } else {
-              var first = outcome
-              outcome = await probeOnce(llm, model, PROBE_MAX_TOKENS_RETRY, PROBE_ATTEMPT_TIMEOUT_MS)
-              // 重试仍空 = 按错误码分治（task-mvrqdw4k 用户拍板）：纯空响应=🟡degraded 存活（供应商怪癖，链路通）
-              // ——不喂冷却、路由仍可选用；额度/凭据/连接信号=真错，维持失败臂（quota 文本优先级高于空响应判定，
-              // ⑬b/⑬d 契约保留）。文案标明重试口径便于排查与嗅探归因。
-              if (outcome.status === 'empty') {
-                var emptyText = 'maxTokens=' + PROBE_MAX_TOKENS_RETRY + ' 重试仍空（EMPTY_RESPONSE）：' + outcome.text
-                outcome = classifyEmptyResponse(outcome.code, outcome.text) === 'degraded'
-                  ? { status: 'degraded', text: emptyText }
-                  : { status: 'fail', text: emptyText }
-              } else if (outcome.status === 'timeout') {
-                // ② 重试超时≠失败（task-mvsv8zym）：每尝试独立 20s 预算仍耗尽=慢模型，沿用首次尝试判定落定
-                // ——与「探测已停」分支同原则（我方预算/停机约束非模型健康信号，L407-412 对称补齐）：
-                // 首探纯空响应→🟡degraded；首探文本带额度/凭据/连接信号→fail（嗅探接管）。
-                var firstVerdict = classifyEmptyResponse(first.code, first.text)
-                outcome = firstVerdict === 'degraded'
-                  ? { status: 'degraded', text: '重试预算耗尽（慢模型），沿用首探判定：' + String(first.text || '') }
-                  : { status: 'fail', text: '重试预算耗尽（慢模型），沿用首探判定：' + String(first.text || '') }
-              }
-            }
-          }
-          if (outcome.status === 'ok') {
-            observeModel(sid, model, true, { probe: true, latencyMs: Date.now() - started })
-            return true
-          }
-          if (outcome.status === 'degraded') {
-            // 🟡 降级存活臂（task-mvrqdw4k）：记存活不记失败——observeModel 落 degraded 派生态；
-            // 不调 sniffModelCooldown（冷却表零登记）；recentRuns 不动（探测本就不进 recentRuns，观察臂已隔开）。
-            observeModel(sid, model, false, { probe: true, degraded: true, latencyMs: Date.now() - started, note: String(outcome.text || '').slice(0, 300) })
-            return 'degraded'
-          }
-          var text = String(outcome.text || '模型探测失败').slice(0, 300)
-          observeModel(sid, model, false, { probe: true, latencyMs: Date.now() - started, note: text })
-          if (!probeDisposed) { try { await sniffModelCooldown(sid, '', model, text) } catch (_) {} }
-          return false
-        } catch (e) {
-          // 兜底臂（probeOnce 自吞错，理论不可达）：语义与旧实现逐字一致
-          var failText = String(e && e.message || e).slice(0, 300)
-          observeModel(sid, model, false, { probe: true, latencyMs: Date.now() - started, note: failText })
-          if (!probeDisposed) { try { await sniffModelCooldown(sid, '', model, failText) } catch (_) {} }
-          return false
-        } finally {
-          delete probeInFlight[model]
-          delete probeAbort[model]
-        }
-      })()
-      probeInFlight[model] = promise
-      return promise
-    }
-    async function probeConfiguredModels(sid, d) {
-      var c = cfg(d), models = core.configuredModelIds(d)
-      for (var i = 0; i < models.length; i++) syncModelHealth(sid, models[i])
-      if (!c.probeEnabled) return { disabled: true, models: models, probed: 0, degraded: 0 }
-      var llm = ctx.get && ctx.get('llm')
-      if (!llm || typeof llm.stream !== 'function') return { disabled: false, unavailable: true, models: models, probed: 0, degraded: 0 }
-      var probed = 0, healthy = 0, degraded = 0
-      for (var m = 0; m < models.length; m++) {
-        if (probeDisposed) break
-        var before = probeInFlight[models[m]] ? false : true
-        var outcome = await probeModel(sid, models[m])
-        if (outcome === null) continue
-        if (before) probed++
-        // task-mvrqdw4k：probeModel 三态消费——true=🟢存活、'degraded'=🟡降级存活（供应商怪癖）、false=失败
-        if (outcome === true) healthy++
-        else if (outcome === 'degraded') degraded++
-      }
-      return { disabled: false, models: models, probed: probed, healthy: healthy, degraded: degraded }
-    }
-    // 15s 调度心跳驱动间隔闸：配置变化立即重排，探测在后台跑，不 await 进派发主链。
-    function maybeProbeModels(sid, d) {
-      var c = cfg(d), now = Date.now()
-      if (!c.probeEnabled) { probeNextAt[sid] = 0; return }
-      var llm = ctx.get && ctx.get('llm')
-      if (!llm || typeof llm.stream !== 'function') return
-      var planKey = String(c.probeIntervalMin)
-      if (probeNextAt[sid] && probeNextAt[sid].plan === planKey && now < probeNextAt[sid].at) return
-      if (!probeNextAt[sid] || probeNextAt[sid].plan !== planKey) probeNextAt[sid] = { at: 0, plan: planKey }
-      probeNextAt[sid] = { at: now + c.probeIntervalMin * 60000, plan: planKey }
-      probeConfiguredModels(sid, d).catch(function (e) { console.error('[task-board] 模型健康探测失败（下周期重试）:', String(e)) })
-    }
+    // 卸载闸随第 4 刀收敛进工厂（probeDisposed 成为其内部状态，disposeProbe() 为唯一卸载入口）——本侧不再
+    // 注入 disposed 读取器；ctx/pushSysNote 随第 3 刀注入（modelDirectory 的 llm 目录获取 / feedModelFailure
+    // 的系统通知 / 探测域的 llm.stream 直调与 timer）。
+    var health = createModelHealth({ state: state, mutateLocked: mutateLocked, ctx: ctx, pushSysNote: pushSysNote })
+    // 整列别名（拆分第 2/3/4 刀）：既有调用点文本不动（降低 diff 风险），函数集统一来自 health 工厂实例。
+    const { healthBucket, healthEntry, syncModelHealth, observeModel, markModelCircuit, cooldownLive, sniffModelCooldown, modelDirectory, outOfDir, traceStaleModel, healthyModel, pickHealthyFallback, isModelKillFailure, feedModelFailure, resetModelFailure, probeConfiguredModels, maybeProbeModels, disposeProbe } = health
+    // 主动探测域（拆分第 4 刀 task-mvt8c1yx-4 全量迁入 lib/model-health.mjs）：PROBE_MAX_TOKENS/
+    // PROBE_MAX_TOKENS_RETRY/PROBE_ATTEMPT_TIMEOUT_MS/QUOTA_SIGNAL_RE/CREDENTIAL_SIGNAL_RE 常量与
+    // task-mvrfp1rj/task-mvrqdw4k/task-mvsv8zym 校准注释、isEmptyResponse/classifyEmptyResponse 分治
+    // 纯函数、probeOnce/probeModel/probeConfiguredModels/maybeProbeModels 探测编排、探测态
+    // （probeInFlight/probeAbort/probeNextAt/probeDisposed）与统一卸载入口 disposeProbe 均已随迁
+    // （cfg 由 core 直接 import、ctx 经工厂注入）——本文件保留两个接线点：poolCycle 的 maybeProbeModels
+    // 间隔闸调用（下方）与插件卸载 effect 的 disposeProbe 回调（文件尾）。
     // 「上下文注入」区块通道的按子代理会话缓存表 + 首轮竞速认领队列随该通道一起退役（task-muvjs392）：
     // 瘦身清单直接进首条 prompt，不再需要注入段命中与父子归属认领（并行 spawn 认领错包的潜伏 bug 一并消灭）。
     var knownSessions = state.knownSessions
@@ -2339,8 +2160,10 @@ export function createDispatch(ctx, state, deps) {
     // state.activeRuns = {} 等价）。原位清空是必要的——runsFor(sid) 返回的是每会话子对象，
     // 只换顶层容器会把这些子对象连同里面的 rec 一起漏掉。
     ctx.effect(function () { return function () { Object.keys(state.activeRuns).forEach(function (psid) { var rr = state.activeRuns[psid]; Object.keys(rr).forEach(function (k) { try { var r0 = rr[k]; if (r0 && r0.run) r0.run.dispose(); if (r0) r0.settled = true } catch (_) {} ; delete rr[k] }) }); state.activeRuns = {}; state.reconcileDone = {} } })
-    // 卸载同时停主动嗅探： AbortSignal 取消在飞请求，迟到结果不再写健康表；已有被动表随 host 状态一并废弃。
-    ctx.effect(function () { return function () { probeDisposed = true; Object.keys(probeAbort).forEach(function (model) { try { probeAbort[model].abort() } catch (_) {} }); probeNextAt = {} } })
+    // 卸载同时停主动嗅探（拆分第 4 刀重指）：注册仍在本侧执行，回调只调 health 工厂暴露的 disposeProbe()
+    // （AbortSignal 取消在飞请求 + 清 probeNextAt 间隔闸表 + 落 probeDisposed 卸载闸，三步操作逐字一致；
+    // 迟到结果不再写健康表，已有被动表随 host 状态一并废弃）。
+    ctx.effect(function () { return function () { disposeProbe() } })
     // Host 侧调度心跳：每 15s 对所有已知会话跑 poolCycle（客户端轮询只是触发器之一，面板关闭/后台节流时照常运转）
     ;(function () { var tm = ctx.timer; if (!tm) return; var disposeTick = tm.interval(function () { var cutoff = Date.now() - 1800000; Object.keys(knownSessions).forEach(function (sid) { if (knownSessions[sid] < cutoff) delete knownSessions[sid]; else poolCycle(sid).catch(function () {}) }) }, 15000); ctx.effect(function () { return disposeTick }) })()
 
