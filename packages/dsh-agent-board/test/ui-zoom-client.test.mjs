@@ -6,7 +6,7 @@
 //   ① 状态与持久化——state.uiZoom（localStorage 键 dsh-agent-board-ui-zoom，白名单五档，脏值/异常回退 1）
 //   ② 根容器接线——TopPanel 顶层 div style 挂 zoom: uiZoom（订阅值，notify 即时生效）
 //   ③ 设置弹层档位——⚙ 弹层「界面」小节 ZoomCfg 下拉：90/100/110/125/150%，选中即 setItem+state+notify
-//   ④ 弹层坐标补偿——zoom 子树内 fixed 弹层 top/right/maxH 除以档位还原 CSS px（仍贴按钮、不溢出视口）
+//   ④ 弹层坐标补偿——/z 口径收进 clampPopoverPos 统一锚点（左溢改左锚/右溢钳右），zoom=1 时右锚式与旧行为同值
 //   ⑤ README 双份——根/包逐字一致 + 看板 UI 区补「界面缩放」说明行
 //   ⑥ 产物重组装——关键标记逐一出现在 lib/client.js（需 npm run build-client）
 import { test } from 'node:test'
@@ -50,10 +50,15 @@ test('③档位：ZoomCfg 下拉五档 + 选中即 localStorage.setItem + state.
   assert.ok(dash.indexOf('界面缩放') >= 0, '弹层缺「界面缩放」标签')
 })
 
-// ===== ④ 弹层坐标补偿（zoom 子树内 fixed 弹层的 top/right/maxH 还原）=====
-test('④补偿：⚙ 弹层定位除以缩放档位（getBoundingClientRect 可视坐标 → CSS px），zoom=1 时与旧行为一致', () => {
+// ===== ④ 弹层坐标补偿 + 钳制接线（task-mvt05utl：/z 口径收进 clampPopoverPos 统一锚点）=====
+test('④补偿：两弹层 toggle 走 clampPopoverPos（/z 还原在钳制函数内统一，左溢改左锚），zoom=1 时右锚式与旧行为同值', () => {
   assert.match(dash, /var z = state\.uiZoom \|\| 1/)
-  assert.match(dash, /setPos\(\{ top: \(r\.bottom \+ 4\) \/ z, right: Math\.max\(8, window\.innerWidth - r\.right\) \/ z, maxH: Math\.max\(140, \(window\.innerHeight - r\.bottom - 16\) \/ z\) \}\)/)
+  // 锚点统一（task-mvt05utl）：两弹层同款 clamp 调用（预算宽常量 + popoverBounds 实测抽屉边界）
+  assert.match(dash, /setPos\(clampPopoverPos\(r, ROUTE_POPOVER_W, z, popoverBounds\(btnRef\.current\)\)\)/)
+  assert.match(dash, /setPos\(clampPopoverPos\(r, POOL_POPOVER_W, z, popoverBounds\(btnRef\.current\)\)\)/)
+  // /z 口径仍在（收进钳制函数）：top 与 right 各项除以档位还原 CSS px
+  assert.match(dash, /var top = \(r\.bottom \+ 4\) \/ zz/)
+  assert.match(dash, /var right = Math\.max\(m, window\.innerWidth - r\.right\) \/ zz/)
   // maxHeight 改读补偿后的 pos.maxH（不再用未补偿的 calc(100vh - ...)）
   assert.match(dash, /maxHeight: \(pos\.maxH \|\| 300\) \+ 'px'/)
 })

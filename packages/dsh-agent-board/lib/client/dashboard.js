@@ -988,7 +988,7 @@
       // 在跑子代理模型可见（task-mvnyc8vo）：每个 busy run 渲染 model 小芯片 + 取模来源角标，
       // 与执行池成员卡同口径；缺 model 字段的老数据条目不渲染芯片。
       var chips = wBusy.concat(vBusy).filter(function (m) { return !!m.model })
-      return React.createElement('span', { style: { fontSize: 9, color: C.text2, display: 'inline-flex', gap: 4, alignItems: 'center' } },
+      return React.createElement('span', { style: { fontSize: 9, color: C.text2, display: 'inline-flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' } },
         // 池水位标注（反馈 n-mut9rzoq3flu / n-muyg4wl9208c）：裸数字第一屏无解，补可见文字标签 + title
         React.createElement('span', { title: '活跃 Worker 数/上限（⚡ = 在跑）', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('zap', 10), 'Worker ' + wActive + '/' + wTotal),
         React.createElement('span', { title: '活跃 Verifier 数/上限（✓ = 在跑；拆解官在跑也占 Verifier 并发位，见右侧 🧩 计数）', style: { display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('check', 10), 'Verifier ' + vActive + '/' + vTotal),
@@ -1141,6 +1141,47 @@
         msg ? React.createElement('span', { style: { color: C.err, maxWidth: 140 } }, msg) : null)
     }
 
+    // ===== 弹层定位共用钳制（task-mvt05utl，用户 2026-10-29「排版有点乱」①主修：弹层左探被裁）=====
+    // 病灶：两弹层（PoolCfgPopover/ModelRoutePopover）fixed 定位统一右锚定（right=视口右缘-按钮右缘，
+    // 内容向左延伸），按钮贴抽屉左缘（窄窗下工具栏折行，⚙/路由按钮落到第二行左端）时弹层左半
+    // 探出抽屉/视口被裁。修法：clampPopoverPos 纯函数统一预算锚点（两弹层共用）——
+    //   · 默认右锚定：右缘贴按钮右缘（zoom=1 且不越界时与旧式输出逐字一致）
+    //   · 左溢：按钮右缘-预算宽 < 抽屉左缘+8 → 改左锚定（左缘=抽屉左缘+8，right 收起不双锚拉宽）
+    //   · 右溢：左锚后右缘仍越过抽屉右缘-8 → 钳回右锚（右缘=抽屉右缘-8；抽屉比弹层还窄的极端兜底）
+    //   · 缩放：各项除以档位还原（fixed 弹层在 zoom 子树内 inset 再被缩一次，沿用既有 /z 口径）
+    // popW=弹层预算宽（whiteSpace:nowrap，宽随文案，常量估算：PoolCfg≈360 / ModelRoute≈500）；
+    // bounds=抽屉可视边界（popoverBounds 实测面板根；缺省退化视口两缘，钳制退化为纯视口口径不炸）。
+    function clampPopoverPos(r, popW, z, bounds) {
+      var zz = z || 1
+      var b = bounds || { left: 0, right: window.innerWidth }
+      var m = 8
+      var top = (r.bottom + 4) / zz
+      var maxH = Math.max(140, (window.innerHeight - r.bottom - 16) / zz)
+      var right = Math.max(m, window.innerWidth - r.right) / zz
+      var left = null
+      if (r.right - popW < b.left + m) {
+        left = (b.left + m) / zz
+        if ((b.left + m) + popW > b.right - m) { left = null; right = Math.max(m, window.innerWidth - (b.right - m)) / zz }
+      }
+      return { top: top, left: left, right: left != null ? null : right, maxH: maxH }
+    }
+    // 抽屉可视边界实测（钳制输入）：沿按钮向上找首个 position:fixed 祖先——面板根容器（kernel TopPanel
+    // 顶层 fixed div，overflow:hidden 即抽屉）；getBoundingClientRect 返回可视坐标（zoom 后真实边界，
+    // 免 zoom 换算、不依赖自身 inset 是否被缩的口径）。找不到（结构变化/异常）退化视口两缘不炸。
+    function popoverBounds(fromEl) {
+      try {
+        var el = fromEl && fromEl.parentElement
+        while (el && el !== document.body) {
+          if (getComputedStyle(el).position === 'fixed') { var rb = el.getBoundingClientRect(); return { left: rb.left, right: rb.right } }
+          el = el.parentElement
+        }
+      } catch (_) {}
+      return { left: 0, right: window.innerWidth }
+    }
+    // 弹层预算宽（whiteSpace:nowrap 内容宽随文案，常量估算；偏大偏向左锚=修被裁病灶的安全侧）
+    var POOL_POPOVER_W = 360
+    var ROUTE_POPOVER_W = 500
+
     // ===== 模型路由独立弹层（task-mvnyc8vo，用户 2026-10-25「模型配置独立弹出卡片」）=====
     // 模型相关全部配置从池配置弹层**搬走**（不是复制）到本弹层：①板级 Worker/Verifier 模型（ModelCfg
     // 复用）②力度路由六槽 ③fallbackModels 备用链——②③ 2026-10-26 起统一为 OrderedModelsEditor
@@ -1185,13 +1226,14 @@
       function toggle() {
         // 与 PoolCfgPopover 同口径：fixed + 视口坐标（面板 overflow:hidden 会裁 absolute 弹层）；
         // 界面缩放补偿——zoom 子树内 getBoundingClientRect 返回缩放后坐标，各项除以档位还原 CSS px。
+        // 锚点统一走 clampPopoverPos（task-mvt05utl）：左溢改左锚，修按钮贴抽屉左缘时弹层左探被裁。
         var z = state.uiZoom || 1
-        if (!open && btnRef.current) { var r = btnRef.current.getBoundingClientRect(); setPos({ top: (r.bottom + 4) / z, right: Math.max(8, window.innerWidth - r.right) / z, maxH: Math.max(140, (window.innerHeight - r.bottom - 16) / z) }) }
+        if (!open && btnRef.current) { var r = btnRef.current.getBoundingClientRect(); setPos(clampPopoverPos(r, ROUTE_POPOVER_W, z, popoverBounds(btnRef.current))) }
         setOpen(!open)
       }
       return React.createElement('span', { ref: ref, style: { position: 'relative', display: 'inline-flex' } },
         React.createElement('button', { ref: btnRef, onClick: toggle, title: '模型路由（板级模型 / 力度路由六槽 / 备用模型链）', style: { fontSize: 12, padding: '3px 8px', border: '1px solid ' + (open ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: open ? C.nested : 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('cpu', 13)),
-        open && pos ? React.createElement('div', { style: { position: 'fixed', top: pos.top + 'px', right: pos.right + 'px', padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: (pos.maxH || 300) + 'px', overflowY: 'auto' } },
+        open && pos ? React.createElement('div', { style: { position: 'fixed', top: pos.top + 'px', left: pos.left != null ? pos.left + 'px' : null, right: pos.right != null ? pos.right + 'px' : null, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: (pos.maxH || 300) + 'px', overflowY: 'auto' } },
           // ① 板级模型（从池配置弹层搬入，组件与写通道逐字不变）
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 5 } }, '板级模型'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
@@ -1253,13 +1295,15 @@
         // 界面缩放补偿（task-mv58e01j）：根容器挂了 CSS zoom 后，getBoundingClientRect 返回缩放后的
         // 可视坐标，而 fixed 弹层在 zoom 子树内 top/right/maxHeight 会再被缩一次 → 各项除以档位还原成
         // CSS px，弹层仍贴着按钮且不溢出视口底（zoom=1 时与旧行为逐字一致）。
+        // 锚点统一走 clampPopoverPos（task-mvt05utl）：左溢改左锚——修按钮贴抽屉左缘（窄窗工具栏折行后
+        // ⚙ 落到第二行左端）时弹层左半探出抽屉/视口被裁（2026-10-29 截图病灶本体）。
         var z = state.uiZoom || 1
-        if (!open && btnRef.current) { var r = btnRef.current.getBoundingClientRect(); setPos({ top: (r.bottom + 4) / z, right: Math.max(8, window.innerWidth - r.right) / z, maxH: Math.max(140, (window.innerHeight - r.bottom - 16) / z) }) }
+        if (!open && btnRef.current) { var r = btnRef.current.getBoundingClientRect(); setPos(clampPopoverPos(r, POOL_POPOVER_W, z, popoverBounds(btnRef.current))) }
         setOpen(!open)
       }
       return React.createElement('span', { ref: ref, style: { position: 'relative', display: 'inline-flex' } },
         React.createElement('button', { ref: btnRef, onClick: toggle, title: '池配置', style: { fontSize: 12, padding: '3px 8px', border: '1px solid ' + (open ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: open ? C.nested : 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('settings', 13)),
-        open && pos ? React.createElement('div', { style: { position: 'fixed', top: pos.top + 'px', right: pos.right + 'px', padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: (pos.maxH || 300) + 'px', overflowY: 'auto' } },
+        open && pos ? React.createElement('div', { style: { position: 'fixed', top: pos.top + 'px', left: pos.left != null ? pos.left + 'px' : null, right: pos.right != null ? pos.right + 'px' : null, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: (pos.maxH || 300) + 'px', overflowY: 'auto' } },
           React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 5 } }, '并发上限（一次性派发，用完即销毁）'),
           React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
             React.createElement(PoolCfg, { label: 'Worker 并发', cfgKey: 'maxWorkers', value: props.maxW }),
