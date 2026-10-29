@@ -3844,28 +3844,29 @@ test('可续跑 Worker⑤：idle 后从子会话 v4 日志读到助手文本 →
 
 test('可续跑 Worker 接线（源码级）：事件订阅走 ctx.effect 回收 + 硬超时 interrupt 留存 + 重派续跑接线', () => {
   const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const settleSrc = readFileSync(new URL('../lib/settle.mjs', import.meta.url), 'utf8')
   const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
   const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
   // ① 双路 spawn：Worker+开关开才走 startContinuable（verifier/hook 不受影响）
   assert.match(dsp, /var useContinuable = role === 'worker' && c\.workerContinuable !== false/)
   assert.match(dsp, /var cs = await subagents\.startContinuable\(\{ provider: providerName, label: req\.label, request: req, signal: req\.signal \}\)/)
   // ② 结算观测：agent/status 订阅 + running→idle + rec.ran 二次守卫 + effect 回收
-  assert.match(dsp, /ctx\.effect\(function \(\) \{ return ctx\.on\('agent\/status', onAgentStatus\) \}\)/)
-  assert.match(dsp, /if \(status !== 'idle' && status !== 'running'\) return/) // running 事件必须放行（rec.ran 的唯一来源）
-  assert.match(dsp, /if \(status === 'running'\) \{ rec\.ran = true; return \}/)
-  assert.match(dsp, /if \(!rec\.ran \|\| rec\.settled\) return/)
-  assert.match(dsp, /await settleRun\(sid, rec, \{ output: \[\{ type: 'text', text: text \}\], stopReason: text\.trim\(\) \? 'completed' : 'error' \}, null\)/)
+  assert.match(dsp, /ctx\.effect\(function \(\) \{ return ctx\.on\('agent\/status', settle\.onAgentStatus\) \}\)/)
+  assert.match(settleSrc, /if \(status !== 'idle' && status !== 'running'\) return/) // running 事件必须放行（rec.ran 的唯一来源）
+  assert.match(settleSrc, /if \(status === 'running'\) \{ rec\.ran = true; return \}/)
+  assert.match(settleSrc, /if \(!rec\.ran \|\| rec\.settled\) return/)
+  assert.match(settleSrc, /await settleRun\(sid, rec, \{ output: \[\{ type: 'text', text: text \}\], stopReason: text\.trim\(\) \? 'completed' : 'error' \}, null\)/)
   // ③ 卡2 Step1：硬超时/失败结算对 continuable 子会话改 interrupt（留存不销毁），一次性仍 dispose；
   //    authority 形状取 dsh-subagent 的 SubagentInterruptAuthority，interrupt 异常被吞进 resumeBlocked 不阻断结算。
-  assert.match(dsp, /async function endContinuable\(sid, rec\) \{/)
-  assert.match(dsp, /subagents\.interrupt\(rec\.childId, \{ kind: 'ancestor', agent: parent \}\)/)
-  assert.match(dsp, /if \(rec\.continuable\) await endContinuable\(sid, rec\)\s*\n\s*else await rec\.run\.dispose\(\)/)
-  assert.match(dsp, /rec\.resumeBlocked = true/)
+  assert.match(settleSrc, /async function endContinuable\(sid, rec\) \{/)
+  assert.match(settleSrc, /subagents\.interrupt\(rec\.childId, \{ kind: 'ancestor', agent: parent \}\)/)
+  assert.match(settleSrc, /if \(rec\.continuable\) await endContinuable\(sid, rec\)\s*\n\s*else await rec\.run\.dispose\(\)/)
+  assert.match(settleSrc, /rec\.resumeBlocked = true/)
   assert.match(dsp, /withTimeout\(abortableP, hardMs, rec\.role \+ ':' \+ t\.id\)/)
   // ④ 文本兜底复用 usage.mjs 现成读取器（与 agent-activity 同一套日志定位/分帧）+ 续跑基线（只认本轮新写字节）
-  assert.match(dsp, /var log = findRunLog\(childId, sessionsRoot\)/)
-  assert.match(dsp, /var buf = readLogBytes\(log, tail\)/)
-  assert.match(dsp, /childSessionOutput\(rec\.childId, rec\.baselineBytes\)/)
+  assert.match(settleSrc, /var log = findRunLog\(childId, sessionsRoot\)/)
+  assert.match(settleSrc, /var buf = readLogBytes\(log, tail\)/)
+  assert.match(settleSrc, /childSessionOutput\(rec\.childId, rec\.baselineBytes\)/)
   assert.match(dsp, /baselineBytes: logSizeOf\(childId\)/)
   // ⑤ 卡2 Step2/Step3：重派续跑接线（sendMessage 冷复活 + 薄框架断点续跑指令 + runs[] 续跑记录 +
   //    失败回退 fresh spawn）+ 三连败计数不受续跑影响（续跑同样走 settleWorker 的 retryCount 口径）
@@ -4186,11 +4187,12 @@ test('可续跑 Worker⑬（卡2 手动终止臂）：终止 continuable run →
 
 test('hooks 接线（源码级）：spawnOneShot 三态 prompt + settleRun 分派 + pre/post 占用与 spawn 失败回收', () => {
   const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  const settleSrc = readFileSync(new URL('../lib/settle.mjs', import.meta.url), 'utf8')
   // spawnOneShot：hook 角色走 buildHookPrompt（phase 由 role 决定）
   assert.match(dsp, /if \(role === 'hook-pre' \|\| role === 'hook-post'\) \{/)
   assert.match(dsp, /buildHookPrompt\(t, role === 'hook-pre' \? 'pre' : 'post', kids\)/)
-  // settleRun：hook 分支进 settleHook（照 worker/verifier 结算模式）
-  assert.match(dsp, /else if \(rec\.role === 'hook-pre' \|\| rec\.role === 'hook-post'\) await settleHook\(sid, rec, output, failed, errText\)/)
+  // settleRun：hook 分支经注入 roles.hook 进 settleHook（照 worker/verifier 结算模式）
+  assert.match(settleSrc, /else if \(rec\.role === 'hook-pre' \|\| rec\.role === 'hook-post'\) await roles\.hook\(sid, rec, output, failed, errText\)/)
   assert.match(dsp, /applyHookSettle\(d, rec\.taskId, phase, !\(failed \|\| esc\), output, runId, errText\)/)
   // pre 闸门占用（state=running 即幂等占用）与 post 补 spawn（pending 标记驱动，复用 verifierRun 幂等位）
   assert.match(dsp, /if \(hookOn\(t, 'pre'\) && t\.hooks\.pre\.state === 'idle' && !runs\[t\.id\]\) \{/)

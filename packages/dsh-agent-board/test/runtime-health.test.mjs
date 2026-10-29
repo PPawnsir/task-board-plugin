@@ -168,8 +168,9 @@ test('⑤b 终止未生效 hint：terminateFailNote → err 级红条（sticky �
 // ===== ⑥ host 挂点源码断言 =====
 test('⑥ host 挂点源码断言：dispatch 心跳打点 / rpc 接线 / index state 容器', function () {
   var srcDispatch = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  var srcSettle = readFileSync(new URL('../lib/settle.mjs', import.meta.url), 'utf8')
   assert.ok(srcDispatch.indexOf('poolLastOkAt') >= 0, 'dispatch.mjs 应有 poolCycle 成功轮心跳打点')
-  assert.ok(srcDispatch.indexOf('settleLastOkAt') >= 0, 'dispatch.mjs 应有 settleRunRecord 打点')
+  assert.ok(srcSettle.indexOf('settleLastOkAt') >= 0, 'settle.mjs 应有 settleRunRecord 打点')
   assert.ok(srcDispatch.indexOf('reapNote') >= 0, 'dispatch.mjs 应有幽灵回收一次性记录打点')
   assert.ok(srcDispatch.indexOf('dispatchOk') >= 0, 'dispatch.mjs 应有成功派发计数')
   var srcRpc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
