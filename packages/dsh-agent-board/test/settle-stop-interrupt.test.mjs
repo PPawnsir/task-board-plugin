@@ -653,7 +653,10 @@ test('挂死检测③（源码级）：40 轮阈值常量化 + 600s 墙钟地板
   var dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
   // 拆分第 1 刀（task-mvt8c1yx，仲裁扩权放行）：挂死域（常量/isHungKillFailure/帧活性/hungZeroOutputSweep）
   // 已拆至 lib/hung.mjs（叶子模块）——机制锁断言随源码重指 hung 源；调用点/白名单接线断言仍锁 dispatch 源。
+  // 拆分第 3 刀（task-mvt8c1yx-3，仲裁扩权放行）：isModelKillFailure 随熔断连击拆至 lib/model-health.mjs
+  // ——isModelKillFailure 白名单机制锁断言随源码重指 model-health 源；settleWorker 调用点接线断言仍锁 dispatch 源。
   var hung = readFileSync(new URL('../lib/hung.mjs', import.meta.url), 'utf8')
+  var mh = readFileSync(new URL('../lib/model-health.mjs', import.meta.url), 'utf8')
   assert.match(hung, /var HUNG_ZERO_GROWTH_ROUNDS = 40/, 'N 轮阈值常量化：连续 40 轮零增长判挂死（600s/15s 心跳换算，干预定稿锁死值）')
   assert.match(hung, /var HUNG_WALL_FLOOR_MS = 600000/, '墙钟地板 600s 常量化（task-mvrt9tn5：三连误杀实证定稿，对齐最长正常静默）')
   assert.doesNotMatch(dsp, /HUNG_WALL_LATENCY_MULT|function hungWallOf/, '延迟缩放已删（3×latencyMs 方向作废：延迟与长生成静默无关）')
@@ -662,7 +665,7 @@ test('挂死检测③（源码级）：40 轮阈值常量化 + 600s 墙钟地板
   assert.match(dsp, /hungN = await hung\.hungZeroOutputSweep\(sid, runs, snap\)/, 'poolCycleBody 挂点（幽灵回收之后、活跃计数之前）')
   assert.match(hung, /lastLogBytes/, 'run 留档基线字段（每轮写回）')
   assert.match(hung, /zeroGrowthRounds/, '零增长连击字段（每轮写回）')
-  assert.match(dsp, /if \(isHungKillFailure\(s\)\) return true/, '挂死前缀进 isModelKillFailure 白名单 = 计入熔断连击')
+  assert.match(mh, /if \(isHungKillFailure\(s\)\) return true/, '挂死前缀进 isModelKillFailure 白名单 = 计入熔断连击')
   assert.match(dsp, /isHungKillFailure\(errText\) \? HUNG_CIRCUIT_WHY : undefined/, 'settleWorker 失败臂挂死熔断文案分态')
   assert.match(hung, /rec\.role === 'worker' \|\| rec\.role === 'verifier'/, '边界：只盖 worker/verifier 在跑 rec（decomposer/hook 不盖）')
   assert.match(hung, /Date\.now\(\) - since >= HUNG_WALL_FLOOR_MS/, '判死双闸：40 轮 × 600s 墙钟地板（固定常量直比）')

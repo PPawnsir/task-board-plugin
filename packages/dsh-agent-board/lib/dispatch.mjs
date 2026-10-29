@@ -8,8 +8,9 @@ import * as core from './core.mjs'
 import { readRunUsage, findRunLog, readLogBytes, readLogFrames } from './usage.mjs'
 import { splitRuleOf, pushRejectLesson, DECOMPOSE_SCHEMA, buildDecomposerPrompt, applyDecomposeProposal, TEAM_DECOMPOSE_FLOW } from './policy.mjs'
 import { createHung, isHungKillFailure, HUNG_CIRCUIT_WHY } from './hung.mjs'
-// 模型健康域（拆分第 2 刀 task-mvt8c1yx-2）：冷却嗅探纯函数（parseModelCooldown/hhmmOf/modelKey/CONNECTIVITY_RE）
-// 与健康表/冷却登记工厂（createModelHealth）已拆至 lib/model-health.mjs（叶子模块，与健康同域）。
+// 模型健康域（拆分第 2 刀 task-mvt8c1yx-2 + 第 3 刀 task-mvt8c1yx-3）：冷却嗅探纯函数（parseModelCooldown/hhmmOf/modelKey/CONNECTIVITY_RE）
+// 与健康表/冷却登记/模型目录/备用链健康判定/熔断连击工厂（createModelHealth）已拆至 lib/model-health.mjs
+// （叶子模块，与健康同域；health→hung 单向 import 无环）。
 // hhmmOf/modelKey/CONNECTIVITY_RE 在本文件不搬区段（降档留痕/熔断键/空响应分治）仍有调用点——单源 import 同源消费。
 import { parseModelCooldown, createModelHealth, hhmmOf, modelKey, CONNECTIVITY_RE } from './model-health.mjs'
 const { ah, cfg, claimApply, resolveApply, verifyApply, lateVerdictApply, lateNoticeFp, parseSections, outputText, pickDispatch, isOrphan, buildWorkerPrompt, buildVerifierPrompt, buildContextPackSection, parseContextFileEntry, parentKickOnDispatch, LESSON_RECALL_HINT, buildHookPrompt, applyHookSettle, hookOn, hookSetState, gsb, pushRejection, depsSatisfied, VERIFIER_PERSONA, VERIFIER_TOOL_FILTER, opsLogLine } = core
@@ -48,142 +49,18 @@ export function createDispatch(ctx, state, deps) {
     // 共享状态别名（本体由 index.mjs apply 统一构建并逐模块注入）
     var dispatchedEver = state.dispatchedEver
     var badModels = state.badModels
-    // 冷却表/健康表（modelCooldown/modelHealth 惰性初始化，原「缺字段就地补」同款）已拆至
-    // lib/model-health.mjs（拆分第 2 刀 task-mvt8c1yx-2）：工厂内就地补缺字段（state 共享同一引用，
-    // 语义逐字不变），见下方 health 实例。
-    // 熔断连击表（task-mvowb2hc 洞①）：sid|model → 连续「模型面失败」次数（纯内存不持久化，与
-    // badModels/modelCooldown 同生命周期，重启即清）。语义：只有「会话被宿主/激活机制在开工前杀掉」
-    // 这类模型面失败才计数（worker 自己的失误——空输出/超时等——不算），连续 N 次才拉黑进 badModels
-    // （熔断语义不变：拉黑后链跳过 + 健康表 circuit）；任一可归因 run 正常完成即归零（settleRunRecord）。
-    var modelFailStreak = state.modelFailStreak || (state.modelFailStreak = {})
+    // 冷却表/健康表/熔断连击表（modelCooldown/modelHealth/modelFailStreak 惰性初始化，原「缺字段就地补」
+    // 同款）已拆至 lib/model-health.mjs（拆分第 2 刀 task-mvt8c1yx-2 + 第 3 刀 task-mvt8c1yx-3）：工厂内
+    // 就地补缺字段（state 共享同一引用，语义逐字不变），见下方 health 实例。
     var probeInFlight = {}, probeAbort = {}, probeNextAt = {}, probeDisposed = false
-    // 健康域实例（拆分第 2 刀 task-mvt8c1yx-2）：健康表/冷却登记/冷却期判定函数集已拆至 lib/model-health.mjs
-    // （state 共享同一引用——modelHealth/modelCooldown/badModels 语义逐字不变；两张表惰性初始化在工厂内
-    // 就地补）。disposed 读取器与 probeDisposed 同源：插件卸载后 observeModel 不再写健康表（既有语义逐字不变）。
-    var health = createModelHealth({ state: state, mutateLocked: mutateLocked, disposed: function () { return probeDisposed } })
-    // 整列别名（拆分第 2 刀）：既有调用点文本不动（降低 diff 风险），与本文件残余 modelFailStreak/熔断喂给链共存。
-    const { healthBucket, healthEntry, syncModelHealth, observeModel, markModelCircuit, cooldownLive, sniffModelCooldown } = health
-    // ===== 模型目录获取（task-mvd3li6 目录失效闸数据源）：与 rpc.mjs enumModels 同源（llm.listProviders+listModels）=====
-    // 返回 { "provider/model": true } 目录映射；null = 目录不可得 → 目录闸整体跳过（保守语义③，不误伤）：
-    //   ① llm 服务缺失/缺 listProviders/listModels 方法（老宿主）；② listProviders 未返回数组或抛错；
-    //   ③ 任一 provider 的 listModels 抛错或未返回数组（部分枚举=目录不完整，宁可跳过闸也不误杀在册模型）；
-    //   ④ 枚举结果为空（退化形态：网关零模型时全候选都会被误判目录外，同样保守跳过）。
-    // 每次 spawnOneShot/续跑闸现取一次（刻意不缓存：模型从宿主配置删除/改名要当轮生效，缓存会放走已删模型）。
-    async function modelDirectory() {
-      var llm = ctx.get && ctx.get('llm')
-      if (!llm || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') return null
-      var providers = null
-      try { providers = llm.listProviders() } catch (_) { return null }
-      if (!Array.isArray(providers)) return null
-      var out = {}
-      for (var i = 0; i < providers.length; i++) {
-        try {
-          var models = await llm.listModels(providers[i].id)
-          if (!Array.isArray(models)) return null
-          for (var j = 0; j < models.length; j++) { if (models[j] && models[j].id) out[providers[i].id + '/' + models[j].id] = true }
-        } catch (_) { return null } // 任一 provider 枚举失败 → 目录不完整 → 保守跳过（不误伤）
-      }
-      if (!Object.keys(out).length) return null
-      return out
-    }
-    // 存在闸谓词（同步；dir=modelDirectory() 结果）：目录可得且模型不在目录 → true（配置已失效）。
-    // dir 为 null（目录不可得）恒 false——闸整体跳过，只留连败软闸生效。
-    function outOfDir(modelId, dir) { return !!(dir && modelId && !dir[modelId]) }
-    // ===== 目录失效留痕（task-mvd3li6）：取模候选不在当前模型目录 → 卡 messages 记「配置已失效」，per 模型去重 =====
-    // 同模型重复取模只记一条（防每轮重派刷屏，与冷却嗅探「未后延零留痕」同纪律）；
-    // 顺带在健康表 observedNote 落同款分态（GUI 健康点可读出「为什么被跳过」）。写卡失败静默吞掉
-    // （留痕是附属动作，绝不阻断取模主流程）。
-    async function traceStaleModel(sid, taskId, model) {
-      if (!model) return
-      console.error('[task-board] 配置已失效：' + model + '（已从模型目录移除），取模跳过该候选')
-      try {
-        var he = healthEntry(sid, model)
-        if (he.observedNote !== '配置已失效（已从模型目录移除）') { he.observedNote = '配置已失效（已从模型目录移除）'; he.note = he.observedNote }
-      } catch (_) {}
-      try {
-        await mutateLocked(sid, function (d) {
-          var t2 = d.tasks.find(function (x) { return x.id === taskId })
-          if (!t2) return null
-          if (!Array.isArray(t2.messages)) t2.messages = []
-          var text = '⚠️ 配置已失效：' + model + '（已从模型目录移除），本 run 取模跳过'
-          for (var i = t2.messages.length - 1; i >= 0; i--) {
-            if (t2.messages[i] && t2.messages[i].kind === 'stale-model' && t2.messages[i].text === text) return null // 已记过，零改动零留痕
-          }
-          t2.messages.push({ kind: 'stale-model', text: text, at: new Date().toISOString(), by: 'system' })
-          return { ok: true }
-        }, true) // skipKick：只是留痕，不踢 poolCycle
-      } catch (_) {}
-    }
-    // ===== 备用模型链健康判定（task-mvnqxlpn）：不在 badModels 熔断名单且不在 modelCooldown 冷却期 =====
-    // 两张表各管各的（熔断=连续失败布尔，冷却=额度窗口时间戳），任一命中即不健康。
-    // 消费点=spawnOneShot 取模链：候选被判不健康时先扫板级 fallbackModels 找首个健康者（链本身逐项过本检查）。
-    // ===== 健康面拓宽（task-mvd3li6）：在既有熔断/冷却双闸之上增读 modelHealth 聚合表 =====
-    //   ① 近期连败软闸：聚合表 recentRuns（近 5 次 run 成败，settleRunRecord 每次结算喂给）≥2 且全败 →
-    //      不健康（软熔断：不落 badModels 黑名单，仅取模/续跑跳过）。一次成功即复位——recentRuns 滚动
-    //      窗口本就有归零语义（成功条目进窗「全败」即不成立），确认复用零新增簿记。原形：glm-5.2
-    //      「78s 报错一次+挂死一次」病了还被优先调度/续跑——第二次派发即被本闸拦下改走健康取模链。
-    //   ② 目录失效闸：dir 可得且模型不在目录（已从宿主配置删除/改名）→ 视为不健康跳过。
-    // dir 为可选第三参：既有调用点（不带 dir）= 目录闸跳过，行为逐字不变（零回归）。
-    function healthyModel(sid, modelId, dir) {
-      if (!modelId) return false
-      var h = syncModelHealth(sid, modelId)
-      if (h.state === 'circuit') return false
-      if (h.state === 'cooldown') return false
-      // task-mvrqdw4k：degraded（🟡空响应降级存活）刻意不拦——探测管可调性，模型仍可被路由选用；
-      // 行为质量另有 recentRuns 连败软闸兜底（下方），探测放宽不放跑真坏模型。
-      if (outOfDir(modelId, dir)) return false
-      var rr = h.recentRuns
-      if (Array.isArray(rr) && rr.length >= 2) {
-        var allBad = true
-        for (var i = 0; i < rr.length; i++) { if (rr[i] && rr[i].ok) { allBad = false; break } }
-        if (allBad) return false
-      }
-      return true
-    }
-    // 扫备用链找首个健康模型（保持链序=主窗口配置的能力水位优先级）；链尽/空链返回 ''。
-    // task-mvd3li6 起 async + dir + taskId：链上目录外模型跳过并留痕（traceStaleModel，per 模型去重）；
-    // 目录不可得（dir 缺省/null）零留痕，行为与旧签名逐字一致（既有调用点零回归）。
-    async function pickHealthyFallback(sid, fbList, dir, taskId) {
-      if (!Array.isArray(fbList)) return ''
-      for (var fi = 0; fi < fbList.length; fi++) {
-        if (outOfDir(fbList[fi], dir)) { await traceStaleModel(sid, taskId, fbList[fi]); continue }
-        if (healthyModel(sid, fbList[fi], dir)) return fbList[fi]
-      }
-      return ''
-    }
-    // ===== 熔断连击喂给（task-mvowb2hc 洞①）：模型面失败判别 + 连击计数 + 三连拉黑 =====
-    // 模型面失败 = 会话被宿主/激活机制在开工前杀掉，两条来源文本都在本文件内确定：
-    //   ① activation.result 拆除兜底臂：「子会话被宿主拆除（stopReason: X，…）」（stopReason=completed
-    //      的收尾性拆除不算——那是正常完成的副产物，不是模型失败）；
-    //   ② activation 异常兜底臂：「子会话 activation 异常：…」（spawn 机制/provider 面失败，同属开工前）。
-    // worker 自己的失误（空输出/超时中断/文本降级失败）不算——好模型不该为 worker 的错误背锅。
-    var WORKER_MODEL_CIRCUIT_AFTER = 3 // 连续 N 次模型面失败才拉黑（与 worker 三连败阻塞同一三击口径）
-    // isHungKillFailure 与挂死常量段已拆至 lib/hung.mjs（拆分第 1 刀 task-mvt8c1yx），此处 import 同源使用。
-    function isModelKillFailure(errText) {
-      var s = String(errText || '')
-      if (isHungKillFailure(s)) return true
-      if (s.indexOf('子会话被宿主拆除（stopReason: ') === 0) return s.indexOf('子会话被宿主拆除（stopReason: completed') !== 0
-      return s.indexOf('子会话 activation 异常：') === 0
-    }
-    // 连击 +1；达 N 且尚未拉黑 → badModels 落黑名单（取模链/降档候选的既有熔断判定照常消费，零新分支）
-    // + 健康表 circuit + 系统通知（不带 taskId：与验收熔断通知同口径，不受任务回执冲刷丢弃）。
-    // why 可选（task-mvqcoz9l）：挂死触发的熔断文案分态（挂死≠秒拆），缺省=既有秒拆文案（既有调用点零回归）。
-    // 返回是否本次调用触发拉黑（测试/留痕用）。
-    function feedModelFailure(sid, model, why) {
-      if (!model) return false
-      var k = modelKey(sid, model)
-      var n = (modelFailStreak[k] || 0) + 1
-      modelFailStreak[k] = n
-      if (n < WORKER_MODEL_CIRCUIT_AFTER) return false
-      if (!badModels[k]) {
-        badModels[k] = true
-        markModelCircuit(sid, model, why || ('连续 ' + n + ' 次 spawn/续跑即被宿主拆除（模型失败），已熔断'))
-        pushSysNote(sid, '模型 ' + model + ' ' + (why || ('连续 ' + n + ' 次 spawn/续跑即被宿主秒拆（模型失败），已熔断')) + '——后续取模链跳过该模型')
-      }
-      return true
-    }
-    // 连击归零：任一可归因 run 正常完成即证明模型链路恢复（settleRunRecord completed 路径调用）
-    function resetModelFailure(sid, model) { if (model) delete modelFailStreak[modelKey(sid, model)] }
+    // 健康域实例（拆分第 2 刀 task-mvt8c1yx-2 + 第 3 刀 task-mvt8c1yx-3）：健康表/冷却登记/冷却期判定/
+    // 模型目录/备用链健康判定/熔断连击函数集已拆至 lib/model-health.mjs（state 共享同一引用——
+    // modelHealth/modelCooldown/badModels/modelFailStreak 语义逐字不变；各表惰性初始化在工厂内就地补）。
+    // disposed 读取器与 probeDisposed 同源：插件卸载后 observeModel 不再写健康表（既有语义逐字不变）；
+    // ctx/pushSysNote 随第 3 刀注入（modelDirectory 的 llm 目录获取 / feedModelFailure 的系统通知）。
+    var health = createModelHealth({ state: state, mutateLocked: mutateLocked, disposed: function () { return probeDisposed }, ctx: ctx, pushSysNote: pushSysNote })
+    // 整列别名（拆分第 2/3 刀）：既有调用点文本不动（降低 diff 风险），函数集统一来自 health 工厂实例。
+    const { healthBucket, healthEntry, syncModelHealth, observeModel, markModelCircuit, cooldownLive, sniffModelCooldown, modelDirectory, outOfDir, traceStaleModel, healthyModel, pickHealthyFallback, isModelKillFailure, feedModelFailure, resetModelFailure } = health
     // ===== 主动模型嗅探：llm.stream 极短直调（无子代理/系统提示/工具，首探 maxTokens=1）=====
     // finish=stop/max-tokens 等均证明模型链路可用；error/aborted/无 finish 才算失败。失败文本复用既有冷却登记，
     // 但不改 badModels 熔断判定。同模型全局只在飞一次，15s 硬超时带 AbortSignal，绝不阻塞 poolCycle 派发。
