@@ -41,7 +41,7 @@
 | **0.1.7 ~ 0.1.7-x**（含 rc） | **≥ 1.2.2（必须）** | 0.1.7 会话日志升级为 format v4：插件消息 `source.kind` 必须是生产者自有 kind。1.2.1 及更早会在**任务完成/阻塞回执**落盘时抛 `SessionFormatError: format v4 message requires a producer-owned source kind`，并连带使主窗口当前轮次失败（表现为「本轮运行失败」）；同时「跳转会话」因宿主移除 `sessions.open` 而失效（控制台 `sessionsSvc.open is not a function`），卡片活动心跳读不到 v4 日志（`session.v4.jsonl.zstd`） |
 | 0.1.5-rc.1 ~ 0.1.6 | ≤ 1.2.1 | 1.2.2 起按 0.1.7 协议编写（v4 source kind、`uiWorkspace.openSession` 跳转），旧宿主未做回归验证，建议停留 1.2.1 |
 
-> 当前版本 **v1.9.1** 已在宿主 **0.2.1-rc.3** 全量实测：723 断言全绿 + 拆解官/力度路由/健康嗅探/帧活性挂死检测真机 E2E 全链。
+> 当前版本 **v1.9.2** 已在宿主 **0.2.1-rc.3** 全量实测：727 断言全绿 + 拆解官/力度路由/健康嗅探/帧活性挂死检测真机 E2E 全链。
 
 ```sh
 dsh plugin --profile web add dsh-agent-board@latest   # 0.1.7+/0.2.x 宿主（推荐）
@@ -119,8 +119,8 @@ dsh plugin --profile web remove dsh-agent-board
 
 - **看板**：六列状态流、拖拽 / 多选批量 / 文本·优先级·标签筛选、归档留档、会话隔离
 - **派发**：一次性 Worker / 独立 Verifier、依赖调度（DFS 环检测）、touches 文件级排他、可续跑 Worker、Team 托管、**spawn 落闸锁内重验**（spawnGateOk：claim 占位与落闸决策读同一把锁的同一份快照，terminate/dependsOn 后补 落在 spawn 在途窗口即弃权——竞态与后补依赖双双根治）、**高优干预分态**（intervene 无活跃 run 时区分「续跑窗口，干预随续跑注入」与「真无 run」，返回体带 state 字段）、**建卡派发预警**（将自动派发时 lintWarnings 瞬态提示「约 1s 内被领取，想占位请 draft:true」）、**宿主 spawn API 双兼容**（v0.2.1 宿主把 `subagents.start/startContinuable` 统一重构为 `startActivation(spec)`——能力探测自动选路：新契约按 `delivery` 语义分发（continuable=`parent` 结算留言 / 一次性=`caller` 只回 result），Activation 适配旧 run 形状下游零改动；老宿主逐字走旧双路径）+ **continuable 结算兜底臂**（`activation.result` 在子会话被宿主拆除时落定即接失败结算——rate-limit/模型崩溃的死子不再挂到硬超时）
-- **智能调度** `☆`：**拆解官工作流**（自然语言需求卡 → `task_decompose` 拆解官先调研后提案（outputSchema 强箍，子卡必带档位/touches/验收命令 + **dependsOn 序号接线**：提案内以 1 起序号互相引用，物化时映射真实任务 id，前排约束天然无环、坏序号丢弃留痕）→ 主窗口呈现、你确认调档 → 逐张 publish；拆解官在池条「🧩 拆解中」与源卡徽标可见；**落定走正式回执**：「🧩 已拆解 N 个（待确认发布）」聚合分区——split 列子卡清单 / keep 列理由，源卡停 draft 也必送达（投递过滤豁免，archived 才丢），失败仍走 ⚠️ 系统异常）+ **力度路由**（轻/标/重三档 × Worker/Verifier 六条有序链，四级取模链：卡级特例→档位链→板级→父模型，每跳过健康闸）+ **备用模型链** `fallbackModels`（额度到顶/故障先跨供应商同档切换，链尽才降档）+ **冷却与熔断**（限流带重置时间解析、连接/网关故障 10 分钟短窗自恢复）+ **模型健康嗅探**（`llm.stream` 极简探测定时扫已配置模型，统一 modelHealth 视图——冷却/熔断/近 5 次 run 聚合，弹层链芯片带 🟢🟡🔴⚪ 健康点，事前调度可见；**探测错误码分治**：额度＞凭据＞连接信号才判失败，纯空响应（供应商怪癖）判 🟡 degraded 存活——不喂冷却、路由仍可选用；**探测预算独立**：每次尝试各 20s（慢模型重试不再被共享窗口饿死），重试预算耗尽沿用首探判定不判死、超时不覆盖既有观测）
-- **执行纪律面** `☆`：**计划闸口**（Worker 动笔前报「计划改动」清单，越界+撞他卡锁双查警示，点名持锁卡）+ **仲裁扩权入锁**（`task_arbitrate` 的 `expandTouches` 把放行文件并入有效锁集+冲突预检+hold 撞锁自动等锁复工）+ **续跑健康闸**（病模型续跑自动改 fresh spawn、宿主秒拆喂熔断、死会话哨兵 5s 即重派）+ **sizeHint 动态调档**（Worker 执行中自报档位修正，下次 spawn 生效）+ **opsLog 人工留痕**（GUI/脚本写集落盘截尾 50 条 + Team 注入「最近人工操作」摘要）
+- **智能调度** `☆`：**拆解官工作流**（自然语言需求卡 → `task_decompose` 拆解官先调研后提案（outputSchema 强箍，子卡必带档位/touches/验收命令 + **dependsOn 序号接线**：提案内以 1 起序号互相引用，物化时映射真实任务 id，前排约束天然无环、坏序号丢弃留痕）→ 主窗口呈现、你确认调档 → 逐张 publish；拆解官在池条「🧩 拆解中」与源卡徽标可见；**落定走正式回执**：「🧩 已拆解 N 个（待确认发布）」聚合分区——split 列子卡清单 / keep 列理由，源卡停 draft 也必送达（投递过滤豁免，archived 才丢），失败仍走 ⚠️ 系统异常）+ **力度路由**（轻/标/重三档 × Worker/Verifier 六条有序链，四级取模链：卡级特例→档位链→板级→父模型，每跳过健康闸）+ **备用模型链** `fallbackModels`（额度到顶/故障先跨供应商同档切换，链尽才降档）+ **冷却与熔断**（限流带重置时间解析、连接/网关故障 10 分钟短窗自恢复）+ **模型健康嗅探**（`llm.stream` 极简探测定时扫已配置模型，统一 modelHealth 视图——冷却/熔断/近 5 次 run 聚合，弹层链芯片带 🟢🟡🔴⚪ 健康点，事前调度可见；**探测错误码分治**：额度＞凭据＞连接信号才判失败，纯空响应（供应商怪癖）判 🟡 degraded 存活——不喂冷却、路由仍可选用；**探测预算独立**：每次尝试各 20s（慢模型重试不再被共享窗口饿死），重试预算耗尽沿用首探判定不判死、超时不覆盖既有观测；**探测恢复熔断解除**：已熔断模型连续 2 个探测周期通过即自动翻绿+解除拉黑+连击归零（单次成功不复位，过滤偶然响应——探测管可调性的对称面：能判死就能证活））
+- **执行纪律面** `☆`：**计划闸口**（Worker 动笔前报「计划改动」清单，越界+撞他卡锁双查警示，点名持锁卡；清单解析容错：正则残片/中文散文片不误判为路径）+ **仲裁扩权入锁**（`task_arbitrate` 的 `expandTouches` 把放行文件并入有效锁集——闸口比对即认扩权边界+冲突预检+hold 撞锁自动等锁复工）（`task_arbitrate` 的 `expandTouches` 把放行文件并入有效锁集+冲突预检+hold 撞锁自动等锁复工）+ **续跑健康闸**（病模型续跑自动改 fresh spawn、宿主秒拆喂熔断、死会话哨兵 5s 即重派）+ **sizeHint 动态调档**（Worker 执行中自报档位修正，下次 spawn 生效）+ **opsLog 人工留痕**（GUI/脚本写集落盘截尾 50 条 + Team 注入「最近人工操作」摘要）
 - **验收治理** `★`：硬性验收脚本独立复跑、驳回全量带回重派、Verifier 自测指南（userTest）、风险队列「待你过目」、验收时序防护（Verifier 在场时主窗口抢批需显式 `force:true`；有活跃 run 的卡禁止归档；Verifier 迟到结论落 `lateVerdict` 留痕+直投告警）、**迟到 verdict 三保险**（①入参校验：`verdict` 非 approved/rejected 拒收并返回重调指引——漏带字段不再被当驳回落账；②通知分态：approved 迟到=「✅ 迟到复核·全过追认」notice 级，🚨「迟到驳回」只留给真 rejected；③指纹去重：同 taskId+by+verdict 只投一次，重复落账零重复通知）
 - **度量** `★`：Token 消耗（总量 / 有效 / 缓存读，按模型·按任务·按日）+ 记分卡（模型表现 / 质量趋势 / 驳回聚类）
 - **可运维性** `★`：运行时健康自检（派发冻结 / 结算停滞告警）、异常驱动审视（风险队列 / 质量异动告警 / 批次摘要）、起草 lint、数据安全（原子写盘 / 腐坏隔离 / 自动 salvage）、**僵尸 run 留档清扫**（host 重启后「落定卡上的 running 无 endedAt 留档」在派发周期自动关账 `stale-closed` + 清认领位，归档门禁不再被幻影 run 永久拦截）、**子会话生命周期收口**（一次性 run 落定/迟到 verdict 落账后主动 interrupt 子会话——「结算≠停止」空转根治；continuable 收紧为「续跑位真在本 child 手上」才豁免，残影 Worker 无处藏身）、**terminate 三保险**（no-rec 也按认领位盲杀补刀 + interrupt 失败 err 级可见化 + `hold:true` 原子「终止+转手动」）、**配置审计**（set-board-config 成功写入落板级 configLog {key,from,to,actor,at} 截尾 50 条；模型下拉两段式选中≠保存）
@@ -330,7 +330,7 @@ Team 托管档独有（调度员体验）：
 
 ### host 模块边界（lib/*.mjs）
 
-v1.6.0 起 host 端从单体 index.mjs（1487 行）拆为薄壳 + 7 个领域模块，
+v1.6.0 起 host 端从单体 index.mjs（1487 行）拆为薄壳 + 7 个领域模块；v1.9.2 再把 dispatch.mjs（2798 行峰值）按职责域四拆（-51%），
 共享闭包状态收进显式 `state` 对象逐模块注入——模块边界即任务边界，并行任务不再全员互锁：
 
 | 模块 | 域 | 内容 |
@@ -340,8 +340,13 @@ v1.6.0 起 host 端从单体 index.mjs（1487 行）拆为薄壳 + 7 个领域�
 | `session.mjs` | 会话 | root 解析缓存 / 会话 id 归一 / workMode 派生 / runsFor |
 | `store.mjs` | 持久化 | boardPath / rt / wt 原子落盘 / 跨重启继承 / fileLocks 串行化 / mutateLocked |
 | `notify.mjs` | 通知 | makeMsg / 歧义 25s 去抖 / 回执聚合 + 空闲门控 / 投递前过滤 |
-| `dispatch.mjs` | 派发引擎 | poolCycle / spawnOneShot / settleRun / 两级超时 / 孤儿回收 / 可续跑 Worker（continuable + 重启 reconcile + usage 水位线） |
+| `hung.mjs` | 挂死检测 | 挂死常量 / 帧活性追踪（assistant-stream 双层判定）/ 日志零增长兜底扫描 |
+| `model-health.mjs` | 模型健康 | 冷却嗅探 / 熔断连击 / 健康表 / 目录失效 / 主动探测全家桶（错误码分治 + 预算独立 + 恢复解除） |
+| `settle.mjs` | 结算族 | settleRun 主干 / 四角色结算（worker/verifier/hook/decompose）/ usage 水位 / 重启 reconcile / 僵尸+幽灵清扫 |
+| `dispatch.mjs` | 派发引擎 | poolCycle / spawnOneShot / 两级超时 / 可续跑 Worker（continuable）——结算/健康/挂死域经工厂闭包注入三兄弟模块 |
 | `rpc.mjs` | 接口层 | RPC 路由 + 16 个 Agent 工具注册 |
+
+（import 单行道无环：hung←core；model-health←hung,core；settle←core,usage,policy,model-health,hung；dispatch←全部；store→dispatch 的循环依赖由 `deps.poolCycle` 晚绑定解开；index.mjs 对外 re-export 契约不变。）
 
 （store→dispatch 的循环依赖由 `deps.poolCycle` 晚绑定解开；index.mjs 对外 re-export 契约不变。）
 
