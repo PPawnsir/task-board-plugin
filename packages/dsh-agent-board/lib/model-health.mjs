@@ -16,8 +16,8 @@
 // isHungKillFailure；hung.mjs 只 import core.mjs，无环）；第 4 刀起另直接 import core.mjs 取
 // cfg/configuredModelIds（探测调度闸与配置集合数据源——core.mjs 不 import 本域，无环）；会话状态/
 // 留卡以闭包回调注入
-// （createModelHealth 工厂：state 共享同一引用——modelHealth/modelCooldown/badModels/modelFailStreak
-// 语义逐字不变；探测态随第 4 刀入厂——probeDisposed 成为本域唯一卸载闸读取源（原 opts.disposed 注入
+// （createModelHealth 工厂：state 共享同一引用——modelHealth/modelCooldown/badModels/modelFailStreak/
+// probeOkStreak 语义逐字不变；探测态随第 4 刀入厂——probeDisposed 成为本域唯一卸载闸读取源（原 opts.disposed 注入
 // 同步口径随之退役），dispose 后 observeModel/probeModel 不再写表，既有卸载闸语义逐字不变；
 // ctx/pushSysNote 随第 3 刀注入——modelDirectory 的 llm 目录获取 / feedModelFailure 的系统通知 /
 // 探测域的 llm.stream 直调与 timer）。
@@ -142,6 +142,13 @@ export function createModelHealth(opts) {
     // 这类模型面失败才计数（worker 自己的失误——空输出/超时等——不算），连续 N 次才拉黑进 badModels
     // （熔断语义不变：拉黑后链跳过 + 健康表 circuit）；任一可归因 run 正常完成即归零（settleRunRecord）。
     var modelFailStreak = state.modelFailStreak || (state.modelFailStreak = {})
+    // 探测恢复连击表（task-mvvw71nc 探测恢复熔断解除）：sid|model → 连续「主动探测通过」次数（纯内存不持久化，
+    // 与 modelFailStreak 同生命周期，重启即清）。语义：探测能证「可调用」却从不解除「不可调」判定，与错误码
+    // 分治（探测管可调性）的哲学不对称（用户 2026-10-31 实测：熔断后红态再也翻不绿）——探测成功且该模型在
+    // badModels 中才 +1，连续 PROBE_OK_RECOVER_AFTER 次（探测间隔 15min 双周期确认）才解除熔断；单次成功不
+    // 复位（过滤偶发响应：能回 1 token 但跑长任务即崩的病模型不被放跑），任一非 ok 探测结果（失败/超时/
+    // degraded）该模型计数清零（重新计，偶发成功不叠加成复位）。
+    var probeOkStreak = state.probeOkStreak || (state.probeOkStreak = {})
     function healthBucket(sid) { return modelHealth[sid] || (modelHealth[sid] = {}) }
     function healthEntry(sid, model) {
       var b = healthBucket(sid)
@@ -329,6 +336,9 @@ export function createModelHealth(opts) {
     //   ② activation 异常兜底臂：「子会话 activation 异常：…」（spawn 机制/provider 面失败，同属开工前）。
     // worker 自己的失误（空输出/超时中断/文本降级失败）不算——好模型不该为 worker 的错误背锅。
     var WORKER_MODEL_CIRCUIT_AFTER = 3 // 连续 N 次模型面失败才拉黑（与 worker 三连败阻塞同一三击口径）
+    // 探测恢复阈值（task-mvvw71nc）：连续 N 次探测通过才解除熔断。2 = 探测间隔 15min 的双周期确认
+    // （单次成功可能是偶发响应——能回 1 token 但跑长任务就崩的病模型不被放跑）；与熔断三击口径同族。
+    var PROBE_OK_RECOVER_AFTER = 2
     // isHungKillFailure 与挂死常量段已拆至 lib/hung.mjs（拆分第 1 刀 task-mvt8c1yx），顶部 import 同源使用
     // （依赖向单行道 health→hung，禁反向）。
     function isModelKillFailure(errText) {
@@ -356,6 +366,28 @@ export function createModelHealth(opts) {
     }
     // 连击归零：任一可归因 run 正常完成即证明模型链路恢复（settleRunRecord completed 路径调用）
     function resetModelFailure(sid, model) { if (model) delete modelFailStreak[modelKey(sid, model)] }
+    // 探测恢复熔断解除（task-mvvw71nc，用户 2026-10-31 拍板「乙+连击」）：探测 ok 臂的恢复钩。
+    // 计数只在「已熔断」时累积（未熔断模型探测成功零副作用——不建多余计数）；连续 PROBE_OK_RECOVER_AFTER 次
+    // 通过即复位：delete badModels + delete modelFailStreak + syncModelHealth 重派生（state 落回 healthy）
+    // + 系统通知（不带 taskId，与熔断通知同口径）。复位后首次 run 失败照走既有 feedModelFailure 连击链
+    // （无豁免——复位只证明可调，质量闸照旧：探测管可调性、行为闸管质量）。
+    // 返回是否本次调用解除熔断（测试/留痕用）。
+    function recoverModelOnProbeOk(sid, model) {
+      if (!model) return false
+      var k = modelKey(sid, model)
+      if (!badModels[k]) return false
+      var n = (probeOkStreak[k] || 0) + 1
+      probeOkStreak[k] = n
+      if (n < PROBE_OK_RECOVER_AFTER) return false
+      delete badModels[k]
+      delete probeOkStreak[k]
+      delete modelFailStreak[k]
+      syncModelHealth(sid, model)
+      pushSysNote(sid, '模型 ' + model + ' 连续 ' + n + ' 次探测通过，熔断已解除，恢复调度')
+      return true
+    }
+    // 非 ok 探测结果（失败/超时/degraded）→ 该模型恢复计数清零（连续 2 次必须真的连续）
+    function resetProbeOkStreak(sid, model) { if (model) delete probeOkStreak[modelKey(sid, model)] }
     // ===== 主动探测编排（拆分第 4 刀随迁）：probeOnce 单次请求 → probeModel 单模型三态 → =====
     // probeConfiguredModels 配置集合探测 → maybeProbeModels 15s 心跳间隔闸 → disposeProbe 统一卸载入口。
     // 「绝不阻塞 poolCycle」红线：探测经 maybeProbeModels 后台异步跑（不 await 进派发主链）；
@@ -412,6 +444,7 @@ export function createModelHealth(opts) {
             // ③ 首探即超时（task-mvsv8zym）：无重试（⑬e 契约保留），且不覆盖既有观测——只更新 note
             // （判定保留）：超时可能只是慢模型+我方预算约束，已 healthy/degraded 条目不倒退成 unknown。
             observeModel(sid, model, false, { probe: true, preserveObserved: true, note: String(outcome.text || '').slice(0, 300) })
+            if (!probeDisposed) resetProbeOkStreak(sid, model)
             return false
           }
           if (outcome.status === 'empty') {
@@ -447,23 +480,27 @@ export function createModelHealth(opts) {
           }
           if (outcome.status === 'ok') {
             observeModel(sid, model, true, { probe: true, latencyMs: Date.now() - started })
+            // task-mvvw71nc：探测成功 = 证「可调用」，对已熔断模型累计恢复连击（连续 2 次即解除熔断，
+            // 红态翻绿）；未熔断模型零副作用。dispose 中断后的迟到结果不写任何表。
+            if (!probeDisposed) recoverModelOnProbeOk(sid, model)
             return true
           }
           if (outcome.status === 'degraded') {
             // 🟡 降级存活臂（task-mvrqdw4k）：记存活不记失败——observeModel 落 degraded 派生态；
             // 不调 sniffModelCooldown（冷却表零登记）；recentRuns 不动（探测本就不进 recentRuns，观察臂已隔开）。
             observeModel(sid, model, false, { probe: true, degraded: true, latencyMs: Date.now() - started, note: String(outcome.text || '').slice(0, 300) })
+            if (!probeDisposed) resetProbeOkStreak(sid, model)
             return 'degraded'
           }
           var text = String(outcome.text || '模型探测失败').slice(0, 300)
           observeModel(sid, model, false, { probe: true, latencyMs: Date.now() - started, note: text })
-          if (!probeDisposed) { try { await sniffModelCooldown(sid, '', model, text) } catch (_) {} }
+          if (!probeDisposed) { resetProbeOkStreak(sid, model); try { await sniffModelCooldown(sid, '', model, text) } catch (_) {} }
           return false
         } catch (e) {
           // 兜底臂（probeOnce 自吞错，理论不可达）：语义与旧实现逐字一致
           var failText = String(e && e.message || e).slice(0, 300)
           observeModel(sid, model, false, { probe: true, latencyMs: Date.now() - started, note: failText })
-          if (!probeDisposed) { try { await sniffModelCooldown(sid, '', model, failText) } catch (_) {} }
+          if (!probeDisposed) { resetProbeOkStreak(sid, model); try { await sniffModelCooldown(sid, '', model, failText) } catch (_) {} }
           return false
         } finally {
           delete probeInFlight[model]

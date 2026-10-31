@@ -779,6 +779,129 @@ test('⑰c超时不覆盖既有观测：先 healthy 再超时→仍 healthy+note
   } finally { console.error = origErr }
 })
 
+// ===== ⑬f 探测恢复熔断解除（task-mvvw71nc）：连续 2 次探测通过翻绿，红态可证活 =====
+// 用户 2026-10-31 实测：「配置模型熔断后状态变红，再下一个探测周期是否会变回来，实测没有」——旧 ok 臂只写
+// observed='healthy'，从不碰 badModels 熔断表，syncModelHealth 覆盖闸每次重查熔断表压回 circuit（探测能证
+// 「可调用」却解除不了「不可调」判定）。修法（用户拍板「乙+连击」）：探测 ok 臂累计 probeOkStreak，连续 2 次
+// （15min 双周期确认）→ delete badModels + 连击清零 + 重派生 + 通知；中断（失败/超时/degraded）计数清零；
+// 单次成功不复位（不放过「能回 1 token 但跑长任务就崩」的偶发病模型）。
+function mkRecoverState(k) {
+  var st = { modelHealth: {}, modelCooldown: {}, badModels: {}, probeOkStreak: {}, modelFailStreak: {} }
+  st.badModels[k] = true
+  st.modelFailStreak[k] = 3
+  st.modelHealth[SID] = {}
+  st.modelHealth[SID]['p/a'] = { state: 'circuit', observed: 'healthy', observedNote: '主动探测通过', lastProbe: '2026-10-30T00:00:00.000Z', lastSeen: '2026-10-30T00:00:00.000Z', circuitNote: '连续 3 次 spawn/续跑即被宿主拆除（模型失败），已熔断', recentRuns: [] }
+  return st
+}
+// 捕获 pushSysNote 的派发桩（mkDispatch 的 pushSysNote 是 no-op，恢复通知投递断言需要显式捕获）；
+// 接线与 mkDispatch 同形，state 各表按引用共享（probeOkStreak 由测试预置，工厂就地取用同一引用）。
+function mkRecoverDispatch(board, ctxOver, state, notes) {
+  var shared = Object.assign({ knownSessions: {}, dispatchedEver: {}, teamModeCache: {}, activeRuns: {} }, state)
+  return createDispatch(
+    Object.assign({ fs: {}, effect: function () {}, get: function () { return null } }, ctxOver || {}),
+    shared,
+    {
+      rt: async function () { return board }, wt: async function () {},
+      mutateLocked: async function (sid, fn) { return fn(board) },
+      kickCycle: function () {}, rootForSession: function () { return { id: SID } },
+      sessionCwd: function () { return '' }, withTimeout: function (p) { return p }, runsFor: function (sid) { return shared.activeRuns[sid] || (shared.activeRuns[sid] = {}) },
+      feedbackOn: function () { return true }, pushSysNote: function (sid, text) { notes.push({ sid: sid, text: String(text) }) }, maybeNotify: function () {}, notifyTaskDone: function () {},
+    })
+}
+
+test('⑬f探测恢复熔断解除：单次通过不复位；连续 2 次→badModels 清除+连击清零+翻 healthy+通知投递', async () => {
+  var board = seed(SID); board.workerModel = 'p/a'
+  var k = SID + '|p/a'
+  var origErr = console.error; console.error = function () {}
+  try {
+    // ① 已熔断 + 探测成功 1 次 → 仍 circuit（计数 1，badModels/连击未动，零通知）
+    var calls = [], notes = [], st = mkRecoverState(k)
+    var d = mkRecoverDispatch(board, mkProbeScriptCtx(calls, ['stop']), st, notes)
+    var r1 = await d.probeConfiguredModels(SID, board)
+    assert.equal(r1.healthy, 1)
+    assert.equal(st.badModels[k], true, '单次探测成功不解除熔断（过滤偶发响应）')
+    assert.equal(st.probeOkStreak[k], 1, '恢复连击累计 1')
+    assert.equal(st.modelFailStreak[k], 3, '熔断连击未被单次探测清零')
+    assert.equal(st.modelHealth[SID]['p/a'].state, 'circuit', '覆盖闸仍压回 circuit（半程红态）')
+    assert.equal(st.modelHealth[SID]['p/a'].observed, 'healthy', 'observed 已翻 healthy（覆盖态仍 circuit）')
+    assert.equal(notes.length, 0, '未复位不发通知')
+
+    // ② 连续第 2 次 → 解除：badModels 清除 + 连击清零 + 恢复计数清零 + state 翻 healthy + 通知投递
+    var r2 = await d.probeConfiguredModels(SID, board)
+    assert.equal(r2.healthy, 1)
+    assert.equal(k in st.badModels, false, '连续 2 次探测通过 → 解除熔断')
+    assert.equal(k in st.modelFailStreak, false, '熔断连击清零（复位对称操作）')
+    assert.equal(k in st.probeOkStreak, false, '恢复连击复位后清零')
+    assert.equal(st.modelHealth[SID]['p/a'].state, 'healthy', '熔断解除后重派生翻绿（🔴→🟢）')
+    assert.equal(st.modelHealth[SID]['p/a'].observed, 'healthy')
+    assert.equal(notes.length, 1, '解除熔断投递系统通知')
+    assert.equal(notes[0].sid, SID)
+    assert.equal(notes[0].text, '模型 p/a 连续 2 次探测通过，熔断已解除，恢复调度')
+
+    // ⑤ 解除后再探测成功：未熔断 → 零副作用（不重建计数/不重复通知）
+    await d.probeConfiguredModels(SID, board)
+    assert.equal(k in st.probeOkStreak, false, '未熔断模型探测成功零副作用（不建多余计数）')
+    assert.equal(notes.length, 1, '未熔断不再发通知')
+  } finally { console.error = origErr }
+})
+
+test('⑬f2探测恢复中断清零：中途一次失败→计数清零重新计；degraded 🟡 不计入不复位', async () => {
+  var board = seed(SID); board.workerModel = 'p/a'
+  var k = SID + '|p/a'
+  var origErr = console.error; console.error = function () {}
+  try {
+    // ③ 成功 1 次 → 失败 1 次（计数清零）→ 成功 1 次：仍 circuit 且计数 1（必须真的连续，偶发成功不叠加）
+    var calls = [], notes = [], st = mkRecoverState(k)
+    var d = mkRecoverDispatch(board, mkProbeScriptCtx(calls, ['stop', { error: 'boom' }, 'stop', 'stop']), st, notes)
+    await d.probeConfiguredModels(SID, board)
+    assert.equal(st.probeOkStreak[k], 1)
+    var rf = await d.probeConfiguredModels(SID, board)
+    assert.equal(rf.healthy, 0)
+    assert.equal(k in st.probeOkStreak, false, '中途一次探测失败 → 恢复计数清零')
+    assert.equal(st.badModels[k], true, '失败不复位熔断')
+    await d.probeConfiguredModels(SID, board)
+    assert.equal(st.probeOkStreak[k], 1, '清零后重新计（不是累计 2）')
+    assert.equal(st.badModels[k], true, '仍需再连续一次才解除')
+    assert.equal(st.modelHealth[SID]['p/a'].state, 'circuit')
+    assert.equal(notes.length, 0)
+    await d.probeConfiguredModels(SID, board)
+    assert.equal(k in st.badModels, false, '清零重计后连续 2 次才解除')
+    assert.equal(notes.length, 1)
+
+    // ④ degraded 🟡（纯空响应供应商怪癖）非探测成功 → 不复位且计数清零（只有 🟢 通过才算证活）
+    var calls2 = [], notes2 = [], st2 = mkRecoverState(k)
+    var d2 = mkRecoverDispatch(board, mkProbeScriptCtx(calls2, ['stop', 'empty', 'empty']), st2, notes2)
+    await d2.probeConfiguredModels(SID, board)
+    assert.equal(st2.probeOkStreak[k], 1)
+    var rd = await d2.probeConfiguredModels(SID, board)
+    assert.equal(rd.degraded, 1, '纯空响应判 🟡degraded 存活')
+    assert.equal(k in st2.probeOkStreak, false, 'degraded 不计入恢复连击（清零）')
+    assert.equal(st2.badModels[k], true, 'degraded 不复位熔断')
+    assert.equal(st2.modelHealth[SID]['p/a'].state, 'circuit', '熔断覆盖态仍在（degraded 未解除）')
+    assert.equal(notes2.length, 0, 'degraded 不发解除通知')
+
+    // ④b 探测超时（判定保留臂）同样非成功 → 计数清零不复位
+    var calls4 = [], notes4 = [], st4 = mkRecoverState(k)
+    await mkRecoverDispatch(board, mkProbeScriptCtx(calls4, ['stop']), st4, notes4).probeConfiguredModels(SID, board)
+    assert.equal(st4.probeOkStreak[k], 1)
+    var ctx4 = mkRecordTimerCtx(mkProbeScriptCtx(calls4, ['hang']), [])
+    await mkRecoverDispatch(board, ctx4, st4, notes4).probeConfiguredModels(SID, board)
+    assert.equal(k in st4.probeOkStreak, false, '探测超时（判定保留）同样不计入恢复连击')
+    assert.equal(st4.badModels[k], true, '超时不复位熔断')
+    assert.equal(st4.modelHealth[SID]['p/a'].state, 'circuit')
+    assert.equal(notes4.length, 0)
+
+    // ⑤ 未熔断模型：探测成功零副作用（不建计数/不通知）
+    var calls3 = [], notes3 = [], st3 = { modelHealth: {}, modelCooldown: {}, badModels: {}, probeOkStreak: {}, modelFailStreak: {} }
+    var d3 = mkRecoverDispatch(board, mkProbeScriptCtx(calls3, ['stop', 'stop']), st3, notes3)
+    await d3.probeConfiguredModels(SID, board)
+    await d3.probeConfiguredModels(SID, board)
+    assert.deepEqual(Object.keys(st3.probeOkStreak), [], '未熔断模型探测成功零副作用（不建多余计数）')
+    assert.deepEqual(Object.keys(st3.badModels), [])
+    assert.equal(notes3.length, 0, '未熔断无通知')
+  } finally { console.error = origErr }
+})
+
 async function runVerifierHealth(result) {
   var settle = null, pending = new Promise(function (resolve) { settle = resolve })
   var board = seed(SID); board.verifierModel = 'p/v'; board.tasks = [mkTask({ status: 'verifying' })]
