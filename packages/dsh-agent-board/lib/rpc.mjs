@@ -14,6 +14,7 @@ import { makeMsg } from './notify.mjs'
 import { computeHealthHints, computeRuntimeHealthHints } from './health.mjs'
 import { isFullSessionId } from './session.mjs' // 幻影板防线口径（纯函数，与 policy.mjs 直引同例）
 import { previewCleanup, runCleanup, SKIP_REASON_TEXT } from './cleanup.mjs' // 已结算会话清理（预览+执行）
+import { HUNG_SUSPECT_REARM_MS } from './hung.mjs' // 「继续观察」豁免防抖窗（与疑似阈值同值，task-mvxmxkq1）
 const { ah, isb, gsb, gpt, vt, validateDeps, classifyPipeline, cfg, claimCheck, claimApply, resolveApply, verifyApply, lateVerdictApply, verdictErr, lateNoticeFp, archiveApply, cancelApply, maybeAutoCloseParent, PRIO_RANK, touchesConflict, holdsFiles, boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint, appendDispatchWarning, TASK_SIZES, opsLogLine } = core
 
 function defineTool(options) {
@@ -912,6 +913,8 @@ export function createRpc(ctx, state, deps) {
         var t = d.tasks.find(function (x) { return x.id === taskId })
         if (!t) return null
         delete t.stuckSince
+        // 豁免防抖窗与卡死标记同生命周期清理（task-mvxmxkq1）：终止后重排队的新 run 不应受上一轮窗口压制
+        delete t.stuckRearmUntil
         // 认领位清理与状态无关（task-mv1pqy27 死结窗口根修）：凡 terminate 命中该卡的 run（rec 在内存表），
         // 按 rec.role 清对应认领位——覆盖 resolved/archived/cancelled 态（卡已落定但 run 尚在结算窗口）的
         // 死结：否则 verifierRun/claimedBy 仍指向已终止 run 的 running 留档 → activeRunOf 卡面兜底误判活跃 → archive 永久拒。
@@ -938,11 +941,32 @@ export function createRpc(ctx, state, deps) {
       if (killFail) ret.killUnconfirmed = killFail // 调用方可直接感知「终止未确认生效」
       return ret
     }
-    // 继续等待：清除卡死标记
+    // 继续观察：清除卡死标记 + 重置判定基线（task-mvxmxkq1）
+    // 根因：旧实现只清 t.stuckSince，判定输入（run 级 frameSilenceSince 帧静默基线）未重置——模型仍在静默
+    // （≥120s）时下一 sweep 立刻重标，「继续观察」等于没点。修法两层：
+    //   ① 基线重置：该卡最新在跑留档（worker/verifier）的帧静默基线置 now——模型需再静默满 120s 才可能重标；
+    //      日志兜底路径（无帧能力宿主）同款重置 zeroGrowthSince，600s 墙钟重新起算（同款两闸，语义一键对齐）。
+    //   ② 防抖窗：t.stuckRearmUntil=now+120s，窗内判定跳过重标（兜 sweep 在飞时读到旧基线的竞态边缘）；
+    //      一次性，重标成功/帧恢复即清（见 hung.mjs）。判死 600s 闸不拦——豁免不永续。
     async function doDismiss(sid, actor, taskId) {
       await mutateLocked(sid, function (d) {
         var t = d.tasks.find(function (x) { return x.id === taskId })
-        if (t) { delete t.stuckSince; ah(t, t.status, t.status, actor, '清除卡死标记，继续观察') }
+        if (!t) return null
+        delete t.stuckSince
+        var nowMs = Date.now()
+        // ① 基线重置：倒序取最新一条在跑留档（同 sweep 的 row 选取口径）；role 缺省按 worker（存量行无 role）
+        var trs = Array.isArray(t.runs) ? t.runs : []
+        for (var i = trs.length - 1; i >= 0; i--) {
+          var row = trs[i]
+          if (!row || row.outcome !== 'running') continue
+          if (row.role && row.role !== 'worker' && row.role !== 'verifier') continue
+          row.frameSilenceSince = nowMs // 帧主路径基线（缺失也先立，杜绝按 lastFrameAt/startedAt 旧值秒重标）
+          row.zeroGrowthSince = nowMs // 日志双闸兜底基线（无帧能力宿主：600s 墙钟重新起算）
+          break
+        }
+        // ② 防抖窗：与疑似阈值同值 120s（「观察一轮」本义）
+        t.stuckRearmUntil = nowMs + HUNG_SUSPECT_REARM_MS
+        ah(t, t.status, t.status, actor, '清除卡死标记，继续观察（基线已重置）')
         return t
       })
       return { ok: true }

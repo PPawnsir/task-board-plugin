@@ -628,3 +628,200 @@ test('帧⑦：verifier 在跑 run 帧路径覆盖——零帧 ≥600s 判死走
     await env.cleanup()
   }
 })
+
+// ===== 帧⑧：「继续观察」（dismiss-suspect）重置判定基线 + 120s 防抖窗（task-mvxmxkq1）=====
+// 旧病（用户 2026-11-01 实测）：dismiss 只清 t.stuckSince，帧静默基线 frameSilenceSince 未动——模型仍静默
+// （≥120s）时下一 sweep 立刻重标，「继续观察」等于没点。新语义两层：①基线置 now（需再静默满 120s 才可能
+// 重标，「观察一轮」本义）②卡上 stuckRearmUntil 防抖窗（兜 sweep 在飞读到旧基线的竞态边缘），一次性
+// （重标成功/帧恢复清除）。本组锁：窗内不重标、窗过期正常重标、字段一次性。
+function dismissSuspect(env, taskId) {
+  return env.rpc('dismiss-suspect', { sessionId: env.sid, taskId: taskId })
+}
+
+test('帧⑧：「继续观察」重置帧静默基线 + 120s 防抖窗——窗内不重标 / 窗过期重标（字段一次性）', async () => {
+  var env = createMockCtx()
+  var boot = null
+  try {
+    boot = await bootWorkerBoard(env, 'task-frame-dismiss')
+    var child = boot.child
+    await primeFrameBaseline(env, 'task-frame-dismiss', child.childId)
+    await pushBackBaseline(env, 'task-frame-dismiss', child.childId, 'frameSilenceSince', 125000)
+    await env.clock.tick()
+    await env.waitFor(function () {
+      var x = env.task('task-frame-dismiss')
+      return x && typeof x.stuckSince === 'number' ? x : null
+    }, '疑似落卡（前置状态）', W)
+    // ---- dismiss：清标记 + 基线重置 + 防抖窗落卡 ----
+    var tBefore = Date.now()
+    var dr = await dismissSuspect(env, 'task-frame-dismiss')
+    assert.equal(dr.ok, true, 'dismiss-suspect 成功')
+    var t1 = env.task('task-frame-dismiss')
+    assert.equal(t1.stuckSince, undefined, 'dismiss 清除疑似标记')
+    assert.ok(typeof t1.stuckRearmUntil === 'number' && t1.stuckRearmUntil >= tBefore + 120000, 'stuckRearmUntil 落卡（now + 120s）')
+    var row1 = runningRow(env, 'task-frame-dismiss', child.childId)()
+    assert.ok(row1 && row1.frameSilenceSince >= tBefore, '帧静默基线重置为 now（不再按旧基线秒重标）')
+    var notes1 = (t1.history || []).filter(function (h) { return /继续观察/.test(h.note || '') })
+    assert.equal(notes1.length, 1, 'dismiss 留史一条')
+    assert.match(notes1[0].note, /基线已重置/, 'dismiss 留史文案带「基线已重置」')
+    // ---- ①基线重置生效：正常一轮 sweep（基线=now）不重标 ----
+    await env.clock.tick()
+    await new Promise(function (r) { setTimeout(r, 300) })
+    assert.equal(env.task('task-frame-dismiss').stuckSince, undefined, '基线重置：正常 sweep 不重标')
+    // ---- ②竞态边缘：sweep 在飞读到旧基线（倒推回 125s）→ 防抖窗兜住，不重标 ----
+    await pushBackBaseline(env, 'task-frame-dismiss', child.childId, 'frameSilenceSince', 125000)
+    await env.clock.tick()
+    await new Promise(function (r) { setTimeout(r, 300) })
+    var t3 = env.task('task-frame-dismiss')
+    assert.equal(t3.stuckSince, undefined, '120s 窗内：旧基线也不重标（防抖窗生效）')
+    assert.ok(typeof t3.stuckRearmUntil === 'number', '窗未过期：字段保留（一次性语义未消耗）')
+    // ---- ③窗过期：仍静默 → 正常重标（豁免不永续）；重标即消耗字段 ----
+    env.patchBoard(function (d) {
+      var x = d.tasks.find(function (y) { return y.id === 'task-frame-dismiss' })
+      x.stuckRearmUntil = Date.now() - 1
+    })
+    await env.clock.tick()
+    var t4 = await env.waitFor(function () {
+      var x = env.task('task-frame-dismiss')
+      return x && typeof x.stuckSince === 'number' ? x : null
+    }, '窗过期后正常重标疑似', W)
+    assert.equal(t4.stuckRearmUntil, undefined, '重标即消耗防抖窗（一次性）')
+    assert.equal((t4.history || []).filter(function (h) { return /疑似卡顿/.test(h.note || '') }).length, 2, '第二次疑似留史（重标正常发生）')
+  } finally {
+    if (boot) boot.unpin()
+    await env.cleanup()
+  }
+})
+
+// ===== 帧⑨：判死 600s 闸不受防抖窗影响（豁免不永续、不拦判死）=====
+// 防抖窗只挂在疑似判定前（hung.mjs 疑似分支内部），kill 分支先于它且零守卫：窗内静默真到 600s 仍判死。
+test('帧⑨：防抖窗不拦判死——dismiss 后静默真到 600s 仍正常判死重派', async () => {
+  var env = createMockCtx()
+  var boot = null
+  try {
+    boot = await bootWorkerBoard(env, 'task-frame-dismiss-kill', function (d) { d.workerModel = 'prov/hung' })
+    var child = boot.child
+    await primeFrameBaseline(env, 'task-frame-dismiss-kill', child.childId)
+    await pushBackBaseline(env, 'task-frame-dismiss-kill', child.childId, 'frameSilenceSince', 125000)
+    await env.clock.tick()
+    await env.waitFor(function () {
+      var x = env.task('task-frame-dismiss-kill')
+      return x && typeof x.stuckSince === 'number' ? x : null
+    }, '疑似落卡（前置状态）', W)
+    await dismissSuspect(env, 'task-frame-dismiss-kill')
+    assert.ok(typeof env.task('task-frame-dismiss-kill').stuckRearmUntil === 'number', 'dismiss 后防抖窗在位（判死前置）')
+    // 窗内把静默推过 600s → 判死照常（防抖窗不在 kill 分支上）
+    await pushBackBaseline(env, 'task-frame-dismiss-kill', child.childId, 'frameSilenceSince', 601000)
+    await env.clock.tick()
+    var t = await env.waitFor(function () {
+      var x = env.task('task-frame-dismiss-kill')
+      var rows = (x && x.runs) || []
+      for (var i = rows.length - 1; i >= 0; i--) {
+        if (rows[i] && String(rows[i].id) === child.childId && rows[i].outcome === 'timeout/error') return x
+      }
+      return null
+    }, '窗内静默 ≥600s 判死关账', W)
+    assert.match(String(t.lastError || ''), /帧静默 600s/, '帧路径判死文案')
+    assert.equal(String(t.lastError || '').indexOf('run 挂死：'), 0, 'HUNG_KILL_PREFIX 前缀锚定（判死链语义不变）')
+  } finally {
+    if (boot) boot.unpin()
+    await env.cleanup()
+  }
+})
+
+// ===== 帧⑩：dismiss 后帧恢复 → 防抖窗清除 + 基线删档；再静默按新基线计时（③）=====
+// 「继续观察」是豁免不是免死：帧恢复（活体证据）即清防抖窗（与 stuckSince 同款一次性）；再静默按新基线
+// 重新计 120s 才重标。
+test('帧⑩：dismiss 后帧恢复清防抖窗 + 删基线 → 再静默按新基线重标', async () => {
+  var env = createMockCtx()
+  var boot = null
+  try {
+    boot = await bootWorkerBoard(env, 'task-frame-dismiss-recover')
+    var child = boot.child
+    await primeFrameBaseline(env, 'task-frame-dismiss-recover', child.childId)
+    await pushBackBaseline(env, 'task-frame-dismiss-recover', child.childId, 'frameSilenceSince', 125000)
+    await env.clock.tick()
+    await env.waitFor(function () {
+      var x = env.task('task-frame-dismiss-recover')
+      return x && typeof x.stuckSince === 'number' ? x : null
+    }, '疑似落卡（前置状态）', W)
+    var tBefore = Date.now()
+    await dismissSuspect(env, 'task-frame-dismiss-recover')
+    // 帧恢复：emitFrame 置 dirty → 下一轮 sweep 走 recovery：删基线 + 清防抖窗（stuckSince 已无）
+    env.emitFrame(child.childId)
+    await env.clock.tick()
+    await new Promise(function (r) { setTimeout(r, 300) })
+    var t1 = env.task('task-frame-dismiss-recover')
+    assert.equal(t1.stuckRearmUntil, undefined, '帧恢复清除防抖窗（一次性语义）')
+    assert.equal(t1.stuckSince, undefined, '帧恢复不标疑似')
+    assert.equal(runningRow(env, 'task-frame-dismiss-recover', child.childId)().frameSilenceSince, undefined, '帧恢复删持久基线')
+    // 再静默：下一轮零帧 sweep 重建基线（= lastFrameAt）→ 倒推 125s → 按新基线重标
+    await env.clock.tick()
+    var row2 = await env.waitFor(function () {
+      var r = runningRow(env, 'task-frame-dismiss-recover', child.childId)()
+      return r && typeof r.frameSilenceSince === 'number' ? r : null
+    }, '帧恢复后重建帧基线', W)
+    assert.ok(row2.frameSilenceSince >= tBefore, '新基线取帧恢复时刻（非 dismiss 前旧值）')
+    await pushBackBaseline(env, 'task-frame-dismiss-recover', child.childId, 'frameSilenceSince', 125000)
+    await env.clock.tick()
+    var t2 = await env.waitFor(function () {
+      var x = env.task('task-frame-dismiss-recover')
+      return x && typeof x.stuckSince === 'number' ? x : null
+    }, '再静默 ≥120s 按新基线重标', W)
+    assert.ok(t2.stuckSince >= tBefore, '重标时间戳按新基线计时落卡')
+  } finally {
+    if (boot) boot.unpin()
+    await env.cleanup()
+  }
+})
+
+// ===== 帧⑪：日志兜底路径（无帧能力宿主）dismiss 同款重置 zeroGrowthSince——600s 墙钟重新起算 =====
+// ⑥ 语义：无帧能力宿主（ctx.on 缺席 → frameStreamSeen 恒 false）走原日志双闸；dismiss 同步重置
+// zeroGrowthSince（同款两闸的另一半），轮数到线但墙钟未到不判死；重置后重新满 600s 判死照常。
+test('帧⑪：日志兜底路径 dismiss 重置 zeroGrowthSince——墙钟重新起算，600s 后判死照常', async () => {
+  var env = createMockCtx()
+  var unpin = pinHomedir(env)
+  try {
+    delete env.ctx.on // 老宿主：帧订阅静默跳过 → 日志双闸
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-frame-dismiss-log', { pipeline: 'full', acceptance: 'npm test' })
+    env.patchBoard(function (d) { d.workerModel = 'prov/hung' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return env.continuables.length >= 1 }, 'worker spawn 发生（无帧能力宿主）', W)
+    var child = env.continuables[0]
+    await env.waitFor(runningRow(env, 'task-frame-dismiss-log', child.childId), '落卡 in-progress 且 runs[0] running', W)
+    await env.clock.tick()
+    await env.waitFor(function () {
+      var r = runningRow(env, 'task-frame-dismiss-log', child.childId)()
+      return r && typeof r.zeroGrowthSince === 'number' ? r : null
+    }, '日志双闸首见记基线', W)
+    // 推到墙钟线附近 + 39 轮零增长（差一轮判死）
+    await pushBackBaseline(env, 'task-frame-dismiss-log', child.childId, 'zeroGrowthSince', 601000)
+    await driveZeroGrowth(env, 'task-frame-dismiss-log', child.childId, 39)
+    var tBefore = Date.now()
+    var dr = await dismissSuspect(env, 'task-frame-dismiss-log')
+    assert.equal(dr.ok, true, 'dismiss-suspect 成功（日志路径）')
+    var row1 = runningRow(env, 'task-frame-dismiss-log', child.childId)()
+    assert.ok(row1.zeroGrowthSince >= tBefore, 'zeroGrowthSince 重置为 now（600s 墙钟重新起算）')
+    assert.ok(typeof env.task('task-frame-dismiss-log').stuckRearmUntil === 'number', '防抖窗同样落卡（与帧路径语义一键对齐）')
+    // 下一轮：轮数到 40，但墙钟距新基线 < 600s → 不判死
+    await env.clock.tick()
+    await env.waitFor(function () {
+      var r = runningRow(env, 'task-frame-dismiss-log', child.childId)()
+      return r && r.zeroGrowthRounds === 40 ? r : null
+    }, '第 40 轮零增长计数落盘', W)
+    var t1 = env.task('task-frame-dismiss-log')
+    assert.equal(t1.runs[0].outcome, 'running', '墙钟未到：不判死（基线重置生效）')
+    assert.ok(!t1.lastError, '零 lastError')
+    // 再推过 600s → 判死照常（豁免不永续、日志闸不失效）
+    await pushBackBaseline(env, 'task-frame-dismiss-log', child.childId, 'zeroGrowthSince', 601000)
+    await env.clock.tick()
+    await env.waitFor(function () {
+      var x = env.task('task-frame-dismiss-log')
+      return x && x.runs[0] && x.runs[0].outcome === 'timeout/error' ? x : null
+    }, '重置后重新满 600s 判死关账', W)
+    assert.match(String(env.task('task-frame-dismiss-log').lastError || ''), /连续 40 轮会话日志零增长/, '日志双闸文案照旧')
+  } finally {
+    unpin()
+    await env.cleanup()
+  }
+})

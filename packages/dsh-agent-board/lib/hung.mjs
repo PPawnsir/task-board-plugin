@@ -29,6 +29,10 @@ export var HUNG_ZERO_GROWTH_ROUNDS = 40 // ≈ HUNG_WALL_FLOOR_MS / 15s 心跳�
 // 120s 只标疑似不杀；600s 才走既有判死结算。帧时间戳只在内存刷新，持久化仅承担 sweep 基线与状态转换。
 export var HUNG_FRAME_SUSPECT_MS = 120000
 export var HUNG_FRAME_KILL_MS = 600000
+// 「继续观察」豁免防抖窗（task-mvxmxkq1）：dismiss 重置帧静默基线后，sweep 可能已在飞（持锁前读到旧基线），
+// 下轮仍可能按旧基线重标。窗口期内本卡跳过重标疑似——与疑似阈值同值 120s（「观察一轮」本义：模型要再静默
+// 满 120s 才可能重标）。一次性：重标成功或帧恢复即清除；判死 600s 闸不受本窗影响（豁免不永续）。
+export var HUNG_SUSPECT_REARM_MS = 120000
 export var HUNG_KILL_PREFIX = 'run 挂死：' // 判死失败文本前缀（进 isModelKillFailure 白名单 = 计入熔断连击）
 export var HUNG_CIRCUIT_WHY = '挂死零产出（会话日志字节持续不涨），已熔断' // 挂死触发的熔断文案分态（挂死≠秒拆）
 // 挂死型模型面失败识别：判死结算的错误文本（HUNG_KILL_PREFIX 开头）与宿主秒拆/activation 异常
@@ -133,6 +137,8 @@ export function createHung(opts) {
               if (hadFrame) {
                 var recoverySilence = frameSince ? nowFrame - frameSince : 0
                 if (frameSince) { delete row.frameSilenceSince; any = true }
+                // 帧恢复即「活体证据」：dismiss 留下的防抖窗一并清除（同帧恢复同款一次性语义，task-mvxmxkq1）
+                if (typeof t.stuckRearmUntil === 'number') { delete t.stuckRearmUntil; any = true }
                 if (t.stuckSince && recoverySilence < HUNG_FRAME_KILL_MS) {
                   delete t.stuckSince
                   ah(t, t.status, t.status, String(rec.id), 'assistant 帧恢复（静默不足 600s），清除疑似卡顿标记')
@@ -154,7 +160,12 @@ export function createHung(opts) {
                 return
               }
               if (frameSilentMs >= HUNG_FRAME_SUSPECT_MS && !t.stuckSince) {
+                // 继续观察防抖窗（task-mvxmxkq1）：窗内跳过重标——dismiss 已重置基线，此处兜 sweep 在飞读到
+                // 旧基线的竞态边缘；窗过期后按重置后的新基线正常判定（豁免不永续）。
+                var rearmUntil = typeof t.stuckRearmUntil === 'number' ? t.stuckRearmUntil : 0
+                if (rearmUntil && nowFrame < rearmUntil) return
                 t.stuckSince = nowFrame
+                if (rearmUntil) { delete t.stuckRearmUntil; any = true } // 一次性窗口：重标成功即消耗
                 ah(t, t.status, t.status, String(rec.id), '🟡 疑似卡顿：assistant 帧静默 ' + Math.round(HUNG_FRAME_SUSPECT_MS / 1000) + 's（仅标卡，不终止）')
                 any = true
               }
