@@ -463,7 +463,9 @@ export function claimApply(d, t, sid, note) { var ps = t.status; t.status = 'in-
 // 状态闸门即拦，级联不会反向误推动父卡。
 export function isChildSettled(t) { return !!t && (t.status === 'resolved' || t.status === 'cancelled' || t.status === 'archived') }
 // 史诗父卡自动收口（共享 helper，唯一判定口径）：父卡存在、父卡 in-progress、且全部子任务 ∈ 终态完成集
-// → 父卡转 verifying（交人验收）。幂等：父卡已 verifying/resolved/archived 一律返回 null，重复调用无副作用。
+// → 按父卡 pipeline 分态收口：full/work 转 verifying（交人/Verifier 验收）；direct 直接 resolved
+// （direct 不进派发池对 verifier 同成立，推进 verifying 等于推进它够不到的状态）。
+// 幂等：父卡已 verifying/resolved/archived 一律返回 null，重复调用无副作用。
 export function maybeAutoCloseParent(d, childTask) {
   if (!d || !childTask || !isb(childTask)) return null
   var p = gpt(childTask, d.tasks)
@@ -489,6 +491,21 @@ export function maybeAutoCloseParent(d, childTask) {
     }
   }
   if (p.hooks && p.hooks.post && p.hooks.post.pending) delete p.hooks.post.pending
+  // ===== 收口分态（task-mvxmxl00）：direct 父卡直接 resolved，full/work 维持推进 verifying =====
+  // 设计矛盾实证（反馈 n-mvxmue8zggw0，本体板三张 direct 史诗 task-mvwk48c2/48rr/49fw）：旧实现
+  // 一律推进 verifying，但 pickDispatch 的 verifier 候选过滤是 `(!t.pipeline || t.pipeline === 'full')`
+  // ——direct 卡永远不进 verifs，卡尸停在 verifying（派 Verifier 永不可能），把人锁死在这个状态。
+  // 口径修正：direct 语义「不进派发池」对 verifier 同样成立，故 direct 父卡在子任务全了结后直接
+  // resolved（子任务每张都已独立走完 worker+verifier 验收，父卡验收是形式收口；父卡本就是人建的容器）。
+  // full/work 零变化：照旧推进 verifying 走验收（work 卡在 resolveApply 侧本就落 resolved，不经此分支）。
+  // 边界：只修推进侧不再把 direct 卡推进它够不到的状态；派发侧过滤闸（pickDispatch）一字不动。
+  if (p.pipeline === 'direct') {
+    p.status = 'resolved'
+    p.resolvedAt = new Date().toISOString()
+    p.resolution = 'all subtasks resolved'
+    ah(p, 'in-progress', 'resolved', 'system', 'auto: all subtasks resolved（direct 父卡直接收口）')
+    return p
+  }
   p.status = 'verifying'
   p.resolvedAt = new Date().toISOString()
   p.resolution = 'all subtasks resolved'

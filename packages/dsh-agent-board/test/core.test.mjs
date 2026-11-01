@@ -159,6 +159,83 @@ test('史诗收口⑥：checkParentAuto 兼容名委托共享 helper（单一判
   assert.equal(p.resolution, 'all subtasks resolved') // 口径文案统一（旧 resolveApply 分支的 'all subtasks done' 已退役）
 })
 
+// ===== direct 父卡收口分态（task-mvxmxl00，反馈 n-mvxmue8zggw0，2026-11-01 本体板实证）=====
+// 设计矛盾：旧 checkParentAuto 一律把收口的父卡推进 verifying，而 pickDispatch 的 verifier 候选过滤是
+// `(!t.pipeline || t.pipeline === 'full')`——direct 父卡被推进 verifying 后永远不进 verifs，
+// verifier 永不 spawn，卡尸停在「验证中」（实证：task-mvwk48c2/48rr/49fw 三张 direct 史诗，只能人工收口）。
+// 修法（方案乙）：按父卡 pipeline 分态收口——direct 直接 resolved（direct「不进派发池」对 verifier
+// 同样成立），full/work 维持推进 verifying；派发侧过滤闸一字不动（单一口径留在派发侧）。
+test('史诗收口⑪：direct 父卡子任务全了结 → 直接 resolved，不进 verifying（无 verifier 记录）', () => {
+  const p = mkTask({ id: 'epic', status: 'in-progress', pipeline: 'direct' })
+  const c = mkTask({ id: 'c1', parentId: 'epic', status: 'in-progress', pipeline: 'work' })
+  const d = mkBoard([p, c])
+  const r = core.resolveApply(d, c, 'w', 'verifying', 'done')
+  assert.equal(c.status, 'resolved')
+  assert.equal(r.parentUpdated, true)
+  assert.equal(p.status, 'resolved')          // 旧实现此处为 verifying → verifier 永不 spawn 的卡死态
+  assert.equal(p.resolution, 'all subtasks resolved')
+  assert.ok(p.resolvedAt)
+  assert.equal((p.runs || []).some((x) => x && x.role === 'verifier'), false) // 父卡不走 verifier run
+  assert.equal(p.verifiedBy, undefined)       // 无验收戳：形式收口（子任务各自已验收）
+  assert.deepEqual(core.pickDispatch(d, 1, 4, {}).verifs, []) // 派发侧过滤闸未动：direct 恒不进 verifier 候选
+  // verifyApply 路径同样分态（子任务 full 档走完验收 → direct 父卡直接收口）
+  const p2 = mkTask({ id: 'epic2', status: 'in-progress', pipeline: 'direct' })
+  const c2 = mkTask({ id: 'c2', parentId: 'epic2', status: 'verifying', pipeline: 'full' })
+  const d2 = mkBoard([p2, c2])
+  assert.equal(core.verifyApply(d2, c2, 'v', 'approved', 'ok').parentUpdated, true)
+  assert.equal(p2.status, 'resolved')
+})
+
+test('史诗收口⑫：full 父卡 → 仍推进 verifying 并进 verifier 候选（回归锁：照派 verifier）', () => {
+  const p = mkTask({ id: 'epic', status: 'in-progress', pipeline: 'full' })
+  const c = mkTask({ id: 'c1', parentId: 'epic', status: 'verifying', pipeline: 'full' })
+  const d = mkBoard([p, c])
+  const r = core.verifyApply(d, c, 'v', 'approved', 'ok')
+  assert.equal(r.parentUpdated, true)
+  assert.equal(p.status, 'verifying')                              // 与修改前逐字一致
+  assert.deepEqual(core.pickDispatch(d, 1, 4, {}).verifs.map((t) => t.id), ['epic']) // 照派 Verifier
+})
+
+test('史诗收口⑬：work 父卡与 full 同态 → 推进 verifying（分态只切 direct，work 零变化）', () => {
+  const p = mkTask({ id: 'epic', status: 'in-progress', pipeline: 'work' })
+  const c = mkTask({ id: 'c1', parentId: 'epic', status: 'in-progress', pipeline: 'work' })
+  const d = mkBoard([p, c])
+  core.resolveApply(d, c, 'w', 'verifying', 'done')
+  assert.equal(p.status, 'verifying')                              // 不被 direct 直收口分支吃掉
+  assert.equal(p.resolution, 'all subtasks resolved')
+  assert.equal(core.pickDispatch(d, 1, 4, {}).verifs.length, 0)    // verifier 过滤闸保持现状（work 不含在内，本卡不改）
+})
+
+test('史诗收口⑭：流转文案分态——direct 带「direct 父卡直接收口」标注 / full·work 原文案逐字不变', () => {
+  const pd = mkTask({ id: 'epic', status: 'in-progress', pipeline: 'direct' })
+  const cd = mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' })
+  core.checkParentAuto(mkBoard([pd, cd]), cd)
+  const hd = pd.history[pd.history.length - 1]
+  assert.equal(hd.from, 'in-progress')
+  assert.equal(hd.to, 'resolved')
+  assert.equal(hd.actor, 'system')
+  assert.equal(hd.note, 'auto: all subtasks resolved（direct 父卡直接收口）')
+  const pf = mkTask({ id: 'epic', status: 'in-progress', pipeline: 'full' })
+  const cf = mkTask({ id: 'c1', parentId: 'epic', status: 'resolved' })
+  core.checkParentAuto(mkBoard([pf, cf]), cf)
+  const hf = pf.history[pf.history.length - 1]
+  assert.equal(hf.to, 'verifying')
+  assert.equal(hf.note, 'auto: all subtasks resolved')             // full 文案不变
+})
+
+test('README 双份同步记录 epic 收口分态契约（direct 直接 resolved / full·work 转 verifying）', () => {
+  const pkg = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  const root = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8')
+  assert.equal(pkg, root) // 两份 README 必须字节一致（npm run sync-readme 的约束）
+  for (const s of [
+    '按父卡 `pipeline` 分态收口',
+    '`full`/`work` 父卡转 verifying 派 Verifier 验收',
+    '`direct` 父卡直接 resolved',
+    '`direct` 不进派发池对 verifier 同成立',
+  ]) assert.ok(pkg.includes(s), 'README 应记录 epic 收口分态口径：' + s)
+  assert.ok(!pkg.includes('子任务全了结转 verifying 后派 Verifier 验收不受影响'), 'README 不应再保留「一律转 verifying」旧口径')
+})
+
 // ===== 史诗自动收口漏触发根修（task-mux3uvx3，反馈 n-muw706h1uymy，2026-10-06 实证）=====
 // 实证根因（repro 脚本逐条复现，嫌疑点逐个排除）：
 //   ① isChildSettled 旧口径不含 archived——「resolve 一张归档一张」的交错序列下，末子卡 resolve
