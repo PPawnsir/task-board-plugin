@@ -283,6 +283,35 @@
           React.createElement('button', { onClick: commit, title: '保存标签（逗号分隔，自动 trim + 去空）', style: { fontSize: 10, padding: '3px 10px', border: 'none', borderRadius: 4, background: C.brand, color: C_INV, cursor: 'pointer', flexShrink: 0 } }, '保存')))
     }
 
+    // touches 声明编辑（task-mvxw7hn5）：文件锁声明主窗口/GUI 可改（生命周期门禁在 host——运行中拒写）。
+    // 未持锁态（draft/pending/blocked/cancelled/resolved）渲染 textarea + 保存，提交走 update-task RPC 的
+    // touches 通道（替换式更新，空清单=清除声明回「无锁」态）；in-progress/verifying 只读展示 + 申报指引
+    //（此阶段边界由 Worker 以实际覆盖面申报：escalate→仲裁扩权；落定后可在此修正）。
+    // 分隔符兼容逗号/顿号/分号/换行；Ctrl+Enter 快捷提交。
+    function TouchesEditor(props) {
+      var task = props.task
+      var running = task.status === 'in-progress' || task.status === 'verifying'
+      var _R = React; var useState = _R.useState
+      var _s = useState((task.touches || []).join(', ')), draft = _s[0], setDraft = _s[1]
+      var _m = useState(''), msg = _m[0], setMsg = _m[1]
+      function commit() {
+        var touches = draft.split(/[,，、;；\n]+/).map(function (s) { return s.trim() }).filter(function (s) { return s.length > 0 }).slice(0, 20)
+        rpc('update-task', { taskId: task.id, touches: touches }).then(function (r) {
+          if (r && r.ok === false) setMsg('⛔ ' + ((r && r.error) || '保存失败'))
+          else setMsg('✅ touches 已更新（' + touches.length + ' 项' + (touches.length ? '' : '——空清单=清除声明，回「无锁」态') + '）')
+          fetchTasks()
+        }).catch(function (e) { setMsg('⛔ ' + String(e)) })
+      }
+      return React.createElement('div', { style: { marginBottom: 6, padding: '4px 6px', background: C.nested, borderRadius: 4 } },
+        React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '🔒 文件级排他（touches · ' + (running ? '运行中只读' : '逗号/换行分隔，空=清除声明') + '）'),
+        running ? React.createElement('div', null,
+          React.createElement('div', { style: { fontSize: 10, color: C.text2, wordBreak: 'break-all' } }, '🔒 ' + ((Array.isArray(task.touches) && task.touches.length) ? task.touches.join('、') : '（未声明）')),
+          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2 } }, '运行中任务的 touches 由 Worker 以实际覆盖面申报（escalate→仲裁扩权）；落定后可在此修正。')) : React.createElement('div', { style: { display: 'flex', gap: 4, alignItems: 'flex-start' } },
+          React.createElement('textarea', { value: draft, onChange: function (e) { setDraft(e.target.value) }, onKeyDown: function (e) { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) commit() }, placeholder: '如 src/x.mjs、src/**（每行一条或逗号分隔；空=清除声明）', rows: 2, style: { flex: 1, minWidth: 0, fontSize: 11, padding: '4px 8px', border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text, fontFamily: 'inherit', boxSizing: 'border-box', resize: 'vertical' } }),
+          React.createElement('button', { onClick: commit, title: '保存 touches 声明（替换式更新；空清单=清除声明回「无锁」态）', style: { fontSize: 10, padding: '3px 10px', border: 'none', borderRadius: 4, background: C.brand, color: C_INV, cursor: 'pointer', flexShrink: 0 } }, '保存')),
+        msg ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 3, wordBreak: 'break-all' } }, msg) : null)
+    }
+
     function DetailView() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect; var task = getTask(state.detailId)
       var _a = useState(task ? task.title : ''), editTitle = _a[0], setEditTitle = _a[1]; var _b = useState(task ? task.description || '' : ''), editDesc = _b[0], setEditDesc = _b[1]; var _c = useState(false), saving = _c[0], setSaving = _c[1]; var _d = useState(state.boardMode), mode = _d[0], setMode = _d[1]
@@ -362,7 +391,7 @@
           React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 4 } }, '本任务声明的 touches 与以下进行中任务重叠（同一批文件并行改会互踩）；它们提交验收/完成后自动派发。'),
           React.createElement('div', { style: { fontSize: 10, display: 'flex', flexWrap: 'wrap', gap: 5 } }, task.waitingForTouches.map(function (id) { var t2 = getTask(id); return React.createElement('span', { key: id, onClick: function () { if (t2) { state.detailId = id; notify() } }, title: t2 ? (t2.title + ' (' + id + ')') : id, style: { padding: '1px 5px', borderRadius: 3, background: C.nested, border: '1px solid ' + C.border, color: t2 ? C.brand : C.text2, cursor: t2 ? 'pointer' : 'default' } }, (t2 ? t2.title.slice(0, 20) : shortId(id)) + ' · ' + shortId(id)) })),
           Array.isArray(task.touches) && task.touches.length ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 4 } }, '本任务 touches: ' + task.touches.join('、')) : null) : null,
-        Array.isArray(task.touches) && task.touches.length ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6, padding: '4px 6px', background: C.nested, borderRadius: 4 } }, '🔒 文件级排他（touches）: ' + task.touches.join('、')) : null,
+        React.createElement(TouchesEditor, { key: task.id + '|touches', task: task }),
         // 起草 lint（task.lintWarnings[]，host 建卡/更新卡现算落盘，get-tasks 透出）：
         // 四规则软警告（粒度过粗/双仓库歧义/缺验收/标题缺动词或描述空）随卡展示，缺字段/空数组整块不渲染（老卡零影响）。
         Array.isArray(task.lintWarnings) && task.lintWarnings.length ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, padding: '5px 8px', border: '1px solid ' + C.warn, borderRadius: 6, background: 'color-mix(in srgb, ' + C.warn + ' 8%, transparent)' } },

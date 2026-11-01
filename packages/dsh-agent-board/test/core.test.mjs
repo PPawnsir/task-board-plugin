@@ -3614,6 +3614,94 @@ test('hooks 只许主窗口设置：create-task/update-task RPC 与 task_create/
   assert.equal(b4.tasks[0].hooks.pre.state, 'idle') // 状态机不被越权写入扰动
 })
 
+// ===== touches 更新通道（task-mvxw7hn5）：主窗口/GUI 替换式更新锁声明，Worker 禁 + 生命周期门禁 =====
+// 断言族（与卡上口径同步·主窗口 2026-11-01 生命周期修正版）：
+// ① 工具 schema 含 touches 参数（顶层，与 hooks 同级）
+// ② draft 卡主窗口可改：归一化（非字符串过滤+trim，与 create-task normTouches 同款）+ history 留痕含原值摘要
+// ③ Worker actor 双通道拒（RPC update-task / task_update 工具，文案「touches 更新仅主窗口可用」）
+// ④ 运行中（in-progress/verifying）拒写——主窗口也不可直改，边界由 Worker 以实际覆盖面申报
+//   （board_report escalate → task_arbitrate expandTouches）；拒写不改卡
+// ⑤ 落定后（resolved/cancelled）可写（锁已释放，修正权回主窗口）
+// ⑥ 空数组=清除声明（t.touches=[] 且 effectiveTouches 回 []）
+// ⑦ 上限 20 条（与 create-task 同款）⑧ 工具通道直改 pending 成功 ⑨ GUI TouchesEditor 走 update-task
+test('task-mvxw7hn5 touches 更新通道：schema/角色门禁/生命周期门禁/归一化留痕/GUI 编辑', async () => {
+  const child = { resolveRoot: () => 'root-other' } // 子代理身份（resolveRoot 指向别处）
+  const h = mkRpcHandlers(mkBoard([]))
+  // ① task_update 工具 schema 含 touches 参数（顶层属性）
+  const tool = h.__tools['task_update']
+  assert.ok(tool, 'task_update 工具已注册')
+  assert.ok(tool.parameters.properties.touches, 'task_update schema 含 touches 参数')
+  assert.equal(tool.parameters.properties.touches.type, 'array')
+  assert.equal(tool.parameters.properties.touches.items.type, 'string')
+  assert.match(tool.description, /touches 可替换式更新/)
+  assert.match(tool.parameters.properties.touches.description, /仅主窗口/)
+  assert.match(tool.parameters.properties.touches.description, /in-progress\/verifying（运行中持锁）拒写/)
+  // ② draft 卡主窗口可改：非字符串过滤 + trim + history 留痕（原值进摘要）
+  const b2 = mkBoard([mkTask({ id: 'd1', status: 'draft', touches: ['old/x.mjs'] })])
+  const r2 = await mkRpcHandlers(b2)['update-task']({ taskId: 'd1', touches: ['lib/a.mjs ', 42, '', 'lib/b.mjs'] })
+  assert.equal(r2.ok, true)
+  assert.deepEqual(b2.tasks[0].touches, ['lib/a.mjs', 'lib/b.mjs'])
+  const note2 = b2.tasks[0].history[b2.tasks[0].history.length - 1].note
+  assert.match(note2, /touches 更新：1 项 → 2 项（原：old\/x\.mjs）/)
+  // ③ Worker actor 双通道拒：角色门禁文案，且不改卡
+  const b3 = mkBoard([mkTask({ id: 'd2', status: 'draft', touches: [] })])
+  const r3 = await mkRpcHandlers(b3, child)['update-task']({ taskId: 'd2', touches: ['x.mjs'] })
+  assert.equal(r3.ok, false); assert.match(r3.error, /touches 更新仅主窗口可用/)
+  assert.deepEqual(b3.tasks[0].touches, [])
+  const r3b = await mkRpcHandlers(b3, child).__tools['task_update'].execute({ taskId: 'd2', touches: ['x.mjs'] })
+  assert.equal(r3b.ok, false); assert.match(r3b.error, /touches 更新仅主窗口可用/)
+  assert.deepEqual(b3.tasks[0].touches, [])
+  // ④ 运行中拒写（生命周期门禁）：in-progress（持锁）与 verifying——主窗口也不可直改；拒写不改卡
+  const b4 = mkBoard([
+    mkTask({ id: 'w1', status: 'in-progress', claimedBy: 'agent-1', claimedAt: '2026-01-01T00:00:00Z', touches: ['keep/x.mjs'] }),
+    mkTask({ id: 'v1', status: 'verifying', touches: ['keep/y.mjs'] }),
+  ])
+  const r4 = await mkRpcHandlers(b4)['update-task']({ taskId: 'w1', touches: ['other/z.mjs'] })
+  assert.equal(r4.ok, false)
+  assert.match(r4.error, /运行中的任务 touches 由 Worker 以实际覆盖面申报——请 escalate 或由主窗口仲裁扩权；待任务落定后再修正/)
+  const r4b = await mkRpcHandlers(b4)['update-task']({ taskId: 'v1', touches: [] })
+  assert.equal(r4b.ok, false); assert.match(r4b.error, /待任务落定后再修正/)
+  assert.deepEqual(b4.tasks[0].touches, ['keep/x.mjs'])
+  assert.deepEqual(b4.tasks[1].touches, ['keep/y.mjs'])
+  const r4c = await mkRpcHandlers(mkBoard([mkTask({ id: 'w2', status: 'in-progress', claimedBy: 'agent-2', touches: ['a.mjs'] })])).__tools['task_update'].execute({ taskId: 'w2', touches: ['b.mjs'] })
+  assert.equal(r4c.ok, false); assert.match(r4c.error, /运行中的任务 touches/)
+  // ⑤ 落定后可写：resolved / cancelled（锁已释放，修正权回主窗口）
+  const b5 = mkBoard([
+    mkTask({ id: 'rs', status: 'resolved', touches: ['old.mjs'] }),
+    mkTask({ id: 'cc', status: 'cancelled', touches: [] }),
+  ])
+  const r5 = await mkRpcHandlers(b5)['update-task']({ taskId: 'rs', touches: ['new.mjs'] })
+  assert.equal(r5.ok, true); assert.deepEqual(b5.tasks[0].touches, ['new.mjs'])
+  const r5b = await mkRpcHandlers(b5)['update-task']({ taskId: 'cc', touches: ['c.mjs'] })
+  assert.equal(r5b.ok, true); assert.deepEqual(b5.tasks[1].touches, ['c.mjs'])
+  // ⑥ 空数组=清除声明：t.touches=[] 且 effectiveTouches 回 []（无锁态）
+  const b6 = mkBoard([mkTask({ id: 'd3', status: 'draft', touches: ['x.mjs'] })])
+  const r6 = await mkRpcHandlers(b6)['update-task']({ taskId: 'd3', touches: [] })
+  assert.equal(r6.ok, true); assert.deepEqual(b6.tasks[0].touches, [])
+  assert.deepEqual(core.effectiveTouches(b6.tasks[0]), [])
+  assert.match(b6.tasks[0].history[b6.tasks[0].history.length - 1].note, /touches 更新：1 项 → 0 项（原：x\.mjs）/)
+  // ⑦ 上限 20 条（与 create-task normTouches 同款：slice(0, 20)）
+  const many = []; for (let i = 0; i < 25; i++) many.push('f' + i + '.mjs')
+  const b7 = mkBoard([mkTask({ id: 'd4', status: 'draft' })])
+  const r7 = await mkRpcHandlers(b7)['update-task']({ taskId: 'd4', touches: many })
+  assert.equal(r7.ok, true); assert.equal(b7.tasks[0].touches.length, 20)
+  // ⑧ 工具通道直改 pending 成功（主窗口 tester 身份；留痕「0 项 → 1 项（原：无）」）
+  const b8 = mkBoard([mkTask({ id: 'd5', status: 'pending', touches: [] })])
+  const r8 = await mkRpcHandlers(b8).__tools['task_update'].execute({ taskId: 'd5', touches: ['t.mjs'] })
+  assert.equal(r8.ok, true); assert.deepEqual(b8.tasks[0].touches, ['t.mjs'])
+  assert.match(b8.tasks[0].history[b8.tasks[0].history.length - 1].note, /touches 更新：0 项 → 1 项（原：无）/)
+  // ⑨ GUI TouchesEditor：源码 + 组装产物都走 update-task touches 通道；运行态只读指引在
+  const src = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  assert.match(src, /function TouchesEditor\(props\)/)
+  assert.match(src, /rpc\('update-task', \{ taskId: task\.id, touches: touches \}\)/)
+  assert.match(src, /running = task\.status === 'in-progress' \|\| task\.status === 'verifying'/)
+  assert.match(src, /运行中任务的 touches 由 Worker 以实际覆盖面申报（escalate→仲裁扩权）；落定后可在此修正/)
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(built, /function TouchesEditor\(props\)/)
+  assert.match(built, /rpc\('update-task', \{ taskId: task\.id, touches: touches \}\)/)
+  assert.match(built, /运行中任务的 touches 由 Worker 以实际覆盖面申报/)
+})
+
 // ===== hooks 接线（host 侧）：pre 闸门 spawn / post 补 spawn / hook run 结算分派（直调 + 源码级）=====
 // poolCycle 直调 harness（带 subagents）：spawnOneShot 走真实路径，捕获 provider/label/prompt；
 // run.result 用永不落定的 Promise（本用例只验证「谁被 spawn 了、prompt 对不对」，不触发结算）。
@@ -4333,8 +4421,8 @@ test('hooks 主窗口限定（源码级）：RPC 与工具双通道门禁 + 浅�
   // create-task RPC：锁外角色门禁 + 锁内形状校验（与建卡同处一次持锁段）
   assert.match(rpc, /if \(args\.hooks !== undefined && hooksDenied\(actor\)\) return \{ ok: false, error: HOOKS_MAIN_ONLY \}/)
   assert.match(rpc, /var nHooks = null; if \(args\.hooks !== undefined\) \{ var hn = normalizeHooks\(args\.hooks\)/)
-  // update-task RPC：同一门禁 + 浅合并
-  assert.match(rpc, /if \(args\.hooks !== undefined && hooksDenied\(actor\)\) return \{ ok: false, error: HOOKS_MAIN_ONLY \}; var existsFn = existsInSession\(sid\)/)
+  // update-task RPC：同一门禁 + 浅合并；touches 门禁（task-mvxw7hn5）随其后插在同一锁外位置，同族角色门禁
+  assert.match(rpc, /if \(args\.hooks !== undefined && hooksDenied\(actor\)\) return \{ ok: false, error: HOOKS_MAIN_ONLY \}; if \(args\.touches !== undefined && hooksDenied\(actor\)\) return \{ ok: false, error: TOUCHES_MAIN_ONLY \}; var existsFn = existsInSession\(sid\)/)
   assert.match(rpc, /if \(args\.hooks !== undefined\) \{ var __he = applyHooks\(t, args\.hooks\)/)
   // 工具通道：两个工具的 hooks 专属门禁（在通用门禁之后，子代理拿到更准确的错误文案）
   assert.equal((rpc.match(/if \(args\.hooks !== undefined && resolveRoot\(__ra\) !== __ra\) return \{ ok: false, error: 'hooks 仅主窗口可设（子代理无 hooks 权限）' \}/g) || []).length, 2)
