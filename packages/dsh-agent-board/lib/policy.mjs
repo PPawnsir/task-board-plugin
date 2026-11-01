@@ -18,7 +18,22 @@ const { cfg, lessonText, pushLesson, ah, classifyPipeline } = core
 //   关的是「主动劝你拆」，不是「不许你拆」。
 //   第 1 条（TASK_SIZE_CONTRACT）留在 task_create 的**静态**工具描述里：工具定义会快照进 request header
 //   （dsh-session 校验 description 必须是 string），没有按板动态能力，故不在开关范围内。
-export var TASK_SIZE_CONTRACT = '建议粒度：单任务 10~30 分钟可独立完成。超出此范围的大任务请先拆分——建一张 epic 卡（parentId 体系）再挂子任务，别整坨塞进来。'
+// ===== 判档 / pipeline 引导文案（task-mvxpzcr9，用户 2026-11-01 两连报的提示词层根修）=====
+// 实证病灶（都是「文案只有定义、没有场景」的产物，零机制问题）：
+//   ① 「Team 模式实测大部分任务都标记为标档」——判档语义原先只写在拆解官 prompt 一处，且原文是
+//      「standard=常规模块改动（缺省）」=引力井：主窗口 Team 注入里完全没有判档引导，agent 建卡时
+//      没见过判档标准，拿不准自然落缺省 → 全落标档；
+//   ② 「agent 发起的任务都是 full，即便我明确说做回归」——pipeline 说明原先只有一句定义
+//      （full(默认)/work(只做不验)/direct(不进池)），从没说过「回归/巡检类归 work」，default=full 自然一律 full。
+// 修法：同一份文案常量三处同源，消灭「（缺省）」引力井表述：
+//   ① Team 注入（dispatch.mjs，第 10/11 条；与 epicSplit 正交，关拆分引导也照样注入——档位与拆分是两件事）；
+//   ② task_create 工具描述（静态契约层：TASK_SIZE_CONTRACT 扩样例 + PIPELINE_SCENE_CONTRACT）；
+//   ③ 拆解官 prompt（buildDecomposerPrompt 第 3 条，与注入同口径）。
+// 边界：纯文案，判档机制（laneModels/healthyModel/sizeHint）、pipeline 分类（classifyPipeline）、
+// 拆解官 schema 一律不动——只让 agent 看得见「怎么选」。
+export var SIZE_TIER_SAMPLES = 'light=单文件小改/文案/配置/断言增补/≤15 分钟（样例：改一句提示文案、加一条断言、调一个常量）；standard=单模块多文件/常规特性/需新断言（样例：加一个开关、修一个判定分支）；heavy=跨模块/改判定链核心/拆分类/高风险（样例：新机制、重构、动结算链）'
+export var SIZE_PICK_QUESTIONS = '判档三问：几个文件？动不动判定核心？要不要全新机制？——拿不准按低一档报（宁小勿大：档位可在执行/验收中用 board_report 的 sizeHint 自修正，当前 run 模型不变、对下一次派发生效；低报有执行中纠错通道，高报只会白烧额度）。'
+export var TASK_SIZE_CONTRACT = '建议粒度：单任务 10~30 分钟可独立完成。超出此范围的大任务请先拆分——建一张 epic 卡（parentId 体系）再挂子任务，别整坨塞进来。力度档位 size 三档样例：' + SIZE_TIER_SAMPLES + '。' + SIZE_PICK_QUESTIONS
 export var SUGGEST_SPLIT_TEXT = '任务看起来偏大（建议单任务 10~30 分钟）：考虑拆分子任务（parentId）或收窄边界'
 // Team 模式提示词第 6 条：大任务的 epic 拆分流程（父卡 pipeline=direct 不派发，子任务全 resolved 后父卡由 checkParentAuto 自动转 verifying）
 export var TEAM_SPLIT_RULE = '6. 大任务必须拆分：预计超过 30 分钟的任务，先建一张 epic 父卡（pipeline 传 direct，不派发），再拆成若干 10~30 分钟的子任务（task_create 传 parentId=父卡 id，有先后顺序的用 dependsOn 串联）。子任务全部完成后父卡会自动标记完成（checkParentAuto）。'
@@ -32,6 +47,21 @@ export var TEAM_CONTEXT_PACKING = '8. 拆解后的上下文装配：每张子卡
 // ⚠️ 本条**不受 epicSplit 门禁**：它是「确认流怎么用」的流程引导，不是「主动劝你拆」——
 //    拆解官机制本身也不看 epicSplit（task_decompose 工具常驻）。dispatch 注入段在 splitRuleOf(...) 之后恒拼接本条。
 export var TEAM_DECOMPOSE_FLOW = '9. 需求卡工作流：用户用自然语言下达的大需求，先建成 draft 需求卡（保留需求原文），再用 task_decompose 派拆解官出实现侧子卡提案；提案以草稿子卡落位后，向用户呈现一览（标题/档位/模型/touches），用户确认或调档（task_update 改 size/model）后统一 publish。拆解官提案不是终稿——你的呈现与用户的那一眼确认是语义质量的最后防线。命中拆分树信号的需求，即使主窗口已在讨论中形成设计稿，也一律走拆解官——设计稿写进需求卡 contextNotes 作为参考方案；拆解官读它当起点，职责是验证/修正设计而非从零重来。禁止以『我已经设计好了』为由整卡直派。'
+// Team 提示词第 10 条：力度档位判档指引（样例化口径，与 TASK_SIZE_CONTRACT / 拆解官 prompt 同源）。
+// ⚠️ 与第 9 条同款纪律：**不受 epicSplit 门禁**——档位怎么判与「要不要拆」正交，关掉拆分引导
+//    也不能让主窗口重新失去判档标准（那正是「全落标档」的成因）。dispatch 恒拼接。
+export var TEAM_SIZE_GUIDE = '10. 力度档位（size）判档——按样例选档，别一律落到标档：' + SIZE_TIER_SAMPLES + '。' + SIZE_PICK_QUESTIONS
+// pipeline 三场景（工具描述与 Team 注入共用同一份文案，口径唯一）
+export var PIPELINE_SCENES = 'work=回归测试/巡检/文档/纯查询/纯报表（自己跑通即可，不需 Verifier 复跑验收）；full=代码改动/修 bug/新特性（默认，要 Verifier 独立复跑验收）；direct=主窗口亲办、不进派发池'
+export var PIPELINE_NAMED_CASES = '显式点名：用户说做回归/巡检/盘点 → 归 work（别默认 full）；纯查询/纯报表同理。'
+// Team 提示词第 11 条：pipeline 场景指引（同上，不受 epicSplit 门禁）
+export var TEAM_PIPELINE_GUIDE = '11. pipeline 场景——按「要不要 Verifier 复核」选，别一律 full：' + PIPELINE_SCENES + '。' + PIPELINE_NAMED_CASES
+// Team 注入出口：第 10/11 条合成一段（dispatch 在 TEAM_DECOMPOSE_FLOW 之后恒拼接）
+export var TEAM_SIZE_PIPELINE_GUIDE = '\n' + TEAM_SIZE_GUIDE + '\n' + TEAM_PIPELINE_GUIDE
+// task_create 静态描述尾部：pipeline 场景指引（紧跟 TASK_SIZE_CONTRACT 拼接；工具描述会快照进 request header，
+// 没有按板动态能力，故与粒度契约同处静态层）
+export var PIPELINE_SCENE_CONTRACT = ' pipeline 场景：' + PIPELINE_SCENES + '。' + PIPELINE_NAMED_CASES
+
 // Team 提示词第 6~8 条拆分 doctrine 的注入出口（每条含前导换行，调用方直接字符串相加）：
 //   epicSplit 缺省/true → 第 6 条拆分流程 + 第 7 条决策树 + 第 8 条上下文装配；
 //   epicSplit === false → ''（第 6~8 条整条不出现，编号 1~5 连续不受影响）。
@@ -112,7 +142,8 @@ export var DECOMPOSE_SCHEMA = {
 // 拆解官 prompt 契约（写死纪律）：
 // ① 第一步必须 read contextFiles 清单里的文件再动手拆（实现侧拆解，禁止需求侧转述）；
 // ② 每张子卡 10~30 分钟可独立验收、touches 精确到文件、acceptance 是可执行命令；
-// ③ size 判档语义：light=单点小改/文档/配置，standard=常规模块改动（缺省），heavy=跨模块/高风险/需强推理；
+// ③ size 判档＝样例化同源（SIZE_TIER_SAMPLES + SIZE_PICK_QUESTIONS，与 Team 注入 / task_create 描述逐字同口径；
+//    旧文案「standard=常规模块改动（缺省）」是「全落标档」的引力井，已消灭）；
 //    modelHint 仅在有特殊理由时填（如超长上下文）；
 // ④ children 上限 DECOMPOSE_MAX_CHILDREN 张；verdict=keep 表示源卡不用拆；
 // ⑤ dependsOn 只许引用本批**前排**子卡的序号（'1' 起，string）——物化侧翻译成本批真实 id，按构造天然无环；无法解析的序号丢弃并在该子卡 messages 留痕。
@@ -128,7 +159,7 @@ export function buildDecomposerPrompt(t, pack) {
   p += '\n拆解纪律（硬约束）：\n'
   p += '1. 第一步必须先用 read 工具读上面文件清单里的文件（按所给行号范围），从**实现侧**拆（按模块/文件边界切分）；禁止不读代码就拍脑袋拆，禁止只做需求侧转述。\n'
   p += '2. 每张子卡必须 10~30 分钟可独立完成并验收：touches 精确到文件（文件级排他锁，同批子卡 touches 不得互相重叠），acceptance 必须是可执行命令（如 "node --test test/xxx.test.mjs"）。\n'
-  p += '3. size 判档：light=单点小改/文档/配置；standard=常规模块改动（缺省）；heavy=跨模块/高风险/需强推理。modelHint 仅在有特殊理由时填（如某子卡需超长上下文模型），否则留空。\n'
+  p += '3. size 判档（按样例落档，别一律标档；与主窗口 Team 注入同口径）：' + SIZE_TIER_SAMPLES + '。' + SIZE_PICK_QUESTIONS + 'modelHint 仅在有特殊理由时填（如某子卡需超长上下文模型），否则留空。\n'
   p += '4. children 上限 ' + DECOMPOSE_MAX_CHILDREN + ' 张；有先后顺序时用 dependsOn 引用同批序号（只许引用本批**前排**子卡，序号 1 起计：如第 2 张依赖第 1 张填 ["1"]）。\n'
   p += '5. 源卡本身不大、不必拆时：verdict=keep，并在 rationale 写清理由。\n'
   p += '\n权限边界：你没有任何建卡工具——不要尝试创建/修改看板任务。提案由宿主读结构化结果后自动物化为 draft 子卡（源卡状态不变，由主窗口确认后逐张 publish）。\n'

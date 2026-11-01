@@ -15,6 +15,9 @@ import * as core from '../lib/core.mjs'
 import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE, TEAM_DECISION_TREE, TEAM_CONTEXT_PACKING, TEAM_DECOMPOSE_FLOW, splitRuleOf } from '../index.mjs'
 import { aggregateUsageSummary, readRunUsage, findRunLog, effectiveTokens, taskEffectiveTokens } from '../index.mjs'
 import { createRpc } from '../lib/rpc.mjs'
+// 拆解官 prompt 契约 + 判档/pipeline 文案常量（task-mvxpzcr9）：直接读 policy 层（契约同源头；本卡 touches
+// 不含 index.mjs 薄壳，故新常量不新增 re-export，测试按 policy 层直引——与 decompose.test 同款导入面）
+import { buildDecomposerPrompt, TEAM_SIZE_GUIDE, TEAM_PIPELINE_GUIDE, TEAM_SIZE_PIPELINE_GUIDE, SIZE_TIER_SAMPLES, SIZE_PICK_QUESTIONS, PIPELINE_SCENE_CONTRACT } from '../lib/policy.mjs'
 // no-root 刷屏根治（task-muuf0o7a）专项：会话层幻影板防线 + 派发层 root 闸门直调断言
 import { createSession, isFullSessionId } from '../lib/session.mjs'
 import { createDispatch } from '../lib/dispatch.mjs'
@@ -5475,6 +5478,13 @@ test('epicSplit 行为①：Team 提示词第 6~8 条随门禁注入/消失（�
   // 第 9 条需求卡工作流（task-mvneoy1u）：随注入段出现，且注入位置在 splitRuleOf 出口内容（第 8 条）之后
   assert.ok(on.includes(TEAM_DECOMPOSE_FLOW)); assert.match(on, /需求卡工作流/)
   assert.ok(on.indexOf(TEAM_DECOMPOSE_FLOW) > on.indexOf(TEAM_CONTEXT_PACKING), '第 9 条注入位置在 splitRuleOf 之后')
+  // 第 10/11 条（判档指引 + pipeline 场景，task-mvxpzcr9）：恒拼接在第 9 条之后（同样不受 epicSplit 门禁）
+  assert.ok(on.includes(TEAM_SIZE_PIPELINE_GUIDE), 'Team 注入含判档/pipeline 引导段')
+  assert.ok(on.indexOf(TEAM_SIZE_GUIDE) > on.indexOf(TEAM_DECOMPOSE_FLOW), '判档段接在第 9 条之后')
+  assert.match(on, /判档三问：几个文件？动不动判定核心？要不要全新机制？/)
+  assert.match(on, /拿不准按低一档报/)
+  assert.match(on, /work=回归测试\/巡检\/文档\/纯查询\/纯报表/)
+  assert.match(on, /用户说做回归\/巡检\/盘点 → 归 work/)
   const off = textOf(false)
   // 第 6~8 条整条消失（连 parentId/checkParentAuto 都不再出现），基础 1~5 条引导一字不少
   assert.doesNotMatch(off, /大任务必须拆分|拆解决策树|上下文装配/)
@@ -5483,7 +5493,70 @@ test('epicSplit 行为①：Team 提示词第 6~8 条随门禁注入/消失（�
   // 第 9 条**不受 epicSplit 门禁**（流程引导不是劝拆）：6~8 条整条消失时它仍在
   assert.ok(off.includes(TEAM_DECOMPOSE_FLOW), 'epicSplit=false 时第 9 条仍注入')
   assert.match(off, /确认或调档（task_update 改 size\/model）后统一 publish/)
+  // 档位/pipeline 与拆分正交：关掉拆分引导时第 10/11 条照样注入（否则「全落标档」盲区原样复发）
+  assert.ok(off.includes(TEAM_SIZE_PIPELINE_GUIDE), 'epicSplit=false 时判档/pipeline 段仍注入')
+  assert.match(off, /按样例选档，别一律落到标档/)
+  assert.match(off, /拿不准按低一档报/)
+  assert.match(off, /用户说做回归\/巡检\/盘点 → 归 work/)
   assert.equal(on.replace(splitRuleOf(true), ''), off.replace(splitRuleOf(false), '')) // 除第 6~8 条外逐字相同
+})
+
+// ===== Team 提示词判档/pipeline 指引（task-mvxpzcr9）：三档具象样例 + 判档三问 + pipeline 场景 =====
+// 病灶（用户 2026-11-01 两连报）：① 判档文案原只写在拆解官一处、且原文「standard=常规模块改动（缺省）」
+// = 引力井 → 主窗口建卡全落标档；② pipeline 只有定义没场景（「回归/巡检类归 work」从未写过）→ 一律 full。
+// 本族断言把「样例化文案 + 三处同源（Team 注入 / task_create 静态描述 / 拆解官 prompt）」钉死。
+test('判档/pipeline 指引文案：三档具象样例 + 判档三问 + 拿不准报低档 + pipeline 三场景（回归点名）', () => {
+  const g = TEAM_SIZE_PIPELINE_GUIDE
+  // 三档样例逐字（每档 = 判据 + 具象例子），且与静态契约/SIZE_TIER_SAMPLES 同源
+  for (const s of [
+    'light=单文件小改/文案/配置/断言增补/≤15 分钟（样例：改一句提示文案、加一条断言、调一个常量）',
+    'standard=单模块多文件/常规特性/需新断言（样例：加一个开关、修一个判定分支）',
+    'heavy=跨模块/改判定链核心/拆分类/高风险（样例：新机制、重构、动结算链）',
+  ]) {
+    assert.ok(g.includes(s), '判档样例缺：' + s)
+    assert.ok(SIZE_TIER_SAMPLES.includes(s), '样例常量应逐字同源：' + s)
+    assert.ok(TASK_SIZE_CONTRACT.includes(s), 'task_create 静态契约应同款样例：' + s)
+  }
+  // 判档三问 + 拿不准报低档（带 sizeHint 自修正出口，别把「低报」说成死路）
+  assert.match(TEAM_SIZE_GUIDE, /判档三问：几个文件？动不动判定核心？要不要全新机制？/)
+  assert.match(TEAM_SIZE_GUIDE, /拿不准按低一档报/)
+  assert.match(TEAM_SIZE_GUIDE, /sizeHint/)
+  assert.ok(SIZE_PICK_QUESTIONS.length > 0 && TEAM_SIZE_GUIDE.includes(SIZE_PICK_QUESTIONS))
+  // 编号接第 9 条（6~9 已在用）；旧「（缺省）」引力井措辞必须清零
+  assert.match(TEAM_SIZE_GUIDE, /^10\. /)
+  assert.doesNotMatch(TEAM_SIZE_GUIDE, /（缺省）/)
+  assert.doesNotMatch(TASK_SIZE_CONTRACT, /（缺省）/)
+  // pipeline 三场景 + 回归/巡检显式点名（work 不再靠猜）
+  assert.match(TEAM_PIPELINE_GUIDE, /^11\. /)
+  for (const s of ['work=回归测试/巡检/文档/纯查询/纯报表', 'full=代码改动/修 bug/新特性', 'direct=主窗口亲办、不进派发池']) {
+    assert.ok(TEAM_PIPELINE_GUIDE.includes(s), 'pipeline 场景缺：' + s)
+    assert.ok(PIPELINE_SCENE_CONTRACT.includes(s), 'task_create 静态契约应同款 pipeline 场景：' + s)
+  }
+  assert.match(TEAM_PIPELINE_GUIDE, /用户说做回归\/巡检\/盘点 → 归 work/)
+  assert.match(PIPELINE_SCENE_CONTRACT, /用户说做回归\/巡检\/盘点 → 归 work/)
+  // 注入出口 = 两条合成（每条含前导换行，调用方直接字符串相加）
+  assert.equal(TEAM_SIZE_PIPELINE_GUIDE, '\n' + TEAM_SIZE_GUIDE + '\n' + TEAM_PIPELINE_GUIDE)
+})
+
+test('判档/pipeline 同源落三处：Team 注入位 + task_create 工具描述 + 拆解官 prompt（静态契约层）', () => {
+  const src = hostSrc()
+  // dispatch 注入：接在第 9 条之后恒拼接（不进 epicSplit 门禁出口——档位与拆分正交）
+  assert.ok(src.includes("+ '\\n' + TEAM_DECOMPOSE_FLOW + '\\n' + TEAM_SIZE_PIPELINE_GUIDE"))
+  assert.ok(!splitRuleOf(true).includes(TEAM_SIZE_PIPELINE_GUIDE), '判档段不进 epicSplit 门禁出口')
+  // task_create 工具描述（真注册出来的 description，不是源码拼串）
+  const tc = mkRpcHandlers(mkBoard([])).__tools['task_create']
+  assert.ok(tc.description.includes(SIZE_TIER_SAMPLES), 'task_create 描述含三档样例')
+  assert.ok(tc.description.includes(PIPELINE_SCENE_CONTRACT), 'task_create 描述含 pipeline 场景指引')
+  assert.match(tc.description, /回归\/巡检\/盘点 → 归 work/)
+  // 参数级描述同步（模型按参数描述选档/pipeline 的那一面）
+  assert.ok(tc.parameters.properties.size.description.includes('加一个开关'), 'size 参数描述同款具象样例')
+  assert.match(tc.parameters.properties.pipeline.description, /work=回归测试\/巡检/)
+  // 拆解官 prompt 第 3 条：与注入同口径（样例 + 三问），旧「（缺省）」引力井消失
+  const p = buildDecomposerPrompt(mkTask({ id: 'pc1', title: 'P' }), '')
+  for (const s of ['加一个开关', '修一个判定分支', '新机制', '动结算链', '判档三问', '拿不准按低一档报']) {
+    assert.ok(p.includes(s), '拆解官判档文案缺：' + s)
+  }
+  assert.ok(!p.includes('常规模块改动（缺省）'), '拆解官旧「缺省」引力井必须消灭')
 })
 
 test('withSplitHint: epicSplit=false 不附 suggestSplit（与未命中同形），缺省/true 零变化', () => {
