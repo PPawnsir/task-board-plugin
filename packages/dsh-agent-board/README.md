@@ -41,7 +41,7 @@
 | **0.1.7 ~ 0.1.7-x**（含 rc） | **≥ 1.2.2（必须）** | 0.1.7 会话日志升级为 format v4：插件消息 `source.kind` 必须是生产者自有 kind。1.2.1 及更早会在**任务完成/阻塞回执**落盘时抛 `SessionFormatError: format v4 message requires a producer-owned source kind`，并连带使主窗口当前轮次失败（表现为「本轮运行失败」）；同时「跳转会话」因宿主移除 `sessions.open` 而失效（控制台 `sessionsSvc.open is not a function`），卡片活动心跳读不到 v4 日志（`session.v4.jsonl.zstd`） |
 | 0.1.5-rc.1 ~ 0.1.6 | ≤ 1.2.1 | 1.2.2 起按 0.1.7 协议编写（v4 source kind、`uiWorkspace.openSession` 跳转），旧宿主未做回归验证，建议停留 1.2.1 |
 
-> 当前版本 **v1.9.3** 已在宿主 **0.2.1-rc.5** 全量实测：739 断言全绿 + 拆解官/力度路由/健康嗅探/帧活性挂死检测真机 E2E 全链。
+> 当前版本 **v1.9.4** 已在宿主 **0.2.1-rc.5** 全量实测：746 断言全绿 + 拆解官/力度路由/健康嗅探/帧活性挂死检测真机 E2E 全链。
 
 ```sh
 dsh plugin --profile web add dsh-agent-board@latest   # 0.1.7+/0.2.x 宿主（推荐）
@@ -258,6 +258,7 @@ draft → pending → in-progress → verifying → resolved → archived
 - **重派冷复活续跑**：命中「上次 continuable Worker 结局=超时/失败」的待办卡时，不 spawn 新会话，改 `subagents.sendMessage(活父 Agent, childId, 断点续跑指令)`——子会话带着上一轮全部上下文复活，先盘点工作树再从断点继续；`t.runs[]` 追加一条 `resume: true` 记录（详情页历史会话按钮带 **↻** 标记），续跑同样计入三连败计数；续跑不可用（`NOT_RESUMABLE` 等）→ 回落全新 Worker，并把原因写进任务消息随首条 prompt 注入
 - **续跑基线（不拿旧文本冒充交付物）**：续跑轮结算只认**基线字节之后**新写的助手文本——一个字没产出就走「空文本按失败」重排，绝不把上一轮（被中断那次）的残留文本当成本轮交付物推进验收
 - **重启 reconcile（找回活跃续跑 Worker）**：host 重启会清空内存里的活跃 run 表，但持久子会话还活着。首轮派发周期对「进行中且无活跃 run」的卡查一次 `listChildren(root)`：仍在列 → 重建 rec 观测（监听器本就在）并重挂两级超时臂、基线取当前日志字节数；不在列 → 视为会话已死，走硬超时等价物（回待办重排 + 留一行流转记录），不占 Worker 并发位
+- **野跑看门狗（wall-clock 兜底，v1.9.4）**：两级超时是内存 setTimeout 臂——**host 重启/插件热重载即清零**，而 reconcile 只重建可续跑 Worker 的臂，**一次性 run（Verifier/hook）的臂永不恢复** → 硬超时彻底失效、run 可无限野跑（实证：本体板一条 verifier run 跑 8 小时 2 分仍在活跃写盘，且因日志持续增长零增长挂死闸也抓不到）。修法=不依赖内存计时器：每轮派发周期扫**所有非落定卡**上的 unning 且无 endedAt 留档，年龄超该留档 hardMin（缺省 360 分钟，留档自带值优先）→ 按失败结算收口（野跑文案 + 清占位 + 喂熔断连击 + 重派），与「落定卡无 endedAt 留档 → stale-closed 关账」的僵尸清扫分工不重叠
 - **usage 增量计账（按 seq 水位线）**：注意「一个持久子会话被结算多次」是新形态——整份日志全量累加会把前几轮的 token 反复记账（实测同一 childId 结算两次＝双倍）。现按 v4 日志事件自带的 `seq` 记水位线（落在 `t.runs[].usageSeq`）：每次结算只累加水位线之后的 `assistant/message` 增量，本轮没新增量就一行都不记；one-shot 路径（每 run 独立日志）行为逐字不变
 - **开关 `workerContinuable`（默认开）**：关掉即逐字回退旧的一次性路径（零 `startContinuable`/零 `sendMessage`/零 `interrupt`，结算仍走 `run.result`+`dispose`）；Verifier 与 hooks（`hook-pre`/`hook-post`）**保持一次性**，不受该开关影响
 - **结算双通道 + 池韧性（2026-10-06 事故修复）**：continuable 结算有事件通道（`agent/status` 的 running→idle，身份取 `agent.session.id`）与上报通道（`board_report` 落定即收尾）两条入口，任一到达即关账（结局/usage/超时臂三件套，幂等）；派发周期自带**幽灵活跃表项 GC**（卡面证据核对回收残留 rec，防残留把派发容量顶到 0 拖死全池）+ 整轮 try/catch 与逐卡隔离（单点异常只作废该卡该轮）+ 去抖 latch 时间戳兜底复位
