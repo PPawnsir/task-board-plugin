@@ -7178,21 +7178,23 @@ test('配置审计①：set-board-config 成功写入落审计行 {key, from, to
   assert.equal(board.configLog.length, 2)
   assert.equal(board.configLog[1].from, 5)
   assert.equal(board.configLog[1].to, 8)
-  // to 记钳制后的实际落盘真值（入参 999 → 钳到 10），审计关心真值不是入参
-  await h['set-board-config']({ key: 'maxWorkers', value: 999 })
-  assert.equal(board.configLog[2].to, 10)
+  // maxWorkers 越界（999）自 task-mvzoq3ov 起显式拒写：零落盘零审计行（旧行为「静默钳到 10」已退役）
+  const r999 = await h['set-board-config']({ key: 'maxWorkers', value: 999 })
+  assert.equal(r999.ok, false)
+  assert.equal(board.maxWorkers, 8) // 拒写不动卡上值
+  assert.equal(board.configLog.length, 2) // 拒写不落审计行
   // 模型键（带枚举校验通道）成功也落：from/to 是 trim 后真值
   await h['set-board-config']({ key: 'verifierModel', value: ' kimi/kimi-k2 ' })
-  const em = board.configLog[3]
+  const em = board.configLog[2]
   assert.equal(em.key, 'verifierModel'); assert.equal(em.from, null); assert.equal(em.to, 'kimi/kimi-k2')
   // 校验拒写（非法模型 id）不落审计行
   const rBad = await h['set-board-config']({ key: 'verifierModel', value: 'kimi/kimi-k3' })
   assert.equal(rBad.ok, false)
-  assert.equal(board.configLog.length, 4)
+  assert.equal(board.configLog.length, 3)
   // 非白名单键：老契约照返 ok:true，但无实际写入 → 不落审计行
   const rX = await h['set-board-config']({ key: 'nonsenseKey', value: 1 })
   assert.equal(rX.ok, true)
-  assert.equal(board.configLog.length, 4)
+  assert.equal(board.configLog.length, 3)
 })
 
 test('配置审计②：截尾留最新 50 条；get-tasks 透出（老看板缺字段=空数组）', async () => {
@@ -7251,6 +7253,128 @@ test('模型下拉两段式④（源码级）：ModelCfg 选中只改草稿态�
   const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   assert.match(built, /function pick\(v\) \{ setVal\(v\); setDirty\(v !== \(props\.value \|\| ''\)\) \}/)
   assert.equal(built.indexOf("function pick(v) { setVal(v); setDirty(false); rpc('set-board-config'"), -1, '组装产物不得残留即点即写旧 pick')
+})
+
+// ===== maxWorkers falsy 陷阱（task-mvzoq3ov，实证 n-mvmtsf9axnn4）=====
+// 病灶：旧写 `Math.max(1, Math.min(10, args.value || 3))`——0 是 falsy，用户设 0 想「暂停派发」，
+// 实际被静默改写成 3 且 configLog 留一条 from→to:3 的「越调越大」错向审计行（限制像没生效）。
+// 新口径：缺省只认 undefined/null/''（落 3，语义不变）；其余 Number() 后校验，非 1-10 整数**显式拒写**，
+// 零落盘零审计行。断言：①0 拒写 ②1/10 照写 + 缺省落 3 ③越界/非数字/小数拒写 ④合法写入路径逐字不变
+// ⑤GUI PoolCfg 下限=1（源码 + client.js 产物 + 行为：输入 0 不写服务端，Verifier 0 照写）。
+test('maxWorkers 陷阱①：设 0 显式拒写——不静默改写为 3、不落盘、不留错向审计行', async () => {
+  const board = mkBoard([])
+  board.maxWorkers = 5 // 已是合法值：0 被拒后必须原样保留
+  const h = mkRpcHandlers(board)
+  const r = await h['set-board-config']({ key: 'maxWorkers', value: 0 })
+  assert.equal(r.ok, false, '0 必须显式拒写（旧行为 ok:true 且静默落 3）')
+  assert.match(r.error, /maxWorkers 合法范围 1-10/)
+  assert.match(r.error, /不支持 0/) // 文案明确「不支持 0」：用户想暂停派发不该被引导到 0
+  assert.match(r.error, /暂停派发请切「清单模式」/) // 指路：暂停派发的正解是清单模式，不是 0
+  assert.equal(board.maxWorkers, 5, '拒写后卡上 maxWorkers 不得被改写')
+  assert.ok(!board.configLog || board.configLog.length === 0, '拒写不得留审计行（错向 from→to:3 行是旧 bug 的一部分）')
+})
+
+test('maxWorkers 陷阱②：1/10 照写、数字串照收；缺省/空串/null 落 3（缺省语义不变）', async () => {
+  const board = mkBoard([])
+  const h = mkRpcHandlers(board)
+  assert.equal((await h['set-board-config']({ key: 'maxWorkers', value: 1 })).ok, true)
+  assert.equal(board.maxWorkers, 1) // 下限 1 是合法值（旧 `|| 3` 也会错吞 1？不会，但边界必锁）
+  assert.equal((await h['set-board-config']({ key: 'maxWorkers', value: 10 })).ok, true)
+  assert.equal(board.maxWorkers, 10)
+  assert.equal((await h['set-board-config']({ key: 'maxWorkers', value: '7' })).ok, true) // 数字串（GUI 曾以字符串提交）照收
+  assert.equal(board.maxWorkers, 7)
+  for (const v of [undefined, null, '']) {
+    board.maxWorkers = 9 // 先置非缺省值，证明缺省确实覆盖为 3
+    assert.equal((await h['set-board-config']({ key: 'maxWorkers', value: v })).ok, true)
+    assert.equal(board.maxWorkers, 3, '缺省/空串/null → 落 3（缺省语义不变）')
+  }
+})
+
+test('maxWorkers 陷阱③：11 / -1 / 小数 / 非数字显式拒写，零落盘零审计行', async () => {
+  const board = mkBoard([])
+  board.maxWorkers = 4
+  const h = mkRpcHandlers(board)
+  for (const v of [11, -1, 2.5, 'abc', NaN, [], {}]) {
+    const r = await h['set-board-config']({ key: 'maxWorkers', value: v })
+    assert.equal(r.ok, false, '非法入参必须拒写: ' + String(v))
+    assert.match(r.error, /1-10/)
+    assert.equal(board.maxWorkers, 4, '拒写不得动卡上值: ' + String(v))
+  }
+  assert.ok(!board.configLog || board.configLog.length === 0, '全部拒写 → configLog 零新增')
+})
+
+test('maxWorkers 陷阱④：合法写入的落盘值与审计行形态逐字不变（from→to 真值链）', async () => {
+  const board = mkBoard([])
+  board.maxWorkers = 3
+  const h = mkRpcHandlers(board)
+  await h['set-board-config']({ key: 'maxWorkers', value: 6 })
+  assert.equal(board.maxWorkers, 6)
+  assert.equal(board.configLog.length, 1)
+  assert.deepEqual({ key: board.configLog[0].key, from: board.configLog[0].from, to: board.configLog[0].to, actor: board.configLog[0].actor },
+    { key: 'maxWorkers', from: 3, to: 6, actor: 'tester' })
+  assert.ok(typeof board.configLog[0].at === 'string' && board.configLog[0].at.length > 0)
+})
+
+test('maxWorkers 陷阱⑤：GUI PoolCfg 下限=1（源码 + client.js 产物 + 行为：输入 0 不写服务端，Verifier 0 照写）', () => {
+  const src = readFileSync(new URL('../lib/client/dashboard.js', import.meta.url), 'utf8')
+  const start = src.indexOf('function PoolCfg(props)')
+  assert.ok(start >= 0, 'dashboard.js 应定义 PoolCfg')
+  const end = src.indexOf('function MinCfg(', start)
+  assert.ok(end > start, 'PoolCfg 之后应紧跟 MinCfg（切片边界）')
+  const body = src.slice(start, end)
+  // ① 源码：旧 `n >= 0` 边界退役（0 是 falsy 陷阱入口），改显式下限 lo（缺省 1）
+  assert.equal(body.indexOf('n >= 0 && n <= 10'), -1, 'PoolCfg 不得残留 n >= 0 边界')
+  assert.match(body, /n < lo \|\| n > 10/, 'commit 越界判定须走 lo 下限')
+  assert.match(body, /var lo = props\.min === undefined \? 1 : props\.min/, 'PoolCfg 缺省下限=1')
+  // ② 接线：maxWorkers 传 min:1 + 出路提示；Verifier 并发显式 min:0（0 对它合法，不被顺带收紧）
+  assert.match(src, /cfgKey: 'maxWorkers', value: props\.maxW, min: 1, tip: '最少 1（暂停派发请切清单模式）；1 ~ 10'/)
+  assert.match(src, /cfgKey: 'maxVerifiers', value: props\.maxV, min: 0,/)
+  // ③ 行为：React 垫片直跑组件（client 无渲染 harness，与历卡同款 new Function 手法）
+  const hooks = []
+  let hi = 0
+  const React = {
+    useState: function (init) { const i = hi++; if (!(i in hooks)) hooks[i] = init; return [hooks[i], function (v) { hooks[i] = v }] },
+    useEffect: function () {},
+    createElement: function (type, props) { return { type: type, props: props || {}, kids: Array.prototype.slice.call(arguments, 2) } },
+  }
+  const calls = []
+  function rpc(name, args) { calls.push([name, args]); return Promise.resolve({ ok: true }) }
+  function fetchTasks() { return Promise.resolve() }
+  const C = {}, C_INV = '#fff', ic = function () { return null }
+  const PoolCfg = new Function('React', 'rpc', 'fetchTasks', 'C', 'C_INV', 'ic', body + '; return PoolCfg')(React, rpc, fetchTasks, C, C_INV, ic)
+  function render(props) { hi = 0; return PoolCfg(props) }
+  function inputOf(tree) { let hit = null; for (let i = 0; i < tree.kids.length; i++) { if (tree.kids[i] && tree.kids[i].type === 'input') hit = tree.kids[i] } return hit }
+  const wProps = { label: 'Worker 并发', cfgKey: 'maxWorkers', value: 3, min: 1, tip: '最少 1（暂停派发请切清单模式）；1 ~ 10' }
+  let tree = render(wProps)
+  inputOf(tree).props.onChange({ target: { value: '0' } })
+  tree = render(wProps) // 受控输入：状态更新后重渲染再失焦（与真实 React 时序一致）
+  inputOf(tree).props.onBlur()
+  assert.equal(calls.length, 0, 'GUI 输入 0 不得写服务端（旧 bug：写 0 → 服务端静默改成 3）')
+  assert.equal(inputOf(render(wProps)).props.value, '3', '越界值失焦回弹服务端权威值')
+  // 步进：下限 1 时按「−」仍提交 1，绝不产生 0
+  hooks.length = 0
+  const atMin = { label: 'Worker 并发', cfgKey: 'maxWorkers', value: 1, min: 1 }
+  const minus = render(atMin).kids.filter(function (k) { return k && k.type === 'button' && k.props.title === '减 1' })[0]
+  assert.ok(minus, 'PoolCfg 应有「减 1」步进按钮')
+  minus.props.onClick()
+  assert.equal(calls.length, 1, '下限 1 按「−」只提交合法值（绝不产生 0）')
+  assert.deepEqual(calls[0], ['set-board-config', { key: 'maxWorkers', value: 1 }], '「−」在下限提交 1 而非 0')
+  assert.equal(inputOf(render(atMin)).props.value, '1')
+  // Verifier 并发 0 合法：照写（不被 maxWorkers 修复顺带收紧）
+  hooks.length = 0
+  calls.length = 0
+  const vProps = { label: 'Verifier 并发', cfgKey: 'maxVerifiers', value: 2, min: 0 }
+  let vt = render(vProps)
+  inputOf(vt).props.onChange({ target: { value: '0' } })
+  vt = render(vProps)
+  inputOf(vt).props.onBlur()
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0], ['set-board-config', { key: 'maxVerifiers', value: 0 }], 'Verifier 并发 0 照写')
+  // ④ 产物：pretest 已重组装 client.js
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.ok(built.indexOf('var lo = props.min === undefined ? 1 : props.min') >= 0, 'client.js 缺 PoolCfg 下限标记（需 npm run build-client 重组装）')
+  assert.ok(built.indexOf("cfgKey: 'maxWorkers', value: props.maxW, min: 1") >= 0, 'client.js 缺 maxWorkers min:1 接线')
+  assert.equal(built.indexOf('n >= 0 && n <= 10'), -1, 'client.js 残留旧 0 边界（需重组装）')
 })
 
 // 熔断通知分态行为测试 harness：一次性 verifier run 失败，捕获 pushSysNote 文案 + badModels 落账

@@ -1419,6 +1419,22 @@ export function createRpc(ctx, state, deps) {
           if (__fe) return { ok: false, error: __fe }
         }
       }
+      // ===== maxWorkers falsy 陷阱修复（task-mvzoq3ov，实证 n-mvmtsf9axnn4）=====
+      // 旧写 `Math.max(1, Math.min(10, args.value || 3))`：0 是 falsy → 被吞成缺省 3。用户设 0 想「暂停派发」，
+      // 实际落 3 且 configLog 留一条 from→to:3 的「越调越大」错向审计行——静默改写比报错难查得多。
+      // 新口径：缺省只认 undefined/null/''（语义不变，落 3）；其余一律 Number() 后校验，非 1-10 整数**显式拒写**
+      // （零落盘、零 configLog），错误文案指路「暂停派发请切清单模式」。
+      var __mwWrite = 3 // maxWorkers 落盘值：缺省取 3；显式值在下方校验通过后写入
+      if (args.key === 'maxWorkers') {
+        var __mwMissing = args.value === undefined || args.value === null || args.value === ''
+        if (!__mwMissing) {
+          var __mwN = Number(args.value)
+          if (!isFinite(__mwN) || Math.floor(__mwN) !== __mwN || __mwN < 1 || __mwN > 10) {
+            return { ok: false, error: 'maxWorkers 合法范围 1-10（不支持 0——如需暂停派发请切「清单模式」或停用看板插件）。收到: ' + String(args.value) }
+          }
+          __mwWrite = __mwN
+        }
+      }
       // ===== 板级配置审计行（task-mv9yuq2l，实证 n-mv8ki92qnhdq：verifierModel 神隐回退 flash 零留痕无从审计）=====
       // 白名单键成功写入即追加一行 {key, from, to, actor, at} 到 d.configLog（随看板落盘），截尾留最新 50 条——
       // 审计是「近期谁动了什么」的线索面，不做无限增长。from/to 取 d 的平铺顶层字段（白名单键全是顶层字段），
@@ -1427,7 +1443,7 @@ export function createRpc(ctx, state, deps) {
       return mutateLocked(sid, function (d) {
         var __from = d[args.key] === undefined ? null : d[args.key] // 写前留旧值（JSON 落盘不容 undefined，归一成 null）
         var __hit = true
-        if (args.key === 'maxWorkers') d.maxWorkers = Math.max(1, Math.min(10, args.value || 3)); else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'cleanupRetentionDays') d.cleanupRetentionDays = Math.max(1, Math.min(90, Number(args.value) || 7)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'workerContinuable') d.workerContinuable = !!args.value; else if (args.key === 'verifyUserGuide') d.verifyUserGuide = !!args.value; else if (args.key === 'probeEnabled') d.probeEnabled = !!args.value; else if (args.key === 'probeIntervalMin') d.probeIntervalMin = core.normalizeProbeIntervalMin(args.value); else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } else if (args.key === 'laneModels') { var __base = cfg(d).laneModels; for (var __pi = 0; __pi < TASK_SIZES.length; __pi++) { var __pl = args.value[TASK_SIZES[__pi]]; if (!__pl) continue; if (__pl.worker !== undefined) __base[TASK_SIZES[__pi]].worker = core.normalizeLaneSlot(__pl.worker); if (__pl.verifier !== undefined) __base[TASK_SIZES[__pi]].verifier = core.normalizeLaneSlot(__pl.verifier) } d.laneModels = __base } else if (args.key === 'fallbackModels') { d.fallbackModels = core.normalizeFallbackModels(args.value) } else __hit = false
+        if (args.key === 'maxWorkers') d.maxWorkers = __mwWrite; else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'cleanupRetentionDays') d.cleanupRetentionDays = Math.max(1, Math.min(90, Number(args.value) || 7)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'workerContinuable') d.workerContinuable = !!args.value; else if (args.key === 'verifyUserGuide') d.verifyUserGuide = !!args.value; else if (args.key === 'probeEnabled') d.probeEnabled = !!args.value; else if (args.key === 'probeIntervalMin') d.probeIntervalMin = core.normalizeProbeIntervalMin(args.value); else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } else if (args.key === 'laneModels') { var __base = cfg(d).laneModels; for (var __pi = 0; __pi < TASK_SIZES.length; __pi++) { var __pl = args.value[TASK_SIZES[__pi]]; if (!__pl) continue; if (__pl.worker !== undefined) __base[TASK_SIZES[__pi]].worker = core.normalizeLaneSlot(__pl.worker); if (__pl.verifier !== undefined) __base[TASK_SIZES[__pi]].verifier = core.normalizeLaneSlot(__pl.verifier) } d.laneModels = __base } else if (args.key === 'fallbackModels') { d.fallbackModels = core.normalizeFallbackModels(args.value) } else __hit = false
         if (__hit) {
           if (!Array.isArray(d.configLog)) d.configLog = []
           d.configLog.push({ key: String(args.key), from: __from, to: d[args.key] === undefined ? null : d[args.key], actor: actor, at: new Date().toISOString() })
