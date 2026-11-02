@@ -867,6 +867,140 @@ export function createSettle(opts) {
       return swept.length
     }
 
+    // ===== 野跑看门狗（task-mvyzshi7）：非落定卡 running 留档超 hardMin 墙钟即结算 =====
+    // 事故（本体板 2026-11-02 实证，task-mvyyxs5u）：host 重启把 armTimeouts 的两级超时臂（内存 setTimeout）
+    // 清零，而 reconcileRoot 只重建 continuable Worker 的观测与超时臂（三道门禁自证「只对 role=worker +
+    // continuable」）——一次性 verifier run 的超时臂**永不恢复**，hardMin 硬超时彻底失效，run 无任何上限
+    // 可无限野跑（实证：verifier run 跑 8 小时 2 分仍在活跃写盘；日志持续增长，600s 零增长挂死闸也抓不到）。
+    // 修法（墙钟兜底，不依赖内存计时器）：每轮 poolCycle 扫所有**非落定卡**上 outcome==='running' 且无
+    // endedAt 的留档，年龄 now-at 超过该留档的 hardMin（缺省 360 分钟，留档自带值优先）→ 按失败结算收口：
+    //   · 关账：outcome='timeout/error' + endedAt + note（settleRun 超时臂同款结局，字段与 closeRunHistory
+    //     一致、并在同一持锁事务里连同卡面推进一次写完）；
+    //   · 落卡：lastError 野跑文案 + 喂熔断连击（feedModelFailure 三连拉黑——与在飞臂的 verifier 即时
+    //     badModels 熔断不同：重启残影不欺负模型，走连击更保守）；
+    //   · worker（认领位曾指向它）：settleWorker 失败臂同款——retryCount++ → pending 重排 / x3 blocked；
+    //   · verifier（幂等位曾指向它）：settleVerifier 失败臂同款——verifyRetries++ → 重排审查 / x3 转人工；
+    //   · hook-post：幂等占用位已清 → 重挂 hooks.post.pending 待跑标记（releaseSpawnPlaceholder 同款，
+    //     下轮 cycle 重新 spawn 收口）；hook-pre 的状态机由 poolCycle 既有 2min 死占位回收自愈，不动；
+    //   · 其余（占位未指向本档/卡不在对应跑态/escalation/frozen）：只关账+留痕，绝不碰卡面状态——
+    //     占位易主说明卡面已有新 run 接手（孤儿回收后重派的形状），清卡面会误杀新 run；
+    //   · 补停：锁外对野跑子会话补一枪 interrupt（stopSettledOneShot 同款 authority 形状）——不补停则旧
+    //     会话残影继续空烧（事故原形 8h）；continuable 补停失败 → noResume 落档（重派回退 fresh spawn）。
+    // 保守双闸（防误杀在飞 run）：留档有活跃 rec 接管且 rec 年龄未超线 → 跳过——rec 年轻（reconcile 重建/
+    // 续跑刚接手）说明超时臂在位、run 有主；留档 at 是重启前的时间戳、年龄大不算野跑。rec 年龄也超线才动手
+    // （settleRun 有 settled 守卫，双闸再防一层「墙钟 vs 在飞臂」的双结算重派）。
+    // 与 sweepZombieRuns 分工：那个管**落定卡**（resolved/cancelled/archived）的 running 无 endedAt 留档
+    // 关账（stale-closed，无年龄闸）；本函数管**非落定卡**的超龄 running 留档真超时结算——状态域互斥不重叠。
+    // 边界（只加墙钟兜底）：armTimeouts 两级超时臂语义、reconcileRoot 门禁、sweepZombieRuns 口径均不动。
+    var WILD_ERR = 'run 超出硬超时上限（重启后超时臂丢失的野跑），按模型面故障结算重派'
+    var WILD_RUN_NOTE = '野跑看门狗墙钟结算（重启后超时臂丢失）'
+    var WILD_CIRCUIT_WHY = '野跑超硬超时墙钟（重启后超时臂丢失），已熔断'
+    function wildHardMinOf(r) { var hm = Number(r && r.hardMin); return hm > 0 ? hm : 360 }
+    // 候选闸（预扫/锁内共用同一判定，两处口径永不漂移）：非落定卡 + running 无 endedAt + 年龄超线 + 双闸放行
+    function wildGate(t, r, runs) {
+      if (!t || !r || r.outcome !== 'running' || r.endedAt) return false
+      var atT = new Date(r.at).getTime()
+      if (!isFinite(atT) || atT <= 0) return false // 无/畸形起始时间：年龄不可知，宁少勿多不动
+      var hardMs = wildHardMinOf(r) * 60000
+      if (Date.now() - atT < hardMs) return false // 年龄闸：墙钟直比（now - at >= hardMin×60s）
+      var rec = runs[t.id]
+      if (rec && !rec.settled && String(rec.id) === String(r.id)) {
+        var recStart = Number(rec.startedAt)
+        if (!(recStart > 0) || Date.now() - recStart < hardMs) return false // 在飞 rec 年轻：超时臂在位，留给臂结算
+      }
+      return true
+    }
+    async function sweepWildRuns(sid, snap) {
+      if (!snap || snap.__noPersist || !Array.isArray(snap.tasks)) return 0 // 瞬时读盘失败/空板：跳过，不写盘
+      var runs = runsFor(sid)
+      // 预扫快照（零写盘纪律同 sweepZombieRuns）：无候选不进锁——安静板不因看门狗多出一次锁调用
+      var hasCandidate = false
+      for (var pi = 0; pi < snap.tasks.length && !hasCandidate; pi++) {
+        var pt = snap.tasks[pi]
+        if (!pt || pt.status === 'resolved' || pt.status === 'cancelled' || pt.status === 'archived') continue
+        var prs = Array.isArray(pt.runs) ? pt.runs : []
+        for (var pj = 0; pj < prs.length; pj++) { if (wildGate(pt, prs[pj], runs)) { hasCandidate = true; break } }
+      }
+      if (!hasCandidate) return 0
+      var settled = [] // 锁内结算清单 {taskId,rid,role,model,continuable}——锁外喂熔断/补停消费
+      var blockedResumes = [] // continuable 补停失败者：锁外二次小事务落 noResume（续跑资格作废）
+      await mutateLocked(sid, function (d) {
+        if (!d || !Array.isArray(d.tasks)) return null
+        var any = false
+        d.tasks.forEach(function (t) {
+          if (!t || t.status === 'resolved' || t.status === 'cancelled' || t.status === 'archived') return // 落定卡归 sweepZombieRuns
+          if (!Array.isArray(t.runs)) return
+          t.runs.forEach(function (r) {
+            if (!wildGate(t, r, runs)) return // 锁内重判（含双闸）：预扫到持锁的窗口里卡面可能已变
+            var rid = String(r.id)
+            var role = r.role || '?'
+            var wasClaim = t.claimedBy === rid // worker 认领位曾指向本档（清占位前取值——清了就判不了）
+            var wasVerif = t.verifierRun === rid // verifier/hook-post 幂等位曾指向本档
+            r.outcome = 'timeout/error' // settleRun 超时臂同款结局（closeRunHistory 同字段直写，单事务原子）
+            r.endedAt = new Date().toISOString()
+            r.note = WILD_RUN_NOTE
+            if (wasClaim) { t.claimedBy = null; t.claimedAt = null }
+            if (wasVerif) { t.verifierRun = null; delete t.verifierRunAt }
+            t.lastError = String(WILD_ERR).slice(0, 300) // 失败原因落卡（settleWorker/settleVerifier 同款截断）
+            if (role === 'worker' && wasClaim && t.status === 'in-progress' && !t.escalation && !t.frozen) {
+              t.retryCount = (t.retryCount || 0) + 1
+              if (t.retryCount >= 3) { t.status = 'blocked'; ah(t, 'in-progress', 'blocked', 'system', 'worker 失败 x' + t.retryCount + '（' + WILD_ERR.slice(0, 120) + '），待人工介入') }
+              else { t.status = 'pending'; ah(t, 'in-progress', 'pending', 'system', 'worker 失败（' + WILD_ERR.slice(0, 80) + '），重新排队 (' + t.retryCount + '/3)') }
+            } else if (role === 'verifier' && wasVerif && t.status === 'verifying' && !t.escalation && !t.frozen) {
+              t.verifyRetries = (t.verifyRetries || 0) + 1
+              if (t.verifyRetries >= 3) {
+                t.escalation = { question: 'Verifier 连续 ' + t.verifyRetries + ' 次超硬超时野跑（重启后超时臂丢失）。交付物已完成，请人工验收：看板详情页直接通过/驳回，或 task_verify 裁决。', at: new Date().toISOString(), by: 'system' }
+                ah(t, 'verifying', 'verifying', 'system', 'verifier 野跑超时 x' + t.verifyRetries + '，转人工验收')
+              } else ah(t, 'verifying', 'verifying', 'system', 'verifier 野跑超硬超时，重新排队审查 (' + t.verifyRetries + '/3)')
+            } else if (role === 'hook-post' && wasVerif && t.hooks && t.hooks.post && t.hooks.post.state !== 'done') {
+              t.hooks.post.pending = true // 幂等占用位已清 → 重挂待跑标记，下轮 cycle 重新 spawn 收口
+            } else {
+              ah(t, t.status, t.status, 'system', '野跑 run 留档墙钟超时关账（角色 ' + role + '）')
+            }
+            settled.push({ taskId: t.id, rid: rid, role: role, model: r.model || '', continuable: r.continuable === true })
+            any = true
+          })
+        })
+        return any ? d : null // 无改动返回 null → 不写盘
+      }, true) // skipKick：本轮已是 poolCycle，重派由本轮持锁段按新鲜 d 自然承接
+      if (!settled.length) return 0
+      // ===== 锁外收尾：喂熔断连击 + 野跑子会话补停 =====
+      // 熔断/补停只盖 worker/verifier（hungZeroOutputSweep / stopSettledOneShot 同款边界——hook 与
+      // decomposer 的模型不进连击面、子会话不由看门狗停）。
+      var subagents = ctx.subagents
+      var parent = rootForSession(sid)
+      for (var wi = 0; wi < settled.length; wi++) {
+        var sw = settled[wi]
+        if (sw.model && (sw.role === 'worker' || sw.role === 'verifier')) feedModelFailure(sid, sw.model, WILD_CIRCUIT_WHY)
+        if (!subagents || typeof subagents.interrupt !== 'function') continue // 老宿主/老桩无此能力：跳过补停（关账不受影响）
+        if (sw.role !== 'worker' && sw.role !== 'verifier') continue
+        if (!parent) { if (sw.role === 'worker' && sw.continuable) blockedResumes.push(sw); continue } // 无活 root 可授权（endContinuable resumeBlocked 同款）
+        try { subagents.interrupt(sw.rid, { kind: 'ancestor', agent: parent }) }
+        catch (e) {
+          console.error('[task-board] 野跑子会话补停失败（会话可能仍在空转，只影响 token）task ' + sw.taskId + ' child ' + sw.rid + ':', String(e))
+          if (sw.role === 'worker' && sw.continuable) blockedResumes.push(sw)
+        }
+      }
+      // continuable 补停失败 → noResume 落档：该会话不可信（interrupt 打不到），重派直接 fresh spawn 不空唤醒
+      // （endContinuable → closeRunHistory(flags.noResume) 同款语义；留档已关账故走二次小事务直写）。
+      if (blockedResumes.length) {
+        try {
+          await mutateLocked(sid, function (d) {
+            if (!d || !Array.isArray(d.tasks)) return null
+            var anyR = false
+            blockedResumes.forEach(function (s2) {
+              var t2 = d.tasks.find(function (x) { return x.id === s2.taskId })
+              if (!t2 || !Array.isArray(t2.runs)) return
+              t2.runs.forEach(function (r2) { if (r2 && String(r2.id) === s2.rid && r2.noResume !== true) { r2.noResume = true; anyR = true } })
+            })
+            return anyR ? d : null
+          }, true)
+        } catch (e) { console.error('[task-board] 野跑 noResume 落档失败:', String(e)) }
+      }
+      console.log('[task-board] 野跑看门狗结算 ' + settled.length + ' 条：' + settled.map(function (x) { return x.taskId + '/' + x.rid + '/' + x.role }).join(', '))
+      return settled.length
+    }
+
     // ===== 幽灵占位回收（池冻结根修，task-muwlepg6）=====
     // 病根（活体实证）：活跃表项（rec）的**唯一**摘除点是各结算通道（事件通道 settleRun /
     // 上报通道 settleReportedRun / 手动终止）。任何一条漏走（worker 经 board_report 完成但当时
@@ -950,5 +1084,6 @@ export function createSettle(opts) {
     // 重指本实例——同一 deps 接线（mutateLocked/health/通知类/kickCycle 同源），语义与搬移前一致。
     // 拆分第 7 刀：reconcile 域四函数（accumulateRunUsage/reconcileRoot/sweepZombieRuns/reapGhostRecs）
     // 从返回集导出——dispatch.mjs 的 poolCycleBody 三挂点与 return API（rpc 侧手动终止关账消费）重指本实例。
-    return { settleRun: settleRun, settleRunRecord: settleRunRecord, settleReportedRun: settleReportedRun, onAgentStatus: onAgentStatus, settleWorker: settleWorker, accumulateRunUsage: accumulateRunUsage, reconcileRoot: reconcileRoot, sweepZombieRuns: sweepZombieRuns, reapGhostRecs: reapGhostRecs }
+    // 野跑看门狗（task-mvyzshi7）随返回集导出：dispatch.mjs 的 poolCycleBody 挂点消费（sweepZombieRuns 之后）。
+    return { settleRun: settleRun, settleRunRecord: settleRunRecord, settleReportedRun: settleReportedRun, onAgentStatus: onAgentStatus, settleWorker: settleWorker, accumulateRunUsage: accumulateRunUsage, reconcileRoot: reconcileRoot, sweepZombieRuns: sweepZombieRuns, sweepWildRuns: sweepWildRuns, reapGhostRecs: reapGhostRecs }
 }

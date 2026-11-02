@@ -799,3 +799,175 @@ test('挂死检测⑥（task-mvrt9tn5）：2s 延迟快模型 600s 内静默不�
     assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/kimi-k3'], 1, '真挂死照喂熔断连击（挂死=模型面故障语义不变）')
   } finally { fs.rmSync(L.root, { recursive: true, force: true }) }
 })
+
+// ===== 野跑看门狗（task-mvyzshi7）：非落定卡 running 留档超 hardMin 墙钟即结算 =====
+// 事故（本体板 2026-11-02 实证，task-mvyyxs5u）：DSH 重启把 armTimeouts 两级超时臂（内存 setTimeout）
+// 清零，reconcileRoot 只重建 continuable Worker 的观测与超时臂——一次性 verifier run 的超时臂永不恢复，
+// hardMin 硬超时彻底失效，run 无任何上限可无限野跑（verifier 跑 8 小时 2 分仍在活跃写盘；日志持续增长，
+// 600s 零增长挂死闸也抓不到）。修法：每轮 poolCycle 墙钟兜底扫描 sweepWildRuns（lib/settle.mjs）。
+// 本套与上方挂死套同一 mkGateDispatch harness；subagents 均不带 listChildren → reconcile 整段跳过，
+// 看门狗是唯一收口者（隔离断言）。留档年龄用真实墙钟（mock 时钟只接管 ctx.timer），at 直接预置到过去。
+var wildAt = function (minsAgo) { return new Date(Date.now() - minsAgo * 60000).toISOString() }
+var wildSubagents = function (stopped, extra) {
+  var s = {
+    list: function () { return ['mock'] },
+    getProvider: function () { return { inheritsParentContext: false } },
+    start: async function () { return { id: 'run-new', result: new Promise(function () {}), dispose: async function () {} } },
+    startContinuable: async function () { throw new Error('本用例不该 fresh spawn') },
+    sendMessage: async function () { throw new Error('本用例零续跑') },
+    interrupt: function (childId, authority) { if (stopped) stopped.push({ childId: childId, authority: authority }) },
+  }
+  for (var k in (extra || {})) s[k] = extra[k]
+  return s
+}
+
+test('野跑看门狗①（断言①+⑥）：verifying 卡超龄 verifier 留档（重启丢臂原形）→ 关账 timeout/error+清占位+连击+1+补停+当轮重派新 verifier；新 run 二轮零误伤', async () => {
+  var t = mkGateTask({ id: 'wv1', status: 'verifying', verifierRun: 'v-wild', verifierRunAt: '2026-01-01T00:00:00Z',
+    runs: [{ role: 'verifier', id: 'v-wild', at: wildAt(8 * 60), model: 'prov/glm-5.2', outcome: 'running', hardMin: 360 }] })
+  var stopped = []
+  var h = mkGateDispatch(mkGateBoard([t]), { subagents: wildSubagents(stopped, {
+    startContinuable: async function () { throw new Error('verifier 恒走一次性面') },
+  }) })
+  await h.dispatch.poolCycle(GATE_SID); await flushGate()
+  // 断言①：结算 timeout/error + 留痕 + 占位清除（8h 野跑的墙钟收口）
+  assert.equal(t.runs[0].outcome, 'timeout/error', '超龄留档关账 timeout/error（settleRun 超时臂同款结局）')
+  assert.ok(t.runs[0].endedAt, '关账写 endedAt')
+  assert.equal(t.runs[0].note, '野跑看门狗墙钟结算（重启后超时臂丢失）', '关账 note 留痕')
+  assert.match(String(t.lastError || ''), /超出硬超时上限.*野跑/, 'lastError 野跑文案落卡')
+  assert.equal(t.status, 'verifying', '验收卡保持 verifying（重排审查语义）')
+  assert.equal(t.verifyRetries, 1, '审查重试计数 +1（settleVerifier 失败臂同款）')
+  assert.ok((t.history || []).some(function (x) { return /野跑超硬超时，重新排队审查 \(1\/3\)/.test(x.note || '') }), '重排审查 history 留痕')
+  assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/glm-5.2'], 1, '熔断连击 +1（按模型面故障结算）')
+  assert.ok(!h.state.badModels[GATE_SID + '|prov/glm-5.2'], '连击 1 < 3 不拉黑（看门狗保守：不即时欺负模型）')
+  assert.equal(stopped.length, 1, '野跑子会话补停恰一枪（8h 空烧根修：关账必须连带停会话）')
+  assert.equal(stopped[0].childId, 'v-wild')
+  assert.equal(stopped[0].authority.kind, 'ancestor', 'authority 形状与 stopSettledOneShot/endContinuable 同款')
+  // 断言⑥：占位清除后当轮重派，新 verifier run 留档不受影响
+  assert.equal(t.verifierRun, 'run-new', 'verifierRun 已清并当轮换新 verifier')
+  assert.equal(t.runs.length, 2, '重派追加新留档')
+  assert.equal(t.runs[1].outcome, 'running', '新 run 留档照常挂 running')
+  await h.dispatch.poolCycle(GATE_SID); await flushGate()
+  assert.equal(t.runs[1].outcome, 'running', '二轮零误伤：新 run 年轻，看门狗不碰')
+  assert.equal(t.runs[0].outcome, 'timeout/error', '已关账留档不被二次改写（幂等）')
+  assert.equal(stopped.length, 1, '新 run 不补停')
+  assert.equal(t.verifyRetries, 1, '不重复计数（幂等）')
+})
+
+test('野跑看门狗②④（断言②+④）：年龄未超线零动作；在飞 rec（reconcile 重建/续跑刚接手）双闸零误伤——超龄留档也不抢在飞臂的活', async () => {
+  // reconcile 重建形状：重启后 rec 已重建+重挂超时臂（startedAt=5 分钟前），留档 at 还是重启前的（超龄 7h）
+  var reb = mkGateTask({ id: 'wreb', status: 'in-progress', claimedBy: 'child-reb', claimedAt: new Date().toISOString(),
+    runs: [{ role: 'worker', id: 'child-reb', at: wildAt(7 * 60), model: 'prov/glm-5.2', outcome: 'running', hardMin: 360, continuable: true }] })
+  // 断言②形状：无 rec 但年龄 10 分钟 << hardMin 360 → 零动作
+  var yng = mkGateTask({ id: 'wyng', status: 'in-progress', claimedBy: 'w-young', claimedAt: new Date().toISOString(),
+    runs: [{ role: 'worker', id: 'w-young', at: wildAt(10), model: 'prov/glm-5.2', outcome: 'running', hardMin: 360 }] })
+  var stopped = []
+  var h = mkGateDispatch(mkGateBoard([reb, yng]), { subagents: wildSubagents(stopped) })
+  h.runs['wreb'] = { id: 'child-reb', childId: 'child-reb', continuable: true, ran: true, run: null, role: 'worker', taskId: 'wreb', startedAt: Date.now() - 5 * 60000, model: 'prov/glm-5.2', settled: false }
+  await h.dispatch.poolCycle(GATE_SID); await flushGate()
+  // 断言④：留档超龄但 rec 年轻（超时臂在位）→ 双闸放行在飞臂，看门狗零动作
+  assert.equal(reb.runs[0].outcome, 'running', '在飞 rec 年轻：超龄留档不结算（reconcile 重建/续跑零误杀）')
+  assert.equal(reb.runs[0].endedAt, undefined, '不写 endedAt')
+  assert.equal(reb.status, 'in-progress', '卡面不动')
+  assert.equal(reb.claimedBy, 'child-reb', '认领位不动')
+  assert.equal(reb.retryCount, undefined, '零失败计数')
+  assert.ok(!(reb.history || []).some(function (x) { return /野跑/.test(x.note || '') }), '零野跑留痕')
+  // 断言②：年龄未超线且无 rec → 零动作
+  assert.equal(yng.runs[0].outcome, 'running', '年龄未超线：不结算（零动作）')
+  assert.equal(yng.runs[0].endedAt, undefined, '不写 endedAt')
+  assert.equal(yng.status, 'in-progress', '零动作')
+  assert.equal(yng.lastError, undefined, '零 lastError')
+  assert.deepEqual(stopped, [], '零补停（双闸与年龄闸都拦住，无任何误伤面）')
+  assert.ok(!h.state.modelFailStreak || !Object.keys(h.state.modelFailStreak).length, '零熔断连击')
+})
+
+test('野跑看门狗③（断言③）：hardMin 缺省 360 生效（5h 未到线不动）；留档自带 hardMin=60 覆盖缺省（70min 超线结算）——worker 失败臂同款重排', async () => {
+  var ndef = mkGateTask({ id: 'wnd', status: 'in-progress', claimedBy: 'w-ndef', claimedAt: new Date().toISOString(),
+    runs: [{ role: 'worker', id: 'w-ndef', at: wildAt(5 * 60), model: 'prov/glm-5.2', outcome: 'running' }] }) // 无 hardMin 字段（老留档形状）→ 缺省 360
+  var ovr = mkGateTask({ id: 'wovr', status: 'in-progress', claimedBy: 'w-hm60', claimedAt: new Date().toISOString(),
+    runs: [{ role: 'worker', id: 'w-hm60', at: wildAt(70), model: 'prov/glm-5.2', outcome: 'running', hardMin: 60 }] })
+  var board = mkGateBoard([ndef, ovr])
+  board.boardMode = 'manual' // 关 worker 派发：隔离看门狗结算面（当轮重派面由用例①覆盖）
+  var stopped = []
+  var h = mkGateDispatch(board, { subagents: wildSubagents(stopped) })
+  await h.dispatch.poolCycle(GATE_SID); await flushGate()
+  assert.equal(ndef.runs[0].outcome, 'running', '无 hardMin → 缺省 360 生效：5h（300min）< 360min 不结算')
+  assert.equal(ndef.status, 'in-progress', '缺省闸内零动作')
+  assert.equal(ovr.runs[0].outcome, 'timeout/error', '留档自带 hardMin=60 覆盖缺省：70min > 60min 超线结算')
+  assert.ok(ovr.runs[0].endedAt, '关账写 endedAt')
+  assert.equal(ovr.status, 'pending', 'worker 失败臂同款：回 pending 重新排队')
+  assert.equal(ovr.claimedBy, null, '认领位清除')
+  assert.equal(ovr.claimedAt, null, '认领时间清除')
+  assert.equal(ovr.retryCount, 1, '失败计数 +1')
+  assert.match(String(ovr.lastError || ''), /超出硬超时上限/, '失败原因落卡')
+  assert.ok((ovr.history || []).some(function (x) { return /worker 失败（.*野跑.*），重新排队 \(1\/3\)/.test(x.note || '') }), '重排 history 留痕')
+  assert.deepEqual(stopped.map(function (s) { return s.childId }), ['w-hm60'], '补停只打超线结算的野跑子会话')
+  assert.equal(h.state.modelFailStreak[GATE_SID + '|prov/glm-5.2'], 1, 'worker 野跑同喂熔断连击')
+})
+
+test('野跑看门狗⑤（断言⑤）：落定卡超龄 running 留档仍走原 sweepZombieRuns 语义（stale-closed），看门狗不抢不碰', async () => {
+  var res = mkGateTask({ id: 'wres', status: 'resolved', resolvedAt: '2026-01-01T00:00:00Z', verifierRun: 'v-dead', verifierRunAt: '2026-01-01T00:00:00Z',
+    runs: [{ role: 'verifier', id: 'v-dead', at: wildAt(8 * 60), model: 'prov/glm-5.2', outcome: 'running', hardMin: 360 }] })
+  var stopped = []
+  var h = mkGateDispatch(mkGateBoard([res]), { subagents: wildSubagents(stopped) })
+  await h.dispatch.poolCycle(GATE_SID); await flushGate()
+  assert.equal(res.runs[0].outcome, 'stale-closed', '落定卡归 sweepZombieRuns：stale-closed（非看门狗的 timeout/error——管辖权不重叠）')
+  assert.equal(res.runs[0].note, 'host 重启僵尸留档清扫', '僵尸清扫 note 原样')
+  assert.equal(res.verifierRun, null, '僵尸清扫清位原样')
+  assert.equal(res.lastError, undefined, '看门狗不落 lastError（没抢跑）')
+  assert.deepEqual(stopped, [], '落定卡留档不由看门狗补停（reconcile 孤儿补停/僵尸清扫辖区，与本卡改动无关）')
+})
+
+test('野跑看门狗⑥：continuable 野跑补停失败（interrupt 抛错）→ noResume 落档（重派回退 fresh spawn，不空唤醒）', async () => {
+  var t = mkGateTask({ id: 'wnr', status: 'in-progress', claimedBy: 'child-wild', claimedAt: new Date().toISOString(),
+    runs: [{ role: 'worker', id: 'child-wild', at: wildAt(8 * 60), model: 'prov/glm-5.2', outcome: 'running', hardMin: 360, continuable: true }] })
+  var board = mkGateBoard([t])
+  board.boardMode = 'manual'
+  var h = mkGateDispatch(board, { subagents: wildSubagents(null, {
+    interrupt: function () { throw new Error('杀无可杀（会话已死/无 root 授权）') },
+  }) })
+  var origErr = console.error; console.error = function () {} // 补停失败留痕日志
+  try {
+    await h.dispatch.poolCycle(GATE_SID); await flushGate()
+    assert.equal(t.runs[0].outcome, 'timeout/error', '超龄关账照旧')
+    assert.equal(t.runs[0].noResume, true, 'interrupt 失败 → noResume 落档（续跑资格作废，重派直接 fresh spawn）')
+    assert.equal(t.status, 'pending', '回 pending 重排')
+    assert.equal(t.retryCount, 1, '失败计数照旧')
+  } finally { console.error = origErr }
+})
+
+test('野跑看门狗⑦：双闸兜底半边——rec 在表但年龄也超线（臂应到期却没结算的形状）→ 照样结算；残 rec 由同轮幽灵回收摘除收尾（口径不另立）', async () => {
+  var t = mkGateTask({ id: 'wage', status: 'in-progress', claimedBy: 'child-age', claimedAt: new Date().toISOString(),
+    runs: [{ role: 'worker', id: 'child-age', at: wildAt(8 * 60), model: 'prov/glm-5.2', outcome: 'running', hardMin: 360, continuable: true }] })
+  var board = mkGateBoard([t])
+  board.boardMode = 'manual'
+  var stopped = []
+  var h = mkGateDispatch(board, { subagents: wildSubagents(stopped) })
+  // rec 在表且年龄也超线（startedAt 7h 前）——双闸的「rec 存在但 age 也超线」半边放行结算
+  h.runs['wage'] = { id: 'child-age', childId: 'child-age', continuable: true, ran: true, run: null, role: 'worker', taskId: 'wage', startedAt: Date.now() - 7 * 3600000, model: 'prov/glm-5.2', settled: false }
+  await h.dispatch.poolCycle(GATE_SID); await flushGate()
+  assert.equal(t.runs[0].outcome, 'timeout/error', 'rec 在表但年龄也超线 → 结算（双闸放行的兜底半边）')
+  assert.equal(t.status, 'pending', '回 pending 重排')
+  assert.ok(!h.runs['wage'], '被结算卡上的残 rec 由同轮幽灵回收按卡面失活摘除（看门狗只结算不摘表项，口径不另立）')
+  assert.equal(t.runs[0].outcome, 'timeout/error', 'reap 收尾不覆盖已关账结局（closeRunHistory 只关 running 条目——双结算收敛为单结局）')
+  assert.deepEqual(stopped.map(function (s) { return s.childId }), ['child-age'], '补停照打（超时臂同款：结算即停）')
+})
+
+test('野跑看门狗⑧（源码级）：sweepWildRuns 定义/年龄闸/双闸/落定卡门禁/连击/补停 + settle 返回集导出 + poolCycleBody 挂点次序', () => {
+  const stl = readFileSync(new URL('../lib/settle.mjs', import.meta.url), 'utf8')
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  assert.match(stl, /async function sweepWildRuns\(sid, snap\) \{/, '看门狗函数定义')
+  assert.match(stl, /function wildHardMinOf\(r\) \{ var hm = Number\(r && r\.hardMin\); return hm > 0 \? hm : 360 \}/, 'hardMin：留档自带值优先，缺省 360')
+  assert.match(stl, /if \(Date\.now\(\) - atT < hardMs\) return false/, '年龄闸：墙钟直比（不依赖内存计时器——重启丢臂的兜底）')
+  assert.match(stl, /if \(!\(recStart > 0\) \|\| Date\.now\(\) - recStart < hardMs\) return false/, '保守双闸：在飞 rec 年轻 → 留给在飞臂（reconcile 重建/续跑零误伤）')
+  assert.match(stl, /pt\.status === 'resolved' \|\| pt\.status === 'cancelled' \|\| pt\.status === 'archived'/, '预扫只过非落定卡（落定卡归 sweepZombieRuns，口径不重叠）')
+  assert.match(stl, /r\.outcome = 'timeout\/error'/, '关账结局=超时臂同款')
+  assert.match(stl, /r\.note = WILD_RUN_NOTE/, '关账 note 留痕')
+  assert.match(stl, /feedModelFailure\(sid, sw\.model, WILD_CIRCUIT_WHY\)/, '喂熔断连击（三连拉黑，非即时熔断）')
+  assert.match(stl, /subagents\.interrupt\(sw\.rid, \{ kind: 'ancestor', agent: parent \}\)/, '野跑子会话补停（8h 空烧根修）')
+  assert.match(stl, /sweepWildRuns: sweepWildRuns/, 'settle 返回集导出')
+  // 挂点次序：sweepZombieRuns（落定卡）→ sweepWildRuns（非落定卡）→ reapGhostRecs
+  const iZ = dsp.indexOf('settle.sweepZombieRuns(sid, snap)')
+  const iW = dsp.indexOf('settle.sweepWildRuns(sid, snap)')
+  const iR = dsp.indexOf('reapedN = await settle.reapGhostRecs(sid, snap)')
+  assert.ok(iZ >= 0 && iW > iZ && iR > iW, 'poolCycleBody 挂点次序：僵尸清扫 → 野跑看门狗 → 幽灵回收')
+})

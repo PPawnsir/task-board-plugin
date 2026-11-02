@@ -1008,6 +1008,14 @@ export function createDispatch(ctx, state, deps) {
       // 落定卡的僵尸留档无活跃 rec，reconcile（只在飞卡）/reapGhostRecs（只清内存表项）都管不到它，
       // 而它若留在 running 会卡死 archive；安静板（只有已落定卡）会走空闲快进早退，清扫必须排在其前才能兜到。
       try { await settle.sweepZombieRuns(sid, snap) } catch (e) { console.error('[task-board] 僵尸留档清扫失败:', String(e)) }
+      // 野跑看门狗（task-mvyzshi7）：非落定卡 running 留档超 hardMin 墙钟即结算——重启把 armTimeouts 两级
+      // 超时臂（内存 setTimeout）清零后，一次性 run（verifier 等）的超时臂永不恢复，run 无上限可无限野跑
+      // （本体板实证 8h）。位置在 sweepZombieRuns（落定卡辖区）之后、幽灵回收之前：结算会把超龄卡翻回
+      // pending/重排审查，本轮持锁段的 pickDispatch 读的是锁内新鲜 d，当轮即可重派；重读快照同回收纪律
+      //（结算写盘后 stalePool/staleInfo 判定不能再拿旧 snap 误判）。
+      var wildN = 0
+      try { wildN = await settle.sweepWildRuns(sid, snap) } catch (e) { console.error('[task-board] 野跑看门狗失败（本轮跳过，派发照常）:', String(e)) }
+      if (wildN > 0) { try { snap = await rt(sid) } catch (_) {} }
       // 幽灵占位回收（池冻结根修）：必须排在活跃度计数与 pickDispatch 之前——残留表项正是把 capW 拉到 0、
       // 并把卡挡在 Verifier 派发之外的元凶（见 reapGhostRecs 头注释）。收尾会写盘（结局/usage），
       // 故有回收时重读一次快照——否则下面空闲快进的 stalePool/staleInfo 判定会拿旧快照误判（写盘已归一进锁）。
