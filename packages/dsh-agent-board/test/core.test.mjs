@@ -7597,3 +7597,43 @@ test('artifacts⑦：GUI 不下发不展示——client 侧零接线（本卡不
   const dash = readFileSync(new URL('../lib/client/dashboard.js', import.meta.url), 'utf8')
   assert.equal(dash.indexOf('artifacts'), -1, '设置区/仪表盘无 artifacts 下发口')
 })
+
+// ===== 工作模式切换乐观 UI（task-mw0e51zd）=====
+// 用户 2026-11-03 反馈：清单模式/自动派发/Team 托管三档点击切换「好几秒才显示成功」。
+// 客户端病根：WorkModeSwitch.pick 悲观更新——rpc('set-work-mode').then(fetchTasks) 整条链回来才翻转。
+// 现口径：点击瞬间本地翻转 state.workMode + notify 立即渲染（受控组件 props.mode 来自 state.workMode，
+// 订阅链 setWorkModeState 当场回灌，按钮组高亮立即切换），RPC 后台落盘；成功后照常 fetchTasks
+// （3s 轮询 + tasksHash 对账天然收敛），失败回弹闭包捕获的前值 prev。服务端语义本卡零改动。
+// 三层断言：①模块源结构（顺序：乐观翻转 → RPC → 失败回弹）②产物重组装同款标记 ③受控组件契约不变。
+test('工作模式乐观 UI（task-mw0e51zd）：pick 先翻转 state.workMode+notify 再发 RPC，失败回弹闭包前值', () => {
+  const dash = readFileSync(new URL('../lib/client/dashboard.js', import.meta.url), 'utf8')
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // ① 模块源：整段 pick 提取后逐要素核对（防跨函数误命中——本文件另有两个同名 pick(v)）
+  const hit = dash.match(/function pick\(m\) \{[\s\S]*?\n      \}/)
+  assert.ok(hit, 'WorkModeSwitch 应保留 pick(m) 入口')
+  const pick = hit[0]
+  assert.match(pick, /var prev = cur/, '回弹前值必须在发 RPC 前捕获（prev = 当前 props.mode 前值）')
+  assert.match(pick, /state\.workMode = m; notify\(\)/, '点击瞬间乐观翻转 + notify 立即渲染')
+  assert.match(pick, /rpc\('set-work-mode', \{ mode: m \}\)/, 'RPC 单入口不变（set-work-mode）')
+  assert.match(pick, /\.then\(fetchTasks\)/, '成功后照常 fetchTasks 对账')
+  assert.match(pick, /\.catch\(function \(\) \{ state\.workMode = prev; notify\(\) \}\)/, '失败回弹前值 + notify 复位')
+  const iOpt = pick.indexOf('state.workMode = m; notify()')
+  const iRpc = pick.indexOf("rpc('set-work-mode'")
+  const iRoll = pick.indexOf('state.workMode = prev; notify()')
+  assert.ok(iOpt >= 0 && iRpc > iOpt && iRoll > iRpc, '三段顺序必须是：乐观翻转 → RPC → 失败回弹')
+  assert.equal(pick.indexOf('then(function'), -1, '不得退回「RPC 回来才在 then 里改 state」的悲观写法')
+  // 受控组件契约不变：模式仍来自 props.mode（乐观写 state 后经订阅链回灌），三档/选中态口径不动
+  assert.match(dash, /var cur = props\.mode \|\| 'auto'/)
+  assert.match(dash, /\{ k: 'list', name: '清单模式'[\s\S]{0,200}\{ k: 'auto', name: '自动派发'[\s\S]{0,200}\{ k: 'team', name: 'Team 托管'/)
+  assert.match(dash, /var on = cur === o\.k/)
+  // ② 产物重组装：lib/client.js 为拼装生成物（build-client 拼 kernel/board-list/task-detail/dashboard），源改必须重建
+  for (const s of [
+    'var prev = cur',
+    'state.workMode = m; notify()',
+    "rpc('set-work-mode', { mode: m }).then(fetchTasks).catch(function () { state.workMode = prev; notify() })"
+  ]) assert.ok(built.indexOf(s) >= 0, 'client.js 缺标记：' + s + '（需 npm run build-client 重组装）')
+  // ③ 服务端不动：set-work-mode 仍是同一 RPC 单入口（本卡不碰 store.mjs 写路径）
+  const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  assert.ok(rpcSrc.indexOf("handle('set-work-mode'") >= 0, '服务端 set-work-mode RPC 保留')
+  assert.equal(pick.indexOf('set-board-mode'), -1, 'UI 不得回退老入口 set-board-mode')
+})

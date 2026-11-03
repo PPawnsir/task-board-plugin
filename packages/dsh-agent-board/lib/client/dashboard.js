@@ -895,7 +895,16 @@
     // 老 RPC（set-board-mode/set-team-mode）在服务端保留兼容，UI 不再使用。
     function WorkModeSwitch(props) {
       var cur = props.mode || 'auto'
-      function pick(m) { if (m === cur) return; rpc('set-work-mode', { mode: m }).then(fetchTasks).catch(function () {}) }
+      // 乐观 UI（task-mw0e51zd，用户反馈「切模式好几秒才显示成功」）：点击瞬间先本地翻转 state.workMode + notify
+      // 立即渲染（TopPanel 订阅链 setWorkModeState(state.workMode) → 按钮组高亮当场切换），RPC 后台落盘；
+      // 成功后照常 fetchTasks（3s 轮询 + hash 对账天然收敛，乐观值与服务器一致时无感）；
+      // 失败回弹到闭包捕获的前值 prev（同样 notify 立即复位）。服务端语义/校验不动。
+      function pick(m) {
+        if (m === cur) return
+        var prev = cur
+        state.workMode = m; notify()
+        rpc('set-work-mode', { mode: m }).then(fetchTasks).catch(function () { state.workMode = prev; notify() })
+      }
       // 档位文案：名称 + 一句说明（说明常驻显示在按钮内，选中态高亮不可用 title 才看得到）
       var opts = [
         { k: 'list', name: '清单模式', desc: '只读清单，不自动派发', icon: 'clipboard-list' },
