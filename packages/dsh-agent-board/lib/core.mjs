@@ -118,13 +118,20 @@ export function parsePlanFiles(question) {
     // 判定在归一前做：`lib/`、`D:\dir` 的分隔符证据会被 normTouch 剥尾斜杠/改写，先记再归一。
     // 解析伪影收紧（task-mvtz2jjq，n-mvtejrusnhi6 生产实证两类碎片——「仲裁扩权后重派仍被拦」的
     // 真凶不是闸口不认 extraTouches[闸口 rpc.mjs 已读 effectiveTouches]，而是这两类残片被误判路径
-    // 后永远不在边界内）：①含中日韩字符（CJK 统一表意 + 全角形式区）的 token 判非路径——「调用点/
-    // 接线断言仍锁」这类含半角斜杠的中文散文片即死（本仓库路径全 ASCII）；②正则/代码残片：以 '/'
-    // 开头且其后含 '(' 或 '\' 转义 → 判非路径（`/if \(...` 即死）。两者只收紧「伪路径入选」，真路径
-    // （ASCII 相对/绝对、反斜杠、尾斜杠、裸扩展名）判定与既有归一语义逐字不变。
+    // 后永远不在边界内）：①含中日韩字符（CJK 统一表意 + 全角形式区）的 token——「调用点/接线断言
+    // 仍锁」这类含半角斜杠的中文散文片即死（v1.9.2 当时的假设「本仓库路径全 ASCII」，通用看板不成立）；
+    // ②正则/代码残片：以 '/' 开头且其后含 '(' 或 '\' 转义 → 判非路径（`/if \(...` 即死）。
+    // CJK 分级（task-mw147o79，n-mw0m55m6v5bg ontology 板 5 格式全灭实证）：v1.9.2 的 CJK 一刀切把
+    // 中文文件名真路径一起拒了（「原型/规则管理/规则管理控制台-v1.html」→ files 恒 0，闸口机器比对对
+    // 中文路径形同虚设）——与 v1.9.2 病例方向相反（那次散文片误入选，这次真路径误拒选）。判据取「结尾
+    // 是否 ASCII 文件扩展名」：含 CJK 的 token 必须带扩展名才算路径（中文文件名真路径必带 .html/.py/
+    // .mjs 等），无扩展名的中文散文片（「调用点/接线断言仍锁」有斜杠无扩展名）继续拒；ASCII token 判定
+    // 逐字不变（分隔符或扩展名任一即可，含无扩展名的 ASCII 目录）。两者只校正「伪路径入选/真路径拒选」，
+    // normTouch 归一语义、frag 残片哨兵、touchCovers 覆盖规则逐字不动。
     var cjk = /[\u4e00-\u9fff\uff00-\uffef]/.test(v)
     var frag = /^\//.test(fragSrc) && /[()\\]/.test(fragSrc.slice(1))
-    var likePath = !cjk && !frag && (/[\/\\]/.test(v) || /\.[a-z0-9]{1,6}$/i.test(v))
+    var hasExt = /\.[a-z0-9]{1,6}$/i.test(v)
+    var likePath = !frag && (cjk ? hasExt : (/[\/\\]/.test(v) || hasExt))
     v = normTouch(v)
     if (v && likePath && out.indexOf(v) < 0) out.push(v)
   }

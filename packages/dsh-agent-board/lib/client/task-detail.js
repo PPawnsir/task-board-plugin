@@ -95,7 +95,9 @@
           React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '📦 子任务 · ' + settledN + '/' + kids.length + ' 已了结'),
           kids.map(function (x) {
             var arch = x.status === 'archived'
-            return React.createElement('div', { key: x.id, onClick: function () { jump(x.id) }, title: (statusLabels[x.status] || x.status) + ' · ' + x.id + (arch ? ' · 已归档留档（点击查看）' : ''), style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, fontSize: 10, cursor: 'pointer', opacity: arch ? 0.55 : 1 } },
+            // 无障碍（同卡顺带巡检）：本行原是 div+onClick 的「子任务行 = 导航入口」，键盘不可达；
+            // 改原生 button 并复位原生按钮皮肤（border:none/透明底/左对齐/字体族 inherit/宽 100%），视觉与 div 行逐字一致。
+            return React.createElement('button', { key: x.id, onClick: function () { jump(x.id) }, title: (statusLabels[x.status] || x.status) + ' · ' + x.id + (arch ? ' · 已归档留档（点击查看）' : ''), style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, fontSize: 10, cursor: 'pointer', opacity: arch ? 0.55 : 1, width: '100%', border: 'none', background: 'transparent', padding: 0, fontFamily: 'inherit', textAlign: 'left', color: C.text } },
               React.createElement('span', { style: { width: 7, height: 7, borderRadius: '50%', background: statusColors[x.status] || C.text2, flexShrink: 0 } }),
               React.createElement('span', { style: { color: arch ? C.text2 : C.brand, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 } }, x.title || x.id),
               arch
@@ -395,7 +397,11 @@
       return React.createElement('div', { style: { padding: '4px 2px' } },
         // 头部行（task-mv493xjs 巡检次生观察②）：左「← 返回看板」+ 右上显性 ✕ 关闭钮（原来只有文字链不够显性）
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 } },
-          React.createElement('div', { onClick: function () { state.detailId = null; notify() }, style: { fontSize: 11, color: C.brand, cursor: 'pointer' } }, '← 返回看板'),
+          // 无障碍（反馈 n-mw0zzxhd3cl7 · 卡 task-mw147ony）：「← 返回看板」原为 div+onClick（role=null/tabIndex=-1，
+          // 键盘不可 Tab 聚焦、Enter/Space 不激活、读屏不识别为控件）；改原生 button 后天然 Tab 可聚焦 + Enter/Space 激活
+          // + 读屏报「按钮」，与旁边 ✕ 同款。视觉零变化：border:none + 透明底 + 字体族/行高 inherit 复位原生按钮皮肤，
+          // 仍 11px / brand 色 / cursor:pointer；onClick 与 Esc 快捷键路径均不变。
+          React.createElement('button', { onClick: function () { state.detailId = null; notify() }, title: '返回看板列表（Esc 快捷键同样可关闭详情）', style: { fontFamily: 'inherit', fontSize: 11, lineHeight: 'inherit', color: C.brand, cursor: 'pointer', border: 'none', background: 'transparent', padding: 0 } }, '← 返回看板'),
           React.createElement('button', { onClick: function () { state.detailId = null; notify() }, title: '关闭详情面板（返回看板）', style: { fontSize: 11, padding: '1px 6px', border: '1px solid ' + C.border, borderRadius: 3, background: 'transparent', color: C.text2, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', lineHeight: 1.4 } }, ic('x', 11))),
         // ===== 拆解官顶部跳（task-mw0dz3ki ①，用户 2026-11-03 反馈「拆解期间看不到会话跳转」）=====
         // 只在存在活跃拆解官 run 时渲染（activeDecomposeRunOf：末条 running + 超龄守卫）：

@@ -1192,7 +1192,8 @@ test('parsePlanFiles: 伪影判非路径（正则残片 + 含半角斜杠的中�
   // 哨兵证据必须在「首空白截断」前采：截断后只剩 '/if'（旧判定含 '/' 即入选 → 假越界），同行真路径仍保留
   assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs\n/if \\(isHungKillFailure(x)\\)/ 判定点'), ['lib/core.mjs'])
   assert.deepEqual(core.planOutsideTouches(['lib/**'], core.parsePlanFiles('计划改动：/if \\(isHungKillFailure(x)\\)/ 判定点')), [])
-  // ② 含半角斜杠的中文散文片（生产实证片段）：含 CJK 字符的 token 判非路径
+  // ② 含半角斜杠的中文散文片（生产实证片段）：含 CJK 但无 ASCII 扩展名结尾的 token 判非路径
+  //（task-mw147o79 起是 CJK 分级判定——带扩展名的中文真路径入选，见下方「CJK 分级」test）
   assert.deepEqual(core.parsePlanFiles('计划改动：调用点/接线断言仍锁'), [])
   assert.deepEqual(core.parsePlanFiles('计划改动：调用点/接线断言仍锁 —— 说明'), [])
   assert.deepEqual(core.planOutsideTouches(['lib/**'], core.parsePlanFiles('计划改动：调用点/接线断言仍锁')), [])
@@ -1213,6 +1214,54 @@ test('parsePlanFiles: 伪影判非路径（正则残片 + 含半角斜杠的中�
   assert.deepEqual(core.planOutsideTouches(core.effectiveTouches(tArb), planArb), [], '扩权文件在有效边界内 → 零越界（扩权即边界）')
   // 反证：不并 extraTouches 时报越界——证明这条锁真在钉 effectiveTouches（否则断言恒真无意义）
   assert.deepEqual(core.planOutsideTouches(tArb.touches, planArb), ['src/extra.mjs'])
+})
+
+// CJK 判定分级（task-mw147o79，n-mw0m55m6v5bg ontology 板实证：纯中文路径「原型/规则管理/规则管理
+// 控制台-v1.html」planGate.files 恒 0，同号 question 换 5 种格式全灭）：v1.9.2 的 CJK 一刀切改成
+// 「含 CJK 的 token 必须带 ASCII 扩展名结尾才算路径」——中文文件名真路径（必带 .html/.py/.mjs 等）
+// 恢复入选，无扩展名的中文散文片继续拒；ASCII 路径判定与 frag 残片哨兵逐字不变。
+test('parsePlanFiles: CJK 分级——含中文但带 ASCII 扩展名的真路径入选（5 格式 + 反斜杠 + 裸文件名）；无扩展名的中文散文片/全角括号散文/正则残片继续拒；闸口机器比对恢复', () => {
+  var zh = '原型/规则管理/规则管理控制台-v1.html'
+  // ① ontology 板实证的 5 种上报格式全部入选：同行冒号后缀 / 换行纯路径 / 反斜杠 / 破折号 bullet / 带说明后缀
+  assert.deepEqual(core.parsePlanFiles('计划改动：原型/规则管理/规则管理控制台-v1.html（R3 控制台）'), [zh])
+  assert.deepEqual(core.parsePlanFiles('计划改动：\n原型/规则管理/规则管理控制台-v1.html'), [zh])
+  assert.deepEqual(core.parsePlanFiles('计划改动：原型\\规则管理\\规则管理控制台-v1.html'), [zh])   // Windows 形态 → 归一
+  assert.deepEqual(core.parsePlanFiles('计划改动：\n- 原型/规则管理/规则管理控制台-v1.html'), [zh])  // markdown bullet
+  assert.deepEqual(core.parsePlanFiles('计划改动：原型/规则管理/规则管理控制台-v1.html — R3 净化'), [zh])
+  assert.deepEqual(core.parsePlanFiles('计划改动：原型/规则管理/规则管理控制台-v1.html 说明文字'), [zh])
+  // ② 中文裸文件名（无分隔符、带 ASCII 扩展名）同样入选
+  assert.deepEqual(core.parsePlanFiles('计划改动：规则管理控制台-v1.html'), ['规则管理控制台-v1.html'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：规则管理.py、控制台.md'), ['规则管理.py', '控制台.md'])
+  // ③ 回归锁：无扩展名的中文散文片（有斜杠无扩展名）继续拒——v1.9.2 病例语义不退化
+  assert.deepEqual(core.parsePlanFiles('计划改动：调用点/接线断言仍锁'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：调用点/接线断言仍锁 —— 说明'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：合规重报/闸口放行'), [])
+  // ④ 全角括号散文（截断后只剩中文首词，无分隔符无扩展名）继续拒
+  assert.deepEqual(core.parsePlanFiles('计划改动：调用点（含断言）'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：（含断言）'), [])
+  // ⑤ 正则/代码残片继续拒（frag 残片哨兵不动）
+  assert.deepEqual(core.parsePlanFiles('计划改动：/if \\(isHungKillFailure(x)\\)/ 判定点'), [])
+  // 混合清单：中文真路径与 ASCII 路径都留，散文片/残片丢弃，保序
+  assert.deepEqual(core.parsePlanFiles('计划改动：\n- 调用点/接线断言仍锁\n- 原型/规则管理/规则管理控制台-v1.html\n- lib/core.mjs\n- /if \\(x\\)/ 残片'),
+    [zh, 'lib/core.mjs'])
+  // ⑥ ASCII 路径既有语义零回归（分隔符或扩展名任一即可；无扩展名的 ASCII 目录仍入选）
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs'), ['lib/core.mjs'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：README.md、plan.mjs'), ['README.md', 'plan.mjs'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：/usr/local/lib/x.mjs'), ['/usr/local/lib/x.mjs'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：D:\\deepseek-work\\lib'), ['D:/deepseek-work/lib'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/'), ['lib'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：这是一段纯说明文字'), [])
+  // ⑦ 闸口集成（rpc.planGateApply = effectiveTouches → parsePlanFiles → planOutsideTouches）：
+  // 中文路径在 touches 内 → outside 空；不在 → outside 正确点名（机器比对对中文路径恢复工作）
+  var tZh = { id: 'task-zh', touches: ['原型/规则管理/规则管理控制台-v1.html'] }
+  var planZh = core.parsePlanFiles('计划改动：原型/规则管理/规则管理控制台-v1.html（R3 控制台）')
+  assert.deepEqual(planZh, [zh])
+  assert.deepEqual(core.planOutsideTouches(core.effectiveTouches(tZh), planZh), [])
+  assert.deepEqual(core.planOutsideTouches(['原型/规则管理/规则管理控制台-v2.html'], planZh), [zh])
+  // 中文目录锁同口径覆盖（touchCovers 覆盖规则不动，'原型/规则管理/**' 盖具体文件）
+  assert.deepEqual(core.planOutsideTouches(['原型/规则管理/**'], planZh), [])
+  // 反证：越界判定确实在跑（否则上行恒真无意义）
+  assert.deepEqual(core.planOutsideTouches(['其他目录/**'], planZh), [zh])
 })
 
 test('touchCovers: 单向覆盖——touch 模式 ⊇ 计划文件（与 matchOne 对称语义方向相反）', () => {
@@ -7673,4 +7722,64 @@ test('工作模式乐观 UI（task-mw0e51zd）：pick 先翻转 state.workMode+n
   const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
   assert.ok(rpcSrc.indexOf("handle('set-work-mode'") >= 0, '服务端 set-work-mode RPC 保留')
   assert.equal(pick.indexOf('set-board-mode'), -1, 'UI 不得回退老入口 set-board-mode')
+})
+
+// ===== 详情「← 返回看板」键盘可达（反馈 n-mw0zzxhd3cl7 · 卡 task-mw147ony）：div+onClick → 原生 button =====
+// 病根（巡检实测）：头部「← 返回看板」是 div+onClick——tagName=DIV / role=null / tabIndex=-1 / 仅 cursor:pointer，
+// 即 Tab 不可聚焦、Enter/Space 不激活、读屏不识别为控件；同面板其它控件全是原生 button（仅靠 Esc 兜底属可访问性缺口）。
+// 修法：原生 button（天然 Tab 可聚焦 + Enter/Space 激活 + 读屏报按钮，与旁边 ✕ 同款），视觉零变化——复位移除原生
+// 按钮皮肤（border:none / 透明底 / fontFamily+lineHeight inherit），仍 11px / brand 色 / cursor:pointer；onClick 不变。
+// 顺带巡检本文件其余 div+onClick 导航元素：子任务行（整行=进子卡详情的导航入口）同款 button 化（border/padding 复位）。
+test('详情「← 返回看板」原生 button 化：键盘可聚焦激活 + 读屏识别（源码 + 产物双锁，含 div+onClick 导航巡检）', () => {
+  const src = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // ① 病根退役：旧「div + 返回看板」逐字形态不得残留（精确串，避免正则跨行误判）
+  assert.equal(src.indexOf("React.createElement('div', { onClick: function () { state.detailId = null; notify() }"), -1,
+    '「← 返回看板」仍是 div+onClick（键盘不可聚焦/不可激活、读屏不识别）')
+  // ② 新形：原生 button 承载，onClick 行为与文案逐字不变（Tab 可聚焦 + Enter/Space 激活 + 读屏报「按钮」）
+  assert.ok(src.indexOf("React.createElement('button', { onClick: function () { state.detailId = null; notify() }, title: '返回看板列表（Esc 快捷键同样可关闭详情）'") >= 0,
+    '「← 返回看板」未改成原生 button（或 title 缺）')
+  assert.ok(src.indexOf("}, '← 返回看板')") >= 0, '「← 返回看板」文案被改动')
+  // ②b 视觉不变：原生按钮皮肤复位（去掉 UA 的 border/背景/字体族/行高），11px + brand 色 + pointer 保持
+  assert.ok(src.indexOf("fontFamily: 'inherit', fontSize: 11, lineHeight: 'inherit', color: C.brand, cursor: 'pointer', border: 'none', background: 'transparent', padding: 0") >= 0,
+    '返回看板按钮缺原生皮肤复位（视觉会漂移：UA 边框/底色/13px 字体）')
+  // ③ 同文件 div+onClick 导航巡检：子任务行（key: x.id + jump(x.id) 整行导航）也原生 button 化，灰化口径不变
+  assert.equal(src.indexOf("return React.createElement('div', { key: x.id, onClick: function () { jump(x.id) }"), -1,
+    'FamilySection 子任务行仍是 div+onClick（整行即导航入口，键盘不可达）')
+  const kidBtn = src.match(/return React\.createElement\('button', \{ key: x\.id, onClick: function \(\) \{ jump\(x\.id\) \}[^\n]*\n/)
+  assert.ok(kidBtn, 'FamilySection 子任务行未原生 button 化')
+  assert.match(kidBtn[0], /opacity: arch \? 0\.55 : 1/, '子任务行归档灰化口径不得变')
+  assert.match(kidBtn[0], /border: 'none', background: 'transparent', padding: 0/, '子任务行 button 需复位边框/底色/内边距（视觉同 div）')
+  assert.match(kidBtn[0], /textAlign: 'left'/, '子任务行 button 需左对齐（否则文字居中，视觉漂移）')
+  // ③b 全文件复盘：div+onClick 计数归零（其余 onClick 导航是 span 文本链——L61/L93/L424 依赖 inline 截断/灰化布局，
+  // 不在本卡「div+onClick」边界内，留作后续 a11y 卡；此断言防新增 div+onClick 悄悄回潮）
+  // 判据：逐个定位 createElement('div', {…}) 的 props 对象（花括号配对切片），看 props 内是否挂 onClick；
+  // 不用行内正则——同行的 div 容器后面可能跟 map 出来的 span+onClick（L424 等），会假阳。
+  function divsWithClick(s) {
+    const out = []
+    const tag = "createElement('div', {"
+    let i = s.indexOf(tag)
+    while (i >= 0) {
+      let d = 0
+      let j = i + tag.length - 1 // 指向 props 对象的 '{'
+      for (; j < s.length; j++) {
+        if (s[j] === '{') d++
+        else if (s[j] === '}') { d--; if (d === 0) break }
+      }
+      const props = s.slice(i, j + 1)
+      if (props.indexOf('onClick:') >= 0) out.push(props.slice(0, 80))
+      i = s.indexOf(tag, j + 1)
+    }
+    return out
+  }
+  assert.deepEqual(divsWithClick(src), [], 'task-detail.js 仍有 div+onClick（导航类应全部原生 button 化）')
+  // ④ Esc 替代路径不动（本卡只动鼠标控件语义，不碰快捷键接线）
+  const kernel = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
+  assert.ok(kernel.indexOf("if (e.key !== 'Escape') return") >= 0, 'kernel.js 的 Esc 关闭详情路径不得被删')
+  // ⑤ 产物重拼：lib/client.js 由 build-client 拼装（pretest 已跑）；缺标记=忘了重建
+  assert.ok(built.indexOf("title: '返回看板列表（Esc 快捷键同样可关闭详情）'") >= 0, 'client.js 缺返回看板 button 标记（需 npm run build-client）')
+  assert.ok(built.indexOf("fontFamily: 'inherit', fontSize: 11, lineHeight: 'inherit', color: C.brand") >= 0,
+    'client.js 缺返回看板皮肤复位标记（需 npm run build-client）')
+  assert.equal(built.indexOf("React.createElement('div', { onClick: function () { state.detailId = null; notify() }"), -1,
+    'client.js 仍残留 div+onClick 旧形（需 npm run build-client 重组装）')
 })
