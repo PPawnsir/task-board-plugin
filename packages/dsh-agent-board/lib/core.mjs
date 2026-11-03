@@ -134,10 +134,25 @@ export function parsePlanFiles(question) {
 // ⚠️ 与 matchOne 的区别：matchOne 对称（目录锁两个方向都试，服务「冲突保守判定」——宁误拦不漏拦）；
 // 计划闸口必须单向——file 侧更宽（如 file='src/**' 而 pattern 只是其中一个具体文件）不算覆盖，
 // 否则越界计划会被反向匹配误放。其余规则（目录锁 / *.ext / 父目录链 / 裸名纪律）与 matchOne 同款。
+// 例外：边界对齐后缀归一（本函数内「边界对齐后缀归一」注释块）是闸口专有的「同文件异形态」判定，
+// matchOne（锁语义，逐字不动）不设此规则——锁是强制层，不容形态错配误放。
 export function touchCovers(pattern, file) {
   var p = normTouch(pattern), f = normTouch(file)
   if (!p || !f) return false
   if (p === f) return true
+  // 边界对齐后缀归一（task-mw0f2zoc，task-mw0dz3ki 三条真路径全误报实证）：声明侧带工作区前缀
+  //（'task-board-plugin/packages/x/a.js'）而计划侧是仓库相对路径（'packages/x/a.js'），或反向——
+  // 同一条文件的两种书写形态，L140 逐字比对与下面目录锁/通配/目录链/裸名分支全都不中，被误判越界。
+  // 判据：短侧必须是长侧的「边界对齐后缀」（长侧该位置前一段必须带 '/'——'x/packages/a.js' 命中
+  // 'packages/a.js'，'ages/a.js' 不命中 'packages/a.js'），双向各一条。
+  // 护栏（三项，别顺手放宽）：①短侧必须含 '/'（多段路径）——裸名 'README.md' 与顶层 'src' 不进本
+  // 规则，否则 'README.md' 会退化成全树同名匹配（裸名纪律见本函数末尾裸名分支）；②本规则只做「同文件
+  // 异形态」归一，不扩大覆盖范围（'*/lib/core.mjs' 泛型短路径理论上可后缀命中别棵子树同名文件，
+  // 闸口是警示层非强制层：锁语义 matchOne 逐字不动、精确判定，残余由 Verifier 范围核查 + 主窗口
+  // 提交纪律兜底，接受）；③方向敏感语义不变——本规则虽排在目录锁/通配/目录链之前，但只在「一侧
+  // 是另一侧边界对齐后缀」时短路，其余一律落到既有分支，五个既有分支逐字未动。
+  if ((p.indexOf('/') >= 0) && (p.length < f.length) && f.slice(-(p.length + 1)) === '/' + p) return true
+  if ((f.indexOf('/') >= 0) && (f.length < p.length) && p.slice(-(f.length + 1)) === '/' + f) return true
   // 目录锁：'dir/**' 覆盖 dir 下任意路径（含更窄的子目录锁——'src/**' 覆盖 'src/lib/**'）
   var pfx = dirLockPrefix(p); if (pfx && f.indexOf(pfx) === 0) return true
   // 通配扩展名：'*.ext' 覆盖以该扩展名结尾的具体文件（f 也是 '*.ext' 时上面已判完全相等）

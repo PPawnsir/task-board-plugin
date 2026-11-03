@@ -1235,6 +1235,32 @@ test('touchCovers: 单向覆盖——touch 模式 ⊇ 计划文件（与 matchOn
   assert.equal(core.touchCovers('lib/core.mjs', ''), false)
 })
 
+test('touchCovers: 边界对齐后缀归一——同一文件的工作区前缀形态 vs 仓库相对形态（task-mw0f2zoc）', () => {
+  // 实证根因（task-mw0dz3ki 三条真路径全误报）：主窗口建卡 touches 带工作区前缀
+  // 'task-board-plugin/...'，Worker 计划上报用仓库相对形态 'packages/...'——逐字比对与目录锁/
+  // 通配/目录链/裸名五分支全不中，同一条文件被判越界。双向都要认（两个书写方向等价）。
+  assert.equal(core.touchCovers('task-board-plugin/packages/x/a.js', 'packages/x/a.js'), true, '声明带前缀 → 计划相对')
+  assert.equal(core.touchCovers('packages/x/a.js', 'task-board-plugin/packages/x/a.js'), true, '声明相对 → 计划带前缀（对称）')
+  // 深层前缀同样对齐（不限于一层工作区前缀）
+  assert.equal(core.touchCovers('ws/sub/lib/core.mjs', 'lib/core.mjs'), true)
+  // 边界对齐硬约束：截断侧必须落在 '/' 之后——'ages/a.js' 不是 'packages/a.js' 的后缀边界
+  assert.equal(core.touchCovers('ages/a.js', 'packages/a.js'), false, '非边界对齐不算同一条文件')
+  assert.equal(core.touchCovers('packages/a.js', 'ages/a.js'), false)
+  assert.equal(core.touchCovers('xpackages/a.js', 'packages/a.js'), false)
+  // 裸名/单段不进本规则（防 'README.md' 退化成全树同名匹配）：保持既有裸名纪律现状
+  assert.equal(core.touchCovers('README.md', 'x/README.md'), false)
+  assert.equal(core.touchCovers('x/README.md', 'README.md'), false)
+  assert.equal(core.touchCovers('src', 'a/src'), false, '单段顶层目录不进后缀规则')
+  // 同文件同形态仍走精确分支，且形态归一不扩大覆盖范围（不同文件名依旧不覆盖）
+  assert.equal(core.touchCovers('packages/x/a.js', 'packages/x/a.js'), true)
+  assert.equal(core.touchCovers('task-board-plugin/packages/x/a.js', 'packages/x/b.js'), false)
+  // 形态归一只认「边界对齐后缀」：中间段不同不覆盖（'task-board-plugin' 不是 'other-plugin' 的后缀）
+  assert.equal(core.touchCovers('task-board-plugin/packages/x/a.js', 'other-plugin/packages/x/a.js'), false)
+  // 锁语义 matchOne 逐字不动：同一对形态在锁侧仍判不冲突（强制层不容错配误放）。
+  // matchOne 未导出，用其唯一导出口径 patOverlap（双向调用 matchOne）验证锁侧零变化。
+  assert.equal(core.patOverlap('task-board-plugin/packages/x/a.js', 'packages/x/a.js'), false, '锁语义零变化（红线）')
+})
+
 test('planOutsideTouches: 反向判定——计划文件不被任何 touches 模式覆盖 = 越界', () => {
   const touches = ['lib/core.mjs', 'test/**', '*.test.mjs']
   assert.deepEqual(core.planOutsideTouches(touches, ['lib/core.mjs', 'test/x.mjs', 'lib/a.test.mjs']), []) // 全合规
@@ -1245,6 +1271,17 @@ test('planOutsideTouches: 反向判定——计划文件不被任何 touches 模
   assert.deepEqual(core.planOutsideTouches(null, ['a.js']), ['a.js'])                                    // touches 空 = 全越界（跳过比对是调用方分支）
   assert.deepEqual(core.planOutsideTouches(['src/**'], ['src/**']), [])                                  // 整树计划被同宽整树覆盖
   assert.deepEqual(core.planOutsideTouches(['src/lib/**'], ['src/**']), ['src/**'])                      // 计划比声明宽 = 越界
+  // 形态错配零误报（task-mw0f2zoc 的 z3ki 场景复刻）：声明带工作区前缀、计划仓库相对 → 零越界；
+  // 反向同样零越界；真越界仍照报（不因形态归一闪成「全放行」）
+  assert.deepEqual(core.planOutsideTouches(
+    ['task-board-plugin/packages/dsh-agent-board/lib/client/task-detail.js'],
+    ['packages/dsh-agent-board/lib/client/task-detail.js']), [], '前缀声明 vs 相对计划 = 同一条文件')
+  assert.deepEqual(core.planOutsideTouches(
+    ['packages/dsh-agent-board/lib/client/task-detail.js'],
+    ['task-board-plugin/packages/dsh-agent-board/lib/client/task-detail.js']), [], '反向形态同样认')
+  assert.deepEqual(core.planOutsideTouches(
+    ['task-board-plugin/lib/core.mjs', 'task-board-plugin/lib/rpc.mjs'],
+    ['lib/core.mjs', 'lib/other.mjs']), ['lib/other.mjs'], '形态归一不放宽真越界')
 })
 
 
