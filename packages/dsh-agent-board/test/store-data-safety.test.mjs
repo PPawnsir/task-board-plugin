@@ -10,7 +10,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createMockCtx } from './helpers/mock-ctx.mjs'
 import * as plugin from '../index.mjs'
-import { createStore } from '../lib/store.mjs'
+import { createStore, shouldFsyncNow, FSYNC_THROTTLE_MS } from '../lib/store.mjs'
 import { boardHome } from '../lib/core.mjs'
 
 function boardFile(env) { return path.join(env.home, '.dsh', 'tasks-' + env.sid + '.json') }
@@ -316,4 +316,179 @@ test('⑥ .tmp 孤儿清扫（源码级）：清扫挂在读盘列举点 + 1h �
   assert.match(sto, /f\.indexOf\('tasks-'\) !== 0 \|\| f\.slice\(-4\) !== '\.tmp'/) // 只认 tasks-*.tmp 同族
   assert.match(sto, /sweepTmpOrphans\(home, files\)/)            // 挂在读盘列举点
   assert.match(sto, /state\.deactivated && !fsNode\.existsSync\(p\)/) // 停用闸落点（新板才拒，已有板放行）
+})
+
+// ===== ⑦ fsync 节流：800ms 窗口合并冲刷 + 尾随补刷（task-mw0f2zh4）=====
+// 微基准实测单次写 ~262ms 中 fsync 占 ~223ms（85%，NTFS 大文件冲刷固有代价）且 wt 锁内串行排队放大。
+// 修法：窗口（800ms）内多次写只在窗口首写全量冲刷，窗内写跳过 tmp fsync（rename 原子性逐字不动），
+// 尾随定时器 800ms 后对**当前**板文件补一次 fsync；ctx.timer 缺席（老宿主/测试桩）逐字回退每写全量。
+// 掉电数据窗口 0 → ≤800ms（用户拍板；进程崩溃不受影响：页缓存属于 OS，rename 原子性 + salvage 兜底仍在）。
+
+test('⑦ 节流决策纯函数：shouldFsyncNow 首写=true / 窗内=false / 窗外=true / 窗边=恰好算窗外', () => {
+  assert.equal(FSYNC_THROTTLE_MS, 800, '窗口常量 = 800ms（模块级，不做配置面）')
+  assert.equal(shouldFsyncNow(0, 1000, FSYNC_THROTTLE_MS), true, '无记录（首写）→ 全量冲')
+  assert.equal(shouldFsyncNow(undefined, 1000, FSYNC_THROTTLE_MS), true, 'undefined（首写）→ 全量冲')
+  assert.equal(shouldFsyncNow(1000, 1000 + FSYNC_THROTTLE_MS - 1, FSYNC_THROTTLE_MS), false, '窗内（差 1ms）→ 跳过本次 fsync')
+  assert.equal(shouldFsyncNow(1000, 1000 + FSYNC_THROTTLE_MS, FSYNC_THROTTLE_MS), true, '窗边（差值恰好=窗口）→ 全量冲（保守偏向落盘）')
+  assert.equal(shouldFsyncNow(1000, 1000 + FSYNC_THROTTLE_MS + 5000, FSYNC_THROTTLE_MS), true, '窗外 → 全量冲')
+})
+
+test('⑦ 节流（源码级）：常量+wt 节流分支+尾随补刷接线+timer 缺席回退全量', () => {
+  var sto = fs.readFileSync(new URL('../lib/store.mjs', import.meta.url), 'utf8')
+  assert.match(sto, /var FSYNC_THROTTLE_MS = 800/)                              // 模块级窗口常量
+  assert.match(sto, /export function shouldFsyncNow\(lastMs, nowMs, intervalMs\)/)  // 节流判据纯函数（可单测）
+  assert.match(sto, /shouldFsyncNow\(lastFsyncMs\[sid\], nowMs, FSYNC_THROTTLE_MS\)/)  // wt 内节流决策
+  assert.match(sto, /async function writeTmpPlain/)                              // 跳过 fsync 的 tmp 写（writeTmpFsync 原样保留）
+  assert.match(sto, /if \(fsyncNow\) await writeTmpFsync\(tmp, c\)/)            // 全量路径：fsync 仍在 rename 前
+  assert.match(sto, /else await writeTmpPlain\(tmp, c\)/)                       // 节流路径：跳过 fsync
+  assert.match(sto, /armTrailingFsync\(sid, tm\)/)                               // 节流写挂尾随补刷臂
+  assert.match(sto, /clearTrailingFsync\(sid\)/)                                 // 全量冲刷作废挂起臂
+  assert.match(sto, /tm\.timeout\(FSYNC_THROTTLE_MS\)/)                         // 尾随定时器接线（promise 形态=kickCycle 同款）
+  assert.match(sto, /\.then\(go, go\)/)                                         // 双臂兜底：reject 也补刷（kickCycle 教训同源）
+  assert.match(sto, /fsNode\.openSync\(p, 'r\+'\)/)                             // 尾随打开当前板文件
+  assert.match(sto, /fsNode\.fsyncSync\(fh\)/)                                 // 尾随对当前文件补 fsync
+  assert.match(sto, /console\.error\('\[task-board\] 尾随 fsync 补刷失败/)     // 失败只记录不抛（OS writeback 兜底）
+  // 回退：ctx.timer 缺席（老宿主/测试桩）→ throttle 恒 false → fsyncNow 恒 true = 每写全量 fsync 老行为
+  assert.match(sto, /var throttle = !!\(tm && typeof tm\.timeout === 'function'\)/)
+  // 原子性红线逐字不动：rename 原子链 + EPERM/EBUSY 退避 + unlink 降级
+  assert.match(sto, /fsNode\.promises\.rename\(tmp, p\)/)
+  assert.match(sto, /code === 'EPERM' \|\| code === 'EBUSY'/)
+  assert.match(sto, /降级 unlink\+rename/)
+})
+
+// 直连 store 的节流测试环境：假 timer（promise 形态——测试手动驱动落定）+ 独立临时 HOME（同 makeRawStore 纪律）。
+// Date.now 由各用例自行劫持（store 的节流判据/尾随臂时刻全走墙钟——虚拟化后窗口推进免真实 sleep）。
+function makeThrottleEnv() {
+  var home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-board-fsync-'))
+  fs.mkdirSync(path.join(home, '.dsh'), { recursive: true })
+  var prevHome = process.env.HOME
+  var hadHome = Object.prototype.hasOwnProperty.call(process.env, 'HOME')
+  process.env.HOME = home
+  var timers = [] // 已挂尾随臂：{ ms, resolve, }——resolve 由用例手动驱动（模拟 800ms 到期）
+  var fakeTimer = {
+    timeout: function (ms) { return new Promise(function (resolve) { timers.push({ ms: ms, resolve: resolve }) }) },
+  }
+  var state = { fileLocks: {}, cyclePending: {}, poolHealth: {}, teamModeCache: {}, feedbackCache: {}, epicSplitCache: {} }
+  var store = createStore({ timer: fakeTimer }, state, { sessionCwd: function () { return home } })
+  return {
+    store: store, home: home, timers: timers,
+    cleanup: function () {
+      if (hadHome) process.env.HOME = prevHome
+      else delete process.env.HOME
+      try { fs.rmSync(home, { recursive: true, force: true }) } catch (_) {}
+    },
+  }
+}
+
+// 观测探针：包 fs.promises.open 记 tmp 写的 FileHandle.sync 次数（全量冲刷路径），返回计数器对象；
+// 用毕 finally 必须还原 fs.promises.open（node:test 同文件内用例串行，无并行互踩）。
+function wrapFsyncSync() {
+  var r = { syncCalls: 0 }
+  var origOpen = fs.promises.open
+  fs.promises.open = async function (tp, mode) {
+    var fh = await origOpen.call(fs.promises, tp, mode)
+    var origSync = fh.sync.bind(fh)
+    fh.sync = async function () { r.syncCalls++; return origSync() }
+    return fh
+  }
+  r.restore = function () { fs.promises.open = origOpen }
+  return r
+}
+
+test('⑦ 节流（行为级）：首写全量、窗内写跳 fsync 只挂一个尾随臂、臂到期补 fsync 当前文件、窗外全量作废挂起臂', async () => {
+  var env = makeThrottleEnv()
+  var realNow = Date.now
+  var fakeNow = 1700000000000
+  Date.now = function () { return fakeNow }
+  var probe = wrapFsyncSync()
+  var fsyncCalls = 0 // 尾随补刷次数（fsyncSync）；全量冲刷走 FileHandle.sync（probe.syncCalls）
+  var origFsyncSync = fs.fsyncSync
+  fs.fsyncSync = function (fd) { fsyncCalls++; return origFsyncSync.call(fs, fd) }
+  try {
+    var sid = 'session-fsync-' + Date.now().toString(36)
+    var p = path.join(env.home, '.dsh', 'tasks-' + sid + '.json')
+    var read = function () { return JSON.parse(fs.readFileSync(p, 'utf8')).tasks.length }
+    // 首写（T0）：全量冲刷，不挂尾随臂
+    await env.store.wt(sid, { ownerSession: sid, tasks: [{ id: 'f1' }] })
+    assert.equal(probe.syncCalls, 1, '首写全量 fsync（writeTmpFsync 的 fh.sync）')
+    assert.equal(env.timers.length, 0, '首写全量冲刷，不挂尾随臂')
+    assert.equal(read(), 1, '首写落盘内容完整')
+    // 窗内二写（T100）：跳过 fsync + 挂一个 800ms 尾随臂
+    fakeNow += 100
+    await env.store.wt(sid, { ownerSession: sid, tasks: [{ id: 'f1' }, { id: 'f2' }] })
+    assert.equal(probe.syncCalls, 1, '窗内写跳过 fsync（无新增 fh.sync）')
+    assert.equal(env.timers.length, 1, '窗内节流写挂一个尾随臂')
+    assert.equal(env.timers[0].ms, 800, '尾随臂延迟 = FSYNC_THROTTLE_MS')
+    assert.equal(read(), 2, '节流写 rename 照常——内容即时可见（只是没冲盘）')
+    // 窗内三写（T200）：复用挂起臂，不叠加
+    fakeNow += 100
+    await env.store.wt(sid, { ownerSession: sid, tasks: [{ id: 'f1' }, { id: 'f2' }, { id: 'f3' }] })
+    assert.equal(env.timers.length, 1, '窗内再写不叠加尾随臂（窗口尾统一补一次）')
+    assert.equal(read(), 3, '节流写内容即时可见')
+    // 尾随臂到期：对当前板文件补一次 fsync（此刻正位上就是最新内容）
+    env.timers[0].resolve()
+    await new Promise(function (r) { setImmediate(r) }) // 微任务链跑完 go
+    assert.equal(fsyncCalls, 1, '尾随臂到期对当前板文件 fsync 一次（fsyncSync）')
+    assert.equal(read(), 3, '补刷不改内容（fsync 无数据改动）')
+    // 尾随臂触发后的窗内新写（T300）：重新挂臂
+    fakeNow += 100
+    await env.store.wt(sid, { ownerSession: sid, tasks: [{ id: 'f4' }] })
+    assert.equal(env.timers.length, 2, '臂触发后窗内新写重新挂臂')
+    // 窗外写（T1101，距上次全量冲刷记录 T200 已 901ms）：全量冲刷 + 作废挂起臂
+    fakeNow += FSYNC_THROTTLE_MS + 1
+    await env.store.wt(sid, { ownerSession: sid, tasks: [{ id: 'f5' }] })
+    assert.equal(probe.syncCalls, 2, '窗外写回归全量 fsync')
+    assert.equal(env.timers.length, 2, '全量冲刷写不挂新臂')
+    assert.equal(read(), 1, '窗外写内容正确')
+    env.timers[1].resolve() // 被作废的臂落定 → 空转
+    await new Promise(function (r) { setImmediate(r) })
+    assert.equal(fsyncCalls, 1, '已作废的尾随臂落定空转（不再补 fsync）')
+  } finally {
+    Date.now = realNow
+    fs.fsyncSync = origFsyncSync
+    probe.restore()
+    env.cleanup()
+  }
+})
+
+test('⑦ 尾随补刷失败不抛（行为级）：板文件缺席时 fire 只记录不炸，链路无恙', async () => {
+  var env = makeThrottleEnv()
+  var realNow = Date.now
+  var fakeNow = 1700000000000
+  Date.now = function () { return fakeNow }
+  try {
+    var sid = 'session-fsync-err-' + Date.now().toString(36)
+    var p = path.join(env.home, '.dsh', 'tasks-' + sid + '.json')
+    await env.store.wt(sid, { ownerSession: sid, tasks: [] })                    // 首写全量
+    fakeNow += 100
+    await env.store.wt(sid, { ownerSession: sid, tasks: [{ id: 'x' }] })       // 窗内节流写挂臂
+    fs.unlinkSync(p)                                                           // 构造 fire 时文件缺席（ENOENT）
+    env.timers[0].resolve()
+    await new Promise(function (r) { setImmediate(r) })
+    // 走到这里 = fire 未抛（失败只 console.error：数据仍在页缓存/该文件已不存在，OS writeback 兜底）
+    assert.ok(!fs.existsSync(p), 'fire 失败确实发生在文件缺席时')
+    // 链路无恙：后续写照常（文件重建，内容正确）
+    await env.store.wt(sid, { ownerSession: sid, tasks: [{ id: 'y' }] })
+    assert.equal(JSON.parse(fs.readFileSync(p, 'utf8')).tasks.length, 1, 'fire 失败后链路无恙，后续写正常')
+  } finally {
+    Date.now = realNow
+    env.cleanup()
+  }
+})
+
+test('⑦ ctx.timer 缺席回退（行为级）：无 timer 测试桩逐字回退每写全量 fsync', async () => {
+  var env = makeRawStore() // 既有直连环境：ctx={}（无 ctx.timer）——老宿主/测试桩同款
+  var probe = wrapFsyncSync()
+  try {
+    var sid = 'session-wt-legacy-' + Date.now().toString(36)
+    var p = path.join(env.home, '.dsh', 'tasks-' + sid + '.json')
+    await env.store.wt(sid, { ownerSession: sid, tasks: [{ id: 'l1' }] })
+    await env.store.wt(sid, { ownerSession: sid, tasks: [{ id: 'l1' }, { id: 'l2' }] })
+    await env.store.wt(sid, { ownerSession: sid, tasks: [{ id: 'l1' }, { id: 'l2' }, { id: 'l3' }] })
+    assert.equal(probe.syncCalls, 3, '无 timer 桩：每写都全量 fsync（老行为逐字回退，不因节流抖动）')
+    assert.equal(JSON.parse(fs.readFileSync(p, 'utf8')).tasks.length, 3, '连续写全部正常落盘')
+  } finally {
+    probe.restore()
+    env.cleanup()
+  }
 })

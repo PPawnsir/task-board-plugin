@@ -14,6 +14,22 @@ const { seed, normalizeBoard, vt, boardHome } = core
 // 模块级（而非 per-store）是为了同一进程内多个 store 实例（测试/热重载）也不会撞名。
 var tmpSeq = 0
 
+// ===== fsync 节流窗口（task-mw0f2zh4）：800ms 窗口内多次写只在窗口首写全量冲刷 + 尾随补刷 =====
+// 微基准实测：全量 JSON 板（1.8-4.4MB）单次写 ~262ms 中 fsync 占 ~223ms（85%，Windows/NTFS 大文件
+// 冲刷固有代价）；所有写（建卡/流转/结算/派发）都走 wt 的 tmp→fsync→rename 且锁内串行 → 排队放大
+// （用户实测 set-work-mode 372-836ms，突发撞秒级）。取舍（用户 2026-11-03 拍板）：掉电数据窗口
+// 0 → ≤800ms（进程崩溃不受影响：rename 原子性仍在，页缓存属于 OS 进程死后不丢；NTFS lazy writeback
+// 数秒内自然冲刷兜底；salvage 腐坏抢救仍在），换单写 ~300ms → ~40-80ms。
+export var FSYNC_THROTTLE_MS = 800
+
+// 节流判据纯函数（模块级导出，便于单测）：lastMs 无记录（0/undefined）→ 首写全量冲；
+// 距上次全量冲刷 ≥ 窗口 → 全量冲；窗内 → 跳过本次 fsync 交尾随补刷。
+// 边界语义：差值恰好 === 窗口视为窗外（保守偏向落盘）。
+export function shouldFsyncNow(lastMs, nowMs, intervalMs) {
+  if (!(lastMs > 0)) return true
+  return nowMs - lastMs >= intervalMs
+}
+
 // 腐坏看板自动抢救（P0 根修 task-mv0bl9vg ③）：从撕裂/夹残片的 JSON 原文里截取**第一个完整 JSON 值**。
 // 手法 = JSON.parse 报错 position 截断法（本次事故人工恢复就是这招）：整串 parse 失败时，
 // V8 报错信息含 "position N"（实测 node v24：'{"a":1}{"b":2}' 报 position 18，即第二个值起点），
@@ -42,6 +58,10 @@ export function createStore(ctx, state, deps) {
     var fileLocks = state.fileLocks
     var cyclePending = state.cyclePending
     var poolHealth = state.poolHealth || (state.poolHealth = {})   // 腐坏隔离/抢救 hint 落这里（与 runtime health 同表）
+    // fsync 节流状态（task-mw0f2zh4，per-sid 存 store 闭包内：wt 全部在 withLock 锁内调用 → 单会话
+    // 串行无竞争；不挂共享 state——直建 store 的测试桩/热重载新实例天然从零起步=首写全量，安全）：
+    var lastFsyncMs = {}    // sid → 上次全量冲刷的墙钟 ms（节流窗口判据）
+    var trailingFsync = {}  // sid → 挂起尾随补刷臂的挂起时刻 ms（0=无挂起；防叠加+stale 兜底，见 armTrailingFsync）
 
     // ===== 停用闸旗标接线（task-mvo9ca58）：插件 disposers 跑过即置 state.deactivated=true =====
     // 根治「mock 板泄漏真根」（巡检 n-mvo4y8ojzr3y）：boardDirName() 每次现读 env，teardown 后 HOME 已复原，
@@ -285,6 +305,48 @@ export function createStore(ctx, state, deps) {
       try { await fh.writeFile(content, 'utf8'); await fh.sync() }
       finally { await fh.close().catch(function () {}) }
     }
+    // 节流窗内写（task-mw0f2zh4）：跳过 tmp fsync（rename 仍每写必做——原子性红线不动），内容照常
+    // 经页缓存进入 OS；落盘由尾随补刷臂 / 下一次全量冲刷收口。失败语义与 writeTmpFsync 同款。
+    async function writeTmpPlain(tmp, content) {
+      var fh = await fsNode.promises.open(tmp, 'w')
+      try { await fh.writeFile(content, 'utf8') }
+      finally { await fh.close().catch(function () {}) }
+    }
+    // ===== 尾随补刷（task-mw0f2zh4）：节流写后 800ms 到期对**当前**板文件补一次 fsync =====
+    // 到期时 rename 早已把最新内容装上正位（fsync 当前 inode 即冲最新数据；窗内被取代的旧 inode
+    // 已无引用，无需补冲）。同步 open+fsync+close 在定时器回调里一气呵成（JS 单线程，与 wt 无交错）。
+    // 失败只 console.error 不抛：数据仍在页缓存，OS writeback（NTFS lazy writeback 数秒级）自然兜底，
+    // 且 lastFsyncMs 不更新 → 下次写自然提前回归全量冲刷。
+    // 定时器走 ctx.timer.timeout(ms) promise 形态（kickCycle 同款：promise 形态是所有 timer 实现的
+    // 公共底线），双臂 .then(go, go) 防「promise reject / 永不落定 → 补刷永不发生」（kickCycle 教训同源）。
+    // 防叠加：trailingFsync 存挂起时刻 ms——窗口内多次写只挂一个臂，窗口尾统一补一次；全量冲刷写
+    // 成功后 clearTrailingFsync 置 0 = 显式作废挂起臂（落定后 go 核对时刻不符即空转）。
+    // stale 兜底（STALE_LATCH_MS 同思路）：宿主 timer 病态 promise 永不落定时，挂起标记滞留超过
+    // TRAILING_STALE_MS（正常 800ms 窗口的 12.5 倍，正常路径永远碰不到）→ 下一个节流写放行重挂新臂，
+    // 补刷不至永久失效。
+    var TRAILING_STALE_MS = 10000
+    function fireTrailingFsync(sid) {
+      if (state.deactivated) return          // 停用后 HOME 已复原，不再碰真根路径（纯防御：fsync 本无数据改动）
+      var p = boardPath(sid)
+      try {
+        var fh = fsNode.openSync(p, 'r+')   // 'r+'：Windows FlushFileBuffers 需写权限；文件须已存在（缺席→ENOENT 走 catch）
+        try { fsNode.fsyncSync(fh) } finally { fsNode.closeSync(fh) }
+        lastFsyncMs[sid] = Date.now()
+      } catch (e) { console.error('[task-board] 尾随 fsync 补刷失败（数据仍在页缓存，OS writeback 兜底）: ' + p + ' :: ' + String(e)) }
+    }
+    function armTrailingFsync(sid, tm) {
+      var armedAt = trailingFsync[sid]
+      if (armedAt && Date.now() - armedAt < TRAILING_STALE_MS) return   // 已挂 → 复用（窗口尾统一补一次）
+      armedAt = Date.now()
+      trailingFsync[sid] = armedAt
+      var go = function () {
+        if (trailingFsync[sid] !== armedAt) return   // 0=被全量冲刷显式取消 / 新时刻=被 stale 重挂的新臂取代 → 本臂空转
+        trailingFsync[sid] = 0
+        fireTrailingFsync(sid)
+      }
+      tm.timeout(FSYNC_THROTTLE_MS).then(go, go)
+    }
+    function clearTrailingFsync(sid) { trailingFsync[sid] = 0 }
     async function wt(sid, d) {
       var c = JSON.stringify(d); var p = boardPath(sid)
       // 停用闸（task-mvo9ca58）：插件已停用（disposers 已跑）→ 拒写**新板文件**——teardown 后 HOME 已复原，
@@ -298,8 +360,25 @@ export function createStore(ctx, state, deps) {
       // rename 装上的永远是**某一份**完整 JSON（旧实现共享 p+'.tmp'：两个并发 chunked 写在同一 tmp 交错，
       // rename 把拼接怪原子装上正位——原子 rename 防写一半，防不住 tmp 本身是拼的）。
       var tmp = p + '.' + process.pid + '.' + Date.now() + '-' + (++tmpSeq) + '.tmp'
+      // ===== fsync 节流决策（task-mw0f2zh4）=====
+      // ctx.timer 缺席（老宿主/测试桩）→ throttle 恒 false → fsyncNow 恒 true = 逐字回退每写全量
+      // fsync 的老行为（零风险降级，既有测试桩零改动零抖动）。决策循环外一次定型，退避重试不改判
+      // （中途变节流反而怪）；状态只在 rename 成功后更新（写失败不记窗口，下次仍全量冲——保守偏向落盘）。
+      var tm = ctx && ctx.timer
+      var throttle = !!(tm && typeof tm.timeout === 'function')
+      var nowMs = Date.now()
+      var fsyncNow = !throttle || shouldFsyncNow(lastFsyncMs[sid], nowMs, FSYNC_THROTTLE_MS)
       for (var attempt = 0; attempt < 6; attempt++) {
-        try { await writeTmpFsync(tmp, c); await fsNode.promises.rename(tmp, p); return }
+        try {
+          if (fsyncNow) await writeTmpFsync(tmp, c)
+          else await writeTmpPlain(tmp, c)
+          await fsNode.promises.rename(tmp, p)
+          if (throttle) {
+            if (fsyncNow) { lastFsyncMs[sid] = nowMs; clearTrailingFsync(sid) }  // 全量已冲：记窗口 + 作废挂起臂
+            else armTrailingFsync(sid, tm)                                     // 节流写：挂/复用尾随补刷臂
+          }
+          return
+        }
         catch (e) {
           var code = e && e.code
           if (code === 'EPERM' || code === 'EBUSY' || code === 'ENOTEMPTY' || code === 'EACCES') {

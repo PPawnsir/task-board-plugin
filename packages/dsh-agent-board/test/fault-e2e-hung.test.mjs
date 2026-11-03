@@ -387,13 +387,18 @@ test('E2E挂死④：emitFrame 续命→停帧→倒推 frameSilenceSince 121s �
     assert.equal(env.sendMessages.length, 0, '零重派（零冷复活投递）')
     assert.equal(env.continuables.length, 1, '零新 spawn（零熔断拉黑行为）')
     // ---- 阶段 C：补一帧 → 帧恢复（静默不足 600s）→ 疑似清除+基线删除 ----
+    var tRecover = Date.now() // 补帧时刻：帧恢复后基线的合法新值下界（fsync 节流 task-mw0f2zh4 重校准点）
     env.emitFrame(child.childId, { type: 'chunk', index: 2, time: Date.now() }) // 显式帧形状（reasoning-delta 同理全算活）
     await env.clock.tick()
     t = await env.waitFor(function () {
       var x = env.task('task-hung-s')
       var r = x && x.runs && x.runs.find(function (r) { return String(r.id) === String(child.childId) && r.outcome === 'running' })
-      return x && !x.stuckSince && r && r.frameSilenceSince === undefined ? x : null
-    }, '补一帧 → 帧恢复：疑似清除+基线删除', W)
+      // 帧恢复即删基线；但同 tick 第二轮 poolCycle（mock tick 双 15s interval：心跳+knownSessions 清扫）会按
+      // hung.mjs「零帧且基线缺失即重记」既有语义立即重记新基线（=补帧时刻）。fsync 节流把删→重记瞬态从
+      // 几十 ms（fsync 串行撑宽的侥幸窗口）压到 ~3ms，5ms 轮询常错过 undefined 瞬态——两可皆真：undefined
+      // （尚未重记）或 >=补帧时刻（重记为新帧起点）。断言本质不变：旧倒推值（-121s）绝不可能与疑似清除共存。
+      return x && !x.stuckSince && r && (r.frameSilenceSince === undefined || (typeof r.frameSilenceSince === 'number' && r.frameSilenceSince >= tRecover)) ? x : null
+    }, '补一帧 → 帧恢复：疑似清除+基线已重置（删除或重记为新帧起点）', W)
     assert.ok((t.history || []).some(function (h) { return /帧恢复/.test(h.note) && /清除疑似卡顿标记/.test(h.note) }), '帧恢复留史（静默不足 600s 清标）')
     assert.equal(t.status, 'in-progress', '恢复后卡保持 in-progress')
     assert.equal(env.sendMessages.length, 0, '恢复零重派')
