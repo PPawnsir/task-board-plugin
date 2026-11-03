@@ -318,6 +318,25 @@ export function normalizeFallbackModels(v) {
   }
   return out
 }
+// ===== 板级 artifacts 生成物声明（task-mw00g0sl，L1 声明式跨生态泛化）=====
+// 背景：内置噪声表（health.mjs TOUCH_NOISE_PATHS 的 'lib/client.js'）是本仓库 npm 方言——非 node 工程
+// 的「改了 proto 没重新生成 _pb2.py」「改了源码没重新 uv build」全不命中，健康度归因对 Python/Go 等项目
+// 等于失效。泛化口径：板级声明 boardConfig.artifacts = 生成物路径/glob 清单（工程属性，声明在板上而非
+// 每张卡——task_create/task_update 刻意不加该字段）；消费点：health 噪声过滤（叠加在内置默认表之后）与
+// 计划闸口生成物提示（rpc.mjs planGateApply），归一出口只此一处。
+// 形态：字符串数组（glob 形态原样保存不展开）；脏值收敛：非数组→[]、逐项非字符串丢弃、normTouch 归一
+//（\→/、去 ./ 前缀、去尾 /、trim）、空串丢弃、去重保序、上限 50（超出截尾）——写入（set-board-config）
+// 与读取（cfg()）共用本出口。空数组=清除声明；缺字段 → []：无声明时全部行为与旧版逐字一致。
+export function normalizeArtifacts(v) {
+  if (!Array.isArray(v)) return []
+  var out = []
+  for (var i = 0; i < v.length && out.length < 50; i++) {
+    if (typeof v[i] !== 'string') continue
+    var p = normTouch(v[i])
+    if (p && out.indexOf(p) < 0) out.push(p)
+  }
+  return out
+}
 // ===== 模型健康嗅探（task-mvoulhm7）=====
 // 主动探测只打已配置模型：板级 Worker/Verifier ∪ 三档双角色槽位 ∪ fallbackModels，去重且不全目录扫。
 // probeEnabled=false 只停主动请求，冷却/熔断/run 被动聚合与调度消费照常；间隔缺省 15min，钳 1~1440。
@@ -369,7 +388,7 @@ export function cfg(d) {
   var crd = d.cleanupRetentionDays
   if (typeof crd !== 'number' || !(crd >= 1)) crd = 7
   crd = Math.max(1, Math.min(90, Math.round(crd)))
-  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, cleanupRetentionDays: crd, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false, workerContinuable: d.workerContinuable !== false, verifyUserGuide: d.verifyUserGuide !== false, probeEnabled: d.probeEnabled !== false, probeIntervalMin: normalizeProbeIntervalMin(d.probeIntervalMin), laneModels: normalizeLaneModels(d.laneModels), fallbackModels: normalizeFallbackModels(d.fallbackModels) }
+  return { minWorkers: Math.max(0, Math.min(10, d.minWorkers || 1)), maxWorkers: Math.max(1, Math.min(10, d.maxWorkers || 3)), minVerifiers: Math.max(0, Math.min(5, d.minVerifiers || 0)), maxVerifiers: Math.max(0, Math.min(5, d.maxVerifiers || 2)), softTimeoutMin: soft, hardTimeoutMin: hard, cleanupRetentionDays: crd, feedbackEnabled: d.feedbackEnabled !== false, notifyDispatch: d.notifyDispatch !== false, notifyDone: d.notifyDone !== false, epicSplit: d.epicSplit !== false, workerContinuable: d.workerContinuable !== false, verifyUserGuide: d.verifyUserGuide !== false, probeEnabled: d.probeEnabled !== false, probeIntervalMin: normalizeProbeIntervalMin(d.probeIntervalMin), laneModels: normalizeLaneModels(d.laneModels), fallbackModels: normalizeFallbackModels(d.fallbackModels), artifacts: normalizeArtifacts(d.artifacts) }
 }
 
 // ===== 看板数据目录（跨重启继承用）=====
@@ -386,7 +405,7 @@ export function boardHome() { return path.join(boardDirName(), '.dsh') }
 // ownerCwd（跨重启继承）：创建该看板的会话工作区路径，继承判定全靠它——取不到就省略字段
 // （绝不落空串，否则「路径读不到的多个会话」会被误判成同一工作区）。
 export function seed(sid, ownerCwd) {
-  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, probeEnabled: true, probeIntervalMin: 15, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', laneModels: normalizeLaneModels(null), fallbackModels: [], softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, poolStatus: { workers: [], verifiers: [] }, tasks: [], configLog: [], opsLog: [] }
+  var d = { version: 12, ownerSession: sid, boardMode: 'auto', teamMode: false, feedbackEnabled: true, notifyDispatch: true, notifyDone: true, epicSplit: true, workerContinuable: true, verifyUserGuide: true, probeEnabled: true, probeIntervalMin: 15, minWorkers: 1, maxWorkers: 3, minVerifiers: 0, maxVerifiers: 2, workerModel: '', verifierModel: '', laneModels: normalizeLaneModels(null), fallbackModels: [], softTimeoutMin: 30, hardTimeoutMin: 120, cleanupRetentionDays: 7, artifacts: [], poolStatus: { workers: [], verifiers: [] }, tasks: [], configLog: [], opsLog: [] }
   if (typeof ownerCwd === 'string' && ownerCwd) d.ownerCwd = ownerCwd
   return d
 }

@@ -116,7 +116,7 @@ test('④ 接线：usage/rpc/index 挂 qualityChangeHints + rejectByDay；README
   const iQch = rpc.indexOf('var __qch = qualityChangeHints(d.usageSummary.scoreboard)')
   const iMph = rpc.indexOf('var __mph = modelPerfHint(d.usageSummary.scoreboard)')
   assert.ok(iQch >= 0 && iMph >= 0 && iQch > iMph, 'qualityChangeHints 必须在 modelPerfHint 之后现算')
-  assert.match(rpc, /d\.healthHints = __rh\.hints\.concat\(computeHealthHints\(d\.tasks\)\)\.concat\(__qch\)\.concat\(__mph \? \[__mph\] : \[\]\)/)
+  assert.match(rpc, /d\.healthHints = __rh\.hints\.concat\(computeHealthHints\(d\.tasks, cfg\(d\)\.artifacts\)\)\.concat\(__qch\)\.concat\(__mph \? \[__mph\] : \[\]\)/)
   // index 兼容 re-export
   assert.match(idx, /qualityChangeHints, QUALITY_CHANGE_PP, QUALITY_MIN_SAMPLE, QUALITY_WINDOW_DAYS/)
   // README 双份：逐字一致 + 各补一句（质量异动 / 批次摘要）

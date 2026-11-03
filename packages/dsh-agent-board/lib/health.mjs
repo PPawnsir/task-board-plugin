@@ -4,7 +4,7 @@
 // 窗口化（近 50 张卡）而非累计：架构优化落地后老数据自动滑出窗口不再报警——
 // 健康区同时是「拆分是否有效」的客观验收证据。
 // 信号源不做裁判：只产提示文案，决策永远是人。
-import { normTouch, pickDispatch } from './core.mjs'
+import { normTouch, pickDispatch, touchCovers } from './core.mjs'
 
 // ===== 阈值常量（全部置顶，可按实际使用手感调整；只影响之后的计算，不追溯老数据）=====
 var WINDOW_SIZE = 50       // 统计窗口：按 createdAt 取最近 N 张卡（含归档）
@@ -24,16 +24,25 @@ var MAX_HINTS = 3          // 返回提示上限（warn 信号优先排列）
 // 不动 touches 本身语义：锁冲突、并行度判定、派发排队一概不受影响（core.mjs 的 matchOne 不读本表）。
 // 副作用（刻意接受）：挂在这些路径上的驳回也不再触发信号 d——对「产物/守门员」报警反而会掩盖真脆弱区。
 // 加名单的唯一理由必须是「流程性挂载」，不是「看着不重要」。
+// L1 泛化（task-mw00g0sl）：内置三条是本仓库缺省方言，保留不动（向后兼容）；板级 artifacts 声明
+//（boardConfig.artifacts，跨生态）在其后叠加判定——挂生成物的卡同样不指代架构收敛点。
 var TOUCH_NOISE_PATHS = {
   'lib/client.js': true, // 派生产物：由 lib/client/*.js 组装，改源码的卡几乎都会挂它（改它反而不对）
   'test': true,          // 守门员目录：单测随每张开发卡走
   'README.md': true,     // 双份 README 的根仓副本：随下次发版统一核对，不指代模块收敛点
 }
 
-// 是否为「机械随卡」噪声路径（normTouch 已归一：\ →/、去 ./、去尾 /）
-function isNoiseTouchPath(p) {
+// 是否为「机械随卡」噪声路径（normTouch 已归一：\ →/、去 ./、去尾 /）。
+// artifacts = 板级生成物声明（cfg(d).artifacts，可缺省）：内置默认表先行，板级清单逐条用 core 既有
+// touchCovers（glob/目录/裸名同款口径）叠加判定；无声明时只走内置三条，行为与旧版逐字一致。
+function isNoiseTouchPath(p, artifacts) {
   if (TOUCH_NOISE_PATHS[p]) return true
-  return p.indexOf('test/') === 0 // test/ 整棵子树（含 test/x.test.mjs）
+  if (p.indexOf('test/') === 0) return true // test/ 整棵子树（含 test/x.test.mjs）
+  var list = Array.isArray(artifacts) ? artifacts : []
+  for (var i = 0; i < list.length; i++) {
+    if (typeof list[i] === 'string' && touchCovers(list[i], p)) return true
+  }
+  return false
 }
 
 // 毫秒 → 分钟（四舍五入取整，仅供文案展示）；不足 1 分钟显示 <1min——
@@ -82,14 +91,14 @@ function durationMsOf(t) {
   return (isNaN(ms) || ms < 0) ? -1 : ms
 }
 
-// 任务 touches 归一化（与 core.mjs normTouch 同款口径）+ 单任务内去重 + 机械随卡路径过滤；无 touches 返回 []
-function normPathsOf(t) {
+// 任务 touches 归一化（与 core.mjs normTouch 同款口径）+ 单任务内去重 + 机械随卡路径过滤（内置表 + 板级 artifacts 叠加）；无 touches 返回 []
+function normPathsOf(t, artifacts) {
   var raw = Array.isArray(t.touches) ? t.touches : []
   var seen = {}, out = []
   for (var i = 0; i < raw.length; i++) {
     if (typeof raw[i] !== 'string') continue
     var p = normTouch(raw[i])
-    if (p && !seen[p] && !isNoiseTouchPath(p)) { seen[p] = true; out.push(p) }
+    if (p && !seen[p] && !isNoiseTouchPath(p, artifacts)) { seen[p] = true; out.push(p) }
   }
   return out
 }
@@ -105,7 +114,9 @@ function topPath(counts) {
 }
 
 // 主入口：tasks = 看板任务数组（含归档）。返回 [{level:'warn'|'info', text}]，最多 MAX_HINTS 条，无命中返回 []。
-export function computeHealthHints(tasks) {
+// artifacts = 板级生成物声明（cfg(d).artifacts；可缺省 = 无声明，噪声过滤只走内置默认三条，行为与旧版逐字一致）。
+// 同一份过滤后的 paths 同时喂信号 a 分母（declCounts）与信号 d 归因（rejCounts）——两消费点一处收口。
+export function computeHealthHints(tasks, artifacts) {
   var all = Array.isArray(tasks) ? tasks.slice() : []
   if (!all.length) return []
   // 窗口：按 createdAt 倒序取最近 WINDOW_SIZE 张（缺 createdAt 视为空串，排在最老一侧）
@@ -122,7 +133,7 @@ export function computeHealthHints(tasks) {
   var now = Date.now()  // 信号 b：排队中 pending 卡的右删失代理要用「现在」（一次取定，长循环内不漂移）
   for (var i = 0; i < win.length; i++) {
     var t = win[i] || {}
-    var paths = normPathsOf(t)
+    var paths = normPathsOf(t, artifacts)
     if (paths.length) {
       withTouchN++
       for (var j = 0; j < paths.length; j++) declCounts[paths[j]] = (declCounts[paths[j]] || 0) + 1

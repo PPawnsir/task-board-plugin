@@ -411,7 +411,7 @@ export function createRpc(ctx, state, deps) {
       // 质量异动告警（异常驱动审视②）：scoreboard.trends 环比（一次通过率跌 / 超时率涨 / 驳回率涨），
       // 拼在静态架构信号之后、荐模型建议之前——质量事故 > 架构建议 > 模型建议（最不紧急垫底）。
       var __qch = qualityChangeHints(d.usageSummary.scoreboard)
-      d.healthHints = __rh.hints.concat(computeHealthHints(d.tasks)).concat(__qch).concat(__mph ? [__mph] : [])
+      d.healthHints = __rh.hints.concat(computeHealthHints(d.tasks, cfg(d).artifacts)).concat(__qch).concat(__mph ? [__mph] : [])
       // 史诗父卡语义层：childStats 现算（零存储）——{ <parentId>: { total, settled, resolved, active, activeTitle } }，
       // 父卡列位置/进度展示的数据源；total 含已归档子任务，settled=resolved|cancelled|archived（resolved 为
       // 兼容别名同值），因此归档子卡不会让进度分母缩水（task-muupgfot）；只有无任何子任务的父卡才不出键
@@ -1062,6 +1062,10 @@ export function createRpc(ctx, state, deps) {
     }
     // 撞锁视图像（返回体 planGate.lockConflicts）：纯 id 清单（状态在文案里已分态，视图保持轻量）
     function lockConflictsView(hits) { return (Array.isArray(hits) ? hits : []).map(function (h) { return { file: h.file, holders: (Array.isArray(h.holders) ? h.holders : []).map(function (x) { return x.id }) } }) }
+    // 生成物提示文案（task-mw00g0sl，板级 artifacts 声明式）：单一出口，全合规/警示两分支共用。
+    function artifactHintText(files) {
+      return '计划改动含生成物 ' + (Array.isArray(files) ? files : []).join('、') + '（板上已声明为 artifacts）——应改其源文件后按工程命令重新生成，不要手改产物'
+    }
     // planGateApply(t, planFiles, actor, pat, d)：d=看板数据（board_report 持锁段在调，必然有）——
     // 双查第二查「撞他卡有效锁」要用它现算他卡持锁（core.planLockConflicts）。
     function planGateApply(t, planFiles, actor, pat, d) {
@@ -1094,10 +1098,24 @@ export function createRpc(ctx, state, deps) {
       // 双查第二查（task-mvonytz3④）：计划文件命中其他 in-progress/verifying 卡的有效锁 → 点名持锁卡。
       // 两个在跑 Worker 各自报计划时都会看到对方持锁——静默漂移在动笔前现形。只警示不阻断。
       var hits = d ? core.planLockConflicts(d, t.id, planFiles) : []
+      // 生成物认知提示（task-mw00g0sl，板级 artifacts 声明式）：计划改动命中板上声明的生成物清单 →
+      // 返回体加一行非阻断提示（不记卡 messages、不通知主窗口、不新增 planGate section、不影响
+      // outside/撞锁判定——「改产物不对」与「越没越界」正交：生成物不在 touches 内仍照常算越界）。
+      // 全合规分支同样提示：合规只说明在边界内，「手改生成物」的工序错误与边界无关。
+      // 无声明（cfg().artifacts 为空）时零命中零提示，行为与旧版逐字一致。
+      var artHits = []
+      var artList = d ? cfg(d).artifacts : []
+      for (var ai = 0; ai < planFiles.length && artList.length; ai++) {
+        for (var aj = 0; aj < artList.length; aj++) {
+          if (core.touchCovers(artList[aj], planFiles[ai])) { artHits.push(planFiles[ai]); break }
+        }
+      }
       // 全合规 → 记一行过闸（幂等），不打扰主窗口
       if (!outside.length && !hits.length) {
         planGateMsg(t, '计划闸口已过（' + planFiles.length + ' 个文件均在 touches 内）', pat, actor)
-        return { ok: true, progress: t.lastProgress, planGate: { files: planFiles.length, outside: [] } }
+        var okRes = { ok: true, progress: t.lastProgress, planGate: { files: planFiles.length, outside: [] } }
+        if (artHits.length) okRes.warning = artifactHintText(artHits)
+        return okRes
       }
       // 越界/撞锁 → 三通道警示（兼有=合并；无扩权且越界无锁=原文案逐字不变）
       var oobText = outside.join('、')
@@ -1109,6 +1127,7 @@ export function createRpc(ctx, state, deps) {
       var warnParts = []
       if (outside.length) warnParts.push('计划改动越界：' + oobText + ' 不在本卡 touches 内——请修正计划（只改 touches 范围内的文件），或 board_report kind=escalate 请主窗口放行')
       if (hits.length) warnParts.push(lockHitText(hits) + '——请与他卡错时改写这些文件，或 board_report kind=escalate 请主窗口协调')
+      if (artHits.length) warnParts.push(artifactHintText(artHits))
       var res = {
         ok: true,
         progress: t.lastProgress,
@@ -1419,6 +1438,13 @@ export function createRpc(ctx, state, deps) {
           if (__fe) return { ok: false, error: __fe }
         }
       }
+      // ===== 板级 artifacts 生成物声明（task-mw00g0sl，L1 跨生态）：字符串数组（glob 原样），非数组 fail-loud 拒写 =====
+      // value 形态为字符串数组（生成物路径/glob 清单，如 ["lib/client.js","dist/**","*_pb2.py"]）；元素归一去重、
+      // 上限 50 由 core.normalizeArtifacts 单口径收口（与 cfg() 读路径同源）；空数组=清除声明；非数组形态拒写
+      //（防手滑传字符串被静默收敛成 []——「清除」必须是显式语义）。成功写入落 configLog 审计行（下方 __hit 链）。
+      if (args.key === 'artifacts') {
+        if (!Array.isArray(args.value)) return { ok: false, error: 'artifacts 需为字符串数组（生成物路径/glob 清单，如 ["lib/client.js","dist/**","*_pb2.py"]；空数组=清除声明）' }
+      }
       // ===== maxWorkers falsy 陷阱修复（task-mvzoq3ov，实证 n-mvmtsf9axnn4）=====
       // 旧写 `Math.max(1, Math.min(10, args.value || 3))`：0 是 falsy → 被吞成缺省 3。用户设 0 想「暂停派发」，
       // 实际落 3 且 configLog 留一条 from→to:3 的「越调越大」错向审计行——静默改写比报错难查得多。
@@ -1443,7 +1469,7 @@ export function createRpc(ctx, state, deps) {
       return mutateLocked(sid, function (d) {
         var __from = d[args.key] === undefined ? null : d[args.key] // 写前留旧值（JSON 落盘不容 undefined，归一成 null）
         var __hit = true
-        if (args.key === 'maxWorkers') d.maxWorkers = __mwWrite; else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'cleanupRetentionDays') d.cleanupRetentionDays = Math.max(1, Math.min(90, Number(args.value) || 7)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'workerContinuable') d.workerContinuable = !!args.value; else if (args.key === 'verifyUserGuide') d.verifyUserGuide = !!args.value; else if (args.key === 'probeEnabled') d.probeEnabled = !!args.value; else if (args.key === 'probeIntervalMin') d.probeIntervalMin = core.normalizeProbeIntervalMin(args.value); else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } else if (args.key === 'laneModels') { var __base = cfg(d).laneModels; for (var __pi = 0; __pi < TASK_SIZES.length; __pi++) { var __pl = args.value[TASK_SIZES[__pi]]; if (!__pl) continue; if (__pl.worker !== undefined) __base[TASK_SIZES[__pi]].worker = core.normalizeLaneSlot(__pl.worker); if (__pl.verifier !== undefined) __base[TASK_SIZES[__pi]].verifier = core.normalizeLaneSlot(__pl.verifier) } d.laneModels = __base } else if (args.key === 'fallbackModels') { d.fallbackModels = core.normalizeFallbackModels(args.value) } else __hit = false
+        if (args.key === 'maxWorkers') d.maxWorkers = __mwWrite; else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'cleanupRetentionDays') d.cleanupRetentionDays = Math.max(1, Math.min(90, Number(args.value) || 7)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'workerContinuable') d.workerContinuable = !!args.value; else if (args.key === 'verifyUserGuide') d.verifyUserGuide = !!args.value; else if (args.key === 'probeEnabled') d.probeEnabled = !!args.value; else if (args.key === 'probeIntervalMin') d.probeIntervalMin = core.normalizeProbeIntervalMin(args.value); else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } else if (args.key === 'laneModels') { var __base = cfg(d).laneModels; for (var __pi = 0; __pi < TASK_SIZES.length; __pi++) { var __pl = args.value[TASK_SIZES[__pi]]; if (!__pl) continue; if (__pl.worker !== undefined) __base[TASK_SIZES[__pi]].worker = core.normalizeLaneSlot(__pl.worker); if (__pl.verifier !== undefined) __base[TASK_SIZES[__pi]].verifier = core.normalizeLaneSlot(__pl.verifier) } d.laneModels = __base } else if (args.key === 'fallbackModels') { d.fallbackModels = core.normalizeFallbackModels(args.value) } else if (args.key === 'artifacts') { d.artifacts = core.normalizeArtifacts(args.value) } else __hit = false
         if (__hit) {
           if (!Array.isArray(d.configLog)) d.configLog = []
           d.configLog.push({ key: String(args.key), from: __from, to: d[args.key] === undefined ? null : d[args.key], actor: actor, at: new Date().toISOString() })

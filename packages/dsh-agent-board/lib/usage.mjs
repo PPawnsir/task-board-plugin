@@ -973,7 +973,10 @@ export var REJECTION_CLUSTER_RULES = [
   { id: 'readme-stale', label: 'README 未同步', re: /README|文档未|文档不|未同步/, advice: '在派发约定补一条：行为/口径/界面变化必须同步 README 双份并逐字一致（npm run sync-readme）' },
   { id: 'scope-creep', label: '范围越界', re: /范围越界|越界|范围外|改了别|额外改动|顺带改|顺手改/, advice: '在派发约定补一条：只改任务 touches 声明范围内的文件；范围外发现的问题另建卡，不顺带改' },
   { id: 'assertion-missing', label: '断言缺失', re: /断言/, advice: '在派发约定补一条：任务断言必须逐条配单测锁定——断言无测试视为未完成' },
-  { id: 'artifact-stale', label: '产物未重组装', re: /重组装|重新组装|产物未|build-client|组装产物|未重建|未重新构建/, advice: '在派发约定补一条：改完组装源（lib/client/* 等）必须重组装产物（npm run build-client）再上报' },
+  // artifact-stale 泛化（task-mw00g0sl）：词族从 npm 方言（build-client 组装）扩到跨生态——
+  // proto/_pb2.py、codegen/generated、任意「改了源没重新生成产物」措辞全命中（原词除 build-client 字面全保留）；
+  // advice 指向板级声明 boardConfig.artifacts（生成物按各工程命令重新生成）。
+  { id: 'artifact-stale', label: '产物未重组装', re: /重组装|重新组装|产物未|组装产物|未重建|未重新构建|未重新生成|没重新生成|未重新跑生成|生成物未|未更新产物|忘了重新生成|需要重新生成|pb2|generated|codegen/, advice: '在派发约定补一条：改完声明为生成物（boardConfig.artifacts）的源文件后，必须按工程命令重新生成再上报' },
 ]
 var REJ_CLUSTER_OTHER = { id: 'other', label: '其他（未匹配规则）', advice: '人工归纳该类驳回的共性后，在派发约定/Worker prompt 补一条对应规则' }
 var REJ_SAMPLE_MAX = 3   // 每类代表原文最多保留条数

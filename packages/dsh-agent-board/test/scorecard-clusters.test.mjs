@@ -196,7 +196,7 @@ test('卡5⑤b：接线（源码级）——rpc healthHints 拼 modelPerfHint / 
   const iSb = rpc.indexOf('d.usageSummary.scoreboard = buildScoreboard(d.tasks, args && args.range')
   const iMph = rpc.indexOf('var __mph = modelPerfHint(d.usageSummary.scoreboard)')
   assert.ok(iSb >= 0 && iMph > iSb, 'modelPerfHint 必须在 scoreboard 挂载之后现算')
-  assert.match(rpc, /d\.healthHints = __rh\.hints\.concat\(computeHealthHints\(d\.tasks\)\)\.concat\(__qch\)\.concat\(__mph \? \[__mph\] : \[\]\)/)
+  assert.match(rpc, /d\.healthHints = __rh\.hints\.concat\(computeHealthHints\(d\.tasks, cfg\(d\)\.artifacts\)\)\.concat\(__qch\)\.concat\(__mph \? \[__mph\] : \[\]\)/)
   // usage.mjs：聚类规则表 / 聚类函数 / hint 阈值常量导出
   assert.match(usage, /export var REJECTION_CLUSTER_RULES = \[/)
   assert.match(usage, /export function clusterRejections\(texts\)/)

@@ -15,6 +15,9 @@ import * as core from '../lib/core.mjs'
 import { suggestSplitOf, withSplitHint, SUGGEST_SPLIT_TEXT, TASK_SIZE_CONTRACT, TEAM_SPLIT_RULE, TEAM_DECISION_TREE, TEAM_CONTEXT_PACKING, TEAM_DECOMPOSE_FLOW, splitRuleOf } from '../index.mjs'
 import { aggregateUsageSummary, readRunUsage, findRunLog, effectiveTokens, taskEffectiveTokens } from '../index.mjs'
 import { createRpc } from '../lib/rpc.mjs'
+// 板级 artifacts 声明（task-mw00g0sl）：health 纯函数直引 + 聚类从 index 薄壳 re-export（对外契约面）
+import { computeHealthHints } from '../lib/health.mjs'
+import { clusterRejections, REJECTION_CLUSTER_RULES } from '../index.mjs'
 // 拆解官 prompt 契约 + 判档/pipeline 文案常量（task-mvxpzcr9）：直接读 policy 层（契约同源头；本卡 touches
 // 不含 index.mjs 薄壳，故新常量不新增 re-export，测试按 policy 层直引——与 decompose.test 同款导入面）
 import { buildDecomposerPrompt, TEAM_SIZE_GUIDE, TEAM_PIPELINE_GUIDE, TEAM_SIZE_PIPELINE_GUIDE, SIZE_TIER_SAMPLES, SIZE_PICK_QUESTIONS, PIPELINE_SCENE_CONTRACT } from '../lib/policy.mjs'
@@ -3130,7 +3133,7 @@ test('学习飞轮接线：两处触发点 + push-lesson 开关拦截 + prompt/�
 test('架构健康接线：get-tasks 返回 healthHints + 仪表盘 HealthHints 区缺省兼容渲染', () => {
   const host = hostSrc()
   const cli = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.match(host, /d\.healthHints = __rh\.hints\.concat\(computeHealthHints\(d\.tasks\)\)/) // host 每次请求现算返回（零存储）；运行时 hint（task-muxhrkbg）拼在静态信号前面
+  assert.match(host, /d\.healthHints = __rh\.hints\.concat\(computeHealthHints\(d\.tasks, cfg\(d\)\.artifacts\)\)/) // host 每次请求现算返回（零存储）；运行时 hint（task-muxhrkbg）拼在静态信号前面；板级 artifacts 声明入噪声过滤（task-mw00g0sl）
   assert.match(cli, /function HealthHints\(\)/)                          // 仪表盘提示区组件
   assert.match(cli, /React\.createElement\(HealthHints\)/)               // 挂进 Dashboard（统计卡行下方、Token 消耗区上方）
   assert.match(cli, /Array\.isArray\(d\.healthHints\)/)                  // 缺省兼容：老 host 无字段/非数组 → 按空处理
@@ -7429,4 +7432,154 @@ test('模型熔断分态②：非 UNKNOWN_MODEL 失败 → 保持「验收连续
   assert.equal(r.notes.length, 1)
   assert.match(r.notes[0], /模型 kimi\/kimi-k3 验收连续失败，已熔断回退父级模型/)
   assert.ok(!/配置非法/.test(r.notes[0]))
+})
+
+// ===== 板级 artifacts 生成物声明（task-mw00g0sl，L1 跨生态泛化）：断言①cfg 归一 / ②set-board-config 落盘审计 / ③health 噪声过滤 / ④聚类 proto 前后对照 / ⑤计划闸口提示正交 =====
+// 红线复述：无 artifacts 声明时全部行为逐字不变（③④⑤各带无声明对照）；不改 touches 锁语义（artifacts 是认知标注不是锁）；GUI 不下发不展示。
+test('artifacts①：cfg 归一化（缺省 [] / 非数组→[] / 非字符串过滤+normTouch 归一+去重保序 / 上限 50）+ seed 缺省 []', () => {
+  assert.deepEqual(core.cfg({}).artifacts, [], '老看板缺字段 → []（无声明=行为与旧版逐字一致）')
+  assert.deepEqual(core.seed('s1').artifacts, [], 'seed 新板缺省 []')
+  assert.deepEqual(core.cfg({ artifacts: 'dist/**' }).artifacts, [], '非数组脏值 → []')
+  assert.deepEqual(core.cfg({ artifacts: [{}, 42, null, undefined, ''] }).artifacts, [], '全脏值 → []（元素须字符串）')
+  // normTouch 归一（\→/、去 ./、trim）+ 去重保序 + 非字符串/空串过滤；glob 形态原样保存不展开
+  assert.deepEqual(
+    core.cfg({ artifacts: [' dist/** ', './dist/**', 'dist\\bundle.js', 'dist/**', 42, '', 'src/*_pb2.py', 'dist/bundle.js'] }).artifacts,
+    ['dist/**', 'dist/bundle.js', 'src/*_pb2.py'],
+    'trim+归一+去重保序，glob 原样'
+  )
+  // 上限 50：60 项 → 截尾保序 50
+  var big = []; for (var i = 0; i < 60; i++) big.push('gen/dir' + i + '/x.js')
+  var capped = core.cfg({ artifacts: big }).artifacts
+  assert.equal(capped.length, 50, '上限 50 截尾')
+  assert.equal(capped[0], 'gen/dir0/x.js'); assert.equal(capped[49], 'gen/dir49/x.js')
+  assert.deepEqual(core.cfg({ artifacts: [] }).artifacts, [], '空数组=清除声明（归一后仍 []）')
+})
+
+test('artifacts②：set-board-config artifacts 白名单键——归一落盘 + configLog 审计行 + 空数组清除 + 非数组 fail-loud 拒写', async () => {
+  const board = mkBoard([])
+  const h = mkRpcHandlers(board)
+  const r = await h['set-board-config']({ key: 'artifacts', value: ['dist/**', ' src/proto/*_pb2.py ', 'dist/**', 'lib\\client.js', 42, ''] })
+  assert.equal(r.ok, true)
+  assert.deepEqual(board.artifacts, ['dist/**', 'src/proto/*_pb2.py', 'lib/client.js'], '归一去重保序落盘（glob 原样保存）')
+  var log = board.configLog[board.configLog.length - 1]
+  assert.equal(log.key, 'artifacts')
+  assert.equal(log.from, null, '首次写入 from=null（板无该字段）')
+  assert.deepEqual(log.to, ['dist/**', 'src/proto/*_pb2.py', 'lib/client.js'], '审计 to 记归一后落盘值')
+  assert.equal(log.actor, 'tester')
+  // 空数组=清除声明：审计行 from→to 如实记录
+  const r2 = await h['set-board-config']({ key: 'artifacts', value: [] })
+  assert.equal(r2.ok, true)
+  assert.deepEqual(board.artifacts, [], '空数组=清除')
+  var log2 = board.configLog[board.configLog.length - 1]
+  assert.deepEqual(log2.from, ['dist/**', 'src/proto/*_pb2.py', 'lib/client.js'])
+  assert.deepEqual(log2.to, [])
+  // 非数组 fail-loud 拒写：零落盘零审计（「清除」必须是显式 [] 语义，不收字符串手滑）
+  var before = JSON.stringify(board.artifacts) + '|' + board.configLog.length
+  const r3 = await h['set-board-config']({ key: 'artifacts', value: 'dist/**' })
+  assert.equal(r3.ok, false)
+  assert.match(r3.error, /artifacts 需为字符串数组/)
+  assert.equal(JSON.stringify(board.artifacts) + '|' + board.configLog.length, before, '拒写零落盘零审计')
+})
+
+test('artifacts③：health 噪声判定——声明 dist/** 后 dist 路径不再计入热度分母与驳回归因；未声明照常提示；内置三条仍生效', () => {
+  // 8 张卡只挂 dist/bundle.js 且各驳回 1 次：未声明时信号 a（8 次声明 100%）+ 信号 d（累计驳回 8 次）双亮
+  var ts = []
+  for (var i = 0; i < 8; i++) ts.push(mkTask({ id: 't' + i, status: 'resolved', touches: ['dist/bundle.js'], rejectCount: 1 }))
+  var plain = computeHealthHints(ts)
+  assert.equal(plain.length, 2, '未声明：热点照常报警')
+  assert.ok(plain[0].text.indexOf('dist/bundle.js 在近 8 张卡中被 8 次声明 touches') >= 0)
+  assert.ok(plain[1].text.indexOf('dist/bundle.js 相关任务被驳回 8 次') >= 0)
+  // 声明 'dist/**' 后：同批卡 dist 路径全被过滤——无热度计数、驳回无归因，零提示
+  assert.deepEqual(computeHealthHints(ts, ['dist/**']), [], '声明后信号 a 分母/信号 d 归因双双过滤')
+  // touchCovers 同款口径：目录形态与精确文件形态声明同样命中；声明不覆盖时不误伤
+  assert.deepEqual(computeHealthHints(ts, ['dist']), [], '目录形态（dist）覆盖子树')
+  assert.deepEqual(computeHealthHints(ts, ['dist/bundle.js']), [], '精确文件声明只盖自身')
+  assert.equal(computeHealthHints(ts, ['dist/other.js']).length, 2, '声明不覆盖时照常提示（不误伤）')
+  // 声明不影响相邻真实路径：同卡真实热点照常计入、生成物不进文案
+  var ts2 = []
+  for (var j = 0; j < 8; j++) ts2.push(mkTask({ id: 'u' + j, status: 'resolved', touches: ['src/real.js', 'dist/bundle.js'], claimedAt: '2026-01-01T00:00:01Z', resolvedAt: '2026-01-01T00:02:00Z' }))
+  var mixed = computeHealthHints(ts2, ['dist/**'])
+  assert.equal(mixed.length, 1, '真实路径照常计入（信号 a）')
+  assert.ok(mixed[0].text.indexOf('src/real.js 在近 8 张卡中被 8 次声明 touches') >= 0)
+  assert.equal(mixed[0].text.indexOf('dist/bundle.js'), -1, '生成物不进提示文案')
+  // 内置默认三条在板级声明叠加后仍生效：lib/client.js / test / README.md / test/ 子树照旧过滤
+  var ts3 = []
+  for (var k = 0; k < 10; k++) ts3.push(mkTask({ id: 'w' + k, status: 'resolved', touches: ['lib/client.js', 'test/core.test.mjs', 'README.md', 'src/real.js'] }))
+  var builtin = computeHealthHints(ts3, ['dist/**'])
+  assert.equal(builtin.length, 1, '内置三条过滤后只剩真实热点')
+  assert.ok(builtin[0].text.indexOf('src/real.js') >= 0)
+  // 无声明（第二参缺省）与既有单测口径逐字一致：health.test.mjs 全量回归由套件保证
+  assert.equal(computeHealthHints(ts).length, 2, '第二参缺省 = 未声明（旧调用面零改动）')
+})
+
+test('artifacts④：驳回聚类跨生态——『改了 proto 没重新生成 _pb2.py』命中 artifact-stale（旧正则不命中，前后对照）+ 原词全保留 + advice 通用化', () => {
+  const rule = REJECTION_CLUSTER_RULES.find(function (r) { return r.id === 'artifact-stale' })
+  const protoText = '验收驳回 · 改了 proto 没重新生成 _pb2.py，接口对不上'
+  // 前后对照（本卡核心价值证明）：旧 npm 方言正则对该文本零命中——聚类对 Python 工程原是失效的
+  const OLD_ARTIFACT_RE = /重组装|重新组装|产物未|build-client|组装产物|未重建|未重新构建/
+  assert.equal(OLD_ARTIFACT_RE.test(protoText), false, '对照：旧正则（npm 方言）对 proto 文本不命中')
+  assert.ok(rule.re.test(protoText), '新词族命中 proto 场景（没重新生成/pb2）')
+  // 跨生态词族逐词抽测
+  for (const t of [
+    '验收驳回 · 改了 proto 未重新生成 _pb2.py',
+    '验收驳回 · 忘了重新生成 generated 代码',
+    '验收驳回 · codegen 没重跑，产物未更新',
+    '验收驳回 · 改了源码没重新 uv build，生成物未重建',
+    '验收驳回 · 需要重新生成产物后再上报',
+  ]) assert.ok(rule.re.test(t), '跨生态样本命中: ' + t)
+  // 原词全保留（除 build-client 字面退役）：存量样本与原词族逐词回归
+  for (const t of ['产物未重组装（lib/client.js 还是旧的）', '重新组装忘了跑', '组装产物没更新', '未重建就上报', '未重新构建']) assert.ok(rule.re.test(t), '原词保留: ' + t)
+  assert.ok(!/build-client/.test(rule.re.source), 'npm 方言字面 build-client 已退役')
+  // advice 指向板级声明（通用工程命令口径，不再绑 npm）
+  assert.ok(rule.advice.indexOf('boardConfig.artifacts') >= 0, 'advice 指向板级声明')
+  assert.ok(rule.advice.indexOf('按工程命令重新生成') >= 0)
+  assert.equal(rule.advice.indexOf('npm run build-client'), -1, 'advice 不再绑 npm 命令')
+  // 端到端：clusterRejections 把 proto 文本归入 artifact-stale 桶（不再落 other 兜底）
+  const cr = clusterRejections([protoText])
+  assert.equal(cr.total, 1)
+  assert.equal(cr.top[0].id, 'artifact-stale')
+  assert.equal(cr.otherCount, 0)
+  assert.match(cr.top[0].suggestion, /产物未重组装/)
+  assert.match(cr.top[0].suggestion, /boardConfig\.artifacts/)
+})
+
+test('artifacts⑤：计划闸口生成物提示——计划含声明产物 → warning 出现且与 outside 判定正交（合规也提示/越界照算/无声明零提示）', async () => {
+  // 场景 A：产物在本卡 touches 内（全合规）→ planGate 视图不变，仅返回体多一行生成物提示
+  const tA = mkTask({ id: 'ta', status: 'in-progress', claimedBy: 'w1', touches: ['dist/**', 'src/a.mjs'] })
+  const boardA = mkBoard([tA]); boardA.artifacts = ['dist/**']
+  const gA = await mkRpcHandlers(boardA).__tools['board_report'].execute({ taskId: 'ta', kind: 'progress', question: '计划改动：\n- dist/bundle.js\n- src/a.mjs' })
+  assert.equal(gA.ok, true)
+  assert.deepEqual(gA.planGate, { files: 2, outside: [] }, 'planGate section 形态不变（不新增 section）')
+  assert.match(gA.warning, /计划改动含生成物 dist\/bundle\.js（板上已声明为 artifacts）——应改其源文件后按工程命令重新生成，不要手改产物/, '全合规分支同样给生成物提示（工序错误与边界无关）')
+  var gateA = (tA.messages || []).filter(function (m) { return m.kind === 'plan-gate' })
+  assert.equal(gateA.length, 1)
+  assert.match(gateA[0].text, /计划闸口已过/, '卡 messages 只有过闸行——生成物提示不记卡、不通知主窗口')
+  assert.equal('planGateNotify' in gA, false, '无越界无撞锁不通知主窗口')
+  // 场景 B：产物不在 touches 内（越界）→ 越界照算 + 生成物提示追加一行（正交：提示不豁免越界）
+  const tB = mkTask({ id: 'tb', status: 'in-progress', claimedBy: 'w1', touches: ['src/a.mjs'] })
+  const boardB = mkBoard([tB]); boardB.artifacts = ['dist/**']
+  const gB = await mkRpcHandlers(boardB).__tools['board_report'].execute({ taskId: 'tb', kind: 'progress', question: '计划改动：\n- dist/bundle.js\n- src/a.mjs' })
+  assert.deepEqual(gB.planGate.outside, ['dist/bundle.js'], '生成物不在 touches 仍算越界（判定正交，提示不豁免）')
+  assert.match(gB.warning, /计划改动越界：dist\/bundle\.js 不在本卡 touches 内/)
+  assert.match(gB.warning, /计划改动含生成物 dist\/bundle\.js（板上已声明为 artifacts）/, '兼有：越界 + 生成物两行 warning 并存')
+  assert.equal(gB.warning.split('\n').length, 2, '两行各说各的')
+  // 场景 C：无声明（缺字段）→ 零提示，返回体行为与旧版逐字一致
+  const tC = mkTask({ id: 'tc', status: 'in-progress', claimedBy: 'w1', touches: ['src/a.mjs'] })
+  const gC = await mkRpcHandlers(mkBoard([tC]) /* 无 artifacts 字段 */).__tools['board_report'].execute({ taskId: 'tc', kind: 'progress', question: '计划改动：\n- dist/bundle.js\n- src/a.mjs' })
+  assert.deepEqual(gC.planGate.outside, ['dist/bundle.js'])
+  assert.ok(!/生成物/.test(gC.warning), '无声明零生成物提示')
+  assert.equal(gC.warning.split('\n').length, 1, 'warning 行数与旧版一致（单行越界）')
+  // 空数组声明（显式清除）同样零提示
+  const boardC2 = mkBoard([mkTask({ id: 'tc2', status: 'in-progress', claimedBy: 'w1', touches: ['src/a.mjs'] })]); boardC2.artifacts = []
+  const gC2 = await mkRpcHandlers(boardC2).__tools['board_report'].execute({ taskId: 'tc2', kind: 'progress', question: '计划改动：\n- dist/bundle.js' })
+  assert.ok(!/生成物/.test(gC2.warning), '空数组声明（清除）零提示')
+})
+
+test('artifacts⑦：GUI 不下发不展示——client 侧零接线（本卡不碰 client，产物与模块源均无 artifacts 消费点）', () => {
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.equal(built.indexOf('artifacts'), -1, 'client.js 组装产物无 artifacts 消费')
+  const kern = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
+  assert.equal(kern.indexOf('artifacts'), -1, 'kernel state 无 artifacts 字段')
+  const dash = readFileSync(new URL('../lib/client/dashboard.js', import.meta.url), 'utf8')
+  assert.equal(dash.indexOf('artifacts'), -1, '设置区/仪表盘无 artifacts 下发口')
 })
