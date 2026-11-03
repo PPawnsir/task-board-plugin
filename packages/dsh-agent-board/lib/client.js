@@ -880,7 +880,9 @@ function apply(ctx) {
 
     // ===== 拆解官状态徽标（task-mvomad6c ②，源卡列表行「🧩 拆解中 / 已提案 ×N」）=====
     // 纯函数现算（不入 state、不落库、不引用 C/ago——自包含，可直接被单测提取执行），
-    // 返回 { txt, tone('brand'|'warn'), tip }，色板映射留给渲染层 decomposePhaseBadge。
+    // 返回 { txt, tone('brand'|'warn'), tip, runId? }，色板映射留给渲染层 decomposePhaseBadge。
+    // runId（task-mw0dz3ki ②）= 末条在跑 decomposer run 的 id，「拆解中」徽标据此改可点直跳；
+    // 「已提案」分支无活跃 run，不返回 runId（徽标保持静态）。
     // 数据源 = t.runs 留档（role='decomposer'）+ 同板子卡提案批：
     //   在跑   → 末条 decomposer 留档 outcome='running' 且无 endedAt；**超龄守卫**：at 距今
     //            ≥ hardMin（留档自带，缺省 120）分钟视为 host 重启残留（sweepZombieRuns 只扫
@@ -895,7 +897,7 @@ function apply(ctx) {
       if (last && last.outcome === 'running' && !last.endedAt) {
         var ageMs = last.at ? (Date.now() - new Date(last.at).getTime()) : Infinity
         if (isFinite(ageMs) && ageMs < (last.hardMin || 120) * 60000) {
-          return { txt: '🧩 拆解中', tone: 'brand', tip: '拆解官正在读本卡并产出子任务提案（run ' + last.id + '）；拆解期间本卡不派 Worker，落定后转「🧩 已提案」' }
+          return { txt: '🧩 拆解中', tone: 'brand', runId: last.id, tip: '拆解官正在读本卡并产出子任务提案（run ' + last.id + '）；拆解期间本卡不派 Worker，落定后转「🧩 已提案」' }
         }
       }
       var kidsN = 0
@@ -908,7 +910,19 @@ function apply(ctx) {
       var b = decomposeBadgeOf(t, state.tasks)
       if (!b) return null
       var color = b.tone === 'warn' ? C.warn : C.brand
-      return React.createElement('span', { title: b.tip, style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + color + ' 14%, transparent)', color: color, fontWeight: 600, whiteSpace: 'nowrap' } }, b.txt)
+      var base = { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + color + ' 14%, transparent)', color: color, fontWeight: 600, whiteSpace: 'nowrap' }
+      // 可点直跳（task-mw0dz3ki ②：「拆解中」徽标此前纯静态，用户看得见徽标却摸不到拆解官会话）：
+      // b.runId 仅在「在跑」分支返回（超龄残留不返回→保持静态），点击 stopPropagation 不打开详情页，
+      // 直接 openSession 跳拆解官子会话。「已提案」分支无 runId，渲染路径与旧版逐字一致。
+      if (b.runId) {
+        return React.createElement('span', {
+          onClick: function (e) { e.stopPropagation(); if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(b.runId) },
+          onMouseDown: function (e) { e.stopPropagation() },
+          title: b.tip + ' · 点击跳转拆解官会话',
+          style: Object.assign({}, base, { cursor: 'pointer', textDecoration: 'underline' })
+        }, b.txt)
+      }
+      return React.createElement('span', { title: b.tip, style: base }, b.txt)
     }
 
     function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); var delOk = !state.selectMode && canDelete(t); var cs = (state.childStats && state.childStats[t.id]) || null; var csDone = cs ? (typeof cs.settled === 'number' ? cs.settled : cs.resolved) : 0; var epic = !!(cs && cs.total > 0); var parentT = t.parentId ? getTask(t.parentId) : null; var depWaitTitle = ''; var depWaitN = 0; if (depBlock) { t.dependsOn.forEach(function (id) { var d = getTask(id); if (!d || (d.status !== 'resolved' && d.status !== 'archived')) { depWaitN++; if (!depWaitTitle) depWaitTitle = d && d.title ? d.title : id } }) } var durB = cardDur(t);
@@ -1421,6 +1435,25 @@ function apply(ctx) {
         msg ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 3, wordBreak: 'break-all' } }, msg) : null)
     }
 
+    // ===== 活跃拆解官 run 择出（task-mw0dz3ki ①）=====
+    // 病根：详情页顶部跳转（canJump）要求 in-progress/verifying + claimedBy，而拆解源卡恒为
+    // draft/pending 且无认领 → 顶部没有任何会话入口，用户只能翻到底部历史区才找到 🧩 按钮。
+    // 本函数给出「当前活跃拆解官 run」供顶部并列入口使用，口径与 board-list decomposeBadgeOf 逐条对齐：
+    //   · 末条 role='decomposer' 留档（重拆取最后一次）；
+    //   · outcome='running' 且无 endedAt（已关账的不算活跃）；
+    //   · 超龄守卫：at 距今 ≥ hardMin（缺省 120）分钟视为 host 重启残留——sweepZombieRuns 只扫落定卡，
+    //     draft/pending 源卡的 running 留档不会被关账，不守卫会在重启后长生一个指向死会话的按钮。
+    // 纯函数（只读 t.runs + Date.now()，不引用 state/C），可直接被单测从源码提取执行。
+    function activeDecomposeRunOf(t) {
+      if (!t || !Array.isArray(t.runs)) return null
+      var last = null
+      for (var i = t.runs.length - 1; i >= 0; i--) { if (t.runs[i] && t.runs[i].role === 'decomposer') { last = t.runs[i]; break } }
+      if (!last || !last.id || last.outcome !== 'running' || last.endedAt) return null
+      var ageMs = last.at ? (Date.now() - new Date(last.at).getTime()) : Infinity
+      if (!isFinite(ageMs) || ageMs >= (last.hardMin || 120) * 60000) return null
+      return last
+    }
+
     function DetailView() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect; var task = getTask(state.detailId)
       var _a = useState(task ? task.title : ''), editTitle = _a[0], setEditTitle = _a[1]; var _b = useState(task ? task.description || '' : ''), editDesc = _b[0], setEditDesc = _b[1]; var _c = useState(false), saving = _c[0], setSaving = _c[1]; var _d = useState(state.boardMode), mode = _d[0], setMode = _d[1]
@@ -1433,6 +1466,8 @@ function apply(ctx) {
       function doAction(fn) { fn().then(fetchTasks).catch(function () {}) }
       function saveEdit() { setSaving(true); rpc('update-task', { taskId: task.id, title: editTitle, description: editDesc, resetToPending: true }).then(function () { setSaving(false); fetchTasks() }).catch(function () { setSaving(false) }) }
       function jumpToAgent() { if (uiWorkspaceSvc && task.claimedBy) uiWorkspaceSvc.openSession(task.claimedBy) }
+      // 拆解官会话跳转（task-mw0dz3ki ①）：与 jumpToAgent 同款，只是绑定拆解 run id 而非 claimedBy
+      function jumpToRun(runId) { if (uiWorkspaceSvc && runId) uiWorkspaceSvc.openSession(runId) }
       function submitArbitration() { if (!arbAnswer.trim()) return; var act = arbAction === 'hold' ? 'hold' : 'resume'; rpc('resolve-escalation', { taskId: task.id, answer: arbAnswer, action: act }).then(function (r) { setActionMsg(r && r.ok ? (act === 'hold' ? '✅ 裁决已记录，任务已挂起冻结（❄ 不参与自动派发）' : '✅ 裁决已转达，任务重新排队派发') : '⚠️ ' + ((r && r.error) || '失败')); setArbAnswer(''); setArbAction('resume'); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) }) }
       function doUnfreeze() { rpc('unfreeze-task', { taskId: task.id }).then(function (r) { setActionMsg(r && r.ok ? '✅ 已解除冻结，重新进入派发池' : '⚠️ ' + ((r && r.error) || '失败')); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) }) }
       function doTerminate() { rpc('terminate-agent', { taskId: task.id }).then(function (r) { setActionMsg(r && r.ok ? '⏹ 已终止 ' + (r.terminated || '') + '，任务重新排队' : '⚠️ ' + ((r && r.error) || '无活动 Agent')); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) }) }
@@ -1455,6 +1490,9 @@ function apply(ctx) {
       }
       function submitIntervene() { if (!interveneMsg.trim()) return; rpc('intervene-agent', { taskId: task.id, message: interveneMsg }).then(function (r) { setActionMsg(r && r.ok ? '✅ 高优指令已插入 ' + shortId(r.agent) + ' 队首' : '⚠️ ' + ((r && r.error) || '无活动 Agent')); setInterveneMsg(''); fetchTasks() }).catch(function (e) { setActionMsg('⚠️ ' + String(e)) }) }
       var isManual = task.assignMode === 'manual'; var canJump = (task.status === 'in-progress' || task.status === 'verifying') && task.claimedBy && task.claimedBy !== state.sessionId
+      // 拆解官顶部跳（task-mw0dz3ki ①）：canJump 条件（in-progress/verifying + claimedBy）对拆解源卡
+      // 恒不成立，故独立择出活跃拆解 run 作并列入口；canJump 语义本身零改动。
+      var decRun = activeDecomposeRunOf(task)
       var canIntervene = task.status === 'in-progress' || task.status === 'verifying'
       // ===== 无障碍·「流转到」按钮组（反馈 n-mut9rzpyc7p1）：状态流转不再只有拖拽一条路 =====
       // 合法迁移与拖拽 transition()（kernel.js）逐条对齐——host 门禁不变，失败原因 ⚠️ 回显 actionMsg 行；
@@ -1482,6 +1520,14 @@ function apply(ctx) {
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 } },
           React.createElement('div', { onClick: function () { state.detailId = null; notify() }, style: { fontSize: 11, color: C.brand, cursor: 'pointer' } }, '← 返回看板'),
           React.createElement('button', { onClick: function () { state.detailId = null; notify() }, title: '关闭详情面板（返回看板）', style: { fontSize: 11, padding: '1px 6px', border: '1px solid ' + C.border, borderRadius: 3, background: 'transparent', color: C.text2, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', lineHeight: 1.4 } }, ic('x', 11))),
+        // ===== 拆解官顶部跳（task-mw0dz3ki ①，用户 2026-11-03 反馈「拆解期间看不到会话跳转」）=====
+        // 只在存在活跃拆解官 run 时渲染（activeDecomposeRunOf：末条 running + 超龄守卫）：
+        // 源卡 draft/pending 无 claimedBy → 顶部 canJump 恒不亮，此前唯一入口在底部历史会话区，
+        // 用户拆完才翻到。此处并列一个 brand 描边按钮直跳拆解官会话；canJump 条件零改动。
+        decRun ? React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, padding: '5px 8px', border: '1px solid ' + C.brand, borderRadius: 6, background: 'color-mix(in srgb, ' + C.brand + ' 8%, transparent)', flexWrap: 'wrap' } },
+          React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: C.brand } }, '🧩 拆解官正在拆解本卡'),
+          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '源卡 draft/pending 期间不派 Worker；想看拆解过程点右侧按钮，不必等落定后翻底部历史区'),
+          React.createElement('button', { onClick: function () { jumpToRun(decRun.id) }, title: '打开拆解官子会话（run ' + decRun.id + (decRun.model ? ' · ' + decRun.model : '') + '）：实时查看拆解过程与提案产出', style: { fontSize: 11, padding: '4px 12px', border: '1px solid ' + C.brand, borderRadius: 4, background: 'transparent', color: C.brand, cursor: 'pointer', fontWeight: 600, marginLeft: 'auto' } }, '🧩 → 查看拆解官会话')) : null,
         React.createElement(ReviewSummary, { task: task }),
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 } }, React.createElement('select', { value: task.priority || 'medium', onChange: function (e) { rpc('update-task', { taskId: task.id, priority: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '优先级（四档：紧急/高/中/低）', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: (prioColor[task.priority] || prioColor.low), fontWeight: 600 } }, ['critical', 'high', 'medium', 'low'].map(function (p) { return React.createElement('option', { key: p, value: p }, prioLabel[p] + '（' + p + '）') })), React.createElement('span', { style: { fontSize: 11, padding: '1px 8px', borderRadius: 3, background: C.nested, color: C.text } }, statusLabels[task.status] || task.status), React.createElement('select', { value: task.size || (state.teamMode ? 'standard' : ''), onChange: function (e) { rpc('update-task', { taskId: task.id, size: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '力度档位（路由板级 laneModels 三档表定模）：轻=单点小改/文档/配置，标=常规模块改动，重=跨模块/高风险' + (state.teamMode ? '；Team 板硬闸必填，不可调回继承' : '；继承=清除 size 回标档语义'), style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.brand, fontWeight: 600 } }, (state.teamMode ? [] : [React.createElement('option', { key: '', value: '' }, '继承（标）')]).concat([['light', '轻（light）'], ['standard', '标（standard）'], ['heavy', '重（heavy）']].map(function (s) { return React.createElement('option', { key: s[0], value: s[0] }, s[1]) }))), task.model ? React.createElement('span', { style: { fontSize: 9, padding: '1px 6px', borderRadius: 3, background: 'color-mix(in srgb, ' + C.warn + ' 18%, transparent)', color: C.warn, fontWeight: 700, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: '卡级模型特例 model=' + task.model + '（取模链最高优先；只读展示——改/删走对话 task_update，v1 不做 GUI 编辑）' }, '🎯 ' + task.model) : null, React.createElement('select', { value: task.pipeline || 'full', onChange: function (e) { rpc('update-task', { taskId: task.id, pipeline: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '管线档位', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'full' }, '全流程（执行+验证）'), React.createElement('option', { value: 'work' }, '免验证（只做不验）'), React.createElement('option', { value: 'direct' }, '主窗口处理')), task.pipelineAuto ? React.createElement('span', { style: { fontSize: 9, color: C.text2 }, title: '由规则自动分类，可手动覆盖' }, 'auto') : null, isManual ? React.createElement('span', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('user', 10), '手动派发') : null),
         React.createElement(TagsEditor, { key: task.id, task: task }),
@@ -2547,7 +2593,16 @@ function apply(ctx) {
     // 老 RPC（set-board-mode/set-team-mode）在服务端保留兼容，UI 不再使用。
     function WorkModeSwitch(props) {
       var cur = props.mode || 'auto'
-      function pick(m) { if (m === cur) return; rpc('set-work-mode', { mode: m }).then(fetchTasks).catch(function () {}) }
+      // 乐观 UI（task-mw0e51zd，用户反馈「切模式好几秒才显示成功」）：点击瞬间先本地翻转 state.workMode + notify
+      // 立即渲染（TopPanel 订阅链 setWorkModeState(state.workMode) → 按钮组高亮当场切换），RPC 后台落盘；
+      // 成功后照常 fetchTasks（3s 轮询 + hash 对账天然收敛，乐观值与服务器一致时无感）；
+      // 失败回弹到闭包捕获的前值 prev（同样 notify 立即复位）。服务端语义/校验不动。
+      function pick(m) {
+        if (m === cur) return
+        var prev = cur
+        state.workMode = m; notify()
+        rpc('set-work-mode', { mode: m }).then(fetchTasks).catch(function () { state.workMode = prev; notify() })
+      }
       // 档位文案：名称 + 一句说明（说明常驻显示在按钮内，选中态高亮不可用 title 才看得到）
       var opts = [
         { k: 'list', name: '清单模式', desc: '只读清单，不自动派发', icon: 'clipboard-list' },

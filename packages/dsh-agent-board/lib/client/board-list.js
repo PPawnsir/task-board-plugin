@@ -159,7 +159,9 @@
 
     // ===== 拆解官状态徽标（task-mvomad6c ②，源卡列表行「🧩 拆解中 / 已提案 ×N」）=====
     // 纯函数现算（不入 state、不落库、不引用 C/ago——自包含，可直接被单测提取执行），
-    // 返回 { txt, tone('brand'|'warn'), tip }，色板映射留给渲染层 decomposePhaseBadge。
+    // 返回 { txt, tone('brand'|'warn'), tip, runId? }，色板映射留给渲染层 decomposePhaseBadge。
+    // runId（task-mw0dz3ki ②）= 末条在跑 decomposer run 的 id，「拆解中」徽标据此改可点直跳；
+    // 「已提案」分支无活跃 run，不返回 runId（徽标保持静态）。
     // 数据源 = t.runs 留档（role='decomposer'）+ 同板子卡提案批：
     //   在跑   → 末条 decomposer 留档 outcome='running' 且无 endedAt；**超龄守卫**：at 距今
     //            ≥ hardMin（留档自带，缺省 120）分钟视为 host 重启残留（sweepZombieRuns 只扫
@@ -174,7 +176,7 @@
       if (last && last.outcome === 'running' && !last.endedAt) {
         var ageMs = last.at ? (Date.now() - new Date(last.at).getTime()) : Infinity
         if (isFinite(ageMs) && ageMs < (last.hardMin || 120) * 60000) {
-          return { txt: '🧩 拆解中', tone: 'brand', tip: '拆解官正在读本卡并产出子任务提案（run ' + last.id + '）；拆解期间本卡不派 Worker，落定后转「🧩 已提案」' }
+          return { txt: '🧩 拆解中', tone: 'brand', runId: last.id, tip: '拆解官正在读本卡并产出子任务提案（run ' + last.id + '）；拆解期间本卡不派 Worker，落定后转「🧩 已提案」' }
         }
       }
       var kidsN = 0
@@ -187,7 +189,19 @@
       var b = decomposeBadgeOf(t, state.tasks)
       if (!b) return null
       var color = b.tone === 'warn' ? C.warn : C.brand
-      return React.createElement('span', { title: b.tip, style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + color + ' 14%, transparent)', color: color, fontWeight: 600, whiteSpace: 'nowrap' } }, b.txt)
+      var base = { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + color + ' 14%, transparent)', color: color, fontWeight: 600, whiteSpace: 'nowrap' }
+      // 可点直跳（task-mw0dz3ki ②：「拆解中」徽标此前纯静态，用户看得见徽标却摸不到拆解官会话）：
+      // b.runId 仅在「在跑」分支返回（超龄残留不返回→保持静态），点击 stopPropagation 不打开详情页，
+      // 直接 openSession 跳拆解官子会话。「已提案」分支无 runId，渲染路径与旧版逐字一致。
+      if (b.runId) {
+        return React.createElement('span', {
+          onClick: function (e) { e.stopPropagation(); if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(b.runId) },
+          onMouseDown: function (e) { e.stopPropagation() },
+          title: b.tip + ' · 点击跳转拆解官会话',
+          style: Object.assign({}, base, { cursor: 'pointer', textDecoration: 'underline' })
+        }, b.txt)
+      }
+      return React.createElement('span', { title: b.tip, style: base }, b.txt)
     }
 
     function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); var delOk = !state.selectMode && canDelete(t); var cs = (state.childStats && state.childStats[t.id]) || null; var csDone = cs ? (typeof cs.settled === 'number' ? cs.settled : cs.resolved) : 0; var epic = !!(cs && cs.total > 0); var parentT = t.parentId ? getTask(t.parentId) : null; var depWaitTitle = ''; var depWaitN = 0; if (depBlock) { t.dependsOn.forEach(function (id) { var d = getTask(id); if (!d || (d.status !== 'resolved' && d.status !== 'archived')) { depWaitN++; if (!depWaitTitle) depWaitTitle = d && d.title ? d.title : id } }) } var durB = cardDur(t);

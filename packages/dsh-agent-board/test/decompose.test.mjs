@@ -646,3 +646,100 @@ test('⑫ 第 9 条已有设计稿款（TEAM_DECOMPOSE_FLOW）：补漏关键词
   assert.match(TEAM_DECOMPOSE_FLOW, /统一 publish/)
   assert.match(TEAM_DECOMPOSE_FLOW, /最后防线/)
 })
+
+// ===== ⑬ 拆解期间显眼会话跳转（task-mw0dz3ki：详情顶跳 + 列表徽标可点）=====
+// 用户反馈：拆解官运行期，查看源卡看不到对应子 agent 的会话跳转，拆解完成后（翻到底部历史区）才看到。
+// 机制层无病（run 行 spawn 即落 t.runs，历史区 🧩 按钮全程可点），病根=可发现性：
+//   canJump 要求 in-progress/verifying + claimedBy，拆解源卡恒 draft/pending → 顶部无跳；
+//   列表行「🧩 拆解中」徽标纯静态不可点。
+// 断言：① activeDecomposeRunOf 纯函数（提取执行）：running+未超龄→run；已关账/超龄/非 decomposer→null
+//       ② decomposeBadgeOf 在跑分支带 runId（超龄与已提案分支不带）
+//       ③ board-list.js：徽标 runId 存在即可点（stopPropagation + openSession + cursor:pointer），已提案保持静态
+//       ④ task-detail.js：顶部「查看拆解官会话」按钮 + jumpToRun openSession 接线 + 超龄守卫 hardMin
+//       ⑤ 产物 lib/client.js 含同款标记（pretest 重组装）；canJump 条件本身零改动
+test('⑬ activeDecomposeRunOf：活跃拆解 run 择出 + 超龄守卫 + 已关账不亮', function () {
+  var td = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  var m = td.match(/function activeDecomposeRunOf\(t\) \{[\s\S]*?\n    \}/)
+  assert.ok(m, '未能从 task-detail.js 提取 activeDecomposeRunOf')
+  var activeDecomposeRunOf = new Function(m[0] + '\nreturn activeDecomposeRunOf')()
+  var now = new Date().toISOString()
+  // 活跃：末条 decomposer running 无 endedAt 且未超龄 → 返回该 run
+  var tRun = { id: 's1', status: 'draft', runs: [{ role: 'decomposer', id: 'd1', at: now, outcome: 'running', hardMin: 120 }] }
+  var r1 = activeDecomposeRunOf(tRun)
+  assert.ok(r1 && r1.id === 'd1', '在跑拆解 run 应择出')
+  // 取末条（重拆）：早先已关账、末条在跑 → 返回末条
+  var tRe = { id: 's2', runs: [
+    { role: 'worker', id: 'w0', outcome: 'completed', endedAt: now },
+    { role: 'decomposer', id: 'd1', at: '2026-01-01T00:00:00Z', outcome: 'completed', endedAt: '2026-01-01T00:10:00Z' },
+    { role: 'decomposer', id: 'd2', at: now, outcome: 'running' },
+  ] }
+  assert.equal(activeDecomposeRunOf(tRe).id, 'd2', '重拆取末条 decomposer run')
+  // 超龄守卫：at 3h 前 > hardMin 120min（host 重启残留）→ null
+  var tStale = { id: 's3', runs: [{ role: 'decomposer', id: 'd3', at: new Date(Date.now() - 3 * 3600000).toISOString(), outcome: 'running', hardMin: 120 }] }
+  assert.equal(activeDecomposeRunOf(tStale), null, '超龄 running 留档（重启残留）不择出')
+  // hardMin 缺省 120 同款生效
+  var tStale2 = { id: 's3b', runs: [{ role: 'decomposer', id: 'd3b', at: new Date(Date.now() - 121 * 60000).toISOString(), outcome: 'running' }] }
+  assert.equal(activeDecomposeRunOf(tStale2), null, 'hardMin 缺省 120 分钟同样守卫')
+  // 已关账（endedAt 在）/ 非 running / 失败 → null
+  assert.equal(activeDecomposeRunOf({ id: 's4', runs: [{ role: 'decomposer', id: 'd4', at: now, outcome: 'running', endedAt: now }] }), null, '已关账 run 不算活跃')
+  assert.equal(activeDecomposeRunOf({ id: 's5', runs: [{ role: 'decomposer', id: 'd5', at: now, outcome: 'completed' }] }), null)
+  assert.equal(activeDecomposeRunOf({ id: 's6', runs: [{ role: 'worker', id: 'w1', at: now, outcome: 'running' }] }), null, '非 decomposer 不择出')
+  // 缺 id（无会话可跳）/ 无 runs / null 入参 → null（零渲染）
+  assert.equal(activeDecomposeRunOf({ id: 's7', runs: [{ role: 'decomposer', at: now, outcome: 'running' }] }), null, '无 run id 不可跳')
+  assert.equal(activeDecomposeRunOf({ id: 's8' }), null)
+  assert.equal(activeDecomposeRunOf(null), null)
+})
+
+test('⑬b decomposeBadgeOf：在跑分支带 runId，超龄与已提案分支不带', function () {
+  var bl = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+  var m = bl.match(/function decomposeBadgeOf\(t, allTasks\) \{[\s\S]*?\n    \}/)
+  assert.ok(m, '未能从 board-list.js 提取 decomposeBadgeOf')
+  var decomposeBadgeOf = new Function(m[0] + '\nreturn decomposeBadgeOf')()
+  var now = new Date().toISOString()
+  // 在跑：runId=末条 running run 的 id（列表行徽标可点直跳的数据源）
+  var tRun = { id: 's1', runs: [{ role: 'decomposer', id: 'd1', at: now, outcome: 'running', hardMin: 120 }] }
+  var b1 = decomposeBadgeOf(tRun, [tRun])
+  assert.equal(b1.txt, '🧩 拆解中')
+  assert.equal(b1.runId, 'd1', '在跑分支必须带 runId')
+  // 超龄：徽标不亮（continue 下判），更不返回 runId
+  var tStale = { id: 's2', runs: [{ role: 'decomposer', id: 'd2', at: new Date(Date.now() - 3 * 3600000).toISOString(), outcome: 'running', hardMin: 120 }] }
+  assert.equal(decomposeBadgeOf(tStale, [tStale]), null, '超龄 running 不亮「拆解中」，自然无 runId')
+  // 已提案：无活跃 run → 徽标静态（runId 必须缺席）
+  var tDone = { id: 's3', runs: [{ role: 'decomposer', id: 'd3', at: '2026-01-01T00:00:00Z', outcome: 'completed', endedAt: '2026-01-01T00:03:00Z' }] }
+  var kids = [{ id: 's3-1', parentId: 's3', proposalOf: 's3', status: 'draft' }]
+  var b3 = decomposeBadgeOf(tDone, [tDone].concat(kids))
+  assert.equal(b3.txt, '🧩 已提案 ×1')
+  assert.equal(b3.runId, undefined, '已提案分支不得带 runId（徽标保持静态）')
+})
+
+test('⑬c GUI 源码 + 产物：详情顶跳按钮 / 列表徽标可点 / 历史区既有跳转零回归 / canJump 零改动', function () {
+  var td = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+  var bl = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+  var built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // ④ 详情页顶部：拆解官跳按钮文案 + openSession 接线 + 超龄守卫复用
+  assert.ok(td.indexOf('🧩 → 查看拆解官会话') >= 0, '详情页缺「🧩 → 查看拆解官会话」顶部按钮')
+  assert.match(td, /function jumpToRun\(runId\) \{ if \(uiWorkspaceSvc && runId\) uiWorkspaceSvc\.openSession\(runId\) \}/, 'jumpToRun 缺 openSession 接线')
+  assert.match(td, /var decRun = activeDecomposeRunOf\(task\)/, '详情页未接 activeDecomposeRunOf')
+  assert.match(td, /decRun \? React\.createElement/, '顶部按钮未按 decRun 条件渲染')
+  assert.match(td, /ageMs >= \(last\.hardMin \|\| 120\) \* 60000/, 'activeDecomposeRunOf 缺 hardMin 超龄守卫')
+  // canJump 条件零改动（worker/verifier 语义不变）
+  assert.ok(td.indexOf("var canJump = (task.status === 'in-progress' || task.status === 'verifying') && task.claimedBy && task.claimedBy !== state.sessionId") >= 0, 'canJump 条件被改动（应保持原样）')
+  // ⑤ 历史会话区既有 🧩 跳转零回归（跑中即可点，本卡只是补显眼入口）
+  assert.ok(td.indexOf("decomposer: { label: '🧩', color: C.brand, tip: '拆解官' }") >= 0, '历史区 roleMeta.decomposer 丢失')
+  assert.ok(td.indexOf('onClick: function () { if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(r.id) }') >= 0, '历史区 runs 行跳转丢失')
+  // ③ 列表行徽标：runId 存在 → 可点（stopPropagation + openSession + pointer + title 提示）
+  assert.match(bl, /if \(b\.runId\) \{/, '列表徽标缺 b.runId 可点分支')
+  assert.ok(bl.indexOf("e.stopPropagation(); if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(b.runId)") >= 0, '徽标点击缺 stopPropagation + openSession(b.runId)')
+  assert.ok(bl.indexOf("title: b.tip + ' · 点击跳转拆解官会话'") >= 0, '徽标可点缺 title 提示')
+  assert.ok(bl.indexOf("cursor: 'pointer', textDecoration: 'underline'") >= 0, '徽标可点缺视觉线索（pointer + 下划线）')
+  // 已提案分支无 runId → 仍走静态 span（同一渲染函数的 else 路径保留）
+  assert.match(bl, /return React\.createElement\('span', \{ title: b\.tip, style: base \}, b\.txt\)/, '静态徽标渲染路径丢失（已提案/无 runId 分支）')
+  // 池条 🧩 计数保持静态（面内一致性不动）
+  var dash = readFileSync(new URL('../lib/client/dashboard.js', import.meta.url), 'utf8')
+  assert.ok(dash.indexOf("'🧩 拆解中 ×' + decBusy.length") >= 0, '池条 🧩 计数应保持静态')
+  assert.equal(/请点击跳转/.test(dash), false, '池条不得被改成可点')
+  // ④ 产物标记（pretest 已挂 build-client 重组装）
+  for (const mk of ['🧩 → 查看拆解官会话', 'activeDecomposeRunOf', 'jumpToRun', '点击跳转拆解官会话']) {
+    assert.ok(built.indexOf(mk) >= 0, 'client.js 缺标记：' + mk + '（需 npm run build-client 重组装）')
+  }
+})
