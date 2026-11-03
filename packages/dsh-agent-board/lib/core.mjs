@@ -1299,7 +1299,7 @@ export function pickDispatch(d, capW, capV, busyTaskIds) {
       if (effT.length) holds.push({ id: cands[i].id, touches: effT })
     }
   }
-  var verifs = capV > 0 ? d.tasks.filter(function (t) { return t.status === 'verifying' && !t.frozen && (!t.pipeline || t.pipeline === 'full') && !t.escalation && t.verifierRun !== 'spawn-pending' && !(busyTaskIds && busyTaskIds[t.id]) }).slice(0, capV) : []
+  var verifs = capV > 0 ? d.tasks.filter(function (t) { return t.status === 'verifying' && !t.frozen && t.assignMode !== 'manual' && (!t.pipeline || t.pipeline === 'full') && !t.escalation && t.verifierRun !== 'spawn-pending' && !(busyTaskIds && busyTaskIds[t.id]) }).slice(0, capV) : []
   return { pendings: pendings, verifs: verifs, blockedTouches: blockedTouches }
 }
 // 孤儿回收判定：in-progress 且 claimedBy 非主会话、无活跃 run、无 escalation、超 2 分钟：in-progress 且 claimedBy 非主会话、无活跃 run、无 escalation、超 2 分钟

@@ -394,6 +394,20 @@ test('假杀根修③：hold=true → 同一次落账 pending+assignMode=manual 
   assert.equal(r2.ok, true)
   assert.equal(board2.tasks[0].assignMode, 'auto')
   assert.equal(core.pickDispatch({ tasks: [board2.tasks[0]] }, 1, 0, null).pendings.length, 1, '无 hold：回 pending 后照常自动重派')
+  // verifier 路径补盲（task-mw0dken8）：hold 停派必须同时闸住 verifier 候选——旧实现只闸 pendings，
+  // 事故本体板 task-mw0awvvt-1：terminate verifier #1 + hold 后 2 秒 poolCycle 又补派 verifier #2。
+  const boardV = mkBoard([mkTask({ id: 'hd4', status: 'verifying', verifierRun: 'run-v4' })])
+  const runsV = { [FULL_SID]: { 'hd4': { id: 'run-v4', role: 'verifier', taskId: 'hd4', startedAt: Date.now(), model: '', settled: false } } }
+  const hV = mkRpcHarness(boardV, runsV)
+  const rV = await hV['terminate-agent']({ taskId: 'hd4', hold: true })
+  assert.equal(rV.ok, true)
+  const tV = boardV.tasks[0]
+  assert.equal(tV.status, 'verifying', 'verifying 卡终止不翻 pending（状态语义不回归）')
+  assert.equal(tV.assignMode, 'manual')
+  assert.deepEqual(core.pickDispatch({ tasks: [tV] }, 0, 5, null).verifs, [], 'manual 闸门：下轮 poolCycle 不自动补派 verifier')
+  // 对照：同形 verifying 卡未 hold（assignMode=auto/缺省）→ verifs 照常选中（无 hold 终止语义逐字不破）
+  const tV2 = mkTask({ id: 'hd5', status: 'verifying', verifierRun: 'run-v5' })
+  assert.deepEqual(core.pickDispatch({ tasks: [tV2] }, 0, 5, null).verifs.map(function (x) { return x.id }), ['hd5'])
 })
 
 // ===== 停泊子会话损毁分态（task-mvnyk55n）：hold 终止对 activation 走 dispose；默认终止保持 interrupt 留存 =====

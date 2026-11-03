@@ -982,6 +982,20 @@ test('pickDispatch: verifying spawn-pending 占位不重复派发（防双 Verif
   assert.deepEqual(r2.verifs.map(t => t.id), ['vn'])
 })
 
+test('pickDispatch: verifying 卡 assignMode=manual（hold 停派）不进 Verifier 候选，auto/缺省照常', () => {
+  // task-mw0dken8：hold 停派之前只闸 worker 候选（pendings），verifier 候选漏闸 →
+  // terminate verifier + hold 后 poolCycle 2 秒自动补派新 verifier（本体板 task-mw0awvvt-1 实证）。
+  const implicit = mkTask({ id: 'vn', status: 'verifying', pipeline: 'full' })
+  delete implicit.assignMode // 缺省（老卡无该字段）必须照常可派
+  const tasks = [
+    mkTask({ id: 'vm', status: 'verifying', pipeline: 'full', assignMode: 'manual' }),
+    mkTask({ id: 'va', status: 'verifying', pipeline: 'full', assignMode: 'auto' }),
+    implicit,
+  ]
+  const r = core.pickDispatch(mkBoard(tasks), 0, 5, null)
+  assert.deepEqual(r.verifs.map(t => t.id), ['va', 'vn']) // manual 排除；auto/缺省照常（无 hold 语义回归锁）
+})
+
 test('pickDispatch: frozen（裁决挂起冻结）不参与任何自动派发', () => {
   const tasks = [
     mkTask({ id: 'fz', frozen: true }), // pending 冻结 → 不派 Worker
