@@ -345,9 +345,17 @@ test('⑦ 节流（源码级）：常量+wt 节流分支+尾随补刷接线+time
   assert.match(sto, /clearTrailingFsync\(sid\)/)                                 // 全量冲刷作废挂起臂
   assert.match(sto, /tm\.timeout\(FSYNC_THROTTLE_MS\)/)                         // 尾随定时器接线（promise 形态=kickCycle 同款）
   assert.match(sto, /\.then\(go, go\)/)                                         // 双臂兜底：reject 也补刷（kickCycle 教训同源）
-  assert.match(sto, /fsNode\.openSync\(p, 'r\+'\)/)                             // 尾随打开当前板文件
-  assert.match(sto, /fsNode\.fsyncSync\(fh\)/)                                 // 尾随对当前文件补 fsync
+  // 尾随补刷全异步（task-mw1sc4jv）：promises.open + fh.sync（线程池异步 fsync）——同步 fs I/O 绝迹。
+  // 同步版 openSync+fsyncSync 实测把事件循环冻 200~400ms（2.6~4.4MB 板），写密集期每 800ms 窗口到期一发，
+  // 排在其后的 RPC 被推成 809/1230ms 尖刺（比节流前更糟）。
+  assert.match(sto, /async function fireTrailingFsync\(sid\)/)                  // fire 改异步函数
+  assert.match(sto, /await fsNode\.promises\.open\(p, 'r\+'\)/)                  // 尾随打开当前板文件（r+ 才够 FlushFileBuffers 权限）
+  assert.match(sto, /try \{ await fh\.sync\(\) \} finally \{ await fh\.close\(\)\.catch\(function \(\) \{\}\) \}/) // 线程池 fsync + finally 关句柄（close 失败吞）
+  assert.equal(/openSync|fsyncSync|closeSync/.test(sto), false, '全文件同步 fs I/O 绝迹（grep 0 命中：事件循环不再被补刷卡死）')
   assert.match(sto, /console\.error\('\[task-board\] 尾随 fsync 补刷失败/)     // 失败只记录不抛（OS writeback 兜底）
+  // 锁化 + 锁内双检 armedAt（异步化引入的竞态必修：fire 打开句柄期间并发 wt 的 rename 在 Windows 撞 EPERM/EBUSY）
+  assert.match(sto, /var go = function \(\) \{[\s\S]*?var p = withLock\(sid, async function \(\) \{[\s\S]*?if \(trailingFsync\[sid\] !== armedAt\) return[\s\S]*?trailingFsync\[sid\] = 0[\s\S]*?await fireTrailingFsync\(sid\)/) // go → withLock → 双检 → 清臂 → await 补刷
+  assert.match(sto, /与 wt 共用 per-sid promise 链串行化/)                        // 锁化理由留档（rename 竞态根因）
   // 回退：ctx.timer 缺席（老宿主/测试桩）→ throttle 恒 false → fsyncNow 恒 true = 每写全量 fsync 老行为
   assert.match(sto, /var throttle = !!\(tm && typeof tm\.timeout === 'function'\)/)
   // 原子性红线逐字不动：rename 原子链 + EPERM/EBUSY 退避 + unlink 降级
@@ -380,19 +388,32 @@ function makeThrottleEnv() {
   }
 }
 
-// 观测探针：包 fs.promises.open 记 tmp 写的 FileHandle.sync 次数（全量冲刷路径），返回计数器对象；
-// 用毕 finally 必须还原 fs.promises.open（node:test 同文件内用例串行，无并行互踩）。
+// 观测探针：包 fs.promises.open 记 FileHandle.sync 次数，按打开模式分流（task-mw1sc4jv：尾随补刷也改走
+// promises.open，不再有可劫持的 fs.fsyncSync）——mode 'w' = tmp 写（writeTmpFsync 全量冲刷）计 syncCalls；
+// mode 'r+' = 尾随补刷计 trailingSyncCalls。返回计数器对象；用毕 finally 必须还原 fs.promises.open
+// （node:test 同文件内用例串行，无并行互踩）。
 function wrapFsyncSync() {
-  var r = { syncCalls: 0 }
+  var r = { syncCalls: 0, trailingSyncCalls: 0 }
   var origOpen = fs.promises.open
   fs.promises.open = async function (tp, mode) {
     var fh = await origOpen.call(fs.promises, tp, mode)
     var origSync = fh.sync.bind(fh)
-    fh.sync = async function () { r.syncCalls++; return origSync() }
+    var trailing = mode === 'r+'
+    fh.sync = async function () { if (trailing) r.trailingSyncCalls++; else r.syncCalls++; return origSync() }
     return fh
   }
   r.restore = function () { fs.promises.open = origOpen }
   return r
+}
+
+// 异步补刷落定等待（task-mw1sc4jv）：go 回调现在走 withLock + await 句柄 I/O（真实线程池），单个
+// setImmediate 不再够——按真实墙钟轮询到判据成立（用例可能劫持了 Date.now，故用调用方传入的时钟）。
+async function waitFor(cond, clock, label) {
+  var t0 = clock()
+  while (!cond()) {
+    if (clock() - t0 > 5000) throw new Error('等待超时: ' + label)
+    await new Promise(function (res) { setTimeout(res, 5) })
+  }
 }
 
 test('⑦ 节流（行为级）：首写全量、窗内写跳 fsync 只挂一个尾随臂、臂到期补 fsync 当前文件、窗外全量作废挂起臂', async () => {
@@ -401,9 +422,7 @@ test('⑦ 节流（行为级）：首写全量、窗内写跳 fsync 只挂一个
   var fakeNow = 1700000000000
   Date.now = function () { return fakeNow }
   var probe = wrapFsyncSync()
-  var fsyncCalls = 0 // 尾随补刷次数（fsyncSync）；全量冲刷走 FileHandle.sync（probe.syncCalls）
-  var origFsyncSync = fs.fsyncSync
-  fs.fsyncSync = function (fd) { fsyncCalls++; return origFsyncSync.call(fs, fd) }
+  // 尾随补刷次数 = probe.trailingSyncCalls（'r+' 打开句柄的 fh.sync）；全量冲刷 = probe.syncCalls（'w' 打开）
   try {
     var sid = 'session-fsync-' + Date.now().toString(36)
     var p = path.join(env.home, '.dsh', 'tasks-' + sid + '.json')
@@ -426,9 +445,10 @@ test('⑦ 节流（行为级）：首写全量、窗内写跳 fsync 只挂一个
     assert.equal(env.timers.length, 1, '窗内再写不叠加尾随臂（窗口尾统一补一次）')
     assert.equal(read(), 3, '节流写内容即时可见')
     // 尾随臂到期：对当前板文件补一次 fsync（此刻正位上就是最新内容）
+    // 补刷现为异步 + 锁内（task-mw1sc4jv）：等它真正落定（真实线程池 I/O），不能只跑一个 setImmediate
     env.timers[0].resolve()
-    await new Promise(function (r) { setImmediate(r) }) // 微任务链跑完 go
-    assert.equal(fsyncCalls, 1, '尾随臂到期对当前板文件 fsync 一次（fsyncSync）')
+    await waitFor(function () { return probe.trailingSyncCalls === 1 }, realNow, '尾随补刷落定')
+    assert.equal(probe.trailingSyncCalls, 1, '尾随臂到期对当前板文件 fsync 一次（promises.open + fh.sync）')
     assert.equal(read(), 3, '补刷不改内容（fsync 无数据改动）')
     // 尾随臂触发后的窗内新写（T300）：重新挂臂
     fakeNow += 100
@@ -441,11 +461,10 @@ test('⑦ 节流（行为级）：首写全量、窗内写跳 fsync 只挂一个
     assert.equal(env.timers.length, 2, '全量冲刷写不挂新臂')
     assert.equal(read(), 1, '窗外写内容正确')
     env.timers[1].resolve() // 被作废的臂落定 → 空转
-    await new Promise(function (r) { setImmediate(r) })
-    assert.equal(fsyncCalls, 1, '已作废的尾随臂落定空转（不再补 fsync）')
+    await new Promise(function (r) { setTimeout(r, 50) }) // 锁内双检空转路径（无 I/O，微任务即完）+ 留裕度
+    assert.equal(probe.trailingSyncCalls, 1, '已作废的尾随臂落定空转（锁内双检 armedAt 不过 → 不再补 fsync）')
   } finally {
     Date.now = realNow
-    fs.fsyncSync = origFsyncSync
     probe.restore()
     env.cleanup()
   }
@@ -456,6 +475,10 @@ test('⑦ 尾随补刷失败不抛（行为级）：板文件缺席时 fire 只�
   var realNow = Date.now
   var fakeNow = 1700000000000
   Date.now = function () { return fakeNow }
+  // 异步 fire 的失败不可用返回值观测 → 劫持 console.error 抓「只记录不抛」的日志（同文件用例串行，无互踩）
+  var origErr = console.error
+  var errs = []
+  console.error = function () { errs.push(Array.prototype.join.call(arguments, ' ')) }
   try {
     var sid = 'session-fsync-err-' + Date.now().toString(36)
     var p = path.join(env.home, '.dsh', 'tasks-' + sid + '.json')
@@ -464,13 +487,18 @@ test('⑦ 尾随补刷失败不抛（行为级）：板文件缺席时 fire 只�
     await env.store.wt(sid, { ownerSession: sid, tasks: [{ id: 'x' }] })       // 窗内节流写挂臂
     fs.unlinkSync(p)                                                           // 构造 fire 时文件缺席（ENOENT）
     env.timers[0].resolve()
-    await new Promise(function (r) { setImmediate(r) })
-    // 走到这里 = fire 未抛（失败只 console.error：数据仍在页缓存/该文件已不存在，OS writeback 兜底）
+    // 异步 fire 落定：等到失败日志出来 = fire 已跑完且只记录（reject 会让 go 的 promise 拒绝，此处不抛即过）
+    await waitFor(function () {
+      return errs.some(function (s) { return s.indexOf('尾随 fsync 补刷失败') >= 0 })
+    }, realNow, '尾随补刷失败日志')
+    console.error = origErr
     assert.ok(!fs.existsSync(p), 'fire 失败确实发生在文件缺席时')
+    assert.ok(errs.some(function (s) { return s.indexOf('ENOENT') >= 0 }), '失败原因如实落日志（ENOENT）')
     // 链路无恙：后续写照常（文件重建，内容正确）
     await env.store.wt(sid, { ownerSession: sid, tasks: [{ id: 'y' }] })
     assert.equal(JSON.parse(fs.readFileSync(p, 'utf8')).tasks.length, 1, 'fire 失败后链路无恙，后续写正常')
   } finally {
+    console.error = origErr
     Date.now = realNow
     env.cleanup()
   }

@@ -314,7 +314,12 @@ export function createStore(ctx, state, deps) {
     }
     // ===== 尾随补刷（task-mw0f2zh4）：节流写后 800ms 到期对**当前**板文件补一次 fsync =====
     // 到期时 rename 早已把最新内容装上正位（fsync 当前 inode 即冲最新数据；窗内被取代的旧 inode
-    // 已无引用，无需补冲）。同步 open+fsync+close 在定时器回调里一气呵成（JS 单线程，与 wt 无交错）。
+    // 已无引用，无需补冲）。
+    // 全异步（task-mw1sc4jv）：旧的同步 open + fsync + close 三连（node:fs 同步 API，本文件已零命中）
+    // 在定时器回调里卡死事件循环——实测 2.6~4.4MB 板每次阻塞 200~400ms 整进程冻结，写密集期每 800ms
+    // 窗口到期一发，排在其后的 RPC 全被推成 809/1230ms 尖刺（比节流前更糟）。改 promises.open + fh.sync()
+    // （libuv 线程池 → Windows FlushFileBuffers 同效，语义不变而阻塞点移出主线程）；close 用 finally +
+    // catch 吞（close 失败不回滚已落盘的 sync 语义）。
     // 失败只 console.error 不抛：数据仍在页缓存，OS writeback（NTFS lazy writeback 数秒级）自然兜底，
     // 且 lastFsyncMs 不更新 → 下次写自然提前回归全量冲刷。
     // 定时器走 ctx.timer.timeout(ms) promise 形态（kickCycle 同款：promise 形态是所有 timer 实现的
@@ -325,12 +330,14 @@ export function createStore(ctx, state, deps) {
     // TRAILING_STALE_MS（正常 800ms 窗口的 12.5 倍，正常路径永远碰不到）→ 下一个节流写放行重挂新臂，
     // 补刷不至永久失效。
     var TRAILING_STALE_MS = 10000
-    function fireTrailingFsync(sid) {
+    async function fireTrailingFsync(sid) {
       if (state.deactivated) return          // 停用后 HOME 已复原，不再碰真根路径（纯防御：fsync 本无数据改动）
       var p = boardPath(sid)
       try {
-        var fh = fsNode.openSync(p, 'r+')   // 'r+'：Windows FlushFileBuffers 需写权限；文件须已存在（缺席→ENOENT 走 catch）
-        try { fsNode.fsyncSync(fh) } finally { fsNode.closeSync(fh) }
+        // 'r+'：Windows FlushFileBuffers 需写权限；文件须已存在（缺席→ENOENT 走 catch）。
+        // 句柄 close 放 finally 且 catch 吞：close 失败不改变「sync 已落盘」的事实，只免句柄泄漏。
+        var fh = await fsNode.promises.open(p, 'r+')
+        try { await fh.sync() } finally { await fh.close().catch(function () {}) }
         lastFsyncMs[sid] = Date.now()
       } catch (e) { console.error('[task-board] 尾随 fsync 补刷失败（数据仍在页缓存，OS writeback 兜底）: ' + p + ' :: ' + String(e)) }
     }
@@ -340,9 +347,17 @@ export function createStore(ctx, state, deps) {
       armedAt = Date.now()
       trailingFsync[sid] = armedAt
       var go = function () {
-        if (trailingFsync[sid] !== armedAt) return   // 0=被全量冲刷显式取消 / 新时刻=被 stale 重挂的新臂取代 → 本臂空转
-        trailingFsync[sid] = 0
-        fireTrailingFsync(sid)
+        // 锁内补刷（task-mw1sc4jv）：fire 现在 await 句柄 I/O，锁外跑会让它的打开窗口与并发 wt 的
+        // rename(tmp,p) 相撞——Windows 上目标被持句柄占用时 rename 抛 EPERM/EBUSY，退避重试链可能耗尽
+        // 掉进 unlink 降级。故与 wt 共用 per-sid promise 链串行化（withLock 函数声明提升，此处可用）。
+        // 锁内**双检** armedAt：等锁期间挂起臂可能已被全量冲刷作废（置 0）或被 stale 重挂的新臂取代 →
+        // 空转退出，不白占 200~400ms 锁（读路径/后续写不被无谓排队）。
+        var p = withLock(sid, async function () {
+          if (trailingFsync[sid] !== armedAt) return   // 0=被全量冲刷显式取消 / 新时刻=被 stale 重挂的新臂取代 → 本臂空转
+          trailingFsync[sid] = 0
+          await fireTrailingFsync(sid)
+        })
+        if (p && typeof p.catch === 'function') p.catch(function () {})   // go 的返回值无人 await（.then 链）→ 吞掉以防无处理拒绝
       }
       tm.timeout(FSYNC_THROTTLE_MS).then(go, go)
     }
