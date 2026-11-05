@@ -27,6 +27,25 @@ function apply(ctx) {
     // 会话跳转走 uiWorkspace.openSession（0.1.7 起 sessions 服务已无 open 方法，
     // 旧调用 sessionsSvc.open 会抛 TypeError: sessionsSvc.open is not a function）
     var uiWorkspaceSvc = ctx.get('uiWorkspace')
+
+    // ===== apply 防重入护栏（task-mw368ovj，反馈 n-mw368x5g46ok）=====
+    // 病根：pretest 每次构建都重写 lib/client.js → 宿主 client HMR receiver 侦测变化重新执行 apply；
+    // 旧 ctx 从未被 dispose → 它名下的注册项（slots 面板/按钮、keydown、样式、3s/12s 轮询、
+    // Resize/MutationObserver）永不回收——每跑一次测试就多挂一套 UI + 一组轮询（用户实测叠 5+ 份）。
+    // 修法（幂等 apply）：window 级登记本次 apply 全部注册项的反注册句柄，重入先反注册旧句柄再注册新版，
+    // 任何时刻至多一份看板，HMR 热更新语义保留。句柄形态实证（dsh-cordis-client-runner slots 服务签名
+    // 「inject(key, callback): () => void」+ cordis Fiber.effect 返回可显式调用的 dispose wrapper）：
+    // slots.inject 与 ctx.effect 均返回 () => void；__tskbTrack 另收 {dispose}/{off} 对象形态（缓冲，非当前路径）。
+    var DISPOSERS_KEY = '__DSH_TASK_BOARD_DISPOSERS__'
+    var __tskbDisposeList = []
+    if (typeof window !== 'undefined') {
+      var __tskbPrev = window[DISPOSERS_KEY]
+      if (Array.isArray(__tskbPrev)) { for (var __tskbIdx = 0; __tskbIdx < __tskbPrev.length; __tskbIdx++) { try { if (typeof __tskbPrev[__tskbIdx] === 'function') __tskbPrev[__tskbIdx]() } catch (_) {} } }
+      window[DISPOSERS_KEY] = __tskbDisposeList
+    }
+    function __tskbTrack(d) { if (typeof d === 'function') __tskbDisposeList.push(d); else if (d && typeof d === 'object' && typeof d.dispose === 'function') __tskbDisposeList.push(d.dispose); else if (d && typeof d === 'object' && typeof d.off === 'function') __tskbDisposeList.push(d.off); return d }
+    // ctx.effect 的登记版：返回句柄同进 disposers（重入时旧 effect 清理可被显式触发，不依赖旧 ctx dispose）
+    function regEffect(fn) { return __tskbTrack(ctx.effect(fn)) }
     var C = { bg: 'var(--dsw-alias-bg-base)', card: 'var(--dsw-alias-bg-layer-1)', nested: 'var(--dsw-alias-bg-layer-2)', border: 'var(--dsw-alias-border-l1)', border2: 'var(--dsw-alias-border-l2)', brand: 'var(--dsw-alias-brand-primary)', text: 'var(--dsw-alias-label-primary)', text2: 'var(--dsw-alias-label-secondary)', err: 'var(--dsw-alias-state-error-primary)', ok: 'var(--dsw-alias-state-success-primary)', warn: 'var(--dsw-alias-state-warn-primary)' }
     var C_INV = 'var(--dsw-alias-label-primary-inverted)' // 品牌底/彩色底上的反色文字（深浅模式自动反转）
     var prioColor = { critical: C.err, high: C.warn, medium: C.brand, low: C.text2 }
@@ -289,11 +308,11 @@ function apply(ctx) {
         e.stopPropagation()
       }
       document.addEventListener('keydown', onKey, true)
-      ctx.effect(function () { return function () { document.removeEventListener('keydown', onKey, true) } })
+      regEffect(function () { return function () { document.removeEventListener('keydown', onKey, true) } })
     } catch (_) {}
 
     // 注入 escalation 脉冲 + critical 辉光动画样式
-    try { var stEl = document.createElement('style'); stEl.textContent = '@keyframes tskb-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.55;transform:scale(1.12)}}@keyframes tskb-crit{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.5)}50%{box-shadow:0 0 12px 2px rgba(239,68,68,.22)}}'; document.head.appendChild(stEl); ctx.effect(function () { return function () { try { stEl.remove() } catch (_) {} } }) } catch (_) {}
+    try { var stEl = document.createElement('style'); stEl.textContent = '@keyframes tskb-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.55;transform:scale(1.12)}}@keyframes tskb-crit{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.5)}50%{box-shadow:0 0 12px 2px rgba(239,68,68,.22)}}'; document.head.appendChild(stEl); regEffect(function () { return function () { try { stEl.remove() } catch (_) {} } }) } catch (_) {}
 
     var listeners = []
     function notify() { listeners.forEach(function (fn) { try { fn(state) } catch (_) {} }) }
@@ -497,8 +516,8 @@ function apply(ctx) {
 
     var __timer = ctx.get('timer')
     // 轮询：get-tasks 已是纯读（v71），3s 开销低；面板关闭时也轮询以更新角标
-    if (__timer) ctx.effect(function () { return __timer.interval(fetchTasks, 3000) })
-    if (__timer) ctx.effect(function () { return __timer.interval(fetchActivity, 12000) })
+    if (__timer) regEffect(function () { return __timer.interval(fetchTasks, 3000) })
+    if (__timer) regEffect(function () { return __timer.interval(fetchActivity, 12000) })
 
     function readLayoutOffsets() {
       try {
@@ -517,9 +536,9 @@ function apply(ctx) {
     // 去抖：切会话时 body 子树 style 大面积变动会触发回调风暴，300ms 合并一次
     var layoutTimer = null
     function syncLayoutDebounced() { if (layoutTimer) return; layoutTimer = setTimeout(function () { layoutTimer = null; syncLayout() }, 300) }
-    ctx.effect(function () { return function () { if (layoutTimer) { clearTimeout(layoutTimer); layoutTimer = null } if (createFlashTimer) { clearTimeout(createFlashTimer); createFlashTimer = null } } })
-    try { var ro = new ResizeObserver(function () { syncLayoutDebounced() }); ro.observe(document.body); ctx.effect(function () { return function () { ro.disconnect() } }) } catch (_) {}
-    try { var mo = new MutationObserver(function () { syncLayoutDebounced() }); mo.observe(document.body, { attributes: true, attributeFilter: ['style'], subtree: true }); ctx.effect(function () { return function () { mo.disconnect() } }) } catch (_) {}
+    regEffect(function () { return function () { if (layoutTimer) { clearTimeout(layoutTimer); layoutTimer = null } if (createFlashTimer) { clearTimeout(createFlashTimer); createFlashTimer = null } } })
+    try { var ro = new ResizeObserver(function () { syncLayoutDebounced() }); ro.observe(document.body); regEffect(function () { return function () { ro.disconnect() } }) } catch (_) {}
+    try { var mo = new MutationObserver(function () { syncLayoutDebounced() }); mo.observe(document.body, { attributes: true, attributeFilter: ['style'], subtree: true }); regEffect(function () { return function () { mo.disconnect() } }) } catch (_) {}
     syncLayout()
 
     // 创建任务后的轻提示（头部短暂显示"✅ 已存草稿/已创建任务"，2.5s 后自动清空；不引入 toast 体系）
@@ -716,8 +735,8 @@ function apply(ctx) {
         createOpen ? React.createElement(CreateTaskForm, null) : null)
     }
 
-    slots.inject('conversation.session.header.actions', function () { return slots.register({ name: 'conversation.session.header.actions', id: 'task-board-btn', label: '任务看板', order: 30 }, function (props) { return React.createElement(BoardButton, props) }) })
-    slots.inject('shell.overlay', function () { return slots.register({ name: 'shell.overlay', id: 'task-board-top-panel' }, function () { return React.createElement(TopPanel) }) })
+    __tskbTrack(slots.inject('conversation.session.header.actions', function () { return slots.register({ name: 'conversation.session.header.actions', id: 'task-board-btn', label: '任务看板', order: 30 }, function (props) { return React.createElement(BoardButton, props) }) }))
+    __tskbTrack(slots.inject('shell.overlay', function () { return slots.register({ name: 'shell.overlay', id: 'task-board-top-panel' }, function () { return React.createElement(TopPanel) }) }))
 
 // ============================================================================
 // board-list —— 看板列表域：批量操作条（BatchBar）· 筛选条（FilterBar）· 卡片（Card）

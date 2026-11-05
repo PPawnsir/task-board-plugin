@@ -9,6 +9,7 @@ import path from 'node:path'
 import zlib from 'node:zlib'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import vm from 'node:vm'
 import * as core from '../lib/core.mjs'
 // 粒度治理（软闸门）住在 lib/policy.mjs（策略层，纯函数）、usage 聚合住在 lib/usage.mjs，
 // 均由 index.mjs 薄壳 re-export（对外契约不变），这里仍从 index.mjs 导入直接断言
@@ -7782,4 +7783,118 @@ test('详情「← 返回看板」原生 button 化：键盘可聚焦激活 + �
     'client.js 缺返回看板皮肤复位标记（需 npm run build-client）')
   assert.equal(built.indexOf("React.createElement('div', { onClick: function () { state.detailId = null; notify() }"), -1,
     'client.js 仍残留 div+onClick 旧形（需 npm run build-client 重组装）')
+})
+
+// ===== apply 防重入护栏（task-mw368ovj，反馈 n-mw368x5g46ok）：HMR 重执行幂等（源码 + 产物 + 执行级三锁）=====
+// 病根：pretest 每次构建都重写 lib/client.js → 宿主 client HMR receiver 重新执行 apply；旧 ctx 从未 dispose
+// → 旧注册项（2 处 slots.inject + 7 处 ctx.effect：keydown/style/3s 轮询/12s 心跳/去抖定时器/Resize+Mutation
+// Observer）永不回收——每跑一次测试就多挂一套 UI + 一组轮询（用户 2026-11-05 实测叠 5+ 份、请求量翻倍）。
+// 修法（幂等 apply）：window 级 __DSH_TASK_BOARD_DISPOSERS__ 登记全部注册句柄，重入先反注册旧句柄再注册新版。
+// 不选一次性守卫兜底的理由（宿主能力实证）：dsh-cordis-client-runner slots 服务签名
+// 「inject(key, callback): () => void / register(...): () => void」+ cordis Fiber.effect 返回可显式调用的
+// dispose wrapper（epoch 幂等）→ 宿主具备真反注册能力，走幂等清理注册（保留 HMR 热更新语义，新版即刻替换旧版）。
+// 断言⑤（既有断言全绿）= npm test 全量跑绿本身；①-④ 源码/产物级；⑥ 执行级（vm 沙箱双跑「求值+apply」）。
+test('apply 防重入①：护栏在位——window 级 disposers 键 + 遍历反注册旧句柄 + 数组复位（kernel.js 源码断言）', () => {
+  const kernel = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
+  assert.ok(kernel.indexOf("var DISPOSERS_KEY = '__DSH_TASK_BOARD_DISPOSERS__'") >= 0, '缺 window 级 disposers 键常量')
+  assert.ok(kernel.indexOf('if (Array.isArray(__tskbPrev))') >= 0, '缺旧句柄数组判定')
+  assert.ok(kernel.indexOf('for (var __tskbIdx = 0; __tskbIdx < __tskbPrev.length; __tskbIdx++)') >= 0, '缺遍历反注册循环')
+  assert.ok(kernel.indexOf("if (typeof __tskbPrev[__tskbIdx] === 'function') __tskbPrev[__tskbIdx]()") >= 0, '缺逐句柄反注册调用')
+  assert.ok(kernel.indexOf('__tskbPrev[__tskbIdx]() } catch (_) {}') >= 0, '单句柄异常须 try/catch 吞掉（旧句柄炸不阻断新版挂载）')
+  assert.ok(kernel.indexOf('window[DISPOSERS_KEY] = __tskbDisposeList') >= 0, '缺登记数组复位（换上本轮新数组）')
+  assert.ok(kernel.indexOf("function __tskbTrack(d) { if (typeof d === 'function') __tskbDisposeList.push(d)") >= 0, '缺 __tskbTrack 登记（函数形态直收）')
+  // 位置闸门：护栏必须落在「取到 slots 之后、任何注册之前」——keydown 是 apply 顶层第一个注册动作
+  const slotsAt = kernel.indexOf("var slots = ctx.get('slots')")
+  const guardAt = kernel.indexOf('window[DISPOSERS_KEY] = __tskbDisposeList')
+  const firstRegAt = kernel.indexOf("document.addEventListener('keydown'")
+  assert.ok(slotsAt >= 0 && guardAt > slotsAt, '护栏必须在取到 slots 之后')
+  assert.ok(firstRegAt > guardAt, '护栏必须在任何注册（keydown 监听）之前')
+})
+
+test('apply 防重入②：两处 slots.inject 返回句柄经 __tskbTrack 登记（旧面板/按钮可被反注册回收）', () => {
+  const kernel = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
+  assert.ok(kernel.indexOf("__tskbTrack(slots.inject('conversation.session.header.actions'") >= 0, 'header.actions 注入未登记')
+  assert.ok(kernel.indexOf("__tskbTrack(slots.inject('shell.overlay'") >= 0, 'shell.overlay 注入未登记')
+  // 登记形态兜底：{dispose}/{off} 对象形态也被收（宿主未来形态变化的缓冲）
+  assert.ok(kernel.indexOf("typeof d.dispose === 'function') __tskbDisposeList.push(d.dispose)") >= 0, '__tskbTrack 缺 {dispose} 对象形态')
+  assert.ok(kernel.indexOf("typeof d.off === 'function') __tskbDisposeList.push(d.off)") >= 0, '__tskbTrack 缺 {off} 对象形态')
+})
+
+test('apply 防重入③：7 处 ctx.effect 全部换道登记版 regEffect——3s/12s 轮询、keydown、style、双 Observer 句柄同登记，apply 顶层无残留裸 ctx.effect', () => {
+  const kernel = readFileSync(new URL('../lib/client/kernel.js', import.meta.url), 'utf8')
+  assert.ok(kernel.indexOf('function regEffect(fn) { return __tskbTrack(ctx.effect(fn)) }') >= 0, '缺 regEffect 定义（ctx.effect 句柄送进登记）')
+  // 换道彻底性：除 regEffect 定义内 1 处，kernel 源不再有其它裸 ctx.effect( 调用
+  assert.equal((kernel.match(/ctx\.effect\(/g) || []).length, 1, 'kernel.js 只允许 regEffect 定义内出现 1 处 ctx.effect（其余 7 处必须换道）')
+  assert.equal((kernel.match(/regEffect\(/g) || []).length, 8, 'regEffect 应为 1 处定义 + 7 处调用')
+  // 轮询面（N 份 apply ≠ N 倍请求量）：3s fetchTasks / 12s fetchActivity 经 regEffect 登记
+  assert.ok(kernel.indexOf('if (__timer) regEffect(function () { return __timer.interval(fetchTasks, 3000) })') >= 0, '3s 轮询 interval 未走登记版')
+  assert.ok(kernel.indexOf('if (__timer) regEffect(function () { return __timer.interval(fetchActivity, 12000) })') >= 0, '12s 活动心跳 interval 未走登记版')
+})
+
+test('apply 防重入④：产物同款标记——client.js 含护栏键名/track/regEffect/两处 inject 包裹（需 npm run build-client 重组装）', () => {
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  for (const m of ['__DSH_TASK_BOARD_DISPOSERS__', 'DISPOSERS_KEY', '__tskbDisposeList', '__tskbTrack', 'regEffect', 'Array.isArray(__tskbPrev)', '__tskbPrev[__tskbIdx]()']) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺标记：' + m + '（需 npm run build-client 重组装）')
+  }
+  assert.ok(built.indexOf("__tskbTrack(slots.inject('conversation.session.header.actions'") >= 0, '产物缺 header.actions 注入包裹')
+  assert.ok(built.indexOf("__tskbTrack(slots.inject('shell.overlay'") >= 0, '产物缺 shell.overlay 注入包裹')
+})
+
+test('apply 防重入⑥（执行级）：vm 沙箱假宿主同窗双跑「模块求值+apply」——第二轮先反注册旧句柄，存活注册计数与首轮逐字相同（面板/轮询零累积）', () => {
+  const built = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // ----- 自包含假宿主（不依赖本文件其它 helper）：存活计数器 + 按宿主真实形态返回 () => void 句柄 -----
+  const live = { injects: 0, intervals: 0, effects: 0, keydown: 0, styles: 0, observers: 0 }
+  const disposed = { injects: 0, intervals: 0, effects: 0 }
+  const sandbox = {
+    window: {},
+    localStorage: { getItem: () => null, setItem () {}, removeItem () {} },
+    setTimeout: () => 0, clearTimeout () {},
+    document: {
+      addEventListener: (t) => { if (t === 'keydown') live.keydown++ },
+      removeEventListener: (t) => { if (t === 'keydown') live.keydown-- },
+      createElement: () => ({ remove () { live.styles-- } }),
+      head: { appendChild () { live.styles++ } },
+      querySelectorAll: () => [],
+      body: {}
+    },
+    getComputedStyle: () => ({ gridTemplateColumns: '' }),
+    MutationObserver: class { observe () { live.observers++ } disconnect () { live.observers-- } },
+    ResizeObserver: class { observe () { live.observers++ } disconnect () { live.observers-- } }
+  }
+  // 假宿主 ctx：每轮新 ctx（HMR = 新插件实例新 ctx，旧 ctx 不 dispose——正是病根场景）
+  const makeCtx = () => ({
+    get (name) {
+      if (name === 'slots') return { inject () { live.injects++; return () => { live.injects--; disposed.injects++ } } }
+      if (name === 'timer') return { interval () { live.intervals++; return () => { live.intervals--; disposed.intervals++ } } }
+      if (name === 'sessions' || name === 'uiWorkspace') return {}
+      return undefined
+    },
+    effect (fn) { // cordis 语义：effect 体同步执行、返回清理；ctx.effect 返回可显式调用的 dispose wrapper
+      live.effects++
+      const cleanup = fn()
+      let dead = false
+      return () => { if (dead) return; dead = true; live.effects--; disposed.effects++; if (typeof cleanup === 'function') { try { cleanup() } catch (_) {} } }
+    }
+  })
+  // 模块求值 = window.__ModuleLoader__.load(factory)（每轮求值产新模块实例；React 桩只在渲染回调里用到，apply 期不触）
+  const evalClient = () => {
+    let captured = null
+    sandbox.window.__ModuleLoader__ = { load: (entry) => { captured = entry.factory(() => ({ createElement: () => null, useState: () => [null, () => {}], useEffect: () => {} })) } }
+    vm.runInNewContext(built, sandbox, { filename: 'lib/client.js' })
+    assert.ok(captured && typeof captured.apply === 'function', '模块求值应产出 { apply }')
+    return captured
+  }
+  // ----- 第一轮：正常启动 -----
+  evalClient().apply(makeCtx())
+  const first = Object.assign({}, live)
+  assert.deepEqual(first, { injects: 2, intervals: 2, effects: 7, keydown: 1, styles: 1, observers: 2 },
+    '首轮注册面：2 注入 + 2 轮询 + 7 effect + 1 keydown + 1 style + 2 observer')
+  // ----- 第二轮：pretest 重建产物 → HMR 重执行（同 window、新模块、新 ctx 再 apply）-----
+  evalClient().apply(makeCtx())
+  assert.equal(disposed.injects, 2, '旧 2 处 slots 注入被反注册（面板/按钮回收，靠 window 级句柄而非旧 ctx dispose）')
+  assert.equal(disposed.effects, 7, '旧 7 处 ctx.effect 清理被显式触发（keydown/样式/去抖定时器/双 Observer 全回收）')
+  assert.equal(disposed.intervals, 2, '旧 3s/12s 轮询 interval 已停（N 份 apply ≠ N 倍请求量）')
+  assert.deepEqual(Object.assign({}, live), first, '第二轮 apply 后存活注册计数与首轮逐字相同（幂等：不叠加面板、不叠轮询）')
+  assert.ok(Array.isArray(sandbox.window.__DSH_TASK_BOARD_DISPOSERS__) && sandbox.window.__DSH_TASK_BOARD_DISPOSERS__.length === 9,
+    'window 级 disposers 登记本轮 9 句柄（2 inject + 7 effect）')
 })
