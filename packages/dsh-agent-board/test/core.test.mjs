@@ -1265,6 +1265,40 @@ test('parsePlanFiles: CJK 分级——含中文但带 ASCII 扩展名的真路�
   assert.deepEqual(core.planOutsideTouches(['其他目录/**'], planZh), [zh])
 })
 
+// 行首圈号/序号装饰剥离（task-mw5ejg4r，反馈 n-mw506xo40hma 实证）：Worker 用 ①②③ 或 1./1)/- 编号
+// 列清单，圈号混入路径首位 → 目录锁前缀比对 f.indexOf(pfx)===0 恒 false → 9 文件全量越界（实际
+// 病例：'①原型/…/rule_engine.py、②…proxy.py、…'）。剥离层插在 fragSrc 记录之后、引号包裹分支之前
+//——装饰不是路径本体；fragSrc 同步更新（哨兵证据基于剥离后内容）。likePath 判定语义不动。
+test('parsePlanFiles: 行首圈号/序号剥离——①②③/1./1)/1、/•/（1）装饰不进路径；散文仍拒；frag 哨兵基于剥离后内容；闸口集成零越界', () => {
+  // ① 实际病例本体：圈号前缀剥离后得到真路径（修复前 ① 在首位 → 全量误报）
+  assert.deepEqual(core.parsePlanFiles('计划改动：①原型/a/b.py'), ['原型/a/b.py'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：①原型/规则管理/app/backend/app/core/rule_engine.py、②原型/规则管理/app/backend/app/core/proxy.py'),
+    ['原型/规则管理/app/backend/app/core/rule_engine.py', '原型/规则管理/app/backend/app/core/proxy.py'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：\n①原型/a.py\n②lib/core.mjs\n③test/x.mjs'), ['原型/a.py', 'lib/core.mjs', 'test/x.mjs'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：①原型/a.py 说明尾巴'), ['原型/a.py'])   // 圈号 + 尾注组合
+  // ② 多种序号形态均剥到路径本体
+  assert.deepEqual(core.parsePlanFiles('计划改动：1. 原型/a.py'), ['原型/a.py'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：1) 原型/a.py'), ['原型/a.py'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：- 原型/a.py'), ['原型/a.py'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：1、原型/a.py'), ['原型/a.py'])   // 、分隔拆段：数字段自然丢、路径段照常入选
+  assert.deepEqual(core.parsePlanFiles('计划改动：• 原型/a.py'), ['原型/a.py'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：（1）原型/a.py'), ['原型/a.py'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：⑩原型/a.py'), ['原型/a.py'])   // ⑳ 以内圈号（U+2469）
+  assert.deepEqual(core.parsePlanFiles('计划改动：㉑原型/a.py'), ['原型/a.py'])   // ㉑-㉟（U+3251）
+  // ③ 回归锁：圈号散文说明仍拒（剥离装饰 ≠ 放宽像路径判定——无扩展名/无斜杠照旧不入选）
+  assert.deepEqual(core.parsePlanFiles('计划改动：① 这是散文说明'), [])
+  // ④ frag 残片哨兵基于剥离后内容：圈号剥掉后 '/if \(' 仍判残片拒
+  assert.deepEqual(core.parsePlanFiles('计划改动：①/if \\(x\\)'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs\n①/if \\(x\\)'), ['lib/core.mjs'])
+  // ⑤ 闸口集成：中文目录锁 + 圈号清单 → 剥离后比对零越界；反证不剥离时确实全量越界（剥离层在起作用）
+  var planC = core.parsePlanFiles('计划改动：①原型/x/a.py')
+  assert.deepEqual(planC, ['原型/x/a.py'])
+  assert.deepEqual(core.planOutsideTouches(['原型/x/**'], planC), [], '剥离后与目录锁正常比对')
+  assert.deepEqual(core.planOutsideTouches(['原型/x/**'], ['①原型/x/a.py']), ['①原型/x/a.py'], '反证：圈号在首位时确实越界（修复前的行为）')
+  // 路径本体数字不受序号剥离影响（数字+分隔符整体判：'3rd/' 无分隔符不剥）
+  assert.deepEqual(core.parsePlanFiles('计划改动：3rd/lib/x.py'), ['3rd/lib/x.py'])
+})
+
 test('touchCovers: 单向覆盖——touch 模式 ⊇ 计划文件（与 matchOne 对称语义方向相反）', () => {
   assert.equal(core.touchCovers('lib/core.mjs', 'lib/core.mjs'), true)   // 精确
   assert.equal(core.touchCovers('lib/core.mjs', 'lib/rpc.mjs'), false)
@@ -7674,6 +7708,46 @@ test('artifacts⑤：计划闸口生成物提示——计划含声明产物 → 
   const boardC2 = mkBoard([mkTask({ id: 'tc2', status: 'in-progress', claimedBy: 'w1', touches: ['src/a.mjs'] })]); boardC2.artifacts = []
   const gC2 = await mkRpcHandlers(boardC2).__tools['board_report'].execute({ taskId: 'tc2', kind: 'progress', question: '计划改动：\n- dist/bundle.js' })
   assert.ok(!/生成物/.test(gC2.warning), '空数组声明（清除）零提示')
+})
+
+// 计划闸口·相对路径诊断提示（task-mw5ejg4r，反馈 n-mw506xo40hma 辅修）：全量越界（每个计划文件都
+// 越界）且有效边界含目录通配（'/**' 结尾）→ 返回体 warning 追加一段诊断——Worker 清单若是相对该
+// 目录的短路径（如 tests/x.py），会因前缀不匹配全量误报。只提示、不阻断、不放行（锁严格性不容
+// 错配误放，outside 判定语义逐字不动）；命中条件严格（全量越界 + 有 glob）才出现——部分越界或
+// 无 glob 的正常场景零附加文案（integration 场景 s 的「越界无锁=原文案逐字不变」即无 glob 后者）。
+test('planGate 相对路径诊断：全量越界+touches 含 /** glob → warning 追加提示；部分越界/无 glob 不追加；圈号清单（修复主案）全链路过闸', async () => {
+  // ① 全量越界 + 有 glob → 诊断提示出现（只进返回体 warning，不进卡 messages、不通知主窗口）
+  const tA = mkTask({ id: 'ta', status: 'in-progress', claimedBy: 'w1', touches: ['原型/规则管理/app/backend/**'] })
+  const gA = await mkRpcHandlers(mkBoard([tA])).__tools['board_report'].execute({ taskId: 'ta', kind: 'progress', question: '计划改动：tests/test_x.py' })
+  assert.equal(gA.ok, true)
+  assert.deepEqual(gA.planGate.outside, ['tests/test_x.py'], '1/1 全量越界（outside 判定不动）')
+  assert.match(gA.warning, /计划改动越界：tests\/test_x\.py 不在本卡 touches 内/)
+  assert.match(gA.warning, /另注意：本卡 touches 含目录通配（原型\/规则管理\/app\/backend\/\*\*），若你的清单是相对该目录的短路径（如 tests\/x\.py），请补全为仓库根相对路径重报/, '全量越界+有 glob → 诊断提示')
+  var gateA = (tA.messages || []).filter(function (m) { return m.kind === 'plan-gate' })
+  assert.equal(gateA.length, 1, '卡 messages 只记既有越界警示行（诊断不重复记卡）')
+  assert.ok(!/另注意/.test(gateA[0].text), '诊断提示只进返回体 warning，不进卡 messages')
+  // ② 部分越界（2 个文件 1 个越界）→ 无诊断提示（命中条件严格：全量越界才提示）
+  const tB = mkTask({ id: 'tb', status: 'in-progress', claimedBy: 'w1', touches: ['原型/规则管理/app/backend/**'] })
+  const gB = await mkRpcHandlers(mkBoard([tB])).__tools['board_report'].execute({ taskId: 'tb', kind: 'progress', question: '计划改动：原型/规则管理/app/backend/app/core/rule_engine.py\ntests/test_y.py' })
+  assert.deepEqual(gB.planGate.outside, ['tests/test_y.py'], '2 个文件 1 个越界 = 部分越界')
+  assert.equal(gB.warning.indexOf('另注意'), -1, '部分越界不出现诊断提示')
+  // ③ 无 glob 的全量越界 → 无诊断提示
+  const tC = mkTask({ id: 'tc', status: 'in-progress', claimedBy: 'w1', touches: ['lib/core.mjs'] })
+  const gC = await mkRpcHandlers(mkBoard([tC])).__tools['board_report'].execute({ taskId: 'tc', kind: 'progress', question: '计划改动：docs/x.md' })
+  assert.deepEqual(gC.planGate.outside, ['docs/x.md'], '全量越界但 touches 无目录通配')
+  assert.equal(gC.warning.indexOf('另注意'), -1, '无 glob 不出现诊断提示')
+  // ④ 实际病例全链路复刻（修复主案行为级断言）：圈号清单 + 全路径 → 剥离后全合规零 warning
+  //（修复前 9 文件全量误报的形态；此处取病例头部 4 条做形态代表）
+  const tD = mkTask({ id: 'td', status: 'in-progress', claimedBy: 'w1', touches: ['原型/规则管理/app/backend/**'] })
+  const gD = await mkRpcHandlers(mkBoard([tD])).__tools['board_report'].execute({ taskId: 'td', kind: 'progress', question: '计划改动：①原型/规则管理/app/backend/app/core/rule_engine.py、②原型/规则管理/app/backend/app/core/proxy.py、③原型/规则管理/app/backend/app/core/field_class_sync.py、④原型/规则管理/app/backend/tests/conftest.py' })
+  assert.equal('warning' in gD, false, '圈号全路径清单 → 剥离后全合规不带 warning')
+  assert.deepEqual(gD.planGate, { files: 4, outside: [] })
+  // ⑤ 辅修与主案组合（病例第二层）：圈号 + 相对目录短路径 → 剥圈号后仍全量越界（outside 语义不
+  //放宽）→ 诊断提示引导补全为仓库根相对路径重报
+  const tE = mkTask({ id: 'te', status: 'in-progress', claimedBy: 'w1', touches: ['原型/规则管理/app/backend/**'] })
+  const gE = await mkRpcHandlers(mkBoard([tE])).__tools['board_report'].execute({ taskId: 'te', kind: 'progress', question: '计划改动：①app/core/rule_engine.py、②tests/conftest.py' })
+  assert.deepEqual(gE.planGate.outside, ['app/core/rule_engine.py', 'tests/conftest.py'], '短路径仍按原语义全量越界（不误放）')
+  assert.match(gE.warning, /另注意：本卡 touches 含目录通配（原型\/规则管理\/app\/backend\/\*\*），若你的清单是相对该目录的短路径/, '全量越界+有 glob → 诊断提示引导重报')
 })
 
 test('artifacts⑦：GUI 不下发不展示——client 侧零接线（本卡不碰 client，产物与模块源均无 artifacts 消费点）', () => {

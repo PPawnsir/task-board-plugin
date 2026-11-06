@@ -1126,6 +1126,18 @@ export function createRpc(ctx, state, deps) {
       var appended = planGateMsg(t, msgParts.join('；') + '——主窗口可 task_intervene ' + (outside.length ? '纠正或放行' : '协调或错时执行'), pat, actor)
       var warnParts = []
       if (outside.length) warnParts.push('计划改动越界：' + oobText + ' 不在本卡 touches 内——请修正计划（只改 touches 范围内的文件），或 board_report kind=escalate 请主窗口放行')
+      // 相对路径诊断提示（task-mw5ejg4r，反馈 n-mw506xo40hma 辅修）：全量越界（每个计划文件都越界）
+      // 且有效边界含目录通配（'/**' 结尾）→ warning 追加一段诊断——Worker 清单若是相对该目录的短
+      // 路径（如 tests/x.py），会因前缀不匹配全量误报。只提示、不阻断、不放行（锁严格性不容错配
+      // 误放，outside 判定语义逐字不动）；命中条件严格（全量越界 + 有 glob）才出现，正常场景零附加。
+      if (outside.length && outside.length === planFiles.length) {
+        var globHit = ''
+        for (var gi = 0; gi < boundary.length; gi++) {
+          var gnorm = core.normTouch(boundary[gi])
+          if (/\/\*\*$/.test(gnorm)) { globHit = gnorm; break }
+        }
+        if (globHit) warnParts.push('另注意：本卡 touches 含目录通配（' + globHit + '），若你的清单是相对该目录的短路径（如 tests/x.py），请补全为仓库根相对路径重报')
+      }
       if (hits.length) warnParts.push(lockHitText(hits) + '——请与他卡错时改写这些文件，或 board_report kind=escalate 请主窗口协调')
       if (artHits.length) warnParts.push(artifactHintText(artHits))
       var res = {
