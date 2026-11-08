@@ -1066,9 +1066,51 @@ export function createRpc(ctx, state, deps) {
     function artifactHintText(files) {
       return '计划改动含生成物 ' + (Array.isArray(files) ? files : []).join('、') + '（板上已声明为 artifacts）——应改其源文件后按工程命令重新生成，不要手改产物'
     }
+    // 被拒理由摘要（task-mw7j4oy4 可观测性，只写文案不改判定）：零路径分支把每段拒选理由台账摘进
+    // warning——「被拒明细：N 条 —— '段原文'(rule)、…」每类最多列 2 例（按出现序取前 2）、总长截断
+    // 200 字符。此前 Worker 只见「清单为空」不知道自己哪一行被谁判掉、按什么规则拒——只能 escalate
+    // 或瞎改重报。rule 字面量唯一出处是 core REJECT_RULES，此处只引用 items[].rule。
+    function rejectSummaryText(items) {
+      var list = Array.isArray(items) ? items : []
+      var rej = []
+      for (var i = 0; i < list.length; i++) { var x = list[i]; if (x && x.kept === false) rej.push(x) }
+      if (!rej.length) return ''
+      var seen = {}, parts = []
+      for (var j = 0; j < rej.length; j++) {
+        var it = rej[j]
+        if ((seen[it.rule] || 0) >= 2) continue
+        seen[it.rule] = (seen[it.rule] || 0) + 1
+        parts.push('\'' + it.raw + '\'(' + it.rule + ')')
+      }
+      return ('被拒明细：' + rej.length + ' 条 —— ' + parts.join('、')).slice(0, 200)
+    }
+    // 解析结果摘要（task-mw7j4oy4 可观测性）：全量越界分支先分清「解析歧义」还是「真越界」——
+    // 「解析结果：N 条入选 / M 条被拒（理由分布：rule×n、…）」。M=0 即解析面干净、越界是真实边界
+    // 问题；M>0 看理由分布定位哪几行被判掉。N 与 planGate.files 同源（去重后入选数）；有拒段才带
+    // 括号理由分布，M=0 时干净收尾不挂空括号。
+    function parseSummaryText(keptCount, items) {
+      var list = Array.isArray(items) ? items : []
+      var counts = {}, order = [], m = 0
+      for (var i = 0; i < list.length; i++) {
+        var it = list[i]
+        if (!it || it.kept !== false) continue
+        m++
+        if (!counts[it.rule]) { counts[it.rule] = 0; order.push(it.rule) }
+        counts[it.rule]++
+      }
+      var text = '解析结果：' + keptCount + ' 条入选 / ' + m + ' 条被拒'
+      if (m > 0) {
+        var dist = []
+        for (var j = 0; j < order.length; j++) dist.push(order[j] + '×' + counts[order[j]])
+        text += '（理由分布：' + dist.join('、') + '）'
+      }
+      return text
+    }
     // planGateApply(t, planFiles, actor, pat, d)：d=看板数据（board_report 持锁段在调，必然有）——
-    // 双查第二查「撞他卡有效锁」要用它现算他卡持锁（core.planLockConflicts）。
-    function planGateApply(t, planFiles, actor, pat, d) {
+    // 双查第二查「撞他卡有效锁」要用它现算他卡持锁（core.planLockConflicts）；explainItems=
+    // core.explainPlanFiles 的每段判定台账（task-mw7j4oy4 可观测性：零路径/全量越界两分支把拒选
+    // 理由摘进 warning，让 Worker 自纠而不是 escalate——只写文案，入选/拒选与 outside 判定零变更）。
+    function planGateApply(t, planFiles, actor, pat, d, explainItems) {
       // 有效边界 = touches ∪ extraTouches（task-mvonytz3：仲裁扩权登记的文件即本卡合法边界，
       // 不再误报越界；touches 审计原值不动——边界展示带「含仲裁扩权」标注以资区别）。
       // 含 extraTouches（task-mvtz2jjq 勘误）：此处自 task-mvonytz3 起就按有效锁集比对，此前
@@ -1089,10 +1131,13 @@ export function createRpc(ctx, state, deps) {
         if (appended0) res0.planGateNotify = '⚔️ ' + t.id + ' 计划改动撞他卡文件锁：' + lt0 + '——可 task_intervene 协调'
         return res0
       }
-      // 有前缀但没解析到路径 → 不通知主窗口，返回体 warning 让 Worker 自纠正重报
+      // 有前缀但没解析到路径 → 不通知主窗口，返回体 warning 让 Worker 自纠正重报；task-mw7j4oy4：
+      // 清单为空即所有段都被拒——追加被拒明细（原文案保留，台账见 rejectSummaryText），Worker 一眼
+      // 看到自己哪一行被谁判掉、按什么规则拒，自纠不再 escalate。
       if (!planFiles.length) {
+        var rejText = rejectSummaryText(explainItems)
         planGateMsg(t, '计划闸口：未解析到文件路径——以『计划改动：』开头、每行一个路径重报', pat, actor)
-        return { ok: true, progress: t.lastProgress, planGate: { files: 0, outside: [] }, warning: '计划改动清单为空——请以『计划改动：』开头、每行一个路径列出将要修改/新建的文件后重报' }
+        return { ok: true, progress: t.lastProgress, planGate: { files: 0, outside: [] }, warning: '计划改动清单为空——请以『计划改动：』开头、每行一个路径列出将要修改/新建的文件后重报' + (rejText ? '\n' + rejText : '') }
       }
       var outside = core.planOutsideTouches(boundary, planFiles)
       // 双查第二查（task-mvonytz3④）：计划文件命中其他 in-progress/verifying 卡的有效锁 → 点名持锁卡。
@@ -1136,6 +1181,9 @@ export function createRpc(ctx, state, deps) {
           var gnorm = core.normTouch(boundary[gi])
           if (/\/\*\*$/.test(gnorm)) { globHit = gnorm; break }
         }
+        // task-mw7j4oy4：解析结果摘要先行——先分清「解析歧义」（有段被拒）还是「真越界」（解析面
+        // 干净、只是全不在边界内）再谈修正；短路径引导后置（最具体的行动提示放最后）。
+        warnParts.push(parseSummaryText(planFiles.length, explainItems))
         if (globHit) warnParts.push('另注意：本卡 touches 含目录通配（' + globHit + '），若你的清单是相对该目录的短路径（如 tests/x.py），请补全为仓库根相对路径重报')
       }
       if (hits.length) warnParts.push(lockHitText(hits) + '——请与他卡错时改写这些文件，或 board_report kind=escalate 请主窗口协调')
@@ -1196,13 +1244,17 @@ export function createRpc(ctx, state, deps) {
           var rawQ = String(args.question || '').trim()
           // 开工计划闸口（task-mvneoyba）：『计划改动：』前缀的 progress 进入 touches 边界比对。
           // 计划清单是多行路径（天然超 200 字），放宽到 2000（与歧义上报同档）；普通进展仍 200。
-          var planFiles = core.parsePlanFiles(rawQ)
-          var ptext = rawQ.slice(0, planFiles ? 2000 : 200)
+          // 解析一次、诊断零重跑（task-mw7j4oy4）：explainPlanFiles 与 parsePlanFiles 共用同一条
+          // 流水线且 files 逐字等值——比对直接用 explain.files，每段判定台账 items 随参数下发
+          // planGateApply（零路径/全量越界两分支写文案用），不二次解析。
+          var explain = core.explainPlanFiles(rawQ)
+          var planFiles = explain ? explain.files : null
+          var ptext = rawQ.slice(0, explain ? 2000 : 200)
           if (!ptext) { if (sizeFix) return { ok: true, sizeHint: sizeFix }; return { ok: false, error: 'question required for progress (一行进展摘要)' } } // 纯档位自修正（sizeHint 不带进展文案）：受理 sizeHint 即可，不强制补 question
           var pat = new Date().toISOString()
           t.messages.push({ kind: 'progress', text: ptext, at: pat, by: actor })
           t.lastProgress = { text: ptext, at: pat } // 覆盖式：卡片只展示最新一条
-          if (planFiles) { var pgr = planGateApply(t, planFiles, actor, pat, d); if (sizeFix) pgr.sizeHint = sizeFix; return pgr }
+          if (explain) { var pgr = planGateApply(t, planFiles, actor, pat, d, explain.items); if (sizeFix) pgr.sizeHint = sizeFix; return pgr }
           var pr = { ok: true, progress: t.lastProgress }; if (sizeFix) pr.sizeHint = sizeFix; return pr
         }
         if (args.kind === 'escalate') {

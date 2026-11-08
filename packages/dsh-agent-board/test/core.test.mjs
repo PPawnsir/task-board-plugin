@@ -1299,6 +1299,272 @@ test('parsePlanFiles: 行首圈号/序号剥离——①②③/1./1)/1、/•/�
   assert.deepEqual(core.parsePlanFiles('计划改动：3rd/lib/x.py'), ['3rd/lib/x.py'])
 })
 
+// ===== 解析 golden 等价基线（task-mw7j45lk：parsePlanFiles 壳+流水线重构）=====
+// 硬约束：本卡只做结构拆分、行为逐字等价——期望表由重构前实现实跑产出、静态固化在此
+//（不依赖实现自证，防「实现改了期望跟着改」）。重构后逐字比对必须全等。
+// 覆盖面：前缀识别（全/半角冒号、null/空串/undefined、非行首）/ 换行·逗号·分号·顿号分隔 +
+// 归一（反斜杠、./ 前缀、尾 /）+ 去重保序 / 列表符 / 引号包裹含空格 / 尾注截断（全半角括号、
+// 破折号）/ 中文路径带扩展名（正斜杠 + 反斜杠 + 裸文件名）/ 中文散文片无扩展名 / 正则残片 /
+// 圈号①⑩㉑ / 数字序号 1./1)/（1）/ 纯散文 / 空清单 / Windows 反斜杠。上方四条历史病例断言族
+// 原样保留；叠加装饰（'- 1. ①path'）属本卡修复面（见下方幂等剥离测试），不在等价表内。
+const GOLDEN_PLAN_CASES = [
+  ['计划改动：lib/core.mjs', ['lib/core.mjs']],
+  ['计划改动：lib/core.mjs\ntest/core.test.mjs', ['lib/core.mjs', 'test/core.test.mjs']],
+  ['计划改动：lib/core.mjs，test/core.test.mjs', ['lib/core.mjs', 'test/core.test.mjs']],
+  ['计划改动：lib/core.mjs, test/core.test.mjs; lib/rpc.mjs', ['lib/core.mjs', 'test/core.test.mjs', 'lib/rpc.mjs']],
+  ['计划改动：./lib/core.mjs\nlib\\rpc.mjs\nlib/', ['lib/core.mjs', 'lib/rpc.mjs', 'lib']],
+  ['计划改动：./lib/core.mjs\nlib\\core.mjs', ['lib/core.mjs']],
+  ['计划改动：\n- lib/core.mjs\n* test/x.mjs', ['lib/core.mjs', 'test/x.mjs']],
+  ['计划改动：`lib/core.mjs`、`test/x.mjs`', ['lib/core.mjs', 'test/x.mjs']],
+  ['计划改动：', []],
+  ['计划改动：\n\n', []],
+  ['计划改动：lib/core.mjs（L75-L91 计划闸口解析器）', ['lib/core.mjs']],
+  ['计划改动：lib/core.mjs (L663 语义注释)', ['lib/core.mjs']],
+  ['计划改动：lib/core.mjs — 解析器现状', ['lib/core.mjs']],
+  ['计划改动：lib/core.mjs（注释）\ntest/core.test.mjs(断言)', ['lib/core.mjs', 'test/core.test.mjs']],
+  ['计划改动：（只有注释）', []],
+  ['计划改动：\n- `lib/core.mjs`（闸口）\n* test/x.mjs — 断言', ['lib/core.mjs', 'test/x.mjs']],
+  ['计划改动：README.md', ['README.md']],
+  ['计划改动：plan.mjs、CHANGELOG.md', ['plan.mjs', 'CHANGELOG.md']],
+  ['计划改动：D:\\deepseek-work\\lib', ['D:/deepseek-work/lib']],
+  ['计划改动：lib/', ['lib']],
+  ['计划改动：\n- 调研文件清单\n- lib/core.mjs\n- 闸口解析补刀\n- lib/core.mjs', ['lib/core.mjs']],
+  ['计划改动：本次重构 lib/core.mjs 的 parsePlanFiles，补全测试断言，顺带更新 README', []],
+  ['计划改动：故障层复用 test/helpers/fault-provider.mjs 可变目录', []],
+  ['计划改动：故障层：复用test/helpers/fault-provider.mjs', []],
+  ['计划改动：test/helpers/fault-provider.mjs 故障层可变目录复用点', ['test/helpers/fault-provider.mjs']],
+  ['计划改动：lib/core.mjs—解析器', ['lib/core.mjs']],
+  ['计划改动：`my docs/a b.md`（注释）', ['my docs/a b.md']],
+  ['计划改动：/if \\(isHungKillFailure(x)\\)/ 判定点', []],
+  ['计划改动：lib/core.mjs\n/if \\(isHungKillFailure(x)\\)/ 判定点', ['lib/core.mjs']],
+  ['计划改动：调用点/接线断言仍锁', []],
+  ['计划改动：调用点/接线断言仍锁 —— 说明', []],
+  ['计划改动：\n- 调用点/接线断言仍锁\n- lib/core.mjs\n- /if \\(x\\)/ 残片', ['lib/core.mjs']],
+  ['计划改动：/usr/local/lib/x.mjs', ['/usr/local/lib/x.mjs']],
+  ['计划改动：原型/规则管理/规则管理控制台-v1.html（R3 控制台）', ['原型/规则管理/规则管理控制台-v1.html']],
+  ['计划改动：原型\\规则管理\\规则管理控制台-v1.html', ['原型/规则管理/规则管理控制台-v1.html']],
+  ['计划改动：规则管理控制台-v1.html', ['规则管理控制台-v1.html']],
+  ['计划改动：规则管理.py、控制台.md', ['规则管理.py', '控制台.md']],
+  ['计划改动：合规重报/闸口放行', []],
+  ['计划改动：调用点（含断言）', []],
+  ['计划改动：（含断言）', []],
+  ['计划改动：这是一段纯说明文字', []],
+  ['计划改动：\n- 调研文件清单\n- 只动解析不动闸口比对', []],
+  ['计划改动：①原型/a/b.py', ['原型/a/b.py']],
+  ['计划改动：①原型/a.py 说明尾巴', ['原型/a.py']],
+  ['计划改动：1. 原型/a.py', ['原型/a.py']],
+  ['计划改动：1) 原型/a.py', ['原型/a.py']],
+  ['计划改动：- 原型/a.py', ['原型/a.py']],
+  ['计划改动：1、原型/a.py', ['原型/a.py']],
+  ['计划改动：• 原型/a.py', ['原型/a.py']],
+  ['计划改动：（1）原型/a.py', ['原型/a.py']],
+  ['计划改动：⑩原型/a.py', ['原型/a.py']],
+  ['计划改动：㉑原型/a.py', ['原型/a.py']],
+  ['计划改动：① 这是散文说明', []],
+  ['计划改动：①/if \\(x\\)', []],
+  ['计划改动：lib/core.mjs\n①/if \\(x\\)', ['lib/core.mjs']],
+  ['计划改动：3rd/lib/x.py', ['3rd/lib/x.py']],
+  ['计划改动:lib/core.mjs', ['lib/core.mjs']],
+  ['里程碑一：骨架已落地', null],
+  ['', null],
+  [null, null],
+  [undefined, null],
+  ['x计划改动：lib/core.mjs', null]
+]
+test('parsePlanFiles: 解析 golden 等价基线——重构前后逐字全等（静态期望表，task-mw7j45lk）', () => {
+  for (const [q, expected] of GOLDEN_PLAN_CASES) {
+    assert.deepEqual(core.parsePlanFiles(q), expected)
+  }
+})
+
+// 叠加装饰（task-mw7j45lk 隐患二，本卡修复面）：'- 1. ①path' 旧实现三条剥离正则按固定顺序各跑一次、
+// 从不回头——列表符步剥 '- ' 后序号步剥 '1. '，再露出的 ① 无人处理，圈号残留路径首位（目录锁比对
+// 恒 false → 全量误报）。stripDecor 幂等循环到不动点后逐层剥净；单层装饰行为不变（上方 golden 表已锁）。
+test('parsePlanFiles: 叠加装饰幂等剥离到不动点——"- 1. ①path" 族剥净；frag 哨兵基于剥净后内容；单层零回归', () => {
+  // ① 断言清单③：列表符+数字序号+圈号三层叠加 → 剥到路径本体（旧实现产出 ['①原型/a/b.py']——① 残留）
+  assert.deepEqual(core.parsePlanFiles('计划改动：- 1. ①原型/a/b.py'), ['原型/a/b.py'])
+  // ② 数字序号叠圈号（不同叠加顺序同样剥净）
+  assert.deepEqual(core.parsePlanFiles('计划改动：1. ②原型/a.py'), ['原型/a.py'])
+  // ③ 叠加装饰清单形态（贴近 Worker 实际上报写法）
+  assert.deepEqual(core.parsePlanFiles('计划改动：\n- 1. ①原型/a.py\n- 2. ②lib/core.mjs'), ['原型/a.py', 'lib/core.mjs'])
+  // ④ 叠加装饰+正则残片：剥净后 frag 哨兵照常拒（旧实现 ① 残留首位、fragSrc 不以 '/' 开头 → 哨兵
+  //    漏判，截断后 '①/if' 被误判路径入选）
+  assert.deepEqual(core.parsePlanFiles('计划改动：- 1. ①/if \\(x\\)'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs\n- 1. ①/if \\(x\\)'), ['lib/core.mjs'])
+  // ⑤ 叠加装饰+行尾说明 → 剥净后照常截断
+  assert.deepEqual(core.parsePlanFiles('计划改动：- 1. ①原型/a.py 说明尾巴'), ['原型/a.py'])
+  // ⑥ 单层装饰回归锁（幂等循环第二轮为无操作——与旧实现逐字等价）
+  assert.deepEqual(core.parsePlanFiles('计划改动：- 原型/a.py'), ['原型/a.py'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：1. 原型/a.py'), ['原型/a.py'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：①原型/a.py'), ['原型/a.py'])
+  // ⑦ 路径本体数字不受影响（幂等循环不过度剥离 '3rd/lib'）
+  assert.deepEqual(core.parsePlanFiles('计划改动：3rd/lib/x.py'), ['3rd/lib/x.py'])
+})
+
+// ===== 装饰形态矩阵（task-mw7j4ihe：DECOR_PATTERNS 表驱动化）=====
+// 表驱动后每条规则独立可追加，本块按「形态矩阵」逐格锁死：13 种单装饰、5 种叠加组合（'- 1. ①path'
+// 族，只有幂等循环才剥得净）、不误伤反证（'3rd/'、'v1.9.5/'）、边界（纯装饰行剥空、散文仍拒、frag 仍拒）。
+// 期望值一律是「剥净后的路径本体」；结构断言锁住「模块级表 + stripDecor 消费表」的形态，防回退成写死正则。
+test('parsePlanFiles: 装饰形态矩阵——13 单装饰 × 5 叠加 × 不误伤/边界；DECOR_PATTERNS 模块级表驱动', () => {
+  // ① 单装饰 13 种：圈号四段区间各取一端（① U+2460 / ⑩ U+2469 / ㉑ U+3251 / ㊱ U+32B1）
+  // + 数字序号 4 形态 + '、' 分隔形态 + 4 种列表符
+  const SINGLE_DECOR = [
+    ['①lib/core.mjs', 'lib/core.mjs'],
+    ['⑩lib/core.mjs', 'lib/core.mjs'],
+    ['㉑lib/core.mjs', 'lib/core.mjs'],
+    ['㊱lib/core.mjs', 'lib/core.mjs'],
+    ['1. lib/core.mjs', 'lib/core.mjs'],
+    ['1)lib/core.mjs', 'lib/core.mjs'],
+    ['(1)lib/core.mjs', 'lib/core.mjs'],
+    ['（1）lib/core.mjs', 'lib/core.mjs'],
+    ['1、lib/core.mjs', 'lib/core.mjs'],   // '、' 同时是清单分隔符：先拆段、段首数字丢弃，净结果一致
+    ['- lib/core.mjs', 'lib/core.mjs'],
+    ['* lib/core.mjs', 'lib/core.mjs'],
+    ['• lib/core.mjs', 'lib/core.mjs'],
+    ['· lib/core.mjs', 'lib/core.mjs'],
+  ]
+  for (const [q, expected] of SINGLE_DECOR) assert.deepEqual(core.parsePlanFiles('计划改动：' + q), [expected], q)
+
+  // ② 叠加组合 5 种（本卡主价值）：旧实现固定顺序各跑一次时，逐层新露出的装饰无人处理、圈号残留首位
+  // → 目录锁比对恒 false。幂等循环逐轮剥到不动点后全部只剩路径本体。
+  const STACKED_DECOR = [
+    ['- 1. ①lib/core.mjs', 'lib/core.mjs'],
+    ['1. ①lib/core.mjs', 'lib/core.mjs'],
+    ['①1. lib/core.mjs', 'lib/core.mjs'],
+    ['- ①lib/core.mjs', 'lib/core.mjs'],
+    ['* ⑩ lib/core.mjs', 'lib/core.mjs'],
+  ]
+  for (const [q, expected] of STACKED_DECOR) assert.deepEqual(core.parsePlanFiles('计划改动：' + q), [expected], q)
+
+  // ③ 不误伤反证：首段数字不是序号（无分隔符 / 非数字开头）时原样保留
+  assert.deepEqual(core.parsePlanFiles('计划改动：3rd/lib/x.py'), ['3rd/lib/x.py'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：v1.9.5/notes.md'), ['v1.9.5/notes.md'])
+  // '3. rd/lib' 首段满足「数字+分隔符」→ 剥成 'rd/lib'：可接受语义（断言写明，不视为误伤）
+  assert.deepEqual(core.parsePlanFiles('计划改动：3. rd/lib'), ['rd/lib'])
+
+  // ④ 边界：纯装饰行剥空 → 不入选；剥后仍无扩展名无斜杠的散文 → 仍拒
+  assert.deepEqual(core.parsePlanFiles('计划改动：①②③'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：① 这是散文说明'), [])
+  // ⑤ frag 残片哨兵证据取自「剥装饰后、截断前」：圈号剥净后 '/if \(' 仍判残片拒（单层 + 叠加）
+  assert.deepEqual(core.parsePlanFiles('计划改动：①/if \\(x\\)'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：- 1. ①/if \\(x\\)'), [])
+
+  // ⑥ 结构锁：DECOR_PATTERNS 是模块级表、stripDecor 循环消费它（新增形态只追加一行，不回退写死正则）
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  assert.match(coreSrc, /^var DECOR_PATTERNS = \[/m)
+  assert.match(coreSrc, /for \(var i = 0; i < DECOR_PATTERNS\.length; i\+\+\)/)
+  assert.match(coreSrc, /v\.replace\(DECOR_PATTERNS\[i\], ''\)/)
+})
+
+// ===== 解析诊断 explainPlanFiles（task-mw7j4oy4：只加可观测性，零行为变更）=====
+// 硬约束：与 parsePlanFiles 共用同一条流水线（壳 planItemsOf 中间态）——files 逐字等于 parse 返回值，
+// 一致性由构造保证而非事后比对；items 台账带 kept/rule（rule 字面量唯一出处=core REJECT_RULES 台账）。
+// rpc 闸口两分支文案接线断言见下方「planGate 解析诊断接入」。
+test('explainPlanFiles: 与 parsePlanFiles 结果一致——files 逐字全等（golden 全表复用）+ 非闸口 null；items 保序不去重、decorated 为截断前快照', () => {
+  // ① golden 全表复用：闸口形态 files 逐字等于静态期望表（=parsePlanFiles 返回值）；非闸口形态返回 null
+  for (const [q, expected] of GOLDEN_PLAN_CASES) {
+    const ex = core.explainPlanFiles(q)
+    if (expected === null) { assert.equal(ex, null, '非闸口上报返回 null：' + JSON.stringify(q)); continue }
+    assert.notEqual(ex, null, '闸口上报不返回 null：' + JSON.stringify(q))
+    assert.deepEqual(ex.files, expected, 'files 逐字等于 golden 期望：' + JSON.stringify(q))
+    assert.deepEqual(ex.files, core.parsePlanFiles(q), '同输入 files 逐字等于 parsePlanFiles 返回值：' + JSON.stringify(q))
+    for (const it of ex.items) assert.ok(it.kept === (it.rule === 'ok'), 'kept 与 rule===ok 一一对应：' + JSON.stringify(it))
+  }
+  // ② 台账形态：items 保序不去重（每段一条），去重只发生在 files 侧
+  const eD = core.explainPlanFiles('计划改动：./lib/core.mjs\nlib\\core.mjs')
+  assert.deepEqual(eD.files, ['lib/core.mjs'], 'files 侧归一后去重（与 parsePlanFiles 同语义）')
+  assert.equal(eD.items.length, 2, 'items 不去重——两段都可见')
+  assert.ok(eD.items[0].kept && eD.items[1].kept, '两段都入选（kept 各自记录）')
+  assert.equal(eD.items[1].candidate, 'lib/core.mjs', 'candidate 为归一后形态')
+  // ③ decorated 语义：截断前快照（尾注原样保留）；引号包裹命中时=引号内内容（残片哨兵同源）
+  const eT = core.explainPlanFiles('计划改动：lib/core.mjs（L75 语义注释）')
+  assert.equal(eT.items[0].raw, 'lib/core.mjs（L75 语义注释）', 'raw 为分隔切分出的原始段')
+  assert.equal(eT.items[0].decorated, 'lib/core.mjs（L75 语义注释）', 'decorated 为截断前快照（尾注可见）')
+  assert.equal(eT.items[0].candidate, 'lib/core.mjs', 'candidate 为归一路径本体')
+  const eQ = core.explainPlanFiles('计划改动：`my docs/a b.md`（注释）')
+  assert.equal(eQ.items[0].decorated, 'my docs/a b.md', '引号命中时 decorated=引号内内容')
+  assert.equal(eQ.items[0].candidate, 'my docs/a b.md')
+  // ⑤ 非闸口（普通进展）显式直断：与 parsePlanFiles 同判返回 null
+  assert.equal(core.explainPlanFiles('里程碑一：骨架已落地'), null)
+  assert.equal(core.explainPlanFiles(''), null)
+  assert.equal(core.explainPlanFiles(null), null)
+})
+
+test('explainPlanFiles: rule 台账——散文片 no-path-shape / 中文无扩展名 cjk-no-ext / 正则残片 regex-fragment / 正常路径 ok / 纯装饰行 empty', () => {
+  const e = core.explainPlanFiles('计划改动：\n调研文件清单\n调用点/接线断言仍锁\n/if \\(x\\)/ 残片\nlib/core.mjs\n①②③')
+  assert.deepEqual(e.items, [
+    { raw: '', decorated: '', candidate: '', kept: false, rule: 'empty' },
+    { raw: '调研文件清单', decorated: '调研文件清单', candidate: '', kept: false, rule: 'no-path-shape' },
+    { raw: '调用点/接线断言仍锁', decorated: '调用点/接线断言仍锁', candidate: '', kept: false, rule: 'cjk-no-ext' },
+    { raw: '/if \\(x\\)/ 残片', decorated: '/if \\(x\\)/ 残片', candidate: '', kept: false, rule: 'regex-fragment' },
+    { raw: 'lib/core.mjs', decorated: 'lib/core.mjs', candidate: 'lib/core.mjs', kept: true, rule: 'ok' },
+    { raw: '①②③', decorated: '', candidate: '', kept: false, rule: 'empty' },
+  ], '五类理由各就位：空段/纯散文词/中文无扩展名有斜杠/正则残片/正常路径/纯装饰行')
+  assert.deepEqual(e.files, ['lib/core.mjs'], '只取 kept 项（与 parsePlanFiles 同结果）')
+  // CJK 无扩展名细分：无分隔符（「调研文件清单」）= no-path-shape；有分隔符（「调用点/…」）= cjk-no-ext
+  // ——两者是旧 looksLikePath 同一布尔拒选分支的台账细分，判定结果一致（都拒），零行为变更
+  const e2 = core.explainPlanFiles('计划改动：故障层复用 test/helpers/fault-provider.mjs 可变目录')
+  assert.equal(e2.items[0].rule, 'no-path-shape', '散文在前截断后是散文首词（无路径特征）')
+  const e3 = core.explainPlanFiles('计划改动：（只有注释）')
+  assert.equal(e3.items[0].rule, 'empty', '全角括号注释行截断到 0 → empty')
+  const e4 = core.explainPlanFiles('计划改动：①/if \\(x\\)')
+  assert.equal(e4.items[0].rule, 'regex-fragment', 'frag 哨兵基于剥装饰后内容（圈号剥净仍判残片）')
+})
+
+test('planGate 解析诊断接入（task-mw7j4oy4）：零路径 warning 追加被拒明细；全量越界追加解析结果行；部分越界/全合规零附加', async () => {
+  // ① 零路径：全部段被拒 → warning 追加被拒明细（含每段理由名）；原文案与卡消息形态不变
+  const tA = mkTask({ id: 'ta', status: 'in-progress', claimedBy: 'w1', touches: ['lib/**'] })
+  const gA = await mkRpcHandlers(mkBoard([tA])).__tools['board_report'].execute({ taskId: 'ta', kind: 'progress', question: '计划改动：调研文件清单\n/if \\(x\\)/ 判定点\n调用点/接线断言仍锁' })
+  assert.equal(gA.ok, true)
+  assert.deepEqual(gA.planGate, { files: 0, outside: [] }, '零路径分支 planGate 形态不变')
+  assert.match(gA.warning, /计划改动清单为空——请以『计划改动：』开头、每行一个路径列出将要修改\/新建的文件后重报/, '原文案保留')
+  assert.match(gA.warning, /被拒明细：3 条 —— /, '追加被拒明细（条数=被拒段数）')
+  assert.ok(gA.warning.indexOf("'调研文件清单'(no-path-shape)") >= 0, '散文片带 no-path-shape 理由名')
+  assert.ok(gA.warning.indexOf("'调用点/接线断言仍锁'(cjk-no-ext)") >= 0, '中文无扩展名带 cjk-no-ext 理由名')
+  assert.ok(gA.warning.indexOf("'/if \\(x\\)/ 判定点'(regex-fragment)") >= 0, '正则残片带 regex-fragment 理由名')
+  assert.equal(gA.warning.split('\n').length, 2, 'warning = 原文案 + 被拒明细各一行')
+  var gatesA = (tA.messages || []).filter(function (m) { return m.kind === 'plan-gate' })
+  assert.equal(gatesA.length, 1, '卡 messages 只记既有零路径警示行')
+  assert.equal(gatesA[0].text, '计划闸口：未解析到文件路径——以『计划改动：』开头、每行一个路径重报', '被拒明细只进返回体 warning，不进卡 messages')
+  // ①b 空段台账：两行全角括号注释都截断到 0 → 明细计数 2、各自以 '…'(empty) 可见
+  //（注：'计划改动：\n\n' 的连续分隔符被 split 折叠为单段，不构成两段）
+  const gA2 = await mkRpcHandlers(mkBoard([mkTask({ id: 'ta2', status: 'in-progress', claimedBy: 'w1', touches: ['lib/**'] })])).__tools['board_report'].execute({ taskId: 'ta2', kind: 'progress', question: '计划改动：（只有注释）\n（另一行注释）' })
+  assert.match(gA2.warning, /被拒明细：2 条 —— '（只有注释）'\(empty\)、'（另一行注释）'\(empty\)/, '注释行截断到 0 按 empty 计入明细')
+  // ①c 每类最多列 2 例：4 条同类散文只列前 2 例、计数仍 4
+  const gA3 = await mkRpcHandlers(mkBoard([mkTask({ id: 'ta3', status: 'in-progress', claimedBy: 'w1', touches: ['lib/**'] })])).__tools['board_report'].execute({ taskId: 'ta3', kind: 'progress', question: '计划改动：散文甲\n散文乙\n散文丙\n散文丁' })
+  assert.match(gA3.warning, /被拒明细：4 条/, '计数=全部被拒段')
+  assert.ok(gA3.warning.indexOf("'散文甲'(no-path-shape)") >= 0 && gA3.warning.indexOf("'散文乙'(no-path-shape)") >= 0, '同类前 2 例在列')
+  assert.equal(gA3.warning.indexOf('散文丙'), -1, '每类最多列 2 例——第 3 例不占文案')
+  // ①d 总长截断 200 字符：4 类理由 × 2 例长段 → 明细行恰 200
+  const long40 = '一二三四五六七八九十'.repeat(4)
+  const qTrunc = '计划改动：' + ['散文甲' + long40, '散文乙' + long40, '断言甲/' + long40, '断言乙/' + long40, '/if \\(x' + long40 + '\\)/ 判', '/if \\(y' + long40 + '\\)/ 判', '（' + long40 + '注释甲）', '（' + long40 + '注释乙）'].join('\n')
+  const gA4 = await mkRpcHandlers(mkBoard([mkTask({ id: 'ta4', status: 'in-progress', claimedBy: 'w1', touches: ['lib/**'] })])).__tools['board_report'].execute({ taskId: 'ta4', kind: 'progress', question: qTrunc })
+  const rejLine = gA4.warning.split('\n')[1]
+  assert.ok(rejLine && rejLine.indexOf('被拒明细：8 条') === 0, '明细行存在且计数 8（四类各 2 段全被拒）')
+  assert.equal(rejLine.length, 200, '总长截断 200 字符')
+  // ② 全量越界（真越界，M=0）：解析面干净 → 「N 条入选 / 0 条被拒」不挂空括号
+  const tB = mkTask({ id: 'tb', status: 'in-progress', claimedBy: 'w1', touches: ['lib/core.mjs'] })
+  const gB = await mkRpcHandlers(mkBoard([tB])).__tools['board_report'].execute({ taskId: 'tb', kind: 'progress', question: '计划改动：docs/x.md' })
+  assert.deepEqual(gB.planGate, { files: 1, outside: ['docs/x.md'] }, 'outside 判定不动')
+  assert.match(gB.warning, /计划改动越界：docs\/x\.md 不在本卡 touches 内/, '越界原文案保留')
+  assert.match(gB.warning, /解析结果：1 条入选 \/ 0 条被拒/, '全量越界追加解析结果行（M=0=真越界，解析面干净）')
+  assert.equal(gB.warning.indexOf('理由分布'), -1, 'M=0 不挂空理由分布括号')
+  assert.equal(gB.warning.split('\n').length, 2, '越界行 + 解析结果行')
+  // ③ 全量越界（解析歧义，M>0）：入选 2 + 被拒 1 → 理由分布定位散文段；glob 短路径引导保留
+  const tC = mkTask({ id: 'tc', status: 'in-progress', claimedBy: 'w1', touches: ['原型/规则管理/**'] })
+  const gC = await mkRpcHandlers(mkBoard([tC])).__tools['board_report'].execute({ taskId: 'tc', kind: 'progress', question: '计划改动：app/core/rule_engine.py、①app/core/proxy.py、调研补刀' })
+  assert.deepEqual(gC.planGate.outside, ['app/core/rule_engine.py', 'app/core/proxy.py'], '2/2 全量越界（outside 语义不动）')
+  assert.match(gC.warning, /解析结果：2 条入选 \/ 1 条被拒（理由分布：no-path-shape×1）/, '解析歧义与真越界一眼可分')
+  assert.match(gC.warning, /另注意：本卡 touches 含目录通配（原型\/规则管理\/\*\*）/, 'glob 短路径引导保留')
+  assert.equal(gC.warning.split('\n').length, 3, '越界行 + 解析结果 + 另注意')
+  // ④ 部分越界/全合规：解析结果行只在全量越界分支出现（命中条件严格，正常场景零附加）
+  const gD = await mkRpcHandlers(mkBoard([mkTask({ id: 'td', status: 'in-progress', claimedBy: 'w1', touches: ['lib/**'] })])).__tools['board_report'].execute({ taskId: 'td', kind: 'progress', question: '计划改动：lib/core.mjs\ndocs/x.md' })
+  assert.deepEqual(gD.planGate.outside, ['docs/x.md'], '1/2 部分越界')
+  assert.equal(gD.warning.indexOf('解析结果'), -1, '部分越界不追加解析结果行')
+  const gE = await mkRpcHandlers(mkBoard([mkTask({ id: 'te', status: 'in-progress', claimedBy: 'w1', touches: ['lib/**'] })])).__tools['board_report'].execute({ taskId: 'te', kind: 'progress', question: '计划改动：lib/core.mjs' })
+  assert.equal('warning' in gE, false, '全合规零 warning')
+})
+
 test('touchCovers: 单向覆盖——touch 模式 ⊇ 计划文件（与 matchOne 对称语义方向相反）', () => {
   assert.equal(core.touchCovers('lib/core.mjs', 'lib/core.mjs'), true)   // 精确
   assert.equal(core.touchCovers('lib/core.mjs', 'lib/rpc.mjs'), false)

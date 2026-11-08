@@ -88,66 +88,161 @@ export var PLAN_GATE_PREFIX = '计划改动：'
 //（「取路径前缀或丢弃」二选一取丢弃，断言锁死）。两类都靠「前缀必须像路径」收口，条目全空走
 // rpc.mjs 既有「未解析到路径 → 重报提示」自纠正；路径在前的混合行正常截出前缀参与比对。
 // 返回 null = 非计划闸口上报（普通进展）；返回数组 = 计划清单（空数组 = 有前缀但没解析到路径）。
+// 「计划改动：」前缀识别 + 路径清单解析——壳（task-mw7j45lk：旧 61 行七重职责单体拆为「壳 + parsePlanItem
+// 流水线」，行为逐字等价、测试「解析 golden 等价基线」锁死）：前缀 → 分隔切分 → 逐条过流水线 → 取 kept
+// 项去重保序（task-mw7j4oy4：壳下沉为 planItemsOf 中间态，与 explainPlanFiles 双壳共用一条流水线）。
 export function parsePlanFiles(question) {
+  var items = planItemsOf(question)
+  if (items === null) return null
+  var out = []
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i]
+    if (it.kept && out.indexOf(it.candidate) < 0) out.push(it.candidate)
+  }
+  return out
+}
+// 壳共用中间态（task-mw7j4oy4）：前缀识别 → 分隔切分 → 逐段过流水线得 Item 台账（保序、不去重——
+// 诊断语义要看到每一段的判定，去重只在上层壳的 files 侧做）。返回 null = 非闸口上报（普通进展）。
+function planItemsOf(question) {
   var q = String(question == null ? '' : question).trim()
   var m = /^计划改动[：:]/.exec(q)
   if (!m) return null
   var parts = q.slice(m[0].length).split(/[\n,，;；、]+/)
-  var out = []
-  for (var i = 0; i < parts.length; i++) {
-    // 顺序：列表符 → 圈号/序号剥离（fragSrc 同步）→ 引号对提取/首空白全角标点截断 → 残留反引号
-    // → trim → 像路径判定 → 归一
-    var v = parts[i].trim().replace(/^[-*•·]\s+/, '')
-    // 残片哨兵证据取自「截断前」原文（task-mvtz2jjq）：正则残片 `/if \(isHungKillFailure/` 的首空白
-    // 截断会把斜杠后的 '(' 与 '\' 转义一起截掉、只剩 `/if`——截断后再看哨兵就丢了证据，故先记。
-    var fragSrc = v
-    // 行首序号/项目符号剥离（反馈 n-mw506xo40hma，task-mw5ejg4r）：Worker 习惯用 ①②③ 或 1./1)/-/*
-    // 编号列清单，这些装饰不是路径本体——不剥离会让路径首位变异导致边界比对全量误报（实证：
-    // '①原型/…/rule_engine.py' 的 ① 保留在路径首位，CJK+扩展名通过 likePath 判定照常入选，但目录
-    // 锁 f.indexOf(pfx)===0 因首位是圈号恒 false → 9 文件全量越界；与 glob 展开无关）。两步走：先剥
-    // 圈号/项目符号（①-⑳ U+2460-2473、带圈字母数字 U+2474-2487、实心圈数字 U+2776-2793、㉑-㉟
-    // U+3251-325F、㊱-㊿ U+32B1-32BF、中点/项目符号/方块/对勾/三角项目符号，含尾随空白），再剥数字
-    // 序号（1./1)/1、/(1)——数字+分隔符整体剥，纯数字开头的路径首段如 '3rd/lib' 不受影响）。剥离后
-    // fragSrc 同步更新：残片哨兵证据应基于剥离后的内容（'①/if \(' 剥离后才是真残片证据）。
-    v = v.replace(/^[\s\u2460-\u2473\u2474-\u247F\u2480-\u2487\u2776-\u2793\u3251-\u325F\u32B1-\u32BF\u00B7\u2022\u25CF\u25A0\u25A1\u2713\u2714\u2023\u2043]+/, '')
-    v = v.replace(/^(?:\d{1,2}[.、)\]：:]\s*|[-*+]\s+|[(（]\d{1,2}[)）]\s*)/, '')
-    fragSrc = v
-    // 引号包裹路径（「除非引号包裹」例外分支，行内代码反引号）：取首对反引号内容为条目、可含
-    // 空格，配对后尾巴（说明/注释）一并忽略；无配对落空走下方截断兜底（残留端点反引号仍剥）
-    var bt = /^`+([^`]+)`+/.exec(v)
-    if (bt) { v = bt[1]; fragSrc = v } else {
-      // 截到首个空白/全角标点前的路径前缀（task-mvr44s0y）：截完是「行首前缀」——路径在前的
-      // 混合行（「path（注释）」「path — 说明」「path 说明文字」）截出路径本体；散文段（说明在
-      // 前、路径碎片在后）截完是散文首词，过不了像路径判定 → 整条丢弃（选定语义，断言锁死）
-      var cut = v.search(/[\s，；、：（）()「」『』《》〈〉【】〔〕“”‘’…—·～！？]/)
-      if (cut >= 0) v = v.slice(0, cut)
-    }
-    v = v.replace(/^`+|`+$/g, '').trim()
-    // 像路径判定（task-mvqfl7in，n-mvqfiofr0kt9 误报实证）：无路径特征的纯散文行（如「调研文件
-    // 清单」「只动解析不动闸口比对」及截断后的散文首词）不入选；含路径分隔符（'/' 或 Windows
-    // 反斜杠——normTouch 同源等价）或以代码扩展名结尾（宽正则，.mjs/.md/.json/.py/.yml 等）才
-    // 入选；条目全被丢光走既有「空清单」语义（rpc.mjs 有前缀但零路径 → 重报提示自纠正）。
-    // 判定在归一前做：`lib/`、`D:\dir` 的分隔符证据会被 normTouch 剥尾斜杠/改写，先记再归一。
-    // 解析伪影收紧（task-mvtz2jjq，n-mvtejrusnhi6 生产实证两类碎片——「仲裁扩权后重派仍被拦」的
-    // 真凶不是闸口不认 extraTouches[闸口 rpc.mjs 已读 effectiveTouches]，而是这两类残片被误判路径
-    // 后永远不在边界内）：①含中日韩字符（CJK 统一表意 + 全角形式区）的 token——「调用点/接线断言
-    // 仍锁」这类含半角斜杠的中文散文片即死（v1.9.2 当时的假设「本仓库路径全 ASCII」，通用看板不成立）；
-    // ②正则/代码残片：以 '/' 开头且其后含 '(' 或 '\' 转义 → 判非路径（`/if \(...` 即死）。
-    // CJK 分级（task-mw147o79，n-mw0m55m6v5bg ontology 板 5 格式全灭实证）：v1.9.2 的 CJK 一刀切把
-    // 中文文件名真路径一起拒了（「原型/规则管理/规则管理控制台-v1.html」→ files 恒 0，闸口机器比对对
-    // 中文路径形同虚设）——与 v1.9.2 病例方向相反（那次散文片误入选，这次真路径误拒选）。判据取「结尾
-    // 是否 ASCII 文件扩展名」：含 CJK 的 token 必须带扩展名才算路径（中文文件名真路径必带 .html/.py/
-    // .mjs 等），无扩展名的中文散文片（「调用点/接线断言仍锁」有斜杠无扩展名）继续拒；ASCII token 判定
-    // 逐字不变（分隔符或扩展名任一即可，含无扩展名的 ASCII 目录）。两者只校正「伪路径入选/真路径拒选」，
-    // normTouch 归一语义、frag 残片哨兵、touchCovers 覆盖规则逐字不动。
-    var cjk = /[\u4e00-\u9fff\uff00-\uffef]/.test(v)
-    var frag = /^\//.test(fragSrc) && /[()\\]/.test(fragSrc.slice(1))
-    var hasExt = /\.[a-z0-9]{1,6}$/i.test(v)
-    var likePath = !frag && (cjk ? hasExt : (/[\/\\]/.test(v) || hasExt))
-    v = normTouch(v)
-    if (v && likePath && out.indexOf(v) < 0) out.push(v)
+  var items = []
+  for (var i = 0; i < parts.length; i++) items.push(parsePlanItem(parts[i]))
+  return items
+}
+// 解析诊断导出（task-mw7j4oy4，只加可观测性、零行为变更）：与 parsePlanFiles 同签名、共用同一条流水线
+//（同一 planItemsOf 中间态——硬约束：禁止复制判定逻辑，两套判定必漂移）。返回：
+//   null                               = 非闸口上报（与 parsePlanFiles 同判）
+//   { files: string[], items: Item[] } = 闸口上报：files 逐字等于 parsePlanFiles 返回值（同一中间态
+//                                        取 kept，一致性由构造保证而非事后比对）；items 是每段判定台账。
+// Item = { raw: 分隔切分出的原始段（未 trim）, decorated: 剥装饰后·截断前快照（引号命中时=引号内
+//          内容，残片哨兵同源）, candidate: 归一候选（被拒恒 ''）, kept: boolean, rule: REJECT_RULES 值 }。
+export function explainPlanFiles(question) {
+  var items = planItemsOf(question)
+  if (items === null) return null
+  var files = []
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i]
+    if (it.kept && files.indexOf(it.candidate) < 0) files.push(it.candidate)
   }
-  return out
+  return { files: files, items: items }
+}
+// ===== 计划闸口解析流水线（task-mw7j45lk 重构：纯函数按调用序排列，均模块私有、测试走 parsePlanFiles 黑盒）=====
+// 装饰剥离 stripDecor → 引号提取 extractQuoted / 截断 truncateAtDelim → 像路径判定+拒选理由 looksLikePathRule
+// → 归一 normTouch，由 parsePlanItem 按旧实现的顺序组装成 Item 台账（task-mw7j4oy4：kept/rule 可观测）。
+// ===== 装饰剥离规则表（task-mw7j4ihe：三条写死正则提为模块级 DECOR_PATTERNS，新增形态只追加一行）=====
+// 行首序号/项目符号剥离背景（反馈 n-mw506xo40hma，task-mw5ejg4r）：Worker 习惯用 ①②③ 或 1./1)/-/*
+// 编号列清单，这些装饰不是路径本体——不剥离会让路径首位变异导致边界比对全量误报（实证：
+// '①原型/…/rule_engine.py' 的 ① 保留在路径首位，CJK+扩展名通过 likePath 判定照常入选，但目录
+// 锁 f.indexOf(pfx)===0 因首位是圈号恒 false → 9 文件全量越界；与 glob 展开无关）。
+// 叠加装饰（'- 1. ①path'）旧实现三步剥离按固定顺序各跑一次、从不回头——列表符步剥完 '- '，新露出的
+// '1. ①' 被序号步剥掉 '1. ' 后再露出的 ① 无人处理，圈号残留路径首位。子卡 task-mw7j45lk 改为幂等
+// 循环到不动点；本卡只把三条正则表驱动化（正则逐字未动、行为逐字等价，golden 基线 + 形态矩阵锁死）。
+// 顺序不敏感：每轮全跑所有规则，叠加装饰逐层剥净；表内顺序沿用旧实现（列表符 → 圈号 → 数字序号）便于
+// 逐字比对，单层装饰第二轮为空操作。每条规则上方注释即「覆盖区间」，新增装饰形态只追加一行。
+var DECOR_PATTERNS = [
+  // 列表符：'-' '*' '•' '·' + 尾随空白（'- path' / '* path' / '• path' / '· path'）
+  /^[-*•·]\s+/,
+  // 圈号/项目符号类：①-⑳ U+2460-2473、带圈字母数字 U+2474-2487、实心圈数字 U+2776-2793、
+  // ㉑-㉟ U+3251-325F、㊱-㊿ U+32B1-32BF、中点/项目符号/方块/对勾/三角项目符号，含尾随空白
+  /^[\s\u2460-\u2473\u2474-\u247F\u2480-\u2487\u2776-\u2793\u3251-\u325F\u32B1-\u32BF\u00B7\u2022\u25CF\u25A0\u25A1\u2713\u2714\u2023\u2043]+/,
+  // 数字序号：数字+分隔符整体剥（1./1、/1)/1：/1:、半角(1)/全角（1）），兼容旧实现 '-' '*' '+' 列表符
+  // 分支；纯数字开头的路径首段如 '3rd/lib' 无分隔符不触发（'3. rd/lib' 剥成 'rd/lib' 是可接受语义）
+  /^(?:\d{1,2}[.、)\]：:]\s*|[-*+]\s+|[(（]\d{1,2}[)）]\s*)/
+]
+// 装饰剥离（纯函数）：表驱动逐轮全跑到不动点（规则随 DECOR_PATTERNS 扩展，循环体不再改）。
+function stripDecor(s) {
+  var v = s, prev
+  do {
+    prev = v
+    for (var i = 0; i < DECOR_PATTERNS.length; i++) v = v.replace(DECOR_PATTERNS[i], '')
+  } while (v !== prev)
+  return v
+}
+// 引号包裹路径（「除非引号包裹」例外分支，行内代码反引号）：取首对反引号内容为条目、可含空格，
+// 配对后尾巴（说明/注释）一并忽略；无配对返回 null → parsePlanItem 走截断兜底（残留端点反引号仍剥）。
+function extractQuoted(v) {
+  var bt = /^`+([^`]+)`+/.exec(v)
+  return bt ? bt[1] : null
+}
+// 截到首个空白/全角标点前的路径前缀（task-mvr44s0y）：截完是「行首前缀」——路径在前的
+// 混合行（「path（注释）」「path — 说明」「path 说明文字」）截出路径本体；散文段（说明在
+// 前、路径碎片在后）截完是散文首词，过不了像路径判定 → 整条丢弃（选定语义，断言锁死）。
+// 半角冒号不在截断类内（Windows 盘符 C:\ 合法）；截断类含括号与空白，是旧「括号/破折号尾巴剥离」
+// 的严格超集。
+function truncateAtDelim(v) {
+  var cut = v.search(/[\s，；、：（）()「」『』《》〈〉【】〔〕“”‘’…—·～！？]/)
+  return cut >= 0 ? v.slice(0, cut) : v
+}
+// 像路径判定（task-mvqfl7in，n-mvqfiofr0kt9 误报实证）：无路径特征的纯散文行（如「调研文件
+// 清单」「只动解析不动闸口比对」及截断后的散文首词）不入选；含路径分隔符（'/' 或 Windows
+// 反斜杠——normTouch 同源等价）或以代码扩展名结尾（宽正则，.mjs/.md/.json/.py/.yml 等）才
+// 入选；条目全被丢光走既有「空清单」语义（rpc.mjs 有前缀但零路径 → 重报提示自纠正）。
+// 判定在归一前做：`lib/`、`D:\dir` 的分隔符证据会被 normTouch 剥尾斜杠/改写，先记再归一。
+// 解析伪影收紧（task-mvtz2jjq，n-mvtejrusnhi6 生产实证两类碎片——「仲裁扩权后重派仍被拦」的
+// 真凶不是闸口不认 extraTouches[闸口 rpc.mjs 已读 effectiveTouches]，而是这两类残片被误判路径
+// 后永远不在边界内）：①含中日韩字符（CJK 统一表意 + 全角形式区）的 token——「调用点/接线断言
+// 仍锁」这类含半角斜杠的中文散文片即死（v1.9.2 当时的假设「本仓库路径全 ASCII」，通用看板不成立）；
+// ②正则/代码残片：以 '/' 开头且其后含 '(' 或 '\' 转义 → 判非路径（`/if \(...` 即死）。
+// CJK 分级（task-mw147o79，n-mw0m55m6v5bg ontology 板 5 格式全灭实证）：v1.9.2 的 CJK 一刀切把
+// 中文文件名真路径一起拒了（「原型/规则管理/规则管理控制台-v1.html」→ files 恒 0，闸口机器比对对
+// 中文路径形同虚设）——与 v1.9.2 病例方向相反（那次散文片误入选，这次真路径误拒选）。判据取「结尾
+// 是否 ASCII 文件扩展名」：含 CJK 的 token 必须带扩展名才算路径（中文文件名真路径必带 .html/.py/
+// .mjs 等），无扩展名的中文散文片（「调用点/接线断言仍锁」有斜杠无扩展名）继续拒；ASCII token 判定
+// 逐字不变（分隔符或扩展名任一即可，含无扩展名的 ASCII 目录）。两者只校正「伪路径入选/真路径拒选」，
+// normTouch 归一语义、frag 残片哨兵、touchCovers 覆盖规则逐字不动。
+// 拒选理由台账（task-mw7j4oy4：判定与文案共用同一事实源）：rule 字符串唯一出处——parsePlanItem 写入
+// Item.rule，rpc.mjs 闸口文案只引用 items[].rule、不重写字面量。枚举与旧 looksLikePath 布尔分支一一对应
+//（零行为变更，静态期望在测试锁字面量）：
+//   ok             = 入选（旧判定返回 true）
+//   empty          = 剥装饰/截断后无内容（旧 !v 短路）或归一后为空串（旧壳对空串回传去重跳过）
+//   regex-fragment = 正则/代码残片（旧 frag 哨兵拒）
+//   cjk-no-ext     = 含 CJK、无 ASCII 扩展名、有分隔符（中文散文片的「像路径」形态）
+//   no-path-shape  = 无任何路径特征（ASCII 无分隔符无扩展名，或 CJK 无扩展名也无分隔符的纯散文词）
+var REJECT_RULES = {
+  OK: 'ok',
+  EMPTY: 'empty',
+  NO_PATH_SHAPE: 'no-path-shape',
+  CJK_NO_EXT: 'cjk-no-ext',
+  REGEX_FRAGMENT: 'regex-fragment'
+}
+// 判定即理由（task-mw7j4oy4 台账化）：本函数直接产出 REJECT_RULES 值，kept = (rule === OK)——拒选
+// 理由不是事后猜测而是判定分支本身，判定与文案不可能漂移。布尔→规则映射与旧实现逐字对齐：frag →
+// REGEX_FRAGMENT；cjk&&!hasExt → 有分隔符 CJK_NO_EXT / 无分隔符 NO_PATH_SHAPE；!cjk&&!hasExt&&!分隔
+// 符 → NO_PATH_SHAPE；其余（cjk&&hasExt，或 !cjk&&(分隔符||hasExt)）→ OK。三个谓词逐字未动。
+function looksLikePathRule(v, fragSrc) {
+  var cjk = /[\u4e00-\u9fff\uff00-\uffef]/.test(v)
+  var frag = /^\//.test(fragSrc) && /[()\\]/.test(fragSrc.slice(1))
+  var hasExt = /\.[a-z0-9]{1,6}$/i.test(v)
+  if (frag) return REJECT_RULES.REGEX_FRAGMENT
+  if (cjk && !hasExt) return /[\/\\]/.test(v) ? REJECT_RULES.CJK_NO_EXT : REJECT_RULES.NO_PATH_SHAPE
+  if (!cjk && !hasExt && !/[\/\\]/.test(v)) return REJECT_RULES.NO_PATH_SHAPE
+  return REJECT_RULES.OK
+}
+// 单条解析流水线（旧实现循环体 L98-148 逐字提出）：顺序——列表符/圈号/序号剥离（stripDecor，幂等）
+// → 引号对提取（extractQuoted）/ 首空白全角标点截断（truncateAtDelim）→ 残留反引号剥 → trim →
+// 像路径判定+拒选理由（looksLikePathRule）→ 归一（normTouch）。fragSrc 是流水线内局部变量传递：残片哨兵证据取自
+// 「剥装饰后、截断前」快照（task-mvtz2jjq：正则残片 `/if \(isHungKillFailure/` 的首空白截断会把斜杠
+// 后的 '(' 与 '\' 转义一起截掉、只剩 `/if`——截断后再看哨兵就丢了证据，故看截断前内容；引号提取
+// 命中时与条目内容同步）。旧实现循环内手动同步三次（记录 → 剥装饰后更新 → 引号提取后再更新），漏
+// 一处残片哨兵证据就错——重构收拢到流水线此处一地，消除该隐患。task-mw7j4oy4：返回改为 Item 台账
+//（kept=true 时 candidate 为归一路径；被拒 kept=false、rule 记拒选理由——旧「空串=被拒」语义由 kept
+// 表达，归一后空串同判被拒〔normTouch('./')==='' 旧实现回传空串被壳跳过，kept 语义逐字等价〕；壳对
+// kept 项去重跳过，拒选标注零行为变更）。
+function parsePlanItem(raw) {
+  var v = stripDecor(raw.trim())
+  var fragSrc = v
+  var quoted = extractQuoted(v)
+  if (quoted !== null) { v = quoted; fragSrc = v } else { v = truncateAtDelim(v) }
+  v = v.replace(/^`+|`+$/g, '').trim()
+  if (!v) return { raw: raw, decorated: fragSrc, candidate: '', kept: false, rule: REJECT_RULES.EMPTY }
+  var rule = looksLikePathRule(v, fragSrc)
+  if (rule !== REJECT_RULES.OK) return { raw: raw, decorated: fragSrc, candidate: '', kept: false, rule: rule }
+  var cand = normTouch(v)
+  if (!cand) return { raw: raw, decorated: fragSrc, candidate: '', kept: false, rule: REJECT_RULES.EMPTY }
+  return { raw: raw, decorated: fragSrc, candidate: cand, kept: true, rule: REJECT_RULES.OK }
 }
 // touch 模式单向覆盖判定：pattern 的声明范围是否 ⊇ 计划文件 file。
 // ⚠️ 与 matchOne 的区别：matchOne 对称（目录锁两个方向都试，服务「冲突保守判定」——宁误拦不漏拦）；
