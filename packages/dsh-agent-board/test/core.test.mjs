@@ -686,6 +686,25 @@ test('parseContextFileEntry: 路径/锚点归一 + 可选「 — 一句用途」
   assert.deepEqual(core.parseContextFileEntry(''), { path: '', file: '', usage: '' })
 })
 
+// ===== task-mwcjr8g5：无 L 锚点 + 逗号多段（epic 预检「路径全部不存在」全量误报根治的回归锁）=====
+// 病例：真实批量写卡用不带 L 的 '路径:1-191'，旧 ANCHOR_TAIL 强制 ':L' 前缀 → 锚点剥不掉 → .file 含锚点原串
+// → epicPrecheck L1645 拿含锚点串去 existsSync 必然 false → 全部条目误报不存在（反馈 n-mwc91ld6qayt，
+// epic task-mwc8un2h 发布时 7 子卡全中）。
+test('parseContextFileEntry: 无 L 锚点剥净（task-mwcjr8g5 病例原串回归锁）', () => {
+  // 病例原串（one_ledger epic 实发条目）：锚点剥离 + 用途解析双正确
+  assert.deepEqual(core.parseContextFileEntry('docs/政策原文目录.md:1-191 — 语料、规则映射与版本边界'), { path: 'docs/政策原文目录.md:L1-L191', file: 'docs/政策原文目录.md', usage: '语料、规则映射与版本边界' })
+  assert.deepEqual(core.parseContextFileEntry('backend/app/core/law_coverage.py:1-170 — 法源反向索引与缺口'), { path: 'backend/app/core/law_coverage.py:L1-L170', file: 'backend/app/core/law_coverage.py', usage: '法源反向索引与缺口' })
+  // 归一口径：不带 L 的 ':10-20' 归一成 ':L10-L20'（与带 L 形态一致——清单里给 Worker 的行号形态统一）
+  assert.deepEqual(core.parseContextFileEntry('src/a.js:10-20'), { path: 'src/a.js:L10-L20', file: 'src/a.js', usage: '' })
+  assert.deepEqual(core.parseContextFileEntry('src/a.js:2350'), { path: 'src/a.js:L2350', file: 'src/a.js', usage: '' })
+  // 多段：from/to 取首段起点/末段终点，path 归一成单段区间 '首-末'（超集，中段不保留——见 parseAnchorPath 注释）
+  assert.deepEqual(core.parseContextFileEntry('backend/app/core/rule_engine.py:90-180,2240-2674 — 判定链'), { path: 'backend/app/core/rule_engine.py:L90-L2674', file: 'backend/app/core/rule_engine.py', usage: '判定链' })
+  // Windows 盘符 + 无 L 锚点共存（盘符冒号在最前不误匹配，尾部锚点照剥）
+  assert.deepEqual(core.parseContextFileEntry('C:\\w\\a.js:100 — 入口'), { path: 'C:\\w\\a.js:L100', file: 'C:\\w\\a.js', usage: '入口' })
+  // 边界语义（接受并写明）：真以「冒号+行号」收尾的文件名（极罕见，如 docs/2024:100）也会被当锚点剥掉
+  assert.deepEqual(core.parseContextFileEntry('docs/2024:100'), { path: 'docs/2024:L100', file: 'docs/2024', usage: '' })
+})
+
 test('buildContextPackSection: 文件清单行（路径+行号+用途），不含内容本体', () => {
   const s = core.buildContextPackSection([
     { path: 'src/a.ts:L1-L40', usage: '状态机主循环' },
@@ -841,6 +860,30 @@ test('parseAnchorPath: 单行与行段锚点', () => {
 test('parseAnchorPath: Windows 盘符 + 锚点共存', () => {
   assert.deepEqual(core.parseAnchorPath('C:\\Users\\x\\a.js:L100-L200'), { file: 'C:\\Users\\x\\a.js', from: 100, to: 200 })
   assert.deepEqual(core.parseAnchorPath('D:/deepseek-work/b.mjs:L5'), { file: 'D:/deepseek-work/b.mjs', from: 5, to: null })
+})
+
+// task-mwcjr8g5：L 可省——':10-20' 与 ':L10-L20' 同权（旧正则强制 ':L'，无 L 形态整条不匹配 → 误报根源）
+test('parseAnchorPath: L 可省（:10-20 / :10 与 :L 形态同权）', () => {
+  assert.deepEqual(core.parseAnchorPath('src/a.js:2350-2420'), { file: 'src/a.js', from: 2350, to: 2420 })
+  assert.deepEqual(core.parseAnchorPath('src/a.js:10'), { file: 'src/a.js', from: 10, to: null })
+  // 第二段 L 可省（历史形态，零回归）
+  assert.deepEqual(core.parseAnchorPath('src/a.js:L10-20'), { file: 'src/a.js', from: 10, to: 20 })
+  // 中文路径剥净无乱码
+  assert.deepEqual(core.parseAnchorPath('docs/政策原文目录.md:1-191'), { file: 'docs/政策原文目录.md', from: 1, to: 191 })
+  // Windows 盘符 + 无 L 锚点：盘符冒号在最前，尾部锚点照剥
+  assert.deepEqual(core.parseAnchorPath('C:\\x\\a.js:10'), { file: 'C:\\x\\a.js', from: 10, to: null })
+})
+
+// task-mwcjr8g5：逗号多段锚点（'backend/app/core/rule_engine.py:90-180,2240-2674' 实发形态）
+test('parseAnchorPath: 逗号多段（from=首段起点、to=末段终点）', () => {
+  assert.deepEqual(core.parseAnchorPath('backend/app/core/rule_engine.py:90-180,2240-2674'), { file: 'backend/app/core/rule_engine.py', from: 90, to: 2674 })
+  // 段间 L 形态混写；三段；末段单行 → to=该行
+  assert.deepEqual(core.parseAnchorPath('a.py:L90-L180,2240-2674'), { file: 'a.py', from: 90, to: 2674 })
+  assert.deepEqual(core.parseAnchorPath('a.py:10-20,30-40,50'), { file: 'a.py', from: 10, to: 50 })
+  assert.deepEqual(core.parseAnchorPath('a.py:90,2240'), { file: 'a.py', from: 90, to: 2240 })
+  // 末段终点 < 首段起点（倒序多段）→ 沿用非法锚点口径剥掉（file 仍剥净，存在性预检不受影响）
+  var r = core.parseAnchorPath('a.py:2240-2674,90-180')
+  assert.equal(r.file, 'a.py'); assert.equal(r.from, null); assert.equal(r.invalidAnchor, true)
 })
 
 test('parseAnchorPath: 非法锚点剥掉并标记 invalidAnchor（调用方回退头部）', () => {
@@ -2420,6 +2463,29 @@ test('epicPrecheck: 字段有无 + 路径存在性（exists 注入），direct/�
   assert.deepEqual(pre2.missing, [])           // d.mjs 存在 → 不判缺材料
 })
 
+// task-mwcjr8g5 端到端回归锁：真实病例条目（无 L 锚点/逗号多段/中文路径/Windows 盘符）喂 epicPrecheck。
+// 修复前：ANCHOR_TAIL 不匹配 → .file 含锚点原串 → exists 拿 'docs/政策原文目录.md:1-191' 这种串去查 →
+// 全部 false → 整卡误报「预研文件路径全部不存在」（one_ledger epic task-mwc8un2h 发布时 7 子卡全中）。
+test('epicPrecheck: 无 L 锚点/多段/中文路径条目端到端不误报（task-mwcjr8g5 回归锁）', () => {
+  const REAL = [
+    'docs/政策原文目录.md:1-191 — 语料、规则映射与版本边界',
+    'backend/app/core/law_coverage.py:1-170 — 法源反向索引与缺口',
+    'backend/app/core/rule_engine.py:90-180,2240-2674 — 判定链',
+    'C:\\x\\a.js:10 — 入口',
+  ]
+  const kid = mkTask({ id: 'r1', title: '真实条目', parentId: 'ep', context: { files: REAL, notes: '' } })
+  // exists 桩只认**剥净后的纯路径**（文件真实存在的语义）；some 首条命中即短路
+  const seen = []
+  const pre = core.epicPrecheck([kid], 'ep', (p) => { seen.push(p); return p === 'docs/政策原文目录.md' })
+  assert.deepEqual(seen, ['docs/政策原文目录.md'])  // exists 收到的是剥净路径，而非 ':1-191' 原串（误报根源的正面证据）
+  assert.deepEqual(pre.missing, [])                 // 修复后不误报
+  // 多文件迭代口径：首条（剥净后）不存在 → some 继续查第二条，第二条存在 → 不判缺材料
+  const seen2 = []
+  const pre2 = core.epicPrecheck([mkTask({ id: 'r2', title: '部分缺', parentId: 'ep', context: { files: ['docs/missing.md:5-10 — 缺', 'backend/app/core/law_coverage.py:1-170 — 法源反向索引与缺口'], notes: '' } })], 'ep', (p) => { seen2.push(p); return p === 'backend/app/core/law_coverage.py' })
+  assert.deepEqual(seen2, ['docs/missing.md', 'backend/app/core/law_coverage.py'])
+  assert.deepEqual(pre2.missing, [])
+})
+
 test('epicPrecheckNote: 全部有材料 → 空串（不打扰）；有缺失 → N/M 汇总文案（超 5 条折叠）', () => {
   assert.equal(core.epicPrecheckNote({ total: 3, missing: [] }), '')
   assert.equal(core.epicPrecheckNote(null), '')
@@ -2473,6 +2539,11 @@ test('suggestContextFiles: glob 跳过 / 锚点剥离 / 存在性过滤 / 去重
   const seen = []
   const r = core.suggestContextFiles(['lib/a.mjs:L10-L20'], (p) => { seen.push(p); return true })
   assert.deepEqual(r, ['lib/a.mjs']); assert.deepEqual(seen, ['lib/a.mjs'])
+  // task-mwcjr8g5：不带 L 的锚点 / 逗号多段同样剥净（touches 写卡两种形态并存，同口径受益）
+  const seenNoL = []
+  const rNoL = core.suggestContextFiles(['lib/a.mjs:10-20', 'lib/b.mjs:90-180,2240-2674'], (p) => { seenNoL.push(p); return true })
+  assert.deepEqual(rNoL, ['lib/a.mjs', 'lib/b.mjs'])
+  assert.deepEqual(seenNoL, ['lib/a.mjs', 'lib/b.mjs'])
   // 存在性过滤：不存在的剔除
   assert.deepEqual(core.suggestContextFiles(['a.mjs', 'b.mjs'], (p) => p === 'b.mjs'), ['b.mjs'])
   // exists 抛异常视为不存在（宁缺勿滥）

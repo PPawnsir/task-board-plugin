@@ -1077,7 +1077,8 @@ export function buildMessages(t) {
 // 教训：replace(/\{\{/g,'{ {') 是开变换——三连括号 {{{lo}}}（Python f-string）会得到
 // "{ {{lo}}}"，替换结果自己又造出 {{。按"连 { 整 run 拆开"才是封闭变换。
 function sanitizeCtx(s) { return String(s).replace(/\{+/g, function (m) { return m.length === 1 ? m : m.split('').join(' ') }) }
-// contextFiles 条目写法：「路径[:L起[-L止]][ — 一句用途]」。
+// contextFiles 条目写法：「路径[:L起[-L止]][ — 一句用途]」；L 可省（':1-191'，与 ':L1-L191' 同权）
+// 且支持逗号多段（':90-180,2240-2674' → 归一 ':L90-L2674'，from/to=首段起点/末段终点，见 parseAnchorPath）。
 // 用途可选（缺省只给路径行号，不造新字段）：分隔符用「 — 」（em dash 带两侧空格，路径/锚点里不会出现）。
 // 锚点按 parseAnchorPath 口径归一（a.js:L10-20 → a.js:L10-L20；非法锚点剥掉，不误导 Worker 去读空段）。
 // 返回 { path: 清单展示串（含归一锚点）, file: 纯路径（存在性预检用，剥掉锚点与用途）, usage }。
@@ -1122,18 +1123,25 @@ export var CONTEXT_SLICE_MAX_LINES = 400
 // 结构索引条数上限：超出附一条省略标注
 export var CONTEXT_OUTLINE_MAX = 40
 
-// 锚点只认路径尾部的 :L<num>(-L?<num>)?（-L200 / -200 都收）。
-// 正则锚定 $ 且要求 ":L" 前缀——Windows 盘符 "C:\" 的冒号在最前，绝不会误匹配。
-var ANCHOR_TAIL = /:L(\d+)(?:-L?(\d+))?$/i
-// 解析 'path:L2350-L2420' / 'path:L2350' 行段语法。
+// 锚点只认路径尾部的 :L?<num>(-L?<num>)?——L 可省：':L10-L20' 与 ':10-20' 历史两形态并存
+// （task-mwcjr8g5：旧版强制 ':L' 前缀，真实写卡的 'docs/政策原文目录.md:1-191' 锚点剥不掉、
+//   .file 含锚点原串，epicPrecheck 拿去 existsSync → 全量误报「预研文件路径全部不存在」）；
+// 末尾还允许逗号多段（':90-180,2240-2674'）——from 取首段起点、to 取末段终点（超集区间，读多段不在本口径）。
+// 正则锚定 $——Windows 盘符 "C:\" 的冒号在最前且不在尾部数字位，不会误匹配；
+// 极罕见「真以冒号+行号收尾」的文件名（如 docs/2024:100）会被当锚点剥掉——接受该语义（存在性预检宁可剥掉重查）。
+var ANCHOR_TAIL = /:L?(\d+)(?:-L?(\d+))?(?:,L?(\d+)(?:-L?(\d+))?)*$/i
+// 解析 'path:L2350-L2420' / 'path:L2350' / 'path:2350'（L 可省）/ 'path:90-180,2240-2674'（多段）行段语法。
 // 返回 {file, from, to}；无锚点 → {file: 原串, from: null, to: null}；
 // 写法非法（:L0、:L5-L2 等）→ 剥掉锚点、from=null、invalidAnchor=true（调用方回退头部并标注）。
+// 多段：from=首段起点、to=末段终点（末段单行 → to=该行）——下游只认单段区间（sliceLines/清单归一），
+// 中段不保留：.path 归一成 ':L首-L末'，Worker 按该区间 read 覆盖两段之间的全部行（超集，不丢段）。
 export function parseAnchorPath(p) {
   var s = String(p || '')
   var m = s.match(ANCHOR_TAIL)
   if (!m) return { file: s, from: null, to: null }
   var from = parseInt(m[1], 10)
   var to = m[2] != null ? parseInt(m[2], 10) : null
+  if (m[3] != null) to = m[4] != null ? parseInt(m[4], 10) : parseInt(m[3], 10)
   var file = s.slice(0, m.index)
   if (!isFinite(from) || from < 1 || (to != null && (!isFinite(to) || to < from))) return { file: file, from: null, to: null, invalidAnchor: true }
   return { file: file, from: from, to: to }
