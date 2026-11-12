@@ -16,6 +16,8 @@
 //   ⑧ 在跑子代理模型可见：成员卡 + 池状态条渲染 model 与取模来源角标；dispatch poolStatus 带 modelSource
 //   ⑨ 产物含模型路由弹层标记
 //   ⑩ OrderedModelsEditor 组件本体：芯片 ×/↑ 交互 + 下拉过滤已选 + 改动即写 + 目录缺失降级
+//      + 下架模型可发现性（task-mwcw1q7b）：链内不在目录 → 「⚠️下架」标记 + warn 描边；目录 null 不误标
+//      + 一键清理失效（task-mwcw2jx8）：「清理失效（N）」按钮有失效项才渲染，过滤纯删除复用 commit 通道
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -341,6 +343,47 @@ test('⑩OrderedModelsEditor：组件存在 + 芯片行（×移除/↑前移）+
   assert.match(src, /placeholder: 'provider\/model'/, '缺目录缺失降级文本输入')
   // 弹层取一次 list-models 下发 7 处（routeModels），避免每编辑器各发一次 RPC
   assert.match(src, /var _rm = useState\(null\), routeModels = _rm\[0\], setRouteModels = _rm\[1\]/, 'ModelRoutePopover 缺 routeModels 目录 state')
+  // ===== 下架模型可发现性（task-mwcw1q7b）：链内不在当前目录 → 芯片标「⚠️下架」+ warn 描边 + title 说明 =====
+  // 目录可用（props.models 非空数组）才建索引；目录不可用（null 老宿主/枚举失败，或空目录数组=枚举回空无法判定）
+  // inDir 保持 null → 一律不标（无法判定不误标）
+  assert.match(src, /var inDir = null/, '缺下架判定基线（目录不可用时须保持 null 不标记）')
+  assert.match(src, /if \(models && models\.length\) \{ inDir = \{\}; for \(var mi = 0; mi < models\.length; mi\+\+\) \{ if \(models\[mi\] && models\[mi\]\.id\) inDir\[models\[mi\]\.id\] = 1 \} \}/, '缺目录索引（仅目录非空时构建；空目录/null 均不标）')
+  assert.match(src, /var retired = !!\(inDir && !inDir\[m\]\)/, '缺芯片下架判定（链内模型不在目录 → 下架）')
+  assert.match(src, /' · ⚠️该模型已不在当前网关可用清单——可直接点 × 移除（仅新增值校验）；要替换请从下方下拉选择'/, '缺下架芯片 title 说明（可直接移除/从下拉替换）')
+  assert.match(src, /border: '1px solid ' \+ \(retired \? C\.warn : C\.border\)/, '下架芯片缺 warn 描边（与正常芯片区分）')
+  assert.match(src, /retired \? React\.createElement\('span', \{ style: \{ color: C\.warn, fontSize: 8, lineHeight: '12px', flexShrink: 0 \} \}, '⚠️下架'\) : null/, '缺「⚠️下架」芯片标记')
+  assert.ok(built.indexOf("'⚠️下架'") >= 0, 'client.js 缺「⚠️下架」标记（需 npm run build-client）')
+  assert.ok(built.indexOf('var retired = !!(inDir && !inDir[m])') >= 0, 'client.js 缺下架判定（需 npm run build-client）')
+})
+
+// ===== ⑩b 一键清理失效（task-mwcw2jx8）：按钮出现条件 + 过滤纯删除复用 commit 通道 + busy 置灰 + 产物同步 =====
+// 背景：同槽多个下架模型逐个 × 要点 N 次等 N 次 RPC——此键一次收口；纯删除在子卡A（task-mwcw0z5t）
+// diff 校验下天然放行（仅「当前配置没有的新值」过合法清单），零新增 RPC、零校验改动。
+test('⑩b清理失效按钮：有失效项才渲染（计数与下架判定同源）+ 过滤纯删除复用 commit 通道 + 无失效项/目录不可用不渲染 + busy 防连点', () => {
+  // 失效计数：与子卡B 下架判定同源（inDir 索引）——目录不可用（inDir=null：老宿主/枚举失败/空目录）恒 0
+  assert.match(src, /var retiredCount = inDir \? list\.filter\(function \(m\) \{ return !inDir\[m\] \}\)\.length : 0/, '缺失效计数（须与下架判定同源，目录不可用恒 0 → 按钮不渲染）')
+  // 清理函数：过滤掉全部不在目录的项，剩余数组交 commit（与 removeAt 同通道 props.onSave/set-board-config，零新 RPC）
+  assert.match(src, /function cleanRetired\(\) \{ if \(!inDir\) return; commit\(list\.filter\(function \(m\) \{ return !!inDir\[m\] \}\)\) \}/, '缺清理函数（过滤全部目录外模型 → 剩余数组走既有 commit 通道）')
+  // 按钮渲染条件：retiredCount>0 才渲染（无失效项不添乱）；提交期间 busy 置灰防连点
+  // （busy 断言作用域限定在 OrderedModelsEditor 组件体内：文件他处另有同名 busy state 的预览/清理组件）
+  const iOme = src.indexOf('function OrderedModelsEditor(props)')
+  const iMrp = src.indexOf('function ModelRoutePopover(props)')
+  assert.ok(iOme >= 0 && iMrp > iOme, 'OrderedModelsEditor 组件边界切片失败')
+  const omeBody = src.slice(iOme, iMrp)
+  assert.match(src, /retiredCount \? React\.createElement\('button', \{ onClick: cleanRetired, disabled: busy,/, '清理按钮须以 retiredCount 为渲染条件（无失效项不渲染）')
+  assert.match(omeBody, /var _busy = useState\(false\), busy = _busy\[0\], setBusy = _busy\[1\]/, '缺 busy 提交态（置灰防连点）')
+  assert.ok(omeBody.indexOf("setMsg(''); setBusy(true)") >= 0, 'commit 提交开始未置 busy')
+  assert.equal((omeBody.match(/setBusy\(false\)/g) || []).length, 2, 'commit 成功/异常两臂都须复位 busy（防永久置灰）')
+  // 文案与 title（口径逐字：动态计数 N + 「仅删除，不新增」语义）
+  assert.match(src, /'清理失效（' \+ retiredCount \+ '）'/, '按钮文案须为「清理失效（N）」动态计数')
+  assert.match(src, /title: '一键移除全部已下架模型（仅删除，不新增）'/, '按钮 title 缺「仅删除，不新增」语义')
+  // 前提锁：子卡A diff 校验口径未动（纯删除天然放行依赖它；本卡零改动 rpc.mjs）
+  const dsrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  assert.ok(dsrc.indexOf('首次出现的新值') >= 0, '子卡A diff 校验口径应保持（仅新值过合法清单——纯删除放行的前提）')
+  // 产物同步：client.js 重组装后含清理按钮全链标记
+  for (const m of ['清理失效（', '一键移除全部已下架模型（仅删除，不新增）', 'function cleanRetired() { if (!inDir) return; commit(list.filter(function (m) { return !!inDir[m] })) }', 'var retiredCount = inDir ? list.filter(function (m) { return !inDir[m] }).length : 0']) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺清理按钮标记：' + m + '（需 npm run build-client）')
+  }
 })
 
 // ===== ⑪ 模型健康：配置缺省/归一 + 已配置模型枚举 + 四态统一视图 =====

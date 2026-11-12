@@ -726,3 +726,92 @@ test('目录闸D4：目录不可得（llm 缺失/空目录/provider 枚举失败
   } finally { console.error = origErr }
 })
 
+// ===== 修删除死锁（task-mwcw0z5）：set-board-config 模型校验改 diff 口径（仅最终态首次出现的新值必校验）+ 聚合非法值 =====
+// 背景：板级 laneModels/fallbackModels 残留已下架模型，用户点芯片 × 删除提交剩余数组 → 旧口径对提交值
+// 全量校验、首个非法即整包拒写 → 删除被自己的校验锁死（整槽无法编排）。断言清单（对应任务验收口径）：
+//   ① 死锁端到端：残留已下架模型逐个删除提交剩余数组 → 全放行 → 槽清空
+//   ② 新增仍拒：剩余数组夹带目录外新 id → 整包拒写且报新 id（防护零损失）
+//   ③ 聚合文案：一次提交多个新非法值 → 报错同时含全部 id（不再首个即停）+「仅新增值校验」钥匙句
+//   ⑦ 板级 workerModel/verifierModel 同 diff：重存已下架值放行、换另一非法值仍拒、清空放行、合法新值放行、跨键挪槽放行
+//   ⑧ configLog 审计：拒写零审计行、放行正常落审计行
+var DEADLOCK_LLM = { ok: [{ id: 'c' }] } // llm 目录只含 ok/c——其余 id 一律目录外
+
+test('死锁①：板级 laneModels 残留已下架模型 → 逐个删除提交剩余数组全放行（修复前首个非法即整包拒写锁死）', async function () {
+  var board = { version: 12, tasks: [], configLog: [], laneModels: JSON.parse(JSON.stringify(DEFAULT_LANES)) }
+  board.laneModels.standard.worker = ['gone/a', 'gone/b', 'ok/c'] // 残留两枚目录外 + 一枚合法
+  var h = mkRpcHandlers(board, {}, mkLlmCtx(DEADLOCK_LLM))
+  var r1 = await h['set-board-config']({ key: 'laneModels', value: { standard: { worker: ['gone/b', 'ok/c'] } } })
+  assert.equal(r1.ok, true, '删 gone/a 后提交剩余数组放行（已存在值不重新校验）')
+  assert.deepEqual(board.laneModels.standard.worker, ['gone/b', 'ok/c'], '槽值=剩余数组（删第一个）')
+  var r2 = await h['set-board-config']({ key: 'laneModels', value: { standard: { worker: ['ok/c'] } } })
+  assert.equal(r2.ok, true, '删 gone/b 后提交剩余数组放行')
+  assert.deepEqual(board.laneModels.standard.worker, ['ok/c'], '槽值=剩余数组（删第二个）')
+  var r3 = await h['set-board-config']({ key: 'laneModels', value: { standard: { worker: [] } } })
+  assert.equal(r3.ok, true, '空数组清槽放行')
+  assert.deepEqual(board.laneModels.standard.worker, [], '槽清空（死锁彻底解除）')
+  assert.equal(board.configLog.filter(function (l) { return l.key === 'laneModels' }).length, 3, '⑧三笔放行各落一条审计行')
+})
+
+test('死锁②：剩余数组夹带目录外新 id → 整包拒写且报新 id（新增/替换防护零损失）', async function () {
+  var board = { version: 12, tasks: [], configLog: [], laneModels: JSON.parse(JSON.stringify(DEFAULT_LANES)) }
+  board.laneModels.standard.worker = ['gone/a', 'gone/b', 'ok/c']
+  var h = mkRpcHandlers(board, {}, mkLlmCtx(DEADLOCK_LLM))
+  var before = JSON.stringify(board.laneModels)
+  var r = await h['set-board-config']({ key: 'laneModels', value: { standard: { worker: ['gone/b', 'ok/c', 'new/bad'] } } })
+  assert.equal(r.ok, false, '新 id new/bad 目录外 → 整包拒写')
+  assert.match(r.error, /new\/bad/, '报错点名新非法 id')
+  assert.doesNotMatch(r.error, /gone\/b/, '已存在残留 gone/b 未参与校验（不进报错）')
+  assert.equal(JSON.stringify(board.laneModels), before, '整包拒写不落半截')
+  assert.equal(board.configLog.length, 0, '⑧拒写零审计行')
+})
+
+test('死锁③：一次提交含多个新非法值 → 聚合全部 id 一次报出（不再首个即停）+ 文案带「仅新增值校验」钥匙句', async function () {
+  var board = { version: 12, tasks: [], configLog: [], laneModels: JSON.parse(JSON.stringify(DEFAULT_LANES)) }
+  var h = mkRpcHandlers(board, {}, mkLlmCtx(DEADLOCK_LLM))
+  var r = await h['set-board-config']({ key: 'laneModels', value: { standard: { worker: ['bad/one', 'bad/two'] }, heavy: { verifier: ['bad/three'] } } })
+  assert.equal(r.ok, false, '多槽位非法 → 拒写')
+  assert.match(r.error, /bad\/one/)
+  assert.match(r.error, /bad\/two/)
+  assert.match(r.error, /bad\/three/, '跨槽位全部非法 id 一次报出（旧口径只报首个 bad/one）')
+  assert.match(r.error, /仅新增值校验/, '文案带「仅新增值校验」钥匙句（用户理解新行为的入口）')
+  assert.match(r.error, /直接删除即可/, '文案带残留删除指引')
+  var r2 = await h['set-board-config']({ key: 'laneModels', value: { standard: { worker: ['bad/one', 'bad/one'] } } })
+  assert.equal(r2.ok, false)
+  assert.equal(r2.error.split('bad/one').length - 1, 1, '同一非法 id 重复提交去重后只报一次')
+  var r3 = await h['set-board-config']({ key: 'fallbackModels', value: ['bad/fb1', 'bad/fb2'] })
+  assert.equal(r3.ok, false)
+  assert.match(r3.error, /bad\/fb1/)
+  assert.match(r3.error, /bad\/fb2/, 'fallbackModels 聚合同口径')
+})
+
+test('死锁⑦：板级 workerModel/verifierModel 同 diff——重存已下架值放行、换另一非法值仍拒、清空放行、合法新值放行、跨键挪槽放行', async function () {
+  var board = { version: 12, tasks: [], configLog: [], workerModel: 'gone/w', verifierModel: 'gone/v' }
+  var h = mkRpcHandlers(board, {}, mkLlmCtx(DEADLOCK_LLM))
+  var r1 = await h['set-board-config']({ key: 'workerModel', value: 'gone/w' })
+  assert.equal(r1.ok, true, '重存当前已下架值放行（已在当前配置里，不重新校验）')
+  assert.equal(board.workerModel, 'gone/w')
+  var r1b = await h['set-board-config']({ key: 'laneModels', value: { heavy: { worker: ['gone/w'] } } })
+  assert.equal(r1b.ok, true, '已下架残留跨键挪进 laneModels 放行（diff 基线=全板模型面 configuredModelIds）')
+  assert.deepEqual(board.laneModels.heavy.worker, ['gone/w'])
+  var r2 = await h['set-board-config']({ key: 'workerModel', value: 'new/bad' })
+  assert.equal(r2.ok, false, '换成另一个目录外值仍拒（新值必校验）')
+  assert.match(r2.error, /new\/bad/)
+  assert.equal(board.workerModel, 'gone/w', '拒写不污染现值')
+  var r3 = await h['set-board-config']({ key: 'workerModel', value: '' })
+  assert.equal(r3.ok, true, '空串清空放行')
+  assert.equal(board.workerModel, '')
+  var r4 = await h['set-board-config']({ key: 'workerModel', value: 'ok/c' })
+  assert.equal(r4.ok, true, '合法新值过清单放行')
+  assert.equal(board.workerModel, 'ok/c')
+  var r5 = await h['set-board-config']({ key: 'verifierModel', value: 'new/bad' })
+  assert.equal(r5.ok, false, 'verifierModel 换另一非法值仍拒')
+  assert.equal(board.verifierModel, 'gone/v', 'verifierModel 拒写不污染现值')
+  var r6 = await h['set-board-config']({ key: 'verifierModel', value: '' })
+  assert.equal(r6.ok, true, 'verifierModel 清空放行')
+  assert.equal(board.verifierModel, '')
+  var r7 = await h['set-board-config']({ key: 'fallbackModels', value: ['smuggle/bad'] })
+  assert.equal(r7.ok, false, '不在板上的值走私到别的键仍拒（无跨键走私洞）')
+  assert.match(r7.error, /smuggle\/bad/)
+  assert.equal(board.fallbackModels, undefined, '拒写不落半截')
+})
+

@@ -2848,25 +2848,45 @@ function apply(ctx) {
       var models = Array.isArray(props.models) ? props.models : null
       // 下拉过滤已在链中的（链内唯一，重复添加无意义）
       var avail = models ? models.filter(function (m) { return list.indexOf(m.id) < 0 }) : null
+      // 下架判定（task-mwcw1q7b 可发现性）：目录可用时，链内「不在目录中」的模型 = 已下架（或手输的非法 id，
+      // 同样该被看见）→ 芯片标「⚠️下架」+ warn 描边，一眼可辨。目录不可用时无法判定 → inDir=null → 一律不标
+      // （不误标）：props.models=null（老宿主/枚举失败）与空目录数组（枚举回空，无法区分「真无模型」与降级）
+      // 两种都视为不可判定。只加展示标记，不动任何交互/写通道（diff 校验归子卡A），不新增 RPC。
+      var inDir = null
+      if (models && models.length) { inDir = {}; for (var mi = 0; mi < models.length; mi++) { if (models[mi] && models[mi].id) inDir[models[mi].id] = 1 } }
+      // 失效计数（task-mwcw2jx8 一键清理）：与上方下架判定同源同判（inDir 索引）——目录不可用（inDir=null，
+      // 老宿主/枚举失败/空目录）或链内全部在目录时恒 0 →「清理失效」按钮不渲染（无失效项不添乱）。
+      var retiredCount = inDir ? list.filter(function (m) { return !inDir[m] }).length : 0
+      // 提交期间置灰防连点：busy 在 commit 进出两处置位/复位，仅接线到「清理失效」按钮 disabled（×/↑/添加交互不动）
+      var _busy = useState(false), busy = _busy[0], setBusy = _busy[1]
       function commit(next) {
-        setMsg('')
+        setMsg(''); setBusy(true)
         Promise.resolve(props.onSave(next)).then(function (r) {
+          setBusy(false)
           if (r && r.ok === false) { setMsg('⚠️ ' + (r.error || '保存失败')); setTimeout(function () { setMsg('') }, 5000); return }
           fetchTasks()
-        }).catch(function () { setMsg('⚠️ 保存失败'); setTimeout(function () { setMsg('') }, 3000) })
+        }).catch(function () { setBusy(false); setMsg('⚠️ 保存失败'); setTimeout(function () { setMsg('') }, 3000) })
       }
       function removeAt(i) { var next = list.slice(); next.splice(i, 1); commit(next) }
       function upAt(i) { if (i <= 0) return; var next = list.slice(); var t = next[i - 1]; next[i - 1] = next[i]; next[i] = t; commit(next) }
       function add() { var v = (pickVal || '').trim(); if (!v || list.indexOf(v) >= 0) return; setPickVal(''); commit(list.concat([v])) }
+      // 一键清理失效（task-mwcw2jx8）：过滤掉所有不在目录的项，剩余数组交 props.onSave（与 removeAt 同通道）。
+      // 纯删除在 host diff 校验（子卡A task-mwcw0z5t：仅「当前配置没有的新值」过合法清单）下天然放行——
+      // 只删不增、剩余项全在合法目录，零新增 RPC、零校验改动；成功后 fetchTasks 回读由 commit 既有逻辑承接。
+      function cleanRetired() { if (!inDir) return; commit(list.filter(function (m) { return !!inDir[m] })) }
       var chipBtn = { fontSize: 9, padding: '0px 2px', border: 'none', background: 'transparent', color: C.text2, cursor: 'pointer', lineHeight: '12px' }
       return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'flex-start', gap: 4, fontSize: 9, color: C.text2, whiteSpace: 'normal' } },
         props.label ? React.createElement('span', { style: { paddingTop: 1, minWidth: 62 } }, props.label) : null,
         React.createElement('span', { style: { display: 'inline-flex', flexWrap: 'wrap', gap: 3, alignItems: 'center', maxWidth: 250 } },
           list.length === 0 ? React.createElement('span', { style: { color: C.text2, fontStyle: 'italic', paddingTop: 1 } }, props.emptyHint || '无') : null,
           list.map(function (m, i) {
-            return React.createElement('span', { key: m + '@' + i, title: (i === 0 ? '首选' : '第 ' + (i + 1) + ' 顺位') + ' · 按序取第一个健康模型', style: { display: 'inline-flex', alignItems: 'center', gap: 1, padding: '0px 2px 0px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.nested, color: C.text, whiteSpace: 'nowrap' } },
+            var retired = !!(inDir && !inDir[m])
+            var chipTitle = (i === 0 ? '首选' : '第 ' + (i + 1) + ' 顺位') + ' · 按序取第一个健康模型'
+            if (retired) chipTitle += ' · ⚠️该模型已不在当前网关可用清单——可直接点 × 移除（仅新增值校验）；要替换请从下方下拉选择'
+            return React.createElement('span', { key: m + '@' + i, title: chipTitle, style: { display: 'inline-flex', alignItems: 'center', gap: 1, padding: '0px 2px 0px 4px', border: '1px solid ' + (retired ? C.warn : C.border), borderRadius: 3, background: C.nested, color: C.text, whiteSpace: 'nowrap' } },
               React.createElement(ModelHealthDot, { model: m, health: props.health }),
               React.createElement('span', null, m),
+              retired ? React.createElement('span', { style: { color: C.warn, fontSize: 8, lineHeight: '12px', flexShrink: 0 } }, '⚠️下架') : null,
               i > 0 ? React.createElement('button', { onClick: function () { upAt(i) }, title: '前移一位（↑）', style: chipBtn }, '↑') : null,
               React.createElement('button', { onClick: function () { removeAt(i) }, title: '移除（×）', style: chipBtn }, '×'))
           })),
@@ -2876,6 +2896,9 @@ function apply(ctx) {
           avail.map(function (m) { return React.createElement('option', { key: m.id, value: m.id }, m.name + ' (' + m.provider + ')') }))
           : React.createElement('input', { value: pickVal, onChange: function (e) { setPickVal(e.target.value) }, onKeyDown: function (e) { if (e.key === 'Enter') add() }, placeholder: 'provider/model', title: '模型目录不可用，手输 provider/model 后点添加', style: { width: 110, padding: '0px 4px', fontSize: 9, border: '1px solid ' + C.border2, borderRadius: 2, background: C.card, color: C.text } }),
         React.createElement('button', { onClick: add, disabled: !pickVal, title: '追加到链尾', style: { fontSize: 9, padding: '0px 5px', border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: pickVal ? C.brand : C.text2, cursor: pickVal ? 'pointer' : 'default', lineHeight: '14px', fontWeight: 600 } }, '添加'),
+        // 「清理失效（N）」一键按钮（task-mwcw2jx8）：retiredCount>0 才渲染（同槽多个下架模型逐个 × 要点 N
+        // 次等 N 次 RPC，此键一次收口）；warn 描边与「⚠️下架」芯片标记同色系；busy 置灰防连点
+        retiredCount ? React.createElement('button', { onClick: cleanRetired, disabled: busy, title: '一键移除全部已下架模型（仅删除，不新增）', style: { fontSize: 9, padding: '0px 5px', border: '1px solid ' + C.warn, borderRadius: 2, background: C.card, color: C.warn, cursor: busy ? 'default' : 'pointer', lineHeight: '14px', fontWeight: 600, flexShrink: 0 } }, '清理失效（' + retiredCount + '）') : null,
         msg ? React.createElement('span', { style: { color: C.err, maxWidth: 140 } }, msg) : null)
     }
 

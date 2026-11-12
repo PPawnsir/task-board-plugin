@@ -224,3 +224,46 @@ test('故障E2E·目录失效反例：目录不可得 → 目录闸整体跳过�
     }, '正常推进到 resolved 且 run 关账 completed（零死锁）')
   } finally { await env.cleanup() }
 })
+
+// ===== 修删除死锁（task-mwcw0z5）⑥：下架后可清理——先含后删场景下 set-board-config diff 校验放行删除、仍拒新增 =====
+// 死锁原形：目录先含 prov/gone 时合法写入 laneModels/fallbackModels → 模型下架（目录移除 prov/gone）→
+// 旧口径对提交值全量校验 → 已成残留的 prov/gone 首个非法即整包拒写 → 用户永远删不掉（整槽/整链被锁死）。
+// diff 口径（仅最终态首次出现的新值必校验）下：
+//   · 删除残留（提交不含 prov/gone 的剩余数组/空链）→ 放行（死锁解除）；
+//   · 替换新非法值（目录外新 id prov/brandnew）→ 仍拒写（防护零损失，不落半截）；
+//   · ⑧ 审计不受 diff 影响：拒写零审计行、放行正常落审计行。
+test('故障E2E·下架后可清理：目录移除 prov/gone 后删除残留放行（laneModels/fallbackModels）、替换新非法值仍拒、审计不受 diff 影响', async () => {
+  var env = createMockCtx()
+  try {
+    var h = installFaults(env, { directory: [GONE, GOOD], programs: [] })
+    plugin.apply(env.ctx)
+    // 先含：目录在册时写入（两键都带 prov/gone——生产常见形态：档位槽与备用链都残留过下架模型）
+    var lm = await env.rpc('set-board-config', { sessionId: env.sid, key: 'laneModels', value: { standard: { worker: [GONE, GOOD] } } })
+    assert.equal(lm.ok, true, '先含：laneModels=[gone,good] 目录在册放行')
+    var fb = await env.rpc('set-board-config', { sessionId: env.sid, key: 'fallbackModels', value: [GONE] })
+    assert.equal(fb.ok, true, '先含：fallbackModels=[gone] 目录在册放行')
+    // 后删（下架）：目录移除 prov/gone、仍含 prov/good（非空 → outOfDir 闸语义不变）
+    h.directory.remove(GONE)
+    assert.equal(h.directory.has(GONE), false, '下架：prov/gone 已从目录移除')
+    // 删除残留 → 放行（死锁解除）：laneModels 只剩 [good]、fallbackModels 清空
+    var del = await env.rpc('set-board-config', { sessionId: env.sid, key: 'laneModels', value: { standard: { worker: [GOOD] } } })
+    assert.equal(del.ok, true, '⑥下架后删除残留值放行（提交剩余数组，已存在值不重新校验——修复前必拒锁死）')
+    assert.deepEqual(env.board().laneModels.standard.worker, [GOOD], '槽值=剩余数组（prov/gone 已删）')
+    var delFb = await env.rpc('set-board-config', { sessionId: env.sid, key: 'fallbackModels', value: [] })
+    assert.equal(delFb.ok, true, '⑥下架后清空备用链放行')
+    assert.deepEqual(env.board().fallbackModels, [], '备用链已清空')
+    // 替换新非法值 → 仍拒（新值必过目录清单；目录外新 id 整包拒写不落半截）
+    var badLane = await env.rpc('set-board-config', { sessionId: env.sid, key: 'laneModels', value: { standard: { worker: [GOOD, 'prov/brandnew'] } } })
+    assert.equal(badLane.ok, false, '⑥替换新非法值仍拒（防护零损失）')
+    assert.ok(String(badLane.error || '').indexOf('prov/brandnew') >= 0, '报错点名新非法 id')
+    assert.deepEqual(env.board().laneModels.standard.worker, [GOOD], '拒写不落半截（槽值不变）')
+    var badFb = await env.rpc('set-board-config', { sessionId: env.sid, key: 'fallbackModels', value: ['prov/brandnew'] })
+    assert.equal(badFb.ok, false, '⑥fallbackModels 替换新非法值仍拒')
+    assert.ok(String(badFb.error || '').indexOf('prov/brandnew') >= 0, 'fallbackModels 报错点名新非法 id')
+    assert.deepEqual(env.board().fallbackModels, [], 'fallbackModels 拒写不落半截')
+    // ⑧ 审计不受 diff 影响：拒写零新审计行、放行各落一条
+    var log = env.board().configLog
+    assert.equal(log.filter(function (l) { return l.key === 'laneModels' }).length, 2, '⑧laneModels 恰两条审计（先含+删除放行；两次替换拒写零审计）')
+    assert.equal(log.filter(function (l) { return l.key === 'fallbackModels' }).length, 2, '⑧fallbackModels 恰两条审计（先含+清空放行；替换拒写零审计）')
+  } finally { await env.cleanup() }
+})

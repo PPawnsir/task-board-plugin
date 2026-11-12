@@ -1389,6 +1389,26 @@ export function createRpc(ctx, state, deps) {
       var sample = legal.slice(0, 8).map(function (m) { return m.id })
       return '非法模型 id: ' + mval + '（不在当前网关可用清单）。合法清单（' + legal.length + ' 个，示前 ' + sample.length + ' 个）：' + (sample.join('、') || '(空)') + '。完整清单见 list-models'
     }
+    // ===== 模型键最终态计算（task-mwcw0z5 修删除死锁）：set-board-config 的 diff 校验与实际写入共用，防两处逻辑漂移 =====
+    // 口径与下方 mutateLocked 写入分支逐字一致：workerModel/verifierModel = 字符串直写（trim，非字符串→''=清除）；
+    // laneModels = cfg(d) 归一基座上只合显式给出的槽位（未给槽位保留现值）；fallbackModels = 整数组覆盖（归一）。
+    // 纯函数（cfg/normalizeLaneSlot/normalizeFallbackModels 均产新对象，不动入参 d）：diff 校验拿它算最终态，
+    // 写入口拿它落盘——两处永远同一形态，改一处不会漂。
+    function computeNextConfig(d, key, value) {
+      if (key === 'workerModel' || key === 'verifierModel') return typeof value === 'string' ? value.trim() : ''
+      if (key === 'fallbackModels') return core.normalizeFallbackModels(value)
+      if (key === 'laneModels') {
+        var __cnBase = cfg(d).laneModels
+        for (var __cnI = 0; __cnI < TASK_SIZES.length; __cnI++) {
+          var __cnPl = value && value[TASK_SIZES[__cnI]]
+          if (!__cnPl) continue
+          if (__cnPl.worker !== undefined) __cnBase[TASK_SIZES[__cnI]].worker = core.normalizeLaneSlot(__cnPl.worker)
+          if (__cnPl.verifier !== undefined) __cnBase[TASK_SIZES[__cnI]].verifier = core.normalizeLaneSlot(__cnPl.verifier)
+        }
+        return __cnBase
+      }
+      return value
+    }
     // 枚举当前网关可用模型（供 Verifier 模型下拉选择）：llm.listProviders + listModels
     handle('list-models', async function () {
       var models = await enumModels()
@@ -1424,82 +1444,93 @@ export function createRpc(ctx, state, deps) {
     handle('set-board-config', async function (args) {
       var sid = rpcSessionId(args)
       var actor = rpcActor(args) // 审计行 actor：谁改的（工具调用方 agent id，缺省回退会话 id）
-      // ===== 模型字段校验（task-mv73ym2k，实证 n-mv6ezj6vary4：手写显示名当 id → 验收 spawn UNKNOWN_MODEL 秒死×2 + 熔断误报「连续失败」）=====
-      // workerModel/verifierModel 的非空值必须先过合法 id 校验：经 enumModels() 枚举当前网关清单（list-models 同款口径），
-      // 不命中则拒写并返回合法清单样例（前 8 个防刷屏）；空串=清除覆盖，放行。
-      // 降级纪律：llm 服务缺失（老宿主，enumModels 返回 null）跳过校验直接放行——配置面绝不因宿主能力缺失而炸。
-      var mkey = (args.key === 'workerModel' || args.key === 'verifierModel') ? args.key : null
-      var mval = mkey && typeof args.value === 'string' ? args.value.trim() : ''
-      if (mkey && mval) {
-        var legal = await enumModels()
-        if (legal) {
-          var hit = false
-          for (var mi = 0; mi < legal.length; mi++) { if (legal[mi].id === mval) { hit = true; break } }
-          if (!hit) {
-            var sample = legal.slice(0, 8).map(function (m) { return m.id })
-            return { ok: false, error: '非法模型 id: ' + mval + '（不在当前网关可用清单）。合法清单（' + legal.length + ' 个，示前 ' + sample.length + ' 个）：' + (sample.join('、') || '(空)') + '。完整清单见 list-models' }
-          }
-        }
-      }
-      // ===== laneModels 三档路由表（task-mvnemvf5）：部分合并对象 + 逐槽位合法清单校验 =====
-      // value 形态 { light?/standard?/heavy?: { worker?, verifier? } }——只合显式给出的槽位，未给槽位保留现值。
-      // 槽位值允许**字符串或有序字符串数组**（task-mvnxckhq 同档优先序：第一位=首选，字符串归一为单元素数组，
-      // 空串/空数组=清槽恢复继承下一级）；非空 id（数组逐项）走与 workerModel 同款 enumModels 校验，
-      // **任一槽位/任一项非法整体拒写**（不落半截合并结果）。未知档位/角色键、非对象形态一律 fail-loud
-      // 拒写（防手滑写废整张表）；llm 缺失（老宿主）由 cardModelErr 内部降级放行。
-      if (args.key === 'laneModels') {
-        var __lmErr = null
-        var __lv = args.value
-        if (!__lv || typeof __lv !== 'object' || Array.isArray(__lv)) __lmErr = 'laneModels 需为部分合并对象（如 {heavy:{worker:"provider/model"}} 或 {heavy:{worker:["首选","次选"]}}）'
-        else {
+      // ===== 模型字段 diff 校验（task-mwcw0z5 修删除死锁；合流 task-mv73ym2k 非法 id 防线 + task-mvnemvf5/task-mvnqxlpn 槽位/链校验）：仅「最终态首次出现的新值」必过合法清单 =====
+      // 原形（用户 2026-11-12 截图实证）：板级 laneModels 残留已下架模型（momabp/kimi/kimi-k3 等），用户点芯片 ×
+      // 删除 → OrderedModelsEditor 提交剩余数组 → 旧口径对提交值逐项全量校验 → 首个非法值即整包拒写 →
+      // 删除被自己的校验锁死，整槽无法编排。根因不是「校验太严」而是「没有一条只删不增的合法表达路径」。
+      // 新口径（diff 在合并后的最终态上算）：先把当前配置与提交值合并出最终态（computeNextConfig，与下方
+      // mutateLocked 实际写入同源），再对最终态里每个模型 id 判「它在当前配置（core.configuredModelIds 全板
+      // 模型面：workerModel/verifierModel/laneModels/fallbackModels）里是否已存在」：
+      //   · 已存在（历史合法值或已下架残留）→ 重存/删除/挪槽不重新校验——纯删除与重存的最终态没有新值，天然放行；
+      //   · 首次出现的新值 → 必过 enumModels 合法清单，非法拒写（新增/替换防护零损失，仍不落半截合并结果）。
+      // ⚠️ diff 基线必须取「合并前的当前配置」：拿合并后的最终态当基线会让所有提交值被判「已存在」，非法 id
+      // 直接落盘（lane-models 地基②「非法整体拒写」断言拦的就是这个洞）。
+      // 聚合报错（同卡附带修复）：收集本次写入涉及的全部非法 id（去重）一次性报出，不再「首个非法即停」——
+      // 用户截图里三个下架模型只有一个报错（其余根本没被检查到）；文案末尾「仅新增值校验」句是用户理解
+      // 新行为的钥匙，不得删。
+      // 降级纪律不变：llm 服务缺失（老宿主，enumModels 返回 null）跳过校验直接放行——配置面绝不因宿主能力缺失而炸。
+      // 卡级 model（update-task 走 cardModelErr 单值校验）不在本口径：卡级清空走空串、换新值必校验，照旧。
+      var __mk = (args.key === 'workerModel' || args.key === 'verifierModel' || args.key === 'laneModels' || args.key === 'fallbackModels') ? args.key : null
+      if (__mk) {
+        // ① 结构 fail-loud（防手滑写废整张表，文案与旧口径逐字一致）：laneModels 需部分合并对象、档位/角色键
+        // 白名单、槽位 string|string[]（数组项非字符串/空串拒写；字符串空串=清槽放行）；fallbackModels 需
+        // 字符串数组（项非字符串/空串拒写）；workerModel/verifierModel 无形态约束（非字符串=清除，见 computeNextConfig）。
+        if (__mk === 'laneModels') {
+          var __lv = args.value
+          if (!__lv || typeof __lv !== 'object' || Array.isArray(__lv)) return { ok: false, error: 'laneModels 需为部分合并对象（如 {heavy:{worker:"provider/model"}} 或 {heavy:{worker:["首选","次选"]}}）' }
           var __lanes = Object.keys(__lv)
-          for (var __li = 0; __li < __lanes.length && !__lmErr; __li++) {
+          for (var __li = 0; __li < __lanes.length; __li++) {
             var __ln = __lanes[__li]
-            if (TASK_SIZES.indexOf(__ln) < 0) { __lmErr = 'laneModels 未知档位: ' + __ln + '（合法: light/standard/heavy）'; break }
+            if (TASK_SIZES.indexOf(__ln) < 0) return { ok: false, error: 'laneModels 未知档位: ' + __ln + '（合法: light/standard/heavy）' }
             var __lobj = __lv[__ln]
-            if (!__lobj || typeof __lobj !== 'object' || Array.isArray(__lobj)) { __lmErr = 'laneModels.' + __ln + ' 需为对象 {worker?, verifier?}'; break }
+            if (!__lobj || typeof __lobj !== 'object' || Array.isArray(__lobj)) return { ok: false, error: 'laneModels.' + __ln + ' 需为对象 {worker?, verifier?}' }
             var __rks = Object.keys(__lobj)
             for (var __ri2 = 0; __ri2 < __rks.length; __ri2++) {
               var __rk = __rks[__ri2]
-              if (__rk !== 'worker' && __rk !== 'verifier') { __lmErr = 'laneModels.' + __ln + ' 未知角色键: ' + __rk + '（合法: worker/verifier）'; break }
+              if (__rk !== 'worker' && __rk !== 'verifier') return { ok: false, error: 'laneModels.' + __ln + ' 未知角色键: ' + __rk + '（合法: worker/verifier）' }
               var __raw = __lobj[__rk]
-              if (typeof __raw === 'string') {
-                var __rv = __raw.trim()
-                if (__rv) { var __me = await cardModelErr(__rv); if (__me) { __lmErr = __me; break } }
-                continue
-              }
               if (Array.isArray(__raw)) {
-                // 数组形态（同档优先序）：逐项必须字符串且 trim 后非空（空串项 fail-loud——清槽请传 [] 或 ''），
-                // 逐项过合法清单校验，任一非法整包拒写
+                // 数组形态（同档优先序）：逐项必须字符串且 trim 后非空（空串项 fail-loud——清槽请传 [] 或 ''）
                 for (var __ai = 0; __ai < __raw.length; __ai++) {
-                  var __av = __raw[__ai]
-                  if (typeof __av !== 'string') { __lmErr = 'laneModels.' + __ln + '.' + __rk + '[' + __ai + '] 需为字符串（provider/model 复合格式）'; break }
-                  var __avt = __av.trim()
-                  if (!__avt) { __lmErr = 'laneModels.' + __ln + '.' + __rk + '[' + __ai + '] 为空串（清槽请传空数组 [] 或空串）'; break }
-                  var __me2 = await cardModelErr(__avt); if (__me2) { __lmErr = __me2; break }
+                  if (typeof __raw[__ai] !== 'string') return { ok: false, error: 'laneModels.' + __ln + '.' + __rk + '[' + __ai + '] 需为字符串（provider/model 复合格式）' }
+                  if (!__raw[__ai].trim()) return { ok: false, error: 'laneModels.' + __ln + '.' + __rk + '[' + __ai + '] 为空串（清槽请传空数组 [] 或空串）' }
                 }
-                if (__lmErr) break
-                continue
+              } else if (typeof __raw !== 'string') {
+                return { ok: false, error: 'laneModels.' + __ln + '.' + __rk + ' 需为字符串或字符串数组（有序=同档优先序，空串/空数组=清槽）' }
               }
-              __lmErr = 'laneModels.' + __ln + '.' + __rk + ' 需为字符串或字符串数组（有序=同档优先序，空串/空数组=清槽）'; break
             }
           }
         }
-        if (__lmErr) return { ok: false, error: __lmErr }
-      }
-      // ===== fallbackModels 备用模型链（task-mvnqxlpn）：有序字符串数组 + 逐项合法清单校验 =====
-      // value 形态为字符串数组（有序备用链，跨供应商同档替代；空数组=清链不启用）；逐项必须字符串且
-      // trim 后非空，非空项走与 workerModel 同款 enumModels 校验，**任一项非法整包拒写**（不落半截数组，
-      // 错误文案带合法清单样例）；非数组形态 fail-loud 拒写。llm 缺失（老宿主）由 cardModelErr 内部降级放行。
-      if (args.key === 'fallbackModels') {
-        if (!Array.isArray(args.value)) return { ok: false, error: 'fallbackModels 需为字符串数组（有序备用链，如 ["gsmoma/kimi/kimi-k3","kimi-coding/k3.1-pro"]；空数组=清链）' }
-        for (var __fi = 0; __fi < args.value.length; __fi++) {
-          var __fv = args.value[__fi]
-          if (typeof __fv !== 'string') return { ok: false, error: 'fallbackModels[' + __fi + '] 需为字符串（provider/model 复合格式）' }
-          var __fvt = __fv.trim()
-          if (!__fvt) return { ok: false, error: 'fallbackModels[' + __fi + '] 为空串（清链请传空数组 []）' }
-          var __fe = await cardModelErr(__fvt)
-          if (__fe) return { ok: false, error: __fe }
+        if (__mk === 'fallbackModels') {
+          if (!Array.isArray(args.value)) return { ok: false, error: 'fallbackModels 需为字符串数组（有序备用链，如 ["gsmoma/kimi/kimi-k3","kimi-coding/k3.1-pro"]；空数组=清链）' }
+          for (var __fi = 0; __fi < args.value.length; __fi++) {
+            if (typeof args.value[__fi] !== 'string') return { ok: false, error: 'fallbackModels[' + __fi + '] 需为字符串（provider/model 复合格式）' }
+            if (!args.value[__fi].trim()) return { ok: false, error: 'fallbackModels[' + __fi + '] 为空串（清链请传空数组 []）' }
+          }
+        }
+        // ② diff 校验：最终态里「当前配置没有的 id」= 首次出现的新值，必过合法清单（enumModels 至多拉一次；
+        //    纯删除/重存（无新值）零枚举零校验，天然放行）
+        var __cur = null
+        try { __cur = await rt(sid) } catch (_) { __cur = null } // 合并前当前配置=diff 基线；读不到按空板（等价全量校验，同旧口径）
+        var __curIds = __cur ? core.configuredModelIds(__cur) : []
+        var __next = computeNextConfig(__cur || {}, __mk, args.value)
+        var __cand = [] // 候选新值（按序去重；workerModel/verifierModel 至多 1 个）
+        if (__mk === 'workerModel' || __mk === 'verifierModel') {
+          if (__next && __curIds.indexOf(__next) < 0) __cand.push(__next)
+        } else if (__mk === 'fallbackModels') {
+          for (var __fi2 = 0; __fi2 < __next.length; __fi2++) { if (__curIds.indexOf(__next[__fi2]) < 0 && __cand.indexOf(__next[__fi2]) < 0) __cand.push(__next[__fi2]) }
+        } else {
+          for (var __li2 = 0; __li2 < TASK_SIZES.length; __li2++) {
+            for (var __ri3 = 0; __ri3 < 2; __ri3++) {
+              var __slot = __next[TASK_SIZES[__li2]][__ri3 === 0 ? 'worker' : 'verifier']
+              for (var __si = 0; __si < __slot.length; __si++) { if (__curIds.indexOf(__slot[__si]) < 0 && __cand.indexOf(__slot[__si]) < 0) __cand.push(__slot[__si]) }
+            }
+          }
+        }
+        if (__cand.length) {
+          var __legal = await enumModels()
+          if (__legal) {
+            var __bad = [] // 全部非法 id（聚合报出，不再首个即停）
+            for (var __ci = 0; __ci < __cand.length; __ci++) {
+              var __mh = false
+              for (var __gi = 0; __gi < __legal.length; __gi++) { if (__legal[__gi].id === __cand[__ci]) { __mh = true; break } }
+              if (!__mh) __bad.push(__cand[__ci])
+            }
+            if (__bad.length) {
+              var __sample = __legal.slice(0, 8).map(function (m) { return m.id })
+              return { ok: false, error: '非法模型 id: ' + __bad.join('、') + '（已不在当前网关可用清单）。合法清单（' + __legal.length + ' 个，示前 ' + __sample.length + ' 个）：' + (__sample.join('、') || '(空)') + '。完整清单见 list-models；如需移除已下架的残留项，直接删除即可（仅新增值校验）' }
+            }
+          }
         }
       }
       // ===== 板级 artifacts 生成物声明（task-mw00g0sl，L1 跨生态）：字符串数组（glob 原样），非数组 fail-loud 拒写 =====
@@ -1533,7 +1564,7 @@ export function createRpc(ctx, state, deps) {
       return mutateLocked(sid, function (d) {
         var __from = d[args.key] === undefined ? null : d[args.key] // 写前留旧值（JSON 落盘不容 undefined，归一成 null）
         var __hit = true
-        if (args.key === 'maxWorkers') d.maxWorkers = __mwWrite; else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'verifierModel') d.verifierModel = typeof args.value === 'string' ? args.value.trim() : ''; else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'cleanupRetentionDays') d.cleanupRetentionDays = Math.max(1, Math.min(90, Number(args.value) || 7)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'workerContinuable') d.workerContinuable = !!args.value; else if (args.key === 'verifyUserGuide') d.verifyUserGuide = !!args.value; else if (args.key === 'probeEnabled') d.probeEnabled = !!args.value; else if (args.key === 'probeIntervalMin') d.probeIntervalMin = core.normalizeProbeIntervalMin(args.value); else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } else if (args.key === 'laneModels') { var __base = cfg(d).laneModels; for (var __pi = 0; __pi < TASK_SIZES.length; __pi++) { var __pl = args.value[TASK_SIZES[__pi]]; if (!__pl) continue; if (__pl.worker !== undefined) __base[TASK_SIZES[__pi]].worker = core.normalizeLaneSlot(__pl.worker); if (__pl.verifier !== undefined) __base[TASK_SIZES[__pi]].verifier = core.normalizeLaneSlot(__pl.verifier) } d.laneModels = __base } else if (args.key === 'fallbackModels') { d.fallbackModels = core.normalizeFallbackModels(args.value) } else if (args.key === 'artifacts') { d.artifacts = core.normalizeArtifacts(args.value) } else __hit = false
+        if (args.key === 'maxWorkers') d.maxWorkers = __mwWrite; else if (args.key === 'maxVerifiers') d.maxVerifiers = Math.max(0, Math.min(5, args.value || 0)); else if (args.key === 'workerModel') d.workerModel = computeNextConfig(d, args.key, args.value); else if (args.key === 'verifierModel') d.verifierModel = computeNextConfig(d, args.key, args.value); else if (args.key === 'softTimeoutMin') d.softTimeoutMin = Math.max(1, Math.min(480, Number(args.value) || 30)); else if (args.key === 'hardTimeoutMin') d.hardTimeoutMin = Math.max(1, Math.min(1440, Number(args.value) || 120)); else if (args.key === 'cleanupRetentionDays') d.cleanupRetentionDays = Math.max(1, Math.min(90, Number(args.value) || 7)); else if (args.key === 'feedbackEnabled') { d.feedbackEnabled = !!args.value; feedbackCache[sid] = d.feedbackEnabled } else if (args.key === 'notifyDispatch') d.notifyDispatch = !!args.value; else if (args.key === 'notifyDone') d.notifyDone = !!args.value; else if (args.key === 'workerContinuable') d.workerContinuable = !!args.value; else if (args.key === 'verifyUserGuide') d.verifyUserGuide = !!args.value; else if (args.key === 'probeEnabled') d.probeEnabled = !!args.value; else if (args.key === 'probeIntervalMin') d.probeIntervalMin = core.normalizeProbeIntervalMin(args.value); else if (args.key === 'epicSplit') { d.epicSplit = !!args.value; epicSplitCache[sid] = d.epicSplit } else if (args.key === 'laneModels') { d.laneModels = computeNextConfig(d, args.key, args.value) } else if (args.key === 'fallbackModels') { d.fallbackModels = computeNextConfig(d, args.key, args.value) } else if (args.key === 'artifacts') { d.artifacts = core.normalizeArtifacts(args.value) } else __hit = false
         if (__hit) {
           if (!Array.isArray(d.configLog)) d.configLog = []
           d.configLog.push({ key: String(args.key), from: __from, to: d[args.key] === undefined ? null : d[args.key], actor: actor, at: new Date().toISOString() })
