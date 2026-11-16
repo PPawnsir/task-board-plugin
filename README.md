@@ -41,7 +41,7 @@
 | **0.1.7 ~ 0.1.7-x**（含 rc） | **≥ 1.2.2（必须）** | 0.1.7 会话日志升级为 format v4：插件消息 `source.kind` 必须是生产者自有 kind。1.2.1 及更早会在**任务完成/阻塞回执**落盘时抛 `SessionFormatError: format v4 message requires a producer-owned source kind`，并连带使主窗口当前轮次失败（表现为「本轮运行失败」）；同时「跳转会话」因宿主移除 `sessions.open` 而失效（控制台 `sessionsSvc.open is not a function`），卡片活动心跳读不到 v4 日志（`session.v4.jsonl.zstd`） |
 | 0.1.5-rc.1 ~ 0.1.6 | ≤ 1.2.1 | 1.2.2 起按 0.1.7 协议编写（v4 source kind、`uiWorkspace.openSession` 跳转），旧宿主未做回归验证，建议停留 1.2.1 |
 
-> 当前版本 **v1.9.8-alpha.1**（预发布，无功能变更）已在宿主 **0.2.2-rc.1** 全量实测：793 断言全绿 + 拆解官/力度路由/健康嗅探/帧活性挂死检测真机 E2E 全链；宿主侧活性自检通过（get-tasks/list-models/set-work-mode/poolStatus 全通）。本版本为宿主升级适配验证声明，代码与 v1.9.7 完全一致。
+> 当前版本 **v1.9.8** 已在宿主 **0.2.2-rc.1** 全量实测：793 断言全绿 + 拆解官/力度路由/健康嗅探/帧活性挂死检测真机 E2E 全链；宿主侧活性自检通过（get-tasks/list-models/set-work-mode/poolStatus 全通）。本版本为宿主升级适配验证声明，代码与 v1.9.7 完全一致。
 
 ```sh
 dsh plugin --profile web add dsh-agent-board@latest   # 0.1.7+/0.2.x 宿主（推荐）
