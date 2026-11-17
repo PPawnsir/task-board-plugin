@@ -1228,6 +1228,24 @@ function hasSettledWorkerRun(t) {
   for (var i = 0; i < t.runs.length; i++) { var r = t.runs[i]; if (r && r.role === 'worker' && r.outcome && r.outcome !== 'running') return true }
   return false
 }
+// ===== touches 边界清单注入（task-mwkc8jhi）=====
+// 实证根因（2026-11-17；task-mw368ovj / task-mwkbm37s 两次 Worker 上报「本卡 touches 只含第一个
+// 文件」，实际卡面均为多条）：不是 Worker 看漏，而是 buildWorkerPrompt 从未注入 t.touches——
+// Worker 从始至终不知道本卡允许改哪些文件，只能凭描述猜、或凭自己改了什么反推；动了第一个文件
+// 就以为边界只有它（prompt 全文无边界清单是共同根因）。
+// 修法：把完整有效锁集（effectiveTouches：touches ∪ 仲裁扩权 extraTouches）在「开工计划闸口」
+// 段之前逐条注入，与闸口判定同读一份事实源（rpc.planGateApply 亦读 core.effectiveTouches）——
+// 只加 prompt 可见性，不改闸口判定逻辑（planGateApply 不动），零新语义。
+// 空 touches（无声明卡）返回 '' → 不注入该段，无声明卡 prompt 逐字不变；
+// 有 extraTouches 时加一行标注（仲裁扩权后的文件同为合法边界，Worker 应看到）。
+function touchesBoundaryText(t) {
+  var eff = effectiveTouches(t)
+  if (!eff.length) return ''
+  var out = '本卡 touches（允许改动的文件边界，越界会被闸口拦截）：'
+  for (var i = 0; i < eff.length; i++) out += '\n  - ' + eff[i]
+  if (t && Array.isArray(t.extraTouches) && t.extraTouches.length) out += '\n（含仲裁扩权 extraTouches，已并入上述清单——这些都是本卡合法边界）'
+  return out
+}
 export function buildWorkerPrompt(t, pack, feedbackEnabled) {
   var notes = histNotes(t)
   var msgs = buildMessages(t)
@@ -1243,6 +1261,10 @@ export function buildWorkerPrompt(t, pack, feedbackEnabled) {
   // 学习飞轮 v1 软召回（feedbackEnabled 关闭时不出现）：只提示"先查历史教训"，看板绝不代查——
   // 环境里有没有笔记/记忆类工具、教训库长什么样，都是 Worker 自己判断的事（零耦合）。
   if (feedbackEnabled !== false) p += '\n\n' + LESSON_RECALL_HINT
+  // touches 边界清单（task-mwkc8jhi）：动笔前先让 Worker 看到本卡能改哪些文件——闸口条款紧接其后，
+  // 没有这份清单，闸口比对的「边界」对 Worker 是黑箱（它只能靠猜/靠已改文件反推，这正是两次误判的根因）。
+  var boundaryW = touchesBoundaryText(t)
+  if (boundaryW) p += '\n\n' + boundaryW
   // 开工计划闸口（task-mvneoyba）：防约束漂移——touches 边界在「动笔前」的零代价时刻拦截，
   // 比提交后才发现越界返工便宜得多。语义三条缺一不可：时机=动笔前、格式=『计划改动：』前缀、
   // 后果=越界会被纠正。host 侧比对接线在 rpc.mjs board_report progress 分支（只警示不阻断）。
@@ -1309,6 +1331,11 @@ export function buildVerifierPrompt(t, pack, userGuide) {
   // 跑偏归因条款（调研遵循·host 三件套 ②）：驳回理由注明「立单缺调研」——归因计入驳回热点统计，
   // 供主窗口分诊「立单缺料 vs Worker 执行问题」，缺料占高了就该把建卡调研门禁拧紧。
   p += '\n驳回归因：若 Worker 的产出明显因缺少调研上下文而跑偏/绕路，驳回时请在驳回理由里注明「立单缺调研」（归因会计入驳回热点统计）。'
+  // touches 边界清单同补（task-mwkc8jhi）：Verifier 的「改动范围基线」审计需要与 Worker 同一份清单——
+  // 此前 prompt 只在文件纪律里提「任务声明的 touches」，却不给清单本体，Verifier 同样只能猜。
+  // 空 touches 不注入（与 Worker 侧同口径）。
+  var boundaryV = touchesBoundaryText(t)
+  if (boundaryV) p += '\n\n' + boundaryV + '\n（上述清单即改动范围基线：Worker 交付的 diff 概要应落在这些文件内，越界一律驳回。）'
   // 文件纪律（task-muy3gm03，用户口径「验收时可以写必要的测试文件，不要动工程代码」）：
   // 写死进 prompt 的硬纪律 + 事后兜底威慑（touches 审计：Worker 交付的 diff 概要与任务声明的
   // touches 即改动范围基线，越界即驳回——这层审计对 verifier 自己同样生效）。

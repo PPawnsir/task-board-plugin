@@ -641,6 +641,69 @@ test('buildWorkerPrompt: 开工计划闸口条款注入（动笔前+『计划改
   assert.doesNotMatch(vBody, /开工计划闸口/)
 })
 
+// ===== touches 边界清单注入（task-mwkc8jhi）=====
+// 根因实证（用户 2026-11-17）：task-mw368ovj / task-mwkbm37s 两次 Worker 上报「本卡 touches 只含第一个
+// 文件」，实际卡面均为多条——prompt 从未注入边界清单，Worker 只能凭描述猜/凭已改文件反推。
+// 断言面：①多条逐条列出且顺序=声明顺序 ②空 touches（无声明）不注入 ③extraTouches 并入有效锁集并标注
+// ④清单位于开工计划闸口段之前（先给边界，再要求报计划）⑤verifier 侧同补同一份边界 ⑥源码级单一事实源
+// （清单口径=effectiveTouches，非裸 t.touches；与闸口 rpc.planGateApply 同源）。
+test('buildWorkerPrompt: touches 边界清单注入（多条逐条列出 + 在开工计划闸口之前）；空 touches 不注入', () => {
+  const t = mkTask({ id: 'tb1', touches: ['lib/core.mjs', 'test/core.test.mjs', 'lib/rpc.mjs'] })
+  const p = core.buildWorkerPrompt(t)
+  assert.match(p, /本卡 touches（允许改动的文件边界，越界会被闸口拦截）：/)
+  // 完整清单逐条列出（声明顺序，一个路径一行）
+  assert.match(p, /\n {2}- lib\/core\.mjs\n {2}- test\/core\.test\.mjs\n {2}- lib\/rpc\.mjs\n/)
+  assert.ok(p.indexOf('本卡 touches（') < p.indexOf('开工计划闸口'), '边界清单在开工计划闸口段之前（先给边界，再要求报计划）')
+  // 空 touches（无声明卡）→ 该段整段不注入（现状逐字不变）
+  assert.doesNotMatch(core.buildWorkerPrompt(mkTask({ id: 'tb2' })), /本卡 touches（/)
+  assert.doesNotMatch(core.buildWorkerPrompt(mkTask({ id: 'tb2b', touches: [] })), /本卡 touches（/)
+  assert.doesNotMatch(core.buildWorkerPrompt(mkTask({ id: 'tb2c', touches: null })), /本卡 touches（/)
+  // 单条同样列出（不是「只列第一条」也不是「不列」）
+  assert.match(core.buildWorkerPrompt(mkTask({ id: 'tb2d', touches: ['a.mjs'] })), /\n {2}- a\.mjs\n/)
+})
+
+test('buildWorkerPrompt: 有效锁集含仲裁扩权 extraTouches（并入去重 + 标注）；不并 extraTouches 的裸 touches 口径已被反证', () => {
+  const t = mkTask({ id: 'tb3', touches: ['lib/core.mjs', 'lib/rpc.mjs'], extraTouches: ['lib/rpc.mjs', 'lib/dispatch.mjs'] })
+  const p = core.buildWorkerPrompt(t)
+  assert.match(p, /\n {2}- lib\/core\.mjs\n {2}- lib\/rpc\.mjs\n {2}- lib\/dispatch\.mjs\n/) // touches 原序 + 新扩权，去重
+  assert.match(p, /含仲裁扩权 extraTouches，已并入上述清单/)
+  assert.equal((p.match(/- lib\/rpc\.mjs/g) || []).length, 1, '重复路径去重（effectiveTouches 语义）')
+  // 反证：只有 extraTouches（touches 空）也算有边界——有效锁集非空即注入
+  const p2 = core.buildWorkerPrompt(mkTask({ id: 'tb3b', touches: [], extraTouches: ['lib/z.mjs'] }))
+  assert.match(p2, /\n {2}- lib\/z\.mjs\n/)
+  assert.match(p2, /含仲裁扩权 extraTouches/)
+})
+
+test('buildVerifierPrompt: touches 边界清单同补（与 Worker 同一份有效锁集 + 改动范围基线句）；空 touches 不注入', () => {
+  const t = mkTask({ id: 'tb4', status: 'verifying', touches: ['a.mjs', 'b.mjs'], extraTouches: ['c.mjs'] })
+  const pv = core.buildVerifierPrompt(t)
+  assert.match(pv, /本卡 touches（允许改动的文件边界，越界会被闸口拦截）：/)
+  assert.match(pv, /\n {2}- a\.mjs\n {2}- b\.mjs\n {2}- c\.mjs\n/)
+  assert.match(pv, /上述清单即改动范围基线：Worker 交付的 diff 概要应落在这些文件内，越界一律驳回。/)
+  assert.doesNotMatch(core.buildVerifierPrompt(mkTask({ id: 'tb5', status: 'verifying' })), /本卡 touches（/)
+  assert.doesNotMatch(core.buildVerifierPrompt(mkTask({ id: 'tb5b', status: 'verifying', touches: [] })), /本卡 touches（/)
+})
+
+test('touches 边界清单：两侧 prompt 同读 effectiveTouches 单一事实源（源码级；无声明卡零新增行）', () => {
+  const coreSrc = readFileSync(new URL('../lib/core.mjs', import.meta.url), 'utf8')
+  const wBody = coreSrc.slice(coreSrc.indexOf('export function buildWorkerPrompt'), coreSrc.indexOf('export function buildVerifierPrompt'))
+  const vBody = coreSrc.slice(coreSrc.indexOf('export function buildVerifierPrompt'), coreSrc.indexOf('export function buildHookPrompt'))
+  assert.match(wBody, /touchesBoundaryText\(t\)/)
+  assert.match(vBody, /touchesBoundaryText\(t\)/)
+  // 单一事实源：清单口径=effectiveTouches（含 extraTouches；闸口 rpc.planGateApply 同读它），不读裸 t.touches
+  const fnStart = coreSrc.indexOf('function touchesBoundaryText(t) {')
+  assert.ok(fnStart > 0, 'helper 存在')
+  const fnBody = coreSrc.slice(fnStart, coreSrc.indexOf('\n}', fnStart))
+  assert.match(fnBody, /var eff = effectiveTouches\(t\)/)
+  assert.match(fnBody, /if \(!eff\.length\) return ''/)          // 空 → 零注入（不注入空标题）
+  assert.doesNotMatch(fnBody, /t\.touches/)                      // 不读裸 touches（口径唯一）
+  // 规划闸口判定逻辑零改动（本卡边界：只改 prompt 注入）：planGateApply 仍只读 effectiveTouches
+  const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
+  const gate = rpcSrc.slice(rpcSrc.indexOf('function planGateApply'), rpcSrc.indexOf('// ===== 卡级 model / laneModels'))
+  assert.match(gate, /var boundary = core\.effectiveTouches\(t\)/)
+  assert.doesNotMatch(gate, /touchesBoundaryText/)
+})
+
 test('buildWorkerPrompt: 大文件交付纪律（write 主体+edit 续块）注入，verifier prompt 不注入（源码断言）', () => {
   const t = mkTask({ id: 'lf1' })
   const p = core.buildWorkerPrompt(t)
@@ -848,7 +911,7 @@ test('task_preview_context / preview-context：返回瘦身清单形态（笔记
 test('派发接线：Worker 首条 prompt 带瘦身清单（笔记全文 + 清单行），不含文件内容本体', async () => {
   // 真跑一次 spawn（poolCycle → spawnOneShot → buildWorkerPrompt），捕获子代理实收 prompt。
   // ctx.fs 只给空对象：清单组装若还试图读盘会立刻炸——顺带锁定「IO 清零」。
-  const t = mkTask({ id: 'c1', status: 'pending', context: { files: ['lib/core.mjs:L100-L140 — 清单组装与锚点归一'], notes: '调研结论：走瘦身分离，文件正文由我自己 read' } })
+  const t = mkTask({ id: 'c1', status: 'pending', touches: ['lib/core.mjs', 'lib/dispatch.mjs'], context: { files: ['lib/core.mjs:L100-L140 — 清单组装与锚点归一'], notes: '调研结论：走瘦身分离，文件正文由我自己 read' } })
   const h = mkHookDispatch(mkBoard([t]))
   await h.dispatch.poolCycle(FULL_SID)
   // Worker 默认走 continuable 路径（workerContinuable 缺省 true）：从 spawnedContinuable 取实收 prompt
@@ -859,6 +922,9 @@ test('派发接线：Worker 首条 prompt 带瘦身清单（笔记全文 + 清�
   assert.match(w.text, /按需用 read 工具自行读取，不要全量盲读/)                                                            // 自取指引
   assert.doesNotMatch(w.text, /export function buildContextPackSection/)                                                    // 文件内容本体不在 prompt
   assert.doesNotMatch(w.text, /通过「上下文注入」区提供/)                                                                    // 旧指引句已退役
+  // touches 边界清单走真派发路径到达 Worker（task-mwkc8jhi 端到端：池 → spawnOneShot → 子代理实收 prompt）
+  assert.match(w.text, /本卡 touches（允许改动的文件边界，越界会被闸口拦截）：/)
+  assert.match(w.text, /\n {2}- lib\/core\.mjs\n {2}- lib\/dispatch\.mjs\n/)
 })
 
 // ===== 锚点行段解析（②，零依赖纯正则，Windows 盘符冒号不得误判）=====
