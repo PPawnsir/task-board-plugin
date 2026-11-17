@@ -2,6 +2,8 @@
 // 纯函数、零状态、零 IO：任务粒度治理（软闸门文案与判定）+ 学习飞轮候选教训生成。
 // index.mjs 薄壳 re-export 粒度治理导出（对外契约不变）；dispatch/rpc 模块按需 import。
 import * as core from './core.mjs'
+// 生命周期状态转移表（lib/lifecycle.mjs，task-mwk47az1）：物化推进点改 status 前查表断言。
+import { assertTransition } from './lifecycle.mjs'
 const { cfg, lessonText, pushLesson, ah, classifyPipeline } = core
 
 // ===== 任务粒度治理（全软方案：只引导/提示，绝不阻断创建与派发）=====
@@ -304,6 +306,7 @@ export function applyDecomposeProposal(d, t, proposal, now) {
   //      ③pipeline 不区分：full/work/direct 父卡物化后同样进 pending（direct 后续由 maybeAutoCloseParent 直接 resolved）。
   if (created.length > 0 && t.status === 'draft') {
     var ps0 = t.status
+    assertTransition(ps0, 'pending', 'decompose')
     t.status = 'pending'
     ah(t, ps0, 'pending', 'decomposer', '拆解提案就位，父卡进入待执行（待子卡 publish 派发）')
   }

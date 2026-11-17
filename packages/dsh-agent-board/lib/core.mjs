@@ -5,6 +5,9 @@
 // 「临时 HOME」可被自测注入——os.homedir() 进程内首次调用即缓存，晚改 env 无效。
 import os from 'node:os'
 import path from 'node:path'
+// 生命周期状态转移表（lib/lifecycle.mjs，task-mwk47az1）：状态推进点改 status 前查表断言，
+// 非法转移开发期抛错（表上已注册全部合法转移，合法流零行为变化——纯结构化接线）。
+import { assertTransition } from './lifecycle.mjs'
 
 // ===== 常量 =====
 export const MAX_CLAIMED = 3
@@ -613,7 +616,7 @@ export function opsLogLine(o) {
 
 // ===== 状态流转 =====
 export function claimCheck(d, t, sid) { if (CLAIMABLE.indexOf(t.status) < 0) return 'cannot claim in ' + t.status; if (t.claimedBy && t.claimedBy !== sid && t.status === 'in-progress') return 'claimed by ' + t.claimedBy; if (d.boardMode === 'manual' || t.assignMode === 'manual') { if (t.assignee && t.assignee !== sid) return 'assigned to ' + t.assignee }; if (isb(t)) { var p = gpt(t, d.tasks); if (!p) return 'parent not found'; if (p.status !== 'in-progress' && p.status !== 'verifying') return 'parent not in-progress' }; var mc = d.tasks.filter(function (x) { return x.claimedBy === sid && (x.status === 'in-progress' || x.status === 'verifying') && !isb(x) }); if (!isb(t) && mc.length >= MAX_CLAIMED) return 'max ' + MAX_CLAIMED + ' active'; return null }
-export function claimApply(d, t, sid, note) { var ps = t.status; t.status = 'in-progress'; t.claimedBy = sid; t.claimedAt = new Date().toISOString(); ah(t, ps, 'in-progress', sid, note) }
+export function claimApply(d, t, sid, note) { var ps = t.status; assertTransition(ps, 'in-progress', 'claim'); t.status = 'in-progress'; t.claimedBy = sid; t.claimedAt = new Date().toISOString(); ah(t, ps, 'in-progress', sid, note) }
 // 子任务「已了结」终态口径：resolved（已完成/已验收）+ cancelled（人主动放弃该子任务范围）
 // + archived（归档=人的显式了结，与 childStats 进度口径同源）。
 // 为什么 cancelled 也算：cancelled 是人的显式决定，该子任务范围已关闭；若不算，一张被取消的
@@ -649,6 +652,7 @@ export function maybeAutoCloseParent(d, childTask) {
     if (pst !== 'done') {
       p.hooks.post.pending = true // hook-post 幂等占用标记：poolCycle 见它才 spawn（spawn 后清除，失败再置回）
       p.hooks.post.state = 'running'
+      assertTransition(p.status, p.status, 'parentAuto') // 同态维持（延迟收口挂闸门，不转 verifying）
       ah(p, p.status, p.status, 'system', 'auto: all subtasks settled，post hook 收口未完成，延迟 verifying')
       return p
     }
@@ -663,12 +667,14 @@ export function maybeAutoCloseParent(d, childTask) {
   // full/work 零变化：照旧推进 verifying 走验收（work 卡在 resolveApply 侧本就落 resolved，不经此分支）。
   // 边界：只修推进侧不再把 direct 卡推进它够不到的状态；派发侧过滤闸（pickDispatch）一字不动。
   if (p.pipeline === 'direct') {
+    assertTransition(p.status, 'resolved', 'parentAuto')
     p.status = 'resolved'
     p.resolvedAt = new Date().toISOString()
     p.resolution = 'all subtasks resolved'
     ah(p, 'in-progress', 'resolved', 'system', 'auto: all subtasks resolved（direct 父卡直接收口）')
     return p
   }
+  assertTransition(p.status, 'verifying', 'parentAuto')
   p.status = 'verifying'
   p.resolvedAt = new Date().toISOString()
   p.resolution = 'all subtasks resolved'
@@ -677,8 +683,8 @@ export function maybeAutoCloseParent(d, childTask) {
 }
 // 兼容名：既有调用点（verifyApply）与 TEAM_SPLIT_RULE / README 的对外语义名保持不变，内部委托共享 helper。
 export function checkParentAuto(d, t) { return maybeAutoCloseParent(d, t) }
-export function resolveApply(d, t, sid, status, resolution, note) { var ps = t.status; if (status === 'verifying' && t.pipeline && t.pipeline !== 'full') { status = 'resolved' } t.status = status; t.resolution = resolution || null; t.resolvedAt = new Date().toISOString(); ah(t, ps, status, sid, note); var r = { ok: true, task: t }; var p = maybeAutoCloseParent(d, t); if (p) { r.parentUpdated = true }; return r }
-export function verifyApply(d, t, sid, verdict, comment) { var ps = t.status; if (verdict === 'approved') { t.status = 'resolved'; t.verifiedAt = new Date().toISOString(); t.verifiedBy = sid; delete t.frozen; delete t.frozenAt; delete t.frozenBy; ah(t, ps, 'resolved', sid, 'approved' + (comment ? ': ' + comment : '')) } else { t.status = 'in-progress'; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'in-progress', sid, 'rejected' + (comment ? ': ' + comment : '')) }; var r = { ok: true, task: t }; if (verdict === 'approved' && isb(t)) { var p = checkParentAuto(d, t); if (p) { r.parentUpdated = true } }; return r }
+export function resolveApply(d, t, sid, status, resolution, note) { var ps = t.status; if (status === 'verifying' && t.pipeline && t.pipeline !== 'full') { status = 'resolved' } assertTransition(ps, status, 'resolve'); t.status = status; t.resolution = resolution || null; t.resolvedAt = new Date().toISOString(); ah(t, ps, status, sid, note); var r = { ok: true, task: t }; var p = maybeAutoCloseParent(d, t); if (p) { r.parentUpdated = true }; return r }
+export function verifyApply(d, t, sid, verdict, comment) { var ps = t.status; assertTransition(ps, verdict === 'approved' ? 'resolved' : 'in-progress', 'verify'); if (verdict === 'approved') { t.status = 'resolved'; t.verifiedAt = new Date().toISOString(); t.verifiedBy = sid; delete t.frozen; delete t.frozenAt; delete t.frozenBy; ah(t, ps, 'resolved', sid, 'approved' + (comment ? ': ' + comment : '')) } else { t.status = 'in-progress'; t.resolvedAt = null; t.resolution = null; ah(t, ps, 'in-progress', sid, 'rejected' + (comment ? ': ' + comment : '')) }; var r = { ok: true, task: t }; if (verdict === 'approved' && isb(t)) { var p = checkParentAuto(d, t); if (p) { r.parentUpdated = true } }; return r }
 // 归档落定（task_archive 工具与 archive-task RPC 共享，单一行为口径；门禁 archiveErr 留在
 // rpc.mjs——活性判定依赖 index.mjs 注入的 hasActiveRun，core 保持纯函数）：置 archived +
 // 级联归档子卡 + 触发父卡自动收口。
@@ -864,7 +870,7 @@ export function preHookGate(epic) {
 // （全子任务 resolved → 父 verifying 要求父卡在 in-progress，此前 pending 父卡永远到不了）。
 // draft 父卡不动（草稿是刻意的人工态）；已在 in-progress/verifying 的不重放（返回 null）。
 // 返回被推进的父卡（无 parentId / 父卡不存在 / 父卡非 pending → null）。
-export function parentKickOnDispatch(d, t) { if (!isb(t)) return null; var p = gpt(t, d.tasks); if (!p || p.status !== 'pending') return null; p.status = 'in-progress'; ah(p, 'pending', 'in-progress', 'system', '首个子任务派发，史诗进入推进态'); return p }
+export function parentKickOnDispatch(d, t) { if (!isb(t)) return null; var p = gpt(t, d.tasks); if (!p || p.status !== 'pending') return null; assertTransition(p.status, 'in-progress', 'parentKick'); p.status = 'in-progress'; ah(p, 'pending', 'in-progress', 'system', '首个子任务派发，史诗进入推进态'); return p }
 
 // childStats 聚合（get-tasks 返回体字段，按 tasks 现算零存储）：
 // { <parentId>: { total, settled, resolved, active, activeTitle } }
