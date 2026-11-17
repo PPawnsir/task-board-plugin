@@ -845,3 +845,42 @@ test('⑮ 源卡 dependsOn 自动继承首张子卡：仅首卡 / 继承在前 /
   assert.equal(d1.id, 'x4-1')
   assert.deepEqual(d1.dependsOn, ['ext/d'], '自引用（x4-1 === 本卡 id）丢弃，其余照常继承')
 })
+
+// ⑮b 继承不污染序号解析口径：坏序号照旧 unres 留痕，继承项不进留痕；首卡 unres 与继承并存
+test('⑮b 继承不影响序号解析：首卡坏序号照旧 unres 留痕 + 继承项不计入 unres', function () {
+  var src = mkTask({ id: 'y1', status: 'draft', dependsOn: ['ext/a'] })
+  var board = mkBoard([src])
+  applyDecomposeProposal(board, src, { verdict: 'split', children: [
+    { title: 'Y1', description: '', size: 'standard', touches: [], acceptance: 'a', dependsOn: ['1', 'x'] },
+    { title: 'Y2', description: '', size: 'standard', touches: [], acceptance: 'b', dependsOn: ['1', '9'] },
+  ] }, '2026-01-01T06:00:00Z')
+  var y1 = board.tasks.find(function (x) { return x.title === 'Y1' })
+  var y2 = board.tasks.find(function (x) { return x.title === 'Y2' })
+  assert.deepEqual(y1.dependsOn, ['ext/a'], '首卡：继承在位，自引用/非数字序号照旧丢弃')
+  var m1 = y1.messages.filter(function (m) { return m.kind === 'decompose' && /依赖序号无法解析/.test(m.text) })
+  assert.equal(m1.length, 1, '首卡坏序号照旧留痕（继承不吞 unres）')
+  assert.match(m1[0].text, /1、x/, '留痕带坏序号明细')
+  assert.equal(/ext\/a/.test(m1[0].text), false, '继承项不进 unres 留痕')
+  assert.deepEqual(y2.dependsOn, [y1.id], '第二张：批内序号链，不重复继承源卡依赖')
+  var m2 = y2.messages.filter(function (m) { return m.kind === 'decompose' && /依赖序号无法解析/.test(m.text) })
+  assert.equal(m2.length, 1); assert.match(m2[0].text, /9/, '越界序号照旧留痕')
+})
+
+// ⑮c 全链：spawnOneShot（拆解官落定）→ 物化 → 首卡带源卡外部依赖（修法活在生产路径，不只纯函数）
+test('⑮c 全链：spawnOneShot 提案物化后首卡带源卡外部依赖，次卡只有批内链', async function () {
+  var src = mkTask({ id: 'epicX', title: '需求卡', status: 'draft', dependsOn: ['task-ext-9'] })
+  var board = mkBoard([mkTask({ id: 'task-ext-9', title: '外部前置', status: 'pending' }), src])
+  var calls = []
+  var h = mkDispatch(board, { subagents: mkDecomposeSubagents(calls, { output: [], stopReason: 'completed', structured: { verdict: 'split', rationale: '两片', children: [
+    { title: '首卡', description: '做 A', size: 'light', touches: ['lib/a.mjs'], acceptance: 'node --test test/a.test.mjs' },
+    { title: '次卡', description: '做 B', size: 'standard', touches: ['lib/b.mjs'], acceptance: 'node --test test/b.test.mjs', dependsOn: ['1'] },
+  ] } }) })
+  var rec = await h.dispatch.spawnOneShot(SID, src, 'decomposer')
+  assert.ok(rec, 'spawn 成功')
+  await tick()
+  var k1 = board.tasks.find(function (x) { return x.title === '首卡' })
+  var k2 = board.tasks.find(function (x) { return x.title === '次卡' })
+  assert.deepEqual(k1.dependsOn, ['task-ext-9'], '端到端：首卡继承源卡外部前置（不再靠主窗口手工补挂）')
+  assert.deepEqual(k2.dependsOn, [k1.id], '次卡只有批内链，不重复继承')
+  assert.deepEqual(src.dependsOn, ['task-ext-9'], '源卡 dependsOn 零改动')
+})
