@@ -12,8 +12,12 @@
 // ===== 复合槽位形态（task-mwkbmu9k）：laneModels/workerModel/verifierModel/fallbackModels 支持 {id, effort?} =====
 // 纯字符串=不指定 effort（模型默认档，零回归）；对象归一 {id, effort}（effort 省略不带字段）；
 // effort 合法性写时校验（list-models efforts 清单），老宿主无元数据/llm 缺失降级放行。断言组见文末。
+// ===== spawn 链路传 effort（task-mwkbnjk8）：四级取模链候选 {id,effort?} → agentOptions.reasoningEffort =====
+// 带档候选 → agentOptions.reasoningEffort=该档（宿主 dsh-sub AgentOptions 契约，camelCase）；不带 →
+// agentOptions 与升级前逐字一致（零回归）；留档面 rec.model/runs[].model 恒纯 id（零迁移）。复合⑥组见文末。
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { cfg, seed, normalizeBoard, normalizeLaneSlot, normalizeFallbackModels, normalizeModelSlot, configuredModelIds } from '../lib/core.mjs'
 import { createRpc } from '../lib/rpc.mjs'
 import { createDispatch } from '../lib/dispatch.mjs'
@@ -1190,5 +1194,124 @@ test('复合⑤c：diff 口径不因 effort 校验复发删除死锁——存量
   var r5 = await h['set-board-config']({ key: 'fallbackModels', value: [{ id: 'brandnew/x', effort: 'high' }] })
   assert.equal(r5.ok, false, '新增目录外复合值仍过 id 校验拒写')
   assert.match(r5.error, /非法模型 id: brandnew\/x/)
+})
+
+// ===== 复合⑥（task-mwkbnjk8）：spawn 链路传思考等级——四级链候选 {id,effort?} → agentOptions.reasoningEffort =====
+// 字段名实证（宿主 dsh-subagent AgentOptions 契约，camelCase）：agentOptions = { provider?, model?,
+// reasoningEffort?, maxTokens?, subagentDepth? }；resolveChildAgentOptions 以 request.agentOptions 展开合并
+// （显式 reasoningEffort 随路由生效，省略且路由变更时自动清父档走模型默认档）。OpenAI 线参
+// reasoning_effort（snake_case）/llm 层 GenerateOptions 是另一层契约，spawn 面就是 camelCase。
+// 断言口径：①带 effort 候选 → agentOptions.reasoningEffort=该档 ②不带 effort（纯字符串/{id}）→
+// agentOptions 与升级前逐字一致（无该键，零回归）③留档面 rec.model/runs[].model 恒纯 id ④源码锁字段名。
+function lanesOf(over) {
+  var l = { light: { worker: [], verifier: [] }, standard: { worker: [], verifier: [] }, heavy: { worker: [], verifier: [] } }
+  return Object.assign(l, over || {})
+}
+
+test('复合⑥a：lane 槽复合候选带 effort → agentOptions 带 reasoningEffort；留档面恒纯 id（零迁移）', async function () {
+  var calls = []
+  var b = laneBoard({ size: 'heavy' }, { laneModels: lanesOf({ heavy: { worker: [{ id: 'lw/thinker', effort: 'high' }], verifier: [] } }) })
+  var sr = await mkDispatch(b, { subagents: mkActivationSubagents(calls) }).spawnOneShot(SID, b.tasks[0], 'worker')
+  assert.ok(sr)
+  assert.deepEqual(calls[0].request.agentOptions, { provider: 'lw', model: 'thinker', reasoningEffort: 'high' }, 'lane 复合候选 → agentOptions 带 reasoningEffort（宿主契约 camelCase）')
+  assert.equal(sr.model, 'lw/thinker', 'rec.model 留档仍纯 id 字符串（effort 走并行变量不进留档）')
+  assert.equal(sr.modelSource, 'lane')
+  assert.equal(b.tasks[0].runs[0].model, 'lw/thinker', 'run 留档 model 恒纯 id')
+  assert.equal(b.tasks[0].runs[0].modelSource, 'lane')
+  // 槽内复合候选健康判定按 id：复合首选健康直取，混合槽保序
+  var calls2 = []
+  var b2 = laneBoard({ size: 'heavy' }, { laneModels: lanesOf({ heavy: { worker: [{ id: 'lw/plain' }, 'lw/str'], verifier: [] } }) })
+  await mkDispatch(b2, { subagents: mkActivationSubagents(calls2) }).spawnOneShot(SID, b2.tasks[0], 'worker')
+  assert.equal(calls2[0].request.agentOptions.model, 'plain', '槽内首项（复合无 effort）照序直取')
+})
+
+test('复合⑥b：板级 workerModel/verifierModel 复合对象入链（原形被 typeof string 静默丢弃）+ effort 透传', async function () {
+  var calls = []
+  var b = laneBoard({}, { workerModel: { id: 'bw/thinker', effort: 'low' } })
+  var sr = await mkDispatch(b, { subagents: mkActivationSubagents(calls) }).spawnOneShot(SID, b.tasks[0], 'worker')
+  assert.ok(sr)
+  assert.deepEqual(calls[0].request.agentOptions, { provider: 'bw', model: 'thinker', reasoningEffort: 'low' }, '板级复合对象入链 + effort 透传（升级前对象形态被丢弃→静默回 parent）')
+  assert.equal(sr.modelSource, 'board')
+  assert.equal(sr.model, 'bw/thinker', 'rec.model 纯 id')
+  var calls2 = []
+  var b2 = laneBoard({}, { verifierModel: { id: 'bv/thinker', effort: 'medium' } })
+  await mkDispatch(b2, { subagents: mkActivationSubagents(calls2) }).spawnOneShot(SID, b2.tasks[0], 'verifier')
+  assert.deepEqual(calls2[0].request.agentOptions, { provider: 'bv', model: 'thinker', reasoningEffort: 'medium' }, 'verifier 同链（verifierModel 复合对象）')
+  // 裸 model（无 slash）复合形态：agentOptions 不带 provider，effort 照补
+  var calls3 = []
+  var b3 = laneBoard({}, { workerModel: { id: 'baremodel', effort: 'high' } })
+  await mkDispatch(b3, { subagents: mkActivationSubagents(calls3) }).spawnOneShot(SID, b3.tasks[0], 'worker')
+  assert.deepEqual(calls3[0].request.agentOptions, { model: 'baremodel', reasoningEffort: 'high' }, '无 slash 裸 model + reasoningEffort（构造点 else 分支同补）')
+})
+
+test('复合⑥c：候选不带 effort（{id} 对象/纯字符串/老字符串槽）→ agentOptions 无 reasoningEffort 键（零回归）', async function () {
+  // {id} 复合对象不带 effort：agentOptions 与纯字符串候选逐字一致
+  var calls = []
+  var b = laneBoard({}, { workerModel: { id: 'bw/board-w' } })
+  await mkDispatch(b, { subagents: mkActivationSubagents(calls) }).spawnOneShot(SID, b.tasks[0], 'worker')
+  assert.deepEqual(calls[0].request.agentOptions, { provider: 'bw', model: 'board-w' }, '{id} 对象（无 effort）→ agentOptions 形态与字符串时代逐字一致')
+  assert.equal('reasoningEffort' in calls[0].request.agentOptions, false, '无 effort 不挂 reasoningEffort 键')
+  // 老纯字符串板级槽（现状路径）：与 ④a 断言同形（双保险零回归）
+  var calls2 = []
+  var b2 = laneBoard({})
+  await mkDispatch(b2, { subagents: mkActivationSubagents(calls2) }).spawnOneShot(SID, b2.tasks[0], 'worker')
+  assert.deepEqual(calls2[0].request.agentOptions, { provider: 'bw', model: 'board-w' }, '老字符串板级槽照旧')
+  assert.equal('reasoningEffort' in calls2[0].request.agentOptions, false, '老路径零新增键')
+})
+
+test('复合⑥d：候选冷却 → 切备用链复合项 → effort 随备用透传；备用纯字符串 → 原 effort 不跨模型带过去', async function () {
+  var origErr = console.error; console.error = function () {}
+  try {
+    // 原候选=lane 复合带 effort 且冷却；备用=复合带 effort → 备用的档透传
+    var calls = []
+    var b = laneBoard({ size: 'heavy' }, { laneModels: lanesOf({ heavy: { worker: [{ id: 'lw/lane-w', effort: 'high' }], verifier: [] } }), fallbackModels: [{ id: 'fb/fb-a', effort: 'low' }] })
+    var state = { modelCooldown: { 'lw/lane-w': Date.now() + 3600000 } }
+    var sr = await mkDispatch(b, { subagents: mkActivationSubagents(calls) }, state).spawnOneShot(SID, b.tasks[0], 'worker')
+    assert.ok(sr)
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'fb', model: 'fb-a', reasoningEffort: 'low' }, '冷却 → 切备用复合项，effort=备用的档（非原候选的）')
+    assert.equal(sr.modelSource, 'fallback', 'modelSource=fallback 留档照旧')
+    assert.equal(sr.model, 'fb/fb-a', 'rec.model=备用 id（纯字符串）')
+    // 对照：备用=纯字符串 → 原 high 不泄漏到备用（effort 是模型属性，不跨模型带过去）
+    var calls2 = []
+    var b2 = laneBoard({ size: 'heavy' }, { laneModels: lanesOf({ heavy: { worker: [{ id: 'lw/lane-w', effort: 'high' }], verifier: [] } }), fallbackModels: ['fb/fb-a'] })
+    var state2 = { modelCooldown: { 'lw/lane-w': Date.now() + 3600000 } }
+    await mkDispatch(b2, { subagents: mkActivationSubagents(calls2) }, state2).spawnOneShot(SID, b2.tasks[0], 'worker')
+    assert.deepEqual(calls2[0].request.agentOptions, { provider: 'fb', model: 'fb-a' }, '备用纯字符串 → agentOptions 无 reasoningEffort（原候选 effort 不跨模型带过去）')
+    // 熔断臂同款：候选熔断 → 备用复合项 effort 透传
+    var calls3 = []
+    var b3 = laneBoard({ size: 'heavy' }, { fallbackModels: [{ id: 'fb/fb-a', effort: 'high' }] })
+    var bad = {}
+    bad[SID + '|lw/lane-w'] = true // lane 级熔断
+    await mkDispatch(b3, { subagents: mkActivationSubagents(calls3) }, { badModels: bad }).spawnOneShot(SID, b3.tasks[0], 'worker')
+    assert.deepEqual(calls3[0].request.agentOptions, { provider: 'fb', model: 'fb-a', reasoningEffort: 'high' }, '熔断 → 切备用复合项，effort 透传')
+  } finally { console.error = origErr }
+})
+
+test('复合⑥e：原档冷却且备用链尽 → C5 降档命中复合槽 → effort 透传；降档槽纯字符串 → 无 effort（零回归）', async function () {
+  var origErr = console.error; console.error = function () {}
+  try {
+    var calls = []
+    var b = laneBoard({ size: 'heavy' }, { laneModels: lanesOf({ heavy: { worker: [{ id: 'hw/heavy-w', effort: 'high' }], verifier: [] }, standard: { worker: [{ id: 'sw/std-w', effort: 'medium' }], verifier: [] } }), fallbackModels: [] })
+    var state = { modelCooldown: { 'hw/heavy-w': Date.now() + 3600000 } }
+    var sr = await mkDispatch(b, { subagents: mkActivationSubagents(calls) }, state).spawnOneShot(SID, b.tasks[0], 'worker')
+    assert.ok(sr)
+    assert.deepEqual(calls[0].request.agentOptions, { provider: 'sw', model: 'std-w', reasoningEffort: 'medium' }, '降档命中复合槽 → 降档槽的 effort 透传（原档 high 不带过去）')
+    assert.equal(sr.modelSource, 'cooldown-downgrade', 'modelSource=cooldown-downgrade 留档照旧')
+    assert.equal(sr.model, 'sw/std-w', 'rec.model=降档目标 id')
+    // 对照：降档槽纯字符串 → 无 reasoningEffort（老 C5 行为逐字不变）
+    var calls2 = []
+    var b2 = laneBoard({ size: 'heavy' }, { laneModels: lanesOf({ heavy: { worker: 'hw/heavy-w', verifier: '' }, standard: { worker: 'sw/std-w', verifier: '' } }), fallbackModels: [] })
+    var state2 = { modelCooldown: { 'hw/heavy-w': Date.now() + 3600000 } }
+    await mkDispatch(b2, { subagents: mkActivationSubagents(calls2) }, state2).spawnOneShot(SID, b2.tasks[0], 'worker')
+    assert.deepEqual(calls2[0].request.agentOptions, { provider: 'sw', model: 'std-w' }, '降档槽纯字符串 → agentOptions 与升级前逐字一致')
+  } finally { console.error = origErr }
+})
+
+test('复合⑥f：源码级锁 effort 字段名——camelCase reasoningEffort 在位、agentOptions 上 snake_case 缺席（防手滑改回 llm 层字段名）', function () {
+  var dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  assert.match(dsp, /req\.agentOptions\.reasoningEffort = modelEffort/, 'agentOptions 构造点补 reasoningEffort（宿主 dsh-subagent AgentOptions 契约）')
+  assert.doesNotMatch(dsp, /agentOptions\.reasoning_effort/, 'agentOptions 上不得出现 snake_case reasoning_effort——那是 OpenAI 线参/llm GenerateOptions 层的字段名，spawn 契约面混用即静默无效')
+  assert.match(dsp, /modelEffort = cands\[mi\]\[0\]\.effort \|\| ''/, '主链命中点 carry effort')
+  assert.match(dsp, /modelEffort = fbEffOf\[fbHit\] \|\| ''/, '备用命中点 carry effort')
 })
 

@@ -512,6 +512,15 @@ export function createDispatch(ctx, state, deps) {
       if (req.outputSchema) r.outputSchema = req.outputSchema // outputSchema 透传（task-mvnenrwk 拆解官结构化提案）
       return r
     }
+    // ===== 槽位值 → 取模链候选（task-mwkbnjk8）：string | {id,effort?} → {id, effort?} | null =====
+    // 配置面（task-mwkbmu9k 子卡2）起 laneModels 槽/workerModel/verifierModel/fallbackModels 支持
+    // {id, effort?} 复合槽位值；取模链候选统一升到该复合形态：id 供既有健康闸/熔断/冷却判定照旧消费
+    // （判定点一律送 id 字符串——纯字符串槽位行为逐字不变），effort 随候选带到 agentOptions 构造点。
+    // 脏形态（非字符串/数组/缺 id/空 id）→ null（与旧「非字符串=清除」口径同款防御）。
+    function slotCandOf(v) {
+      if (typeof v === 'string') { var s = v.trim(); return s ? { id: s } : null }
+      return core.normalizeSlotObj(v) // {id, effort?} | null（归一出口只含 id/effort 两键）
+    }
 
     async function spawnOneShot(sid, t, role) {
       var subagents = ctx.subagents; if (!subagents) return null
@@ -525,7 +534,13 @@ export function createDispatch(ctx, state, deps) {
       // 每个候选照常过 badModels 熔断：命中即跳过该候选降下一跳（原「熔断即回父模型」改为「熔断即降一级」）。
       // modelSource 记实际命中跳（card/lane/board/parent），随 run 留档落卡便于审计。
       // hook run（hook-pre/hook-post）不进链：维持现状恒用父模型（板级 worker/verifier 模型对 hook 无语义）。
+      // ===== 候选思考等级（task-mwkbnjk8）：四级链候选升级 {id, effort?} 复合（slotCandOf）=====
+      // 命中候选带 effort 时 agentOptions 补 reasoningEffort（宿主 AgentOptions 契约字段，camelCase）；
+      // 不带时 agentOptions 与现状逐字一致（零回归，模型默认档）。健康闸/熔断/冷却照旧按 id 判（判定点
+      // 送 id 字符串，语义与纯字符串槽位同款）；modelOverride 恒为纯 id 字符串——rec.model 留档/冷却嗅探/
+      // 降档留痕/熔断键全链零迁移，effort 走并行的 modelEffort 变量（切备用/降档命中即换成新候选的档）。
       var modelOverride = ''
+      var modelEffort = ''
       var modelSource = 'parent'
       // 力度档位留档（task-mvneq4mw）：worker/verifier 归一到三档（缺省/脏值=标档语义），
       // 随 rec 与 run 留档（recordRunHistory），记分卡 bySize 聚合按它归桶；hook 不进链不留档。
@@ -539,7 +554,7 @@ export function createDispatch(ctx, state, deps) {
         var dir = await modelDirectory()
         var cands = []
         var tm = typeof t.model === 'string' ? t.model.trim() : ''
-        if (tm) cands.push([tm, 'card'])
+        if (tm) cands.push([{ id: tm }, 'card']) // 卡级特例=纯字符串（配置面无卡级 effort 字段）
         var sz = typeof t.size === 'string' ? t.size : ''
         laneSize = core.TASK_SIZES.indexOf(sz) >= 0 ? sz : 'standard'
         var laneCfg = cfg(dsnap).laneModels
@@ -549,45 +564,62 @@ export function createDispatch(ctx, state, deps) {
           // 【目录失效闸 task-mvd3li6】、近期连败未达软闸线【连败软闸 task-mvd3li6】；偏好序非故障序——
           // 首选病即次选赢，不降级不绕链）。槽内全病 → 以首项为代表照常入链，由既有熔断/冷却分支
           // 照旧消费 fallbackModels → 降档 → parent（既有链逐字不动）；空数组槽位=不命中，降下一级。
+          // 复合候选（task-mwkbnjk8）：健康判定按 id（slotCandOf 提取），effort 随候选入链。
           var lvList = Array.isArray(laneCfg[sz][roleKey]) ? laneCfg[sz][roleKey] : []
-          var lv = ''
-          for (var li = 0; li < lvList.length; li++) { if (healthyModel(sid, lvList[li], dir)) { lv = lvList[li]; break } }
-          if (!lv && lvList.length) lv = lvList[0] // 槽内全病：首项代表入链（既有熔断/冷却分支照旧兜底）
+          var lv = null
+          for (var li = 0; li < lvList.length; li++) {
+            var lc = slotCandOf(lvList[li])
+            if (lc && healthyModel(sid, lc.id, dir)) { lv = lc; break }
+          }
+          if (!lv && lvList.length) lv = slotCandOf(lvList[0]) // 槽内全病：首项代表入链（既有熔断/冷却分支照旧兜底）
           if (lv) cands.push([lv, 'lane'])
         }
+        // 板级单模型槽（task-mwkbnjk8）：复合形态 {id,effort?} 照常入链（原形 typeof string 判丢弃对象形态）；
+        // 纯字符串 trim 语义逐字不变，脏形态（数字/布尔/无效对象）=清除同旧。
         var bm = role === 'verifier' ? dsnap.verifierModel : dsnap.workerModel
-        bm = typeof bm === 'string' ? bm.trim() : ''
-        if (bm) cands.push([bm, 'board'])
+        var bc = slotCandOf(bm)
+        if (bc) cands.push([bc, 'board'])
         // ===== 备用模型链（task-mvnqxlpn）：板级 fallbackModels 有序链 =====
         // 取模候选被判「熔断中/冷却中」时的跳过顺序：先按链找首个健康模型（同档替代、跨供应商，
         // 保住能力水位）→ 链尽才走原降级路径（熔断=降下一跳 / 冷却=C5 降档链）→ 最后 parent 兜底。
         // 缺省 []：两个判定点均不触发（零回归——无配置时行为与现状逐字一致）。
         // 留痕：命中即 run.modelSource='fallback' + 卡 messages 记「原模型 X 冷却/熔断，切备用 Y」。
+        // 复合形态（task-mwkbnjk8）：备用链项 string | {id,effort?}——判定按 id 送入既有
+        // pickHealthyFallback（纯 id 数组，返回值与字符串链时代同形）；命中 id 映射回首项 effort
+        // （同 id 健康判定同键，首个健康即首个同 id 项——归因不漂）。纯字符串链 fbIds 原样、effort 全空。
         var fbList = cfg(dsnap).fallbackModels
+        var fbIds = []
+        var fbEffOf = {}
+        for (var fbi = 0; fbi < fbList.length; fbi++) {
+          var fbc = slotCandOf(fbList[fbi])
+          if (!fbc) continue
+          fbIds.push(fbc.id)
+          if (!(fbc.id in fbEffOf)) fbEffOf[fbc.id] = fbc.effort || ''
+        }
         for (var mi = 0; mi < cands.length; mi++) {
           // ===== 目录失效闸（task-mvd3li6）：候选不在当前模型目录（已从宿主配置删除/改名）→ 跳过该候选 =====
           // 覆盖卡级特例/档位/板级全路径——卡级特例只豁免健康闸（连败软闸/熔断/冷却），**不豁免存在闸**
           // （原形：本体板已删除的失效模型钉在卡级特例上还在被派）。目录不可得（dir=null）→ 整体跳过不误伤。
-          if (outOfDir(cands[mi][0], dir)) { await traceStaleModel(sid, t.id, cands[mi][0]); continue }
-          if (badModels[modelKey(sid, cands[mi][0])]) {
+          if (outOfDir(cands[mi][0].id, dir)) { await traceStaleModel(sid, t.id, cands[mi][0].id); continue }
+          if (badModels[modelKey(sid, cands[mi][0].id)]) {
             // 熔断候选：先扫备用链找首个健康者（链本身逐项过健康检查），命中即切备用（不再降下一跳）
-            var fbHit = await pickHealthyFallback(sid, fbList, dir, t.id)
+            var fbHit = await pickHealthyFallback(sid, fbIds, dir, t.id)
             if (fbHit) {
-              console.error('[task-board] model ' + cands[mi][0] + ' (' + cands[mi][1] + ' 级) circuited, switch to fallback ' + fbHit)
+              console.error('[task-board] model ' + cands[mi][0].id + ' (' + cands[mi][1] + ' 级) circuited, switch to fallback ' + fbHit)
               try {
                 await mutateLocked(sid, function (d) {
                   var t2 = d.tasks.find(function (x) { return x.id === t.id })
                   if (!t2) return null
                   if (!Array.isArray(t2.messages)) t2.messages = []
-                  t2.messages.push({ kind: 'fallback', text: '🔀 原模型 ' + cands[mi][0] + ' 熔断中，切备用 ' + fbHit, at: new Date().toISOString(), by: 'system' })
+                  t2.messages.push({ kind: 'fallback', text: '🔀 原模型 ' + cands[mi][0].id + ' 熔断中，切备用 ' + fbHit, at: new Date().toISOString(), by: 'system' })
                   return { ok: true }
                 }, true) // skipKick：只是留痕，不踢 poolCycle
               } catch (_) {}
-              modelOverride = fbHit; modelSource = 'fallback'; break
+              modelOverride = fbHit; modelEffort = fbEffOf[fbHit] || ''; modelSource = 'fallback'; break
             }
-            console.error('[task-board] model ' + cands[mi][0] + ' (' + cands[mi][1] + ' 级) circuited, trying next level'); continue
+            console.error('[task-board] model ' + cands[mi][0].id + ' (' + cands[mi][1] + ' 级) circuited, trying next level'); continue
           }
-          modelOverride = cands[mi][0]; modelSource = cands[mi][1]; break
+          modelOverride = cands[mi][0].id; modelEffort = cands[mi][0].effort || ''; modelSource = cands[mi][1]; break
         }
         // ===== 额度冷却降档（task-mvneq4kk）：解析出的候选在冷却期 → 沿 heavy→standard→light 降档再试 =====
         // 降档候选同样过熔断+冷却双闸（冷却项顺带惰性清除过期）；到底（light 也不可用）→ 父模型兜底
@@ -602,9 +634,10 @@ export function createDispatch(ctx, state, deps) {
           if (cdUntil) {
             var cdFrom = modelOverride
             // 冷却候选：同样先扫备用链找首个健康者，链尽才走 C5 降档链
-            var fbCd = await pickHealthyFallback(sid, fbList, dir, t.id)
+            var fbCd = await pickHealthyFallback(sid, fbIds, dir, t.id)
             if (fbCd) {
               modelOverride = fbCd
+              modelEffort = fbEffOf[fbCd] || ''
               modelSource = 'fallback'
               console.error('[task-board] 模型 ' + cdFrom + ' 冷却中（至 ' + hhmmOf(cdUntil) + '），切备用 ' + fbCd)
               try {
@@ -620,20 +653,24 @@ export function createDispatch(ctx, state, deps) {
             var laneOrder = ['heavy', 'standard', 'light']
             var curLane = laneOrder.indexOf(sz) >= 0 ? sz : 'standard'
             var cdPicked = ''
+            var cdEffort = ''
             for (var di = laneOrder.indexOf(curLane) + 1; di < laneOrder.length; di++) {
               var dl = laneCfg[laneOrder[di]]
               // 降档目标槽同为有序数组（task-mvnxckhq）：槽内按序取首个健康候选；空槽/槽内全病 → 继续降下一档
+              // 复合候选（task-mwkbnjk8）：判定按 id（slotCandOf 提取），命中项的 effort 随降档带走。
               var dmList = dl && Array.isArray(dl[roleKey]) ? dl[roleKey] : []
               for (var dmi = 0; dmi < dmList.length; dmi++) {
-                var dm = dmList[dmi]
-                if (outOfDir(dm, dir)) { console.error('[task-board] cooldown 降档候选 ' + dm + ' 不在当前模型目录（配置已失效），继续降档'); await traceStaleModel(sid, t.id, dm); continue }
-                if (badModels[modelKey(sid, dm)]) { console.error('[task-board] cooldown 降档候选 ' + dm + ' 熔断中，继续降档'); continue }
-                if (cooldownLive(dm)) { console.error('[task-board] cooldown 降档候选 ' + dm + ' 同在冷却期，继续降档'); continue }
-                cdPicked = dm; break
+                var dmc = slotCandOf(dmList[dmi])
+                if (!dmc) continue
+                if (outOfDir(dmc.id, dir)) { console.error('[task-board] cooldown 降档候选 ' + dmc.id + ' 不在当前模型目录（配置已失效），继续降档'); await traceStaleModel(sid, t.id, dmc.id); continue }
+                if (badModels[modelKey(sid, dmc.id)]) { console.error('[task-board] cooldown 降档候选 ' + dmc.id + ' 熔断中，继续降档'); continue }
+                if (cooldownLive(dmc.id)) { console.error('[task-board] cooldown 降档候选 ' + dmc.id + ' 同在冷却期，继续降档'); continue }
+                cdPicked = dmc.id; cdEffort = dmc.effort || ''; break
               }
               if (cdPicked) break
             }
             modelOverride = cdPicked // 空串 = 到底，父模型兜底
+            modelEffort = cdEffort
             modelSource = 'cooldown-downgrade'
             var cdTo = cdPicked || '父模型'
             console.error('[task-board] 模型 ' + cdFrom + ' 冷却中（至 ' + hhmmOf(cdUntil) + '），本 run 降档为 ' + cdTo)
@@ -694,6 +731,14 @@ export function createDispatch(ctx, state, deps) {
         var slash = modelOverride.indexOf('/')
         if (slash > 0) req.agentOptions = { provider: modelOverride.slice(0, slash), model: modelOverride.slice(slash + 1) }
         else req.agentOptions = { model: modelOverride }
+        // ===== 思考等级透传（task-mwkbnjk8）：命中候选带 effort 时补 reasoningEffort =====
+        // 字段名实证（宿主 dsh-subagent AgentOptions 契约，camelCase）：agentOptions = { provider?,
+        // model?, reasoningEffort?, maxTokens?, subagentDepth? }——resolveChildAgentOptions 把
+        // request.agentOptions 展开合并进子代理路由（显式 reasoningEffort 随路由生效；省略且路由变更时
+        // 自动清父档走模型默认档）。注意区分：OpenAI 线参/llm 层（GenerateOptions.reasoningEffort →
+        // 线参 reasoning_effort）是另一层契约，spawn 面就是 camelCase。不带 effort 的候选不挂该键——
+        // agentOptions 与升级前逐字一致（零回归，模型默认档）。
+        if (modelEffort) req.agentOptions.reasoningEffort = modelEffort
       }
       // ===== spawn 两条路径（task-muw5gnhv 卡1：可续跑 Worker + 回退开关）=====
       // 开关开（缺省）→ Worker 走 continuable：subagents.startContinuable 建**持久子会话**
