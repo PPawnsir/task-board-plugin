@@ -18,6 +18,9 @@
 //   ⑩ OrderedModelsEditor 组件本体：芯片 ×/↑ 交互 + 下拉过滤已选 + 改动即写 + 目录缺失降级
 //      + 下架模型可发现性（task-mwcw1q7b）：链内不在目录 → 「⚠️下架」标记 + warn 描边；目录 null 不误标
 //      + 一键清理失效（task-mwcw2jx8）：「清理失效（N）」按钮有失效项才渲染，过滤纯删除复用 commit 通道
+//   ⑱ effort 选择器（task-mwkbo9z6）：{id,effort} 槽位芯片显示「id · effort」（纯字符串只显 id 零视觉
+//      变化）+ 添加时 effort 下拉（选项=该模型 efforts、默认 defaultEffort、「默认」=不指定；无 efforts/
+//      目录不可用隐藏）+ 芯片 effort 文本点击改档走 onSave 提交 {id,effort}（重建纯函数行为级锁定）
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -997,5 +1000,77 @@ test('⑮模型路由健康点：🟢🟡🔴⚪ + 悬浮详情 + 主动探测�
   assert.ok(src.indexOf('健康嗅探（事前调度）') >= 0)
   for (const marker of ['function ModelHealthDot(props)', '健康嗅探（事前调度）', "cfgKey: 'probeIntervalMin'", 'health: modelHealth']) {
     assert.ok(built.indexOf(marker) >= 0, 'client.js 缺健康标记：' + marker + '（需 npm run build-client）')
+  }
+})
+
+// ===== ⑱ effort 选择器（task-mwkbo9z6）：芯片「id · effort」+ 添加时 effort 下拉 + 芯片改档走 onSave =====
+// 前置：子卡1（task-mwkbm37s）list-models 每模型带 efforts（档位 id 清单，空/缺席=不支持或老宿主）与
+// defaultEffort（默认档，缺席省略）；子卡2（task-mwkbmu9k）配置面支持 {id,effort?} 复合槽位。
+// 本卡纯 GUI（onSave 通道/list-models 拉取零改）：①芯片显示 ②添加下拉 ③芯片改档——⑤产物同步。
+test('⑱a effort 选择器·源码结构：两形态读侧（list+effs 平行数组）+ 芯片 effort 段 gated + 添加时 effort 下拉（efforts 选项/defaultEffort 默认/无 efforts 隐藏）+ 改档提交', () => {
+  const iOme18 = src.indexOf('function OrderedModelsEditor(props)')
+  const iMrp18 = src.indexOf('function ModelRoutePopover(props)')
+  assert.ok(iOme18 >= 0 && iMrp18 > iOme18, 'OrderedModelsEditor 组件边界切片失败')
+  const ome = src.slice(iOme18, iMrp18)
+  // ① 读侧两形态拆解：list=同序 id 数组（去重/下架/清理判定按 id 走，口径零改）+ effs=同序 effort 平行数组
+  assert.match(ome, /var raw = Array\.isArray\(props\.value\) \? props\.value : \(typeof props\.value === 'string' && props\.value \? \[props\.value\] : /, '缺两形态读侧容错（老单字符串形态归一为单元素数组）')
+  assert.match(ome, /if \(typeof rv === 'string' && rv\.trim\(\)\) \{ list\.push\(rv\.trim\(\)\); effs\.push\(''\) \}/, '字符串项未归一进 list/effs（effort 空=纯字符串形态）')
+  assert.match(ome, /typeof rv\.id === 'string' && rv\.id\.trim\(\)\) \{ list\.push\(rv\.id\.trim\(\)\); effs\.push\(typeof rv\.effort === 'string' && rv\.effort\.trim\(\) \? rv\.effort\.trim\(\) : ''\) \}/, '对象项未拆解进 list/effs 平行数组（{id,effort?} → id + effort）')
+  // ① 芯片显示：effort 文本段 gated 于 eff（纯字符串槽位不渲染 → 芯片只显 id，零视觉变化）；id 文本段原样
+  assert.match(ome, /var eff = effs\[i\] \|\| ''/, '缺芯片 effort 读取（effs 平行数组按下标）')
+  assert.match(ome, /eff \? \(effEdit === i/, 'effort 文本/改档下拉未 gated 于 eff（纯字符串芯片不得出现 effort 段）')
+  assert.match(ome, /\}, ' · ' \+ eff\)\) : null/, '缺「id · effort」芯片 effort 文本（· 分隔）')
+  assert.match(ome, /React\.createElement\('span', null, m\),/, '芯片 id 文本段应保持原样（纯字符串=只显 id）')
+  // ② effort 元数据选项源：effortsOf（efforts 空/缺席/目录不可用 → null → 相关 UI 隐藏）+ defaultEffortOf（缺席=''）
+  assert.match(ome, /function effortsOf\(id\) \{ var mm = modelMeta && modelMeta\[id\]; return \(mm && Array\.isArray\(mm\.efforts\) && mm\.efforts\.length\) \? mm\.efforts : null \}/, '缺 efforts 选项源（空/缺席=隐藏 effort 选择器）')
+  assert.match(ome, /function defaultEffortOf\(id\) \{ var mm = modelMeta && modelMeta\[id\]; return \(mm && typeof mm\.defaultEffort === 'string' && mm\.defaultEffort\) \? mm\.defaultEffort : '' \}/, '缺 defaultEffort 取值（缺席=空串=「默认」档）')
+  // ② 添加时 effort 下拉：pickEfforts null（未选/无 efforts/目录不可用/降级手输）→ 不渲染；选项=efforts +「默认」
+  assert.match(ome, /var pickEfforts = pickVal \? effortsOf\(pickVal\) : null/, '缺添加时 effort 选项源（pickEfforts=null → 下拉隐藏，只添加 id）')
+  assert.match(ome, /pickEfforts \? React\.createElement\('select', \{ value: pickEff, onChange: function \(e\) \{ setPickEff\(e\.target\.value\) \}, title: '思考等级（默认=不指定 effort，走模型默认档）'/, '缺添加时 effort 下拉（渲染 gated 于 pickEfforts）')
+  assert.match(ome, /pickEfforts\.map\(function \(ef\) \{ return React\.createElement\('option', \{ key: ef, value: ef \}, ef\) \}\)/, 'effort 下拉选项未来自该模型 efforts 清单')
+  assert.match(ome, /React\.createElement\('option', \{ value: '' \}, '默认'\)/, '缺「默认」选项（=不指定 effort，走模型默认档）')
+  // ② 模型切换即重置：effort 默认选中该模型 defaultEffort
+  assert.match(ome, /setPickEff\(e\.target\.value \? defaultEffortOf\(e\.target\.value\) : ''\)/, '模型切换未把 effort 重置为该模型 defaultEffort')
+  // ② 添加落形：选档 → {id,effort} 终形；「默认」/无 efforts → 纯字符串（零变化）
+  assert.match(ome, /if \(pickEff && effortsOf\(v\)\) v = \{ id: v, effort: pickEff \}/, '添加未落 {id,effort} 终形（选了档位时）')
+  // ③ 芯片改档：点击 effort 文本展开（effortsOf 有选项才可点）+ 改选走 commit（{id,effort} 由重建层落形）
+  assert.match(ome, /if \(effOpts\) setEffEdit\(effEdit === i \? null : i\)/, 'effort 文本点击未展开改档下拉（有选项才可点）')
+  assert.match(ome, /onChange: function \(e\) \{ changeEffort\(i, e\.target\.value\) \}/, '改档下拉未接 changeEffort')
+  assert.match(ome, /var patch = \{\}; patch\[list\[i\]\] = eff \|\| ''/, '缺改档单项覆盖（「默认」=清除回纯字符串）')
+  assert.match(ome, /function changeEffort\(i, eff\) \{[\s\S]*?commit\(list\.slice\(\), patch\)/, '改档未走 commit → onSave 通道')
+  // ③ 提交重建：effMap（存量 id effort 原样带回，删除/前移/清理不丢档）+ effPatch（改档覆盖）→ onSave 单参形态
+  assert.match(ome, /var effMap = \{\}[\s\S]*?next = rebuildEffItems\(next, effMap, effPatch\)/, 'commit 缺两形态重建（存量 effort 按id带回 + 改档覆盖）')
+  assert.match(src, /function rebuildEffItems\(next, effMap, effPatch\) \{/, '缺 rebuildEffItems 重建纯函数（模块级，供 commit 落形）')
+  assert.match(ome, /Promise\.resolve\(props\.onSave\(next\)\)/, 'onSave 通道形态被改（应保持既有单参形态）')
+  // 边界锁：list-models 拉取与下发未动（routeModels 原样传 7 处编辑器，efforts 元数据随 models 透传）
+  assert.match(src, /models: routeModels, emptyHint: '继承板级', health: modelHealth/, 'models 透传接线被改（efforts 元数据应随 routeModels 原样下发）')
+})
+
+test('⑱b effort 重建纯函数·行为级：纯字符串零变化 + 存量 effort 保留（删除/前移/清理不丢档）+ add 终形直通 + 改档覆盖/清除 + 脏项防御', () => {
+  const fnM = src.match(/function rebuildEffItems\(next, effMap, effPatch\) \{[\s\S]*?\n    \}/)
+  assert.ok(fnM, '缺 rebuildEffItems 函数体（源码提取失败）')
+  const rebuildEffItems = new Function(fnM[0] + '\nreturn rebuildEffItems')()
+  // ① 纯字符串数组（老形态/「默认」）：无 effort → 原样输出（零变化）
+  assert.deepEqual(rebuildEffItems(['a/b', 'c/d'], {}, null), ['a/b', 'c/d'])
+  assert.deepEqual(rebuildEffItems(['a/b'], null, null), ['a/b'], 'effMap null（目录不可用）防御不炸')
+  // ② 存量 effort 保留：×/↑/清理传 id 数组，effMap 按 id 带回 {id,effort}（删除/前移/清理/重排不丢档）
+  assert.deepEqual(rebuildEffItems(['c/d', 'a/b'], { 'a/b': 'high' }, null), ['c/d', { id: 'a/b', effort: 'high' }])
+  assert.deepEqual(rebuildEffItems(['a/b'], { 'a/b': 'high', 'x/y': 'low' }, null), [{ id: 'a/b', effort: 'high' }], 'effMap 只按 next 里的 id 取（链外 id 不带出）')
+  // ③ add 终形直通：混合数组（ids + {id,effort}）——对象项 effort 保留、无 effort 对象回纯字符串、均 trim
+  assert.deepEqual(rebuildEffItems(['a/b', { id: ' c/d ', effort: ' low ' }], { 'a/b': 'high' }, null), [{ id: 'a/b', effort: 'high' }, { id: 'c/d', effort: 'low' }])
+  assert.deepEqual(rebuildEffItems([{ id: ' a/b ' }], null, null), ['a/b'], '无 effort 对象回纯字符串（trim 后）')
+  // ④ 改档覆盖：effPatch 优先于 effMap 与对象自带 effort；''=清除回纯字符串
+  assert.deepEqual(rebuildEffItems(['a/b'], { 'a/b': 'high' }, { 'a/b': 'low' }), [{ id: 'a/b', effort: 'low' }], '改档覆盖优先于存量 effMap')
+  assert.deepEqual(rebuildEffItems(['a/b'], { 'a/b': 'high' }, { 'a/b': '' }), ['a/b'], '「默认」=清除 effort 回纯字符串')
+  assert.deepEqual(rebuildEffItems(['a/b'], {}, { 'a/b': 'medium' }), [{ id: 'a/b', effort: 'medium' }], '纯字符串槽位改档 → 落 {id,effort}')
+  assert.deepEqual(rebuildEffItems([{ id: 'a/b', effort: 'high' }], {}, { 'a/b': 'low' }), [{ id: 'a/b', effort: 'low' }], '对象槽位改档覆盖（对象自带 effort 让位）')
+  // ⑤ 脏项防御：非字符串/缺 id/空 id 丢弃；effort 非字符串忽略；非数组 next → []
+  assert.deepEqual(rebuildEffItems([42, { id: '' }, null, ' x/y ', { id: ' m/n', effort: 9 }], null, null), ['x/y', 'm/n'], '脏项丢弃、id trim、非字符串 effort 忽略')
+  assert.deepEqual(rebuildEffItems('junk', null, null), [], '非数组入参 → 空数组（防御不炸）')
+})
+
+test('⑱c effort 选择器·产物同步：client.js 已重组装且含全链标记', () => {
+  for (const m of ['function rebuildEffItems(next, effMap, effPatch)', 'function effortsOf(id)', 'function defaultEffortOf(id)', 'function changeEffort(i, eff)', "React.createElement('option', { value: '' }, '默认')", "' · ' + eff", 'if (pickEff && effortsOf(v)) v = { id: v, effort: pickEff }', 'var pickEfforts = pickVal ? effortsOf(pickVal) : null']) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺 effort 选择器标记：' + m + '（需 npm run build-client 重组装）')
   }
 })

@@ -1116,12 +1116,52 @@
     // 复用既有 set-board-config 通道（laneModels 槽位写**整个有序数组** / fallbackModels 写**整个数组**，
     // 零 RPC 改动），host 逐项合法清单校验、非法整体拒写（ok:false 亮 ⚠️ 不静默吞）；写成功后 fetchTasks 回读权威值。
     // props.models=null（目录枚举失败/老宿主）时降级为文本输入 + 添加，不丢功能。
+    // effort 选择器（task-mwkbo9z6，前置：子卡1 task-mwkbm37s list-models 带 efforts/defaultEffort +
+    // 子卡2 task-mwkbmu9k 配置面支持 {id,effort?}）：槽位值两形态（string | {id,effort?} 混合有序数组）——
+    // ①芯片显示「id · effort」（纯字符串槽位只显 id，零视觉变化）②添加时 effort 下拉（选项=该模型 efforts，
+    // 默认选中 defaultEffort，「默认」=不指定 effort 走模型默认档；无 efforts/目录不可用下拉隐藏）③芯片
+    // effort 文本点击展开改档小下拉；写仍走既有 onSave 通道（提交两形态混合数组，host 侧已归一，通道零改）。
+    // ===== 槽位两形态重建纯函数（task-mwkbo9z6）：commit 提交前的落形层 =====
+    // 入参：next=有序数组（既有交互 ×/↑/清理/改档传 id 数组；add 传混合数组——新项已是 {id,effort} 终形）；
+    // effMap=当前槽值逐 id effort（删除/前移/清理不碰 per-id effort → 存量 id 重建时原样带回，改档不丢档）；
+    // effPatch=芯片改档单项覆盖（id→新 effort；''=清除回纯字符串）。
+    // 出参：无 effort=纯字符串、有 effort={id,effort}（只含这两键、均 trim）的混合有序数组——host 两形态
+    // 既有归一（task-mwkbmu9k set-board-config/normalizeLaneSlot），纯字符串槽位零视觉变化。脏项（非字符串/
+    // 缺 id/空 id）丢弃，与读侧容错同口径。
+    function rebuildEffItems(next, effMap, effPatch) {
+      var out = []
+      var arr = Array.isArray(next) ? next : []
+      for (var i = 0; i < arr.length; i++) {
+        var nx = arr[i]
+        var isObj = nx && typeof nx === 'object'
+        var id = isObj ? (typeof nx.id === 'string' ? nx.id.trim() : '') : (typeof nx === 'string' ? nx.trim() : '')
+        if (!id) continue
+        var eff = ''
+        if (effPatch && (id in effPatch)) { if (typeof effPatch[id] === 'string' && effPatch[id].trim()) eff = effPatch[id].trim() }
+        else if (isObj && typeof nx.effort === 'string' && nx.effort.trim()) eff = nx.effort.trim()
+        else if (effMap && effMap[id]) eff = effMap[id]
+        out.push(eff ? { id: id, effort: eff } : id)
+      }
+      return out
+    }
     function OrderedModelsEditor(props) {
       var _R = React; var useState = _R.useState
       // 读侧容错：老 host 单字符串形态归一为单元素数组；非字符串/空串项滤掉（host 归一后恒为干净数组，此处只是防御）
-      var list = Array.isArray(props.value) ? props.value.filter(function (x) { return typeof x === 'string' && x }) : (typeof props.value === 'string' && props.value ? [props.value] : [])
+      var raw = Array.isArray(props.value) ? props.value : (typeof props.value === 'string' && props.value ? [props.value] : (props.value && typeof props.value === 'object' && typeof props.value.id === 'string' ? [props.value] : []))
+      // 槽位两形态拆解（task-mwkbo9z6）：list=同序 id 数组（既有去重/下架/清理判定全按 id 走，口径零改）；
+      // effs=同序 effort 平行数组（''=该槽无 effort=纯字符串形态，芯片只显示 id——零视觉变化）。
+      var list = [], effs = []
+      for (var ri = 0; ri < raw.length; ri++) {
+        var rv = raw[ri]
+        if (typeof rv === 'string' && rv.trim()) { list.push(rv.trim()); effs.push('') }
+        else if (rv && typeof rv === 'object' && typeof rv.id === 'string' && rv.id.trim()) { list.push(rv.id.trim()); effs.push(typeof rv.effort === 'string' && rv.effort.trim() ? rv.effort.trim() : '') }
+      }
       var _p = useState(''), pickVal = _p[0], setPickVal = _p[1]
       var _m = useState(''), msg = _m[0], setMsg = _m[1]
+      // 添加时 effort 选择（task-mwkbo9z6 ②）：''=「默认」（不指定 effort，走模型默认档）；模型切换时重置为该模型 defaultEffort
+      var _pe = useState(''), pickEff = _pe[0], setPickEff = _pe[1]
+      // 芯片改档小下拉（task-mwkbo9z6 ③）：当前展开改档的芯片下标（null=全收起）
+      var _ee = useState(null), effEdit = _ee[0], setEffEdit = _ee[1]
       var models = Array.isArray(props.models) ? props.models : null
       // 下拉过滤已在链中的（链内唯一，重复添加无意义）
       var avail = models ? models.filter(function (m) { return list.indexOf(m.id) < 0 }) : null
@@ -1131,13 +1171,31 @@
       // 两种都视为不可判定。只加展示标记，不动任何交互/写通道（diff 校验归子卡A），不新增 RPC。
       var inDir = null
       if (models && models.length) { inDir = {}; for (var mi = 0; mi < models.length; mi++) { if (models[mi] && models[mi].id) inDir[models[mi].id] = 1 } }
+      // effort 元数据索引（task-mwkbo9z6）：子卡1（task-mwkbm37s）list-models 每模型带 efforts（档位 id 清单，
+      // 模型不支持思考等级/解析失败=空数组；老宿主无该字段）与 defaultEffort（默认档，缺席省略）。effortsOf/
+      // defaultEffortOf 是添加时 effort 下拉与芯片改档的共用选项源；目录不可用（models=null/空目录）或该模型
+      // 无 efforts（空/缺席）→ effortsOf 返回 null → 相关 effort UI 全隐藏（只按 id 添加，零变化）。
+      var modelMeta = null
+      if (models && models.length) { modelMeta = {}; for (var mmi = 0; mmi < models.length; mmi++) { if (models[mmi] && models[mmi].id) modelMeta[models[mmi].id] = models[mmi] } }
+      function effortsOf(id) { var mm = modelMeta && modelMeta[id]; return (mm && Array.isArray(mm.efforts) && mm.efforts.length) ? mm.efforts : null }
+      function defaultEffortOf(id) { var mm = modelMeta && modelMeta[id]; return (mm && typeof mm.defaultEffort === 'string' && mm.defaultEffort) ? mm.defaultEffort : '' }
+      // 添加时 effort 下拉选项源（task-mwkbo9z6 ②）：当前选中模型的 efforts 清单；null（未选/无 efforts/
+      // 目录不可用/降级手输）→ 下拉不渲染
+      var pickEfforts = pickVal ? effortsOf(pickVal) : null
       // 失效计数（task-mwcw2jx8 一键清理）：与上方下架判定同源同判（inDir 索引）——目录不可用（inDir=null，
       // 老宿主/枚举失败/空目录）或链内全部在目录时恒 0 →「清理失效」按钮不渲染（无失效项不添乱）。
       var retiredCount = inDir ? list.filter(function (m) { return !inDir[m] }).length : 0
       // 提交期间置灰防连点：busy 在 commit 进出两处置位/复位，仅接线到「清理失效」按钮 disabled（×/↑/添加交互不动）
       var _busy = useState(false), busy = _busy[0], setBusy = _busy[1]
-      function commit(next) {
+      // 提交统一入口（task-mwkbo9z6 起带 effort）：既有交互（×/↑/清理）传 id 数组、add 传混合数组、芯片改档
+      // 传 id 数组+effPatch——重建层（rebuildEffItems）把存量 id 的 effort 按 effMap 原样带回（删除/前移/
+      // 清理/重排不碰 per-id effort，改档不丢档）、add 传入的 {id,effort} 终形直通、effPatch 承接改档单项
+      // 覆盖（''=清除回纯字符串）；重建后仍走 props.onSave 既有通道（host 已支持两形态混合数组，通道零改）。
+      function commit(next, effPatch) {
         setMsg(''); setBusy(true)
+        var effMap = {}
+        for (var ci = 0; ci < list.length; ci++) { if (effs[ci]) effMap[list[ci]] = effs[ci] }
+        next = rebuildEffItems(next, effMap, effPatch)
         Promise.resolve(props.onSave(next)).then(function (r) {
           setBusy(false)
           if (r && r.ok === false) { setMsg('⚠️ ' + (r.error || '保存失败')); setTimeout(function () { setMsg('') }, 5000); return }
@@ -1146,7 +1204,19 @@
       }
       function removeAt(i) { var next = list.slice(); next.splice(i, 1); commit(next) }
       function upAt(i) { if (i <= 0) return; var next = list.slice(); var t = next[i - 1]; next[i - 1] = next[i]; next[i] = t; commit(next) }
-      function add() { var v = (pickVal || '').trim(); if (!v || list.indexOf(v) >= 0) return; setPickVal(''); commit(list.concat([v])) }
+      // 添加（task-mwkbo9z6 起 effort 随新链项声明）：选中档位（pickEff 非空且该模型确有 efforts 清单）→
+      // 追加 {id,effort} 终形；「默认」（pickEff=''）/无 efforts 模型/目录降级手输 → 纯字符串（不指定
+      // effort，走模型默认档——老形态零变化）。effort 合法性（支不支持该档）由 host 写路径校验兜底。
+      function add() { var v = (pickVal || '').trim(); if (!v || list.indexOf(v) >= 0) return; setPickVal(''); setPickEff(''); if (pickEff && effortsOf(v)) v = { id: v, effort: pickEff }; commit(list.concat([v])) }
+      // 芯片改档（task-mwkbo9z6 ③）：改档小下拉改选 → 整链走 commit（{id,effort} 形态由重建层落形）；
+      //「默认」=清除 effort 回纯字符串；未改档（与当前一致）只收起不下发（省一次 RPC + 审计行）。
+      // 选项源与添加时 effort 下拉同（effortsOf）；该模型无 efforts/目录不可用时点击不展开（无选项可给）。
+      function changeEffort(i, eff) {
+        setEffEdit(null)
+        if (!list[i] || (effs[i] || '') === (eff || '')) return
+        var patch = {}; patch[list[i]] = eff || ''
+        commit(list.slice(), patch)
+      }
       // 一键清理失效（task-mwcw2jx8）：过滤掉所有不在目录的项，剩余数组交 props.onSave（与 removeAt 同通道）。
       // 纯删除在 host diff 校验（子卡A task-mwcw0z5t：仅「当前配置没有的新值」过合法清单）下天然放行——
       // 只删不增、剩余项全在合法目录，零新增 RPC、零校验改动；成功后 fetchTasks 回读由 commit 既有逻辑承接。
@@ -1158,20 +1228,38 @@
           list.length === 0 ? React.createElement('span', { style: { color: C.text2, fontStyle: 'italic', paddingTop: 1 } }, props.emptyHint || '无') : null,
           list.map(function (m, i) {
             var retired = !!(inDir && !inDir[m])
+            // 芯片 effort（task-mwkbo9z6 ①）：{id,effort} 槽位显示「id · effort」；effOpts=该模型 efforts
+            //（改档选项源，与添加时下拉同源；null=无 efforts/目录不可用 → effort 文本不可点）
+            var eff = effs[i] || ''
+            var effOpts = effortsOf(m)
             var chipTitle = (i === 0 ? '首选' : '第 ' + (i + 1) + ' 顺位') + ' · 按序取第一个健康模型'
             if (retired) chipTitle += ' · ⚠️该模型已不在当前网关可用清单——可直接点 × 移除（仅新增值校验）；要替换请从下方下拉选择'
+            if (eff) chipTitle += ' · 思考等级 ' + eff + (effOpts ? '（点击等级文本改档，「默认」=解除）' : '')
             return React.createElement('span', { key: m + '@' + i, title: chipTitle, style: { display: 'inline-flex', alignItems: 'center', gap: 1, padding: '0px 2px 0px 4px', border: '1px solid ' + (retired ? C.warn : C.border), borderRadius: 3, background: C.nested, color: C.text, whiteSpace: 'nowrap' } },
               React.createElement(ModelHealthDot, { model: m, health: props.health }),
               React.createElement('span', null, m),
+              // effort 文本段（task-mwkbo9z6 ①③）：gated 于 eff——纯字符串槽位不渲染（芯片只显 id，零视觉变化）；
+              // 点击展开改档小下拉（选项=efforts+「默认」）；改档中渲染 select 替换文本，失焦收起不下发
+              eff ? (effEdit === i
+                ? React.createElement('select', { value: eff, onChange: function (e) { changeEffort(i, e.target.value) }, onBlur: function () { setEffEdit(null) }, title: '改思考等级（默认=不指定 effort，走模型默认档）', style: { fontSize: 9, padding: '0px 1px', border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
+                  React.createElement('option', { value: '' }, '默认'),
+                  (effOpts || []).map(function (ef) { return React.createElement('option', { key: ef, value: ef }, ef) }))
+                : React.createElement('span', { onClick: function () { if (effOpts) setEffEdit(effEdit === i ? null : i) }, title: effOpts ? '点击修改思考等级（当前 ' + eff + '）' : '思考等级 ' + eff, style: { cursor: effOpts ? 'pointer' : 'default' } }, ' · ' + eff)) : null,
               retired ? React.createElement('span', { style: { color: C.warn, fontSize: 8, lineHeight: '12px', flexShrink: 0 } }, '⚠️下架') : null,
               i > 0 ? React.createElement('button', { onClick: function () { upAt(i) }, title: '前移一位（↑）', style: chipBtn }, '↑') : null,
               React.createElement('button', { onClick: function () { removeAt(i) }, title: '移除（×）', style: chipBtn }, '×'))
           })),
-        // 尾部：下拉（过滤已选）/ 目录缺失降级文本输入 +「添加」追加链尾
-        avail ? React.createElement('select', { value: pickVal, onChange: function (e) { setPickVal(e.target.value) }, title: '选择要追加到链尾的模型（已在链中的已过滤）', style: { width: 150, padding: '0px 2px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
+        // 尾部：下拉（过滤已选）/ 目录缺失降级文本输入 + effort 下拉（task-mwkbo9z6 ②）+「添加」追加链尾
+        avail ? React.createElement('select', { value: pickVal, onChange: function (e) { setPickVal(e.target.value); setPickEff(e.target.value ? defaultEffortOf(e.target.value) : '') }, title: '选择要追加到链尾的模型（已在链中的已过滤）', style: { width: 150, padding: '0px 2px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
           React.createElement('option', { value: '' }, '选择模型…'),
           avail.map(function (m) { return React.createElement('option', { key: m.id, value: m.id }, m.name + ' (' + m.provider + ')') }))
           : React.createElement('input', { value: pickVal, onChange: function (e) { setPickVal(e.target.value) }, onKeyDown: function (e) { if (e.key === 'Enter') add() }, placeholder: 'provider/model', title: '模型目录不可用，手输 provider/model 后点添加', style: { width: 110, padding: '0px 4px', fontSize: 9, border: '1px solid ' + C.border2, borderRadius: 2, background: C.card, color: C.text } }),
+        // 添加时 effort 下拉（task-mwkbo9z6 ②）：选中模型带 efforts 清单才渲染（无 efforts/未选/目录不可用/
+        // 降级手输 → pickEfforts=null → 隐藏，只添加 id）；选项=该模型 efforts，默认选中 defaultEffort
+        //（模型切换即重置）；「默认」=不指定 effort（纯字符串添加，走模型默认档）。
+        pickEfforts ? React.createElement('select', { value: pickEff, onChange: function (e) { setPickEff(e.target.value) }, title: '思考等级（默认=不指定 effort，走模型默认档）', style: { padding: '0px 2px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
+          React.createElement('option', { value: '' }, '默认'),
+          pickEfforts.map(function (ef) { return React.createElement('option', { key: ef, value: ef }, ef) })) : null,
         React.createElement('button', { onClick: add, disabled: !pickVal, title: '追加到链尾', style: { fontSize: 9, padding: '0px 5px', border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: pickVal ? C.brand : C.text2, cursor: pickVal ? 'pointer' : 'default', lineHeight: '14px', fontWeight: 600 } }, '添加'),
         // 「清理失效（N）」一键按钮（task-mwcw2jx8）：retiredCount>0 才渲染（同槽多个下架模型逐个 × 要点 N
         // 次等 N 次 RPC，此键一次收口）；warn 描边与「⚠️下架」芯片标记同色系；busy 置灰防连点
