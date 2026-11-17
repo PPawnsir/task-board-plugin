@@ -355,12 +355,27 @@ export function depsCancelled(d, t) {
   return t.dependsOn.some(function (id) { var x = d.tasks.find(function (y) { return y.id === id }); return x && x.status === 'cancelled' })
 }
 
-// ===== 管线分类（#19）：规则先行，兜底 full（宁严勿漏）=====
+// ===== 管线分类（#19）：任务性质优先于验收脚本，规则先行，兜底 full（宁严勿漏）=====
+// 引力井修复（task-mwk2enp8，用户 2026-11-17 实证）：旧序是「先看 acceptance（有验收脚本→full）、
+// 再看任务性质」，而「回归测试/写文档/巡检」恰恰是最该带验收命令的活，于是它们一挂 acceptance 就被
+// 吸进 full——观测分布 full=234 / work=30 / direct=20（full 占 82%），实证误判「E2E：v1.8.3 全链回归」
+// 与「README 补拆解官工作流指南」双双落 full。新序把判定颠倒过来：
+//   ① 主窗口亲办（问答/解释类）→ direct（问了就是问，不看 acceptance）
+//   ② 任务性质=回归/巡检/盘点/文档/整理/总结/报告/指南/白皮书/readme/分析文 → work（**不看 acceptance**）
+//   ③ 有验收脚本（acceptance 非空）→ full
+//   ④ 兜底 → full
+// 边界一（只看 title，不读 description）：词族只匹配 title。title 是任务性质的最强信号；description 里
+//   提到「回归/文档」通常是附带动作而非任务本体——「修 planGate 圈号污染」的描述即便写了「回归验证」，
+//   也不能因此被判 work（读 description 会把修 bug 的卡误判成回归卡）。
+// 边界二（title 含「修」→ 优先 full）：修 bug 才是本体。「巡检三连修：草稿发布预警」这类标题虽命中 work
+//   词族（巡检），目的却是改代码，仍归 full；故「含『修』」时不走 work 分支（修/修复/修改/修订…同族）。
+//   work 词族本身不含「修」字，故该守卫只影响「修 + work 词」这种混装标题。
 export function classifyPipeline(t) {
-  if (t.acceptance && String(t.acceptance).trim()) return 'full'
-  var text = ((t.title || '') + ' ' + (t.description || '')).toLowerCase()
+  var title = String(t.title || '')
+  var text = title.toLowerCase()
   if (/解释|为什么|是什么|区别|对比|说明一下|是什么意思|how to|what is|why /.test(text)) return 'direct'
-  if (/文档|调研|整理|总结|报告|指南|白皮书|readme|分析文/.test(text)) return 'work'
+  if (!/修/.test(title) && /回归|巡检|盘点|文档|调研|整理|总结|报告|指南|白皮书|readme|分析文/.test(text)) return 'work'
+  if (t.acceptance && String(t.acceptance).trim()) return 'full'
   return 'full'
 }
 

@@ -351,11 +351,30 @@ test('depsCancelled: 依赖被取消 → true', () => {
 })
 
 // ===== 管线分类 =====
-test('classifyPipeline: 验收脚本→full；问答→direct；文档→work；兜底 full', () => {
-  assert.equal(core.classifyPipeline(mkTask({ acceptance: 'npm test' })), 'full')
+// 引力井修复（task-mwk2enp8）：任务性质优先于验收脚本——旧序「有 acceptance 就 full」把「E2E 全链回归」
+// 「README 补指南」这类最该带验收命令的活吸进 full（实证 full 占 82%）。新序：direct → work(性质) → full(acceptance) → full。
+test('classifyPipeline: 任务性质优先于验收脚本（回归/文档带 acceptance 仍 work；修 bug 不被误判 work）', () => {
+  // ① 任务性质优先：带验收脚本的回归/文档卡仍归 work（旧序会误判 full）
+  assert.equal(core.classifyPipeline(mkTask({ title: 'E2E：v1.8.3 全链回归', acceptance: 'npm test' })), 'work')
+  assert.equal(core.classifyPipeline(mkTask({ title: 'README 补拆解官工作流指南', acceptance: 'npm test' })), 'work')
+  // ② 词族扩充后的三类高频词（回归/巡检/盘点，不看 acceptance）
+  assert.equal(core.classifyPipeline(mkTask({ title: '全库巡检', acceptance: 'npm test' })), 'work')
+  assert.equal(core.classifyPipeline(mkTask({ title: '存量卡盘点', acceptance: 'npm test' })), 'work')
+  // ③ 既有保持
   assert.equal(core.classifyPipeline(mkTask({ title: '解释一下这个函数' })), 'direct')
   assert.equal(core.classifyPipeline(mkTask({ title: '整理 API 文档' })), 'work')
   assert.equal(core.classifyPipeline(mkTask({ title: '实现登录功能' })), 'full')
+  // ④ 有验收脚本、标题非性质词 → full（兜底不变）
+  assert.equal(core.classifyPipeline(mkTask({ acceptance: 'npm test' })), 'full')
+  // ⑤ 修 bug 是本体：title 无 work 词 + acceptance → full
+  assert.equal(core.classifyPipeline(mkTask({ title: '修 planGate 圈号污染', acceptance: 'npm test' })), 'full')
+  // ⑥ 边界：title 既含 work 词（巡检）又含「修」→ 修 bug 优先 full
+  assert.equal(core.classifyPipeline(mkTask({ title: '巡检三连修：草稿发布预警', acceptance: 'npm test' })), 'full')
+  assert.equal(core.classifyPipeline(mkTask({ title: '修复巡检报告里的误报' })), 'full')
+  // ⑦ 边界：词族只读 title，不读 description——描述里提「回归」的修 bug 卡不得判 work
+  assert.equal(core.classifyPipeline(mkTask({ title: '修 planGate 圈号污染', description: '改完跑全链回归验证', acceptance: 'npm test' })), 'full')
+  // ⑧ 边界：direct 词族优先级最高（问答与 work 词混装时仍是 direct）
+  assert.equal(core.classifyPipeline(mkTask({ title: '解释一下这份回归报告', acceptance: 'npm test' })), 'direct')
 })
 
 // ===== 输出解析 =====
