@@ -373,3 +373,298 @@ test('死胡同源码锁：sweepStuckCards 纯函数 + poolCycleBody 挂点 + �
   assert.match(ds, /return res\.changed \? d : null/, '零改动返回 null 不写盘（安静板纪律）')
   assert.match(ds, /死胡同检测：' \+ res\.findings\.length/, '④⑤汇总一条通知（不逐卡轰炸）')
 })
+
+// ====================================================================
+// ①补全（task-mwk48jsw）：合法转移断言族——表上每条边的「初始状态+事件→终态」
+// 前两层（表覆盖/六推进点/死胡同检测器）由子卡1/2 落地；本段补齐其余推进面：
+//   A 面·core 纯函数推进点：archiveApply / cancelApply / applyHookSettle（第七推进点：
+//     post 收口完成 in-progress→verifying）/ maybeAutoCloseParent 幂等早退 / resolve 兼容面
+//   B 面·RPC 事件级（mock-ctx 真 index.mjs apply + 真 POST 路由）：publish / reset / batch-undo
+//   C 面·settle/rpc/dispatch 写点源码锁：reclaim 族（驳回重派/终止/spawn 失败/裁决回池/isOrphan）
+//     与 blocked×3、同态维持写点逐条配对表边（行为级由 integration 九场景+本文件 B 面双覆盖）
+// ====================================================================
+test('①补全A·归档族：resolved→archived / cancelled→archived / in-progress 僵尸→archived / 级联子卡 archive-cascade / 末子卡归档触发父卡收口', () => {
+  var t1 = mkT({ status: 'resolved' })
+  var r1 = core.archiveApply({ tasks: [t1] }, t1, 'main', 'archived')
+  assert.equal(r1.ok, true)
+  assert.equal(t1.status, 'archived', 'resolved --archive--> archived')
+  assert.ok(t1.archivedAt, 'archivedAt 落卡')
+  assert.equal(t1.history[t1.history.length - 1].from, 'resolved')
+  assert.equal(t1.history[t1.history.length - 1].to, 'archived', 'history 走 archive 边')
+  var t2 = mkT({ status: 'cancelled' })
+  core.archiveApply({ tasks: [t2] }, t2, 'main', 'archived')
+  assert.equal(t2.status, 'archived', 'cancelled --archive--> archived（B 组恢复边：归档门禁放行面含 cancelled）')
+  var t3 = mkT({ status: 'in-progress' })
+  core.archiveApply({ tasks: [t3] }, t3, 'main', 'archived')
+  assert.equal(t3.status, 'archived', 'in-progress 僵尸 --archive--> archived（v1.7.1 放行面；活跃 run 门禁在 rpc 层）')
+  // 级联：父卡归档级联未归档子卡（archive-cascade 边），已归档子卡幂等不动
+  var p = mkT({ id: 'ca-p', status: 'resolved' })
+  var c1 = mkT({ id: 'ca-c1', parentId: 'ca-p', status: 'pending' })
+  var c2 = mkT({ id: 'ca-c2', parentId: 'ca-p', status: 'archived' })
+  var r2 = core.archiveApply({ tasks: [p, c1, c2] }, p, 'main', 'archived')
+  assert.equal(r2.childrenArchived, 1, '只级联未归档子卡')
+  assert.equal(c1.status, 'archived', 'pending 子卡 --archive-cascade--> archived')
+  assert.match(String(c1.history[c1.history.length - 1].note), /cascade/, '级联留痕')
+  assert.equal(c2.status, 'archived', '已归档子卡幂等不动')
+  // 末子卡归档触发父卡收口（isChildSettled 计入 archived：交错 resolve+archive 序列的收口保险）
+  var pe = mkT({ id: 'ae-p', status: 'in-progress' })
+  var k1 = mkT({ id: 'ae-c1', parentId: 'ae-p', status: 'resolved' })
+  var k2 = mkT({ id: 'ae-c2', parentId: 'ae-p', status: 'resolved' })
+  var r3 = core.archiveApply({ tasks: [pe, k1, k2] }, k2, 'main', 'archived')
+  assert.equal(r3.parentUpdated, true, '归档路径触发父卡收口')
+  assert.equal(pe.status, 'verifying', 'full 管线父卡收口 verifying')
+  assert.ok(pe.resolvedAt, '收口留 resolvedAt')
+})
+
+test('①补全B·取消族：draft/pending/blocked --cancel--> cancelled + in-progress spawn-pending 占位（认领位回退）+ 取消子卡触发父卡收口', () => {
+  var GATE = ['draft', 'pending', 'blocked'] // cancelGate 放行面（门禁在 rpc 层，core 落状态）
+  for (var gi = 0; gi < GATE.length; gi++) {
+    var t = mkT({ status: GATE[gi] })
+    core.cancelApply({ tasks: [t] }, t, 'main', '放弃')
+    assert.equal(t.status, 'cancelled', GATE[gi] + ' --cancel--> cancelled')
+    assert.ok(t.cancelledAt, 'cancelledAt 落卡')
+    assert.equal(t.resolvedAt, null, '取消清 resolvedAt')
+    assert.equal(t.history[t.history.length - 1].from, GATE[gi])
+    assert.equal(t.history[t.history.length - 1].to, 'cancelled', 'history 走 cancel 边')
+  }
+  // in-progress 仅 spawn-pending 派发占位态放行（真在跑须先 terminate）；占位取消清认领位不留死占位
+  var sp = mkT({ status: 'in-progress', claimedBy: 'spawn-pending', claimedAt: '2026-01-01T00:00:00Z' })
+  core.cancelApply({ tasks: [sp] }, sp, 'main', '取消占位')
+  assert.equal(sp.status, 'cancelled', 'in-progress(spawn-pending 占位) --cancel--> cancelled')
+  assert.equal(sp.claimedBy, null, '占位认领位清干净')
+  assert.equal(sp.claimedAt, null)
+  // 取消子卡触发父卡收口（isChildSettled 计入 cancelled——手动取消的子任务不把 epic 钉死）
+  var pe = mkT({ id: 'cx-p', status: 'in-progress' })
+  var k1 = mkT({ id: 'cx-c1', parentId: 'cx-p', status: 'resolved' })
+  var k2 = mkT({ id: 'cx-c2', parentId: 'cx-p', status: 'pending' })
+  var r = core.cancelApply({ tasks: [pe, k1, k2] }, k2, 'main', '放弃该子任务')
+  assert.equal(r.parentUpdated, true, '取消路径触发父卡收口')
+  assert.equal(pe.status, 'verifying', 'cancelled 计入终态集 → full 父卡收口')
+})
+
+test('①补全C·hook 结算族：pre 失败 pending→blocked（hook-failed 边）/ post 失败 in-progress→blocked / post 完成 in-progress→verifying（parentAuto 收口同款）/ pre 完成开闸零转移 / done 幂等', () => {
+  // pre 失败：父卡尚在 pending（未到首个子卡派发）→ blocked 挂歧义等人裁决
+  var p1 = mkT({ id: 'hk1', status: 'pending', hooks: { pre: { enabled: true, prompt: '准备', state: 'running', runId: 'r1' } } })
+  var r1 = core.applyHookSettle({ tasks: [p1] }, 'hk1', 'pre', false, '', 'r1', '准备失败')
+  assert.equal(r1.blocked, true)
+  assert.equal(p1.status, 'blocked', 'pending --hook-failed--> blocked')
+  assert.equal(p1.hooks.pre.state, 'failed')
+  assert.ok(p1.escalation, '挂歧义等人裁决（重试/跳过/放弃）')
+  assert.equal(p1.history[p1.history.length - 1].from, 'pending')
+  assert.equal(p1.history[p1.history.length - 1].to, 'blocked', 'history 走 hook-failed 边')
+  // post 失败：父卡 in-progress（post 闸门 running 延迟收口中）→ blocked
+  var p2 = mkT({ id: 'hk2', status: 'in-progress', hooks: { post: { enabled: true, prompt: '收口', state: 'running', runId: 'r2', pending: true } } })
+  var r2 = core.applyHookSettle({ tasks: [p2] }, 'hk2', 'post', false, '', 'r2', '收口失败')
+  assert.equal(r2.blocked, true)
+  assert.equal(p2.status, 'blocked', 'in-progress --blocked(hook run 失败)--> blocked')
+  // post 完成：in-progress → verifying（applyHookSettle 收口完成，与 maybeAutoCloseParent 同边）
+  var p3 = mkT({ id: 'hk3', status: 'in-progress', hooks: { post: { enabled: true, prompt: '收口', state: 'running', runId: 'r3', pending: true } } })
+  var r3 = core.applyHookSettle({ tasks: [p3] }, 'hk3', 'post', true, '收口完成', 'r3')
+  assert.equal(r3.closed, true)
+  assert.equal(p3.status, 'verifying', 'in-progress --parentAuto(post 收口完成)--> verifying')
+  assert.ok(p3.resolvedAt, '收口留 resolvedAt')
+  assert.equal(p3.hooks.post.state, 'done')
+  assert.equal(p3.history[p3.history.length - 1].from, 'in-progress')
+  assert.equal(p3.history[p3.history.length - 1].to, 'verifying', 'history 走 parentAuto 边')
+  // pre 完成：只开闸不动状态（同态审计）
+  var p4 = mkT({ id: 'hk4', status: 'pending', hooks: { pre: { enabled: true, prompt: '准备', state: 'running', runId: 'r4' } } })
+  var r4 = core.applyHookSettle({ tasks: [p4] }, 'hk4', 'pre', true, '完成', 'r4')
+  assert.equal(r4.preDone, true)
+  assert.equal(p4.status, 'pending', 'pre 完成只开闸：零转移')
+  // 幂等：点位已 done，迟到失败不覆盖不改状态
+  var r5 = core.applyHookSettle({ tasks: [p4] }, 'hk4', 'pre', false, '', 'r5', '迟到失败')
+  assert.equal(r5.already, true, 'done 后幂等早退')
+  assert.equal(p4.status, 'pending', '迟到失败零影响')
+})
+
+test('①补全D·parentAuto 幂等早退：verifying 父卡 maybeAutoCloseParent 返回 null 零写账（表上 verifying→verifying 维持边=无转移无留痕）', () => {
+  var pe = mkT({ id: 'iv-p', status: 'verifying', resolvedAt: '2026-01-01T00:00:00Z' })
+  var c = mkT({ id: 'iv-c', parentId: 'iv-p', status: 'resolved' })
+  var hLen = pe.history.length
+  var r = core.maybeAutoCloseParent({ tasks: [pe, c] }, c)
+  assert.equal(r, null, '幂等早退：已 verifying 不重放')
+  assert.equal(pe.status, 'verifying', '状态维持')
+  assert.equal(pe.history.length, hLen, '早退零写账（「维持」= 无转移记录）')
+})
+
+test('①补全E·resolve 纯函数兼容面 + pending→resolved via 锁：跳级仅 work/强改面（resolve）登记，验收通道无边', () => {
+  var t1 = mkT({ status: 'pending' })
+  core.resolveApply({ tasks: [t1] }, t1, 'w', 'verifying', 'r')
+  assert.equal(t1.status, 'verifying', 'pending --resolve--> verifying（B 组契约边；生产 RPC/结算通道均有 in-progress 门禁）')
+  var t2 = mkT({ status: 'pending', pipeline: 'work' })
+  core.resolveApply({ tasks: [t2] }, t2, 'w', 'verifying', 'r')
+  assert.equal(t2.status, 'resolved', 'pending --resolve(work 强改)--> resolved（core.test.mjs 直调用例锁定面）')
+  var e = lc.findTransition('pending', 'resolved')
+  assert.ok(e, 'pending→resolved 边在表（B 组兼容面）')
+  assert.deepEqual(e.via, ['resolve'], 'via 仅 resolve（work 强改面）——验收（verify）通道从 pending 出发零边，跳级拒绝见③补全')
+})
+
+test('①补全F·同态审计自环：八态 findTransition(s,s) 全命中（ah 留痕不转移，from===to 恒合法）', () => {
+  for (var i = 0; i < lc.LIFECYCLE_STATES.length; i++) {
+    var s = lc.LIFECYCLE_STATES[i]
+    var e = lc.findTransition(s, s)
+    assert.ok(e, s + ' 自环命中（同态留痕恒合法）')
+    var w = lc.findTransition(s, s, 'audit-self')
+    assert.ok(w && w.via.indexOf('audit-self') >= 0, s + ' 命中通配 audit-self 自环')
+  }
+})
+
+// ===== ①补全 B 面：RPC 事件级（mock-ctx 真 index.mjs apply + 真 POST 路由）=====
+// 初始状态用 patchBoard 构造，事件走用户真实入口（batch-op/update-task/batch-undo/
+// resolve-task/verify-task），断言终态——比源码锁更强的行为级「初始状态+事件→终态」。
+import { createMockCtx } from './helpers/mock-ctx.mjs'
+import * as plugin from '../index.mjs'
+
+test('①补全G·publish 事件级：draft --batch-op publish--> pending（history 走 publish 边）；非草稿跳过附原因不熔断', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    await env.rpc('create-task', { sessionId: env.sid, id: 'pb1', title: '草稿发布卡', description: '生命周期断言族用例' })
+    await env.rpc('create-task', { sessionId: env.sid, id: 'pb2', title: '已发布卡', description: '生命周期断言族用例' })
+    env.patchBoard(function (d) { d.tasks.find(function (x) { return x.id === 'pb1' }).status = 'draft' }) // 构造初始态 draft
+    var r = await env.rpc('batch-op', { sessionId: env.sid, op: 'publish', ids: ['pb1', 'pb2'] })
+    assert.equal(r.ok, true)
+    assert.equal(r.done, 1, '仅草稿翻卡')
+    assert.deepEqual(r.skipped, ['pb2'], '非草稿进 skipped')
+    assert.match(String((r.reasons || {}).pb2), /仅草稿可发布/, '拒因落 reasons')
+    var t = env.task('pb1')
+    assert.equal(t.status, 'pending', 'draft --publish--> pending')
+    var last = t.history[t.history.length - 1]
+    assert.equal(last.from, 'draft')
+    assert.equal(last.to, 'pending', 'history 走 publish 边')
+    assert.match(String(last.note), /batch publish/)
+  } finally { await env.cleanup() }
+})
+
+test('①补全H·reset 事件级：verifying/resolved/cancelled/archived/blocked --update-task resetToPending--> pending（reset 边无状态门禁）', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    var states = ['verifying', 'resolved', 'cancelled', 'archived', 'blocked']
+    for (var i = 0; i < states.length; i++) await env.rpc('create-task', { sessionId: env.sid, id: 'rs' + i, title: '复位卡' + i, description: '生命周期断言族用例' })
+    env.patchBoard(function (d) {
+      for (var i = 0; i < states.length; i++) {
+        var t = d.tasks.find(function (x) { return x.id === 'rs' + i })
+        t.status = states[i] // 构造初始态
+        t.history = [{ from: 'pending', to: states[i], timestamp: '2026-01-01T00:00:00Z', actor: 'test', note: '构造初始态' }]
+      }
+    })
+    for (var j = 0; j < states.length; j++) {
+      var r = await env.rpc('update-task', { sessionId: env.sid, taskId: 'rs' + j, resetToPending: true })
+      assert.equal(r.ok, true, states[j] + ' 复位 ok')
+      var t = env.task('rs' + j)
+      assert.equal(t.status, 'pending', states[j] + ' --reset--> pending')
+      assert.equal(t.claimedBy, null, '认领位清干净')
+      var last = t.history[t.history.length - 1]
+      assert.equal(last.from, states[j], 'history 起点=复位前状态')
+      assert.equal(last.to, 'pending', 'history 走 reset 边')
+    }
+  } finally { await env.cleanup() }
+})
+
+test('①补全I·batch-undo 事件级：archived --撤销批量归档--> resolved / cancelled（快照态恢复，终态汇可逆面）', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    await env.rpc('create-task', { sessionId: env.sid, id: 'bu1', title: '撤销归档卡一', description: '生命周期断言族用例' })
+    await env.rpc('create-task', { sessionId: env.sid, id: 'bu2', title: '撤销归档卡二', description: '生命周期断言族用例' })
+    env.patchBoard(function (d) {
+      d.tasks.find(function (x) { return x.id === 'bu1' }).status = 'archived' // 构造初始态（快照态 resolved）
+      d.tasks.find(function (x) { return x.id === 'bu2' }).status = 'archived' // 构造初始态（快照态 cancelled）
+    })
+    var r = await env.rpc('batch-undo', { sessionId: env.sid, snapshot: { op: 'archive', items: [
+      { id: 'bu1', priority: 'medium', status: 'resolved' },
+      { id: 'bu2', priority: 'medium', status: 'cancelled' },
+    ] } })
+    assert.equal(r.ok, true)
+    assert.equal(r.done, 2)
+    assert.deepEqual(r.skipped, [])
+    var t1 = env.task('bu1')
+    assert.equal(t1.status, 'resolved', 'archived --batch-undo--> resolved')
+    assert.ok(!t1.archivedAt, '归档时间戳撤净')
+    assert.equal(t1.history[t1.history.length - 1].from, 'archived')
+    assert.equal(t1.history[t1.history.length - 1].to, 'resolved', 'history 走 batch-undo 边')
+    var t2 = env.task('bu2')
+    assert.equal(t2.status, 'cancelled', 'archived --batch-undo--> cancelled')
+  } finally { await env.cleanup() }
+})
+
+// ===== ①补全 C 面：settle/rpc/dispatch 侧推进点源码锁（与②六推进点同族）=====
+// 六推进点之外的状态写点全部在 settle/rpc/dispatch 三文件：每条写点锁「源码在位 +
+// (from,to) 在表上」——新增写点绕表即在本族红灯（行为级由 integration 套件九场景 +
+// 本文件 B 面事件级双重覆盖，这里补的是写点↔表边的配对完整性）。
+test('①补全J·reclaim 族写点锁：in-progress→pending 全部写点（驳回重派/失败重排/手动终止/spawn 失败/裁决回池/isOrphan 回收）逐条配对表边', () => {
+  const ss = srcOf('../lib/settle.mjs')
+  const rs = srcOf('../lib/rpc.mjs')
+  const ds = srcOf('../lib/dispatch.mjs')
+  assert.match(ss, /ah\(t, 'in-progress', 'pending', 'system', '驳回重派：新 Worker 将携带驳回原因继续'\)/, '驳回重派第二跳（verify-rejected 落 in-progress 后回池）')
+  assert.match(ss, /ah\(t, ps2, 'pending', String\(rec\.id\), 'worker 失败（/, 'worker 失败 <3 重排')
+  assert.match(rs, /ah\(t, ps, 'pending', actor, '手动终止，任务重新排队'\)/, '手动终止回池')
+  assert.match(rs, /ah\(t2, 'in-progress', 'pending', 'system', 'spawn 失败'\)/, 'spawn 失败回退（rpc 工具通道）')
+  assert.match(rs, /act === 'hold' \? '带裁决挂起冻结（不参与自动派发）' : '带裁决重新排队'/, '裁决回池（resume/hold 双态）')
+  assert.match(ds, /ah\(t, 'in-progress', 'pending', 'system', '执行 run 已结束\/丢失，回收重新排队'\)/, 'isOrphan 孤儿回收')
+  assert.match(ds, /t\.claimedBy === 'spawn-pending'\) \{ t\.status = 'pending'/, 'spawn 失败占位回退（dispatch 侧）')
+  assert.ok(lc.findTransition('in-progress', 'pending'), '(in-progress, pending) 在表（reclaim 族）')
+})
+
+test('①补全K·blocked 与同态维持写点锁：×3 挂起（worker/verifier 双通道）+ escalate/审查重试同态留痕，逐条配对表边', () => {
+  const ss = srcOf('../lib/settle.mjs')
+  const rs = srcOf('../lib/rpc.mjs')
+  assert.match(ss, /ah\(t, ps, 'blocked', String\(rec\.id\), 'worker 失败 x/, 'worker 失败×3 挂起（settle）')
+  assert.match(ss, /ah\(t, 'in-progress', 'blocked', 'system', 'worker 失败 x/, '野跑 worker 失败×3 挂起')
+  assert.match(ss, /ah\(t, 'in-progress', 'blocked', 'system', 'verifier 驳回 x/, 'verifier 驳回×3 挂起（settle）')
+  assert.match(rs, /ah\(t, 'in-progress', 'blocked', 'system', 'verifier 驳回 x/, 'verifier 驳回×3 挂起（board_verdict 工具通道）')
+  assert.match(ss, /ah\(t, 'in-progress', 'in-progress', String\(rec\.id\), 'worker 上报歧义（文本通道），待主窗口裁决'\)/, 'escalate 同态维持')
+  assert.match(ss, /ah\(t, 'verifying', 'verifying', 'system', 'verifier 未给出有效结论，重新排队审查 \('/, 'verifier 审查重试同态维持')
+  assert.match(ss, /ah\(t, 'verifying', 'verifying', 'system', 'verifier 野跑超硬超时，重新排队审查 \('/, '野跑审查重试同态维持')
+  assert.match(rs, /ah\(t, 'verifying', 'verifying', actor, '手动终止审查，等待新 verifier 接手'\)/, '手动终止审查同态维持（换 verifier 不换状态）')
+  assert.ok(lc.findTransition('in-progress', 'blocked'), '(in-progress, blocked) 在表（blocked 边）')
+  assert.ok(lc.findTransition('in-progress', 'in-progress'), '(in-progress, in-progress) 在表（escalate 自环）')
+  assert.ok(lc.findTransition('verifying', 'verifying'), '(verifying, verifying) 在表（审查重试自环）')
+})
+
+// ===== ③补全（task-mwk48jsw）：非法转移拒绝扩充 + 验收通道跳级拒绝 =====
+// 三层收口：非法 (from,to) 配对逐条拒（表级）+ 验收通道唯一入口（via 级）+
+// 边界门禁（事件级：resolve/verify 双通道前置状态闸——pending 卡直落 resolved 被系统边界拒绝）。
+// 注意 pending→resolved 的表级现实：B 组兼容面登记了 resolve（work 强改面）边（①补全E 已锁
+// via 仅 ['resolve']）；「跳过 verifying」的验收路径在表上零边（本段 via 级锁）+ RPC 门禁拒（事件级锁）。
+const ILLEGAL_MORE = [
+  ['draft', 'blocked', '草稿无 run 不挂阻塞（blocked 只从执行态/挂起面进入）'],
+  ['cancelled', 'resolved', '取消卡不可直接复活为已验收'],
+  ['resolved', 'cancelled', '已验收不可取消（终态收口走归档）'],
+  ['verifying', 'cancelled', '验收中不可取消（先裁决/终止再动）'],
+  ['blocked', 'resolved', '阻塞卡不可直接跳验收完成（先复工再走 resolve）'],
+  ['archived', 'blocked', '归档终态不可再挂起'],
+]
+test('③补全·非法转移扩充：六对终态/跳级配对被查表拒绝', () => {
+  for (const [f, t, why] of ILLEGAL_MORE) {
+    assert.equal(lc.findTransition(f, t), null, '不该有边: ' + f + ' → ' + t + '（' + why + '）')
+    assert.throws(() => lc.assertTransition(f, t, 'test'), /非法状态转移/, '应抛错: ' + f + ' → ' + t)
+  }
+})
+
+test('③补全·验收通道唯一入口：to=resolved 且 via 带 verify 标签的边必须从 verifying 出发（pending/in-progress 跳级 approval 无边）', () => {
+  for (const e of lc.LIFECYCLE_TRANSITIONS) {
+    if (e.to !== 'resolved') continue
+    for (const v of e.via) {
+      if (String(v).indexOf('verify') !== 0) continue // 只查 verify* 系事件（verify-approved 等）
+      var fs = Array.isArray(e.from) ? e.from : [e.from]
+      for (const f of fs) assert.equal(f, 'verifying', 'verify 系事件只许从 verifying 出发: ' + f + ' → resolved（via ' + v + '）跳级')
+    }
+  }
+})
+
+test('③补全·边界门禁事件级：pending 卡 resolve-task 拒（not in-progress）/ verify-task 拒（not verifying）——跳级直落 resolved 被系统边界拒绝', async () => {
+  var env = createMockCtx()
+  try {
+    plugin.apply(env.ctx)
+    await env.rpc('create-task', { sessionId: env.sid, id: 'gk1', title: '跳级卡', description: '生命周期断言族用例' }) // 初始态 pending
+    var r1 = await env.rpc('resolve-task', { sessionId: env.sid, taskId: 'gk1', status: 'verifying', resolution: '跳级' })
+    assert.equal(r1.ok, false, 'pending 卡不经执行直提验证：拒')
+    assert.match(String(r1.error), /not in-progress/)
+    var r2 = await env.rpc('verify-task', { sessionId: env.sid, taskId: 'gk1', verdict: 'approved' })
+    assert.equal(r2.ok, false, 'pending 卡跳过 verifying 直落 resolved：拒')
+    assert.match(String(r2.error), /not verifying/)
+    assert.equal(env.task('gk1').status, 'pending', '两次跳级尝试状态零漂移')
+  } finally { await env.cleanup() }
+})
