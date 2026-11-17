@@ -163,7 +163,7 @@ export function buildDecomposerPrompt(t, pack) {
   p += '3. size 判档（按样例落档，别一律标档；与主窗口 Team 注入同口径）：' + SIZE_TIER_SAMPLES + '。' + SIZE_PICK_QUESTIONS + 'modelHint 仅在有特殊理由时填（如某子卡需超长上下文模型），否则留空。\n'
   p += '4. children 上限 ' + DECOMPOSE_MAX_CHILDREN + ' 张；有先后顺序时用 dependsOn 引用同批序号（只许引用本批**前排**子卡，序号 1 起计：如第 2 张依赖第 1 张填 ["1"]）。\n'
   p += '5. 源卡本身不大、不必拆时：verdict=keep，并在 rationale 写清理由。\n'
-  p += '\n权限边界：你没有任何建卡工具——不要尝试创建/修改看板任务。提案由宿主读结构化结果后自动物化为 draft 子卡（源卡状态不变，由主窗口确认后逐张 publish）。\n'
+  p += '\n权限边界：你没有任何建卡工具——不要尝试创建/修改看板任务。提案由宿主读结构化结果后自动物化为 draft 子卡（物化后源卡只推一格 draft→pending 进入待执行，不进 in-progress；子卡仍是 draft，由主窗口确认后逐张 publish）。\n'
   return p
 }
 // 子卡 id 分配：parentId-N 派生（可读、可溯源）；与存量卡撞号时追加 rN 后缀（重拆撞已发布子卡的场景）。
@@ -181,7 +181,9 @@ function decomposeChildId(d, parentId, n) {
 //     description 落位、dependsOn 序号 → 本批真实 id（只收前排序号，天然无环；坏序号丢弃+该子卡 messages 留痕）、上限 DECOMPOSE_MAX_CHILDREN 截断；
 //   · 首张子卡自动继承**源卡外部依赖**（task-mwk0f3f1：批内序号无法表达跨批/外部前置，源卡 dependsOn 透传到首卡，
 //     后续子卡经批内链天然传递；去重 + 自引用防御，不改序号解析口径）；
-//   · 源卡自身状态不变（仍 draft/pending，由用户处置），只追加 messages 提案摘要行 + history 审计行。
+//   · 源卡状态：物化出子卡且源卡仍 draft 时推进 draft→pending（task-mwk2lf8m：父卡进入待执行，只推一格，
+//     让首个子卡派发的 parentKickOnDispatch 与全部子卡了结的 maybeAutoCloseParent 够得到门槛；已在
+//     pending/in-progress 等状态的不重复推进；verdict=keep 无子卡不推进），另追加 messages 提案摘要行 + history 审计行。
 // 返回 { ok, verdict, children?:[{id,title}], error? }——非空返回值驱动 mutateLocked 写盘。
 export function applyDecomposeProposal(d, t, proposal, now) {
   if (!d || !Array.isArray(d.tasks) || !t) return { ok: false, error: '板/源卡缺失' }
@@ -290,5 +292,20 @@ export function applyDecomposeProposal(d, t, proposal, now) {
   var summary = created.map(function (x) { return x.id + '·' + x.title }).join('、').slice(0, 900)
   t.messages.push({ kind: 'decompose', text: '🧩 拆解提案已就位（' + created.length + ' 张草稿子卡）：' + summary + '——确认后逐张 publish（task_update publish=true）', at: stamp, by: 'decomposer' })
   ah(t, t.status, t.status, 'system', '拆解官提案物化 ' + created.length + ' 张草稿子卡（draft，待主窗口确认发布）')
+  // ===== 父卡生命周期推进（task-mwk2lf8m，用户 2026-11-17 实证「epic 卡在草稿」）=====
+  // 物化 = 父卡从「需求草稿」进入「待执行」：只推一格 draft→pending，不进 in-progress。理由：父卡生命周期的
+  // 三个推进点各自有状态门槛，而物化侧原先完全不推进 → 父卡永钉 draft：
+  //   ① parentKickOnDispatch（core.mjs）要求父卡 **pending** 才在首个子卡派发时转 in-progress（draft 直接 return null）
+  //   ② maybeAutoCloseParent（core.mjs）要求父卡 **in-progress** 才在全部子卡了结时收口（draft/pending 直接 return null）
+  // 不推这一格，子卡全部落定后父卡仍停 draft，永远进不了生命周期（实证现场：拆解领取完成后主卡仍草稿）。
+  // 「确认 publish」的决策仍留给主窗口/用户——本函数只保证父卡能到达那两个门槛；**子卡**照旧全 draft 待确认。
+  // 边界：①仅父卡仍 draft 时推（主窗口已 publish/推进过的 pending/in-progress 等一律不覆盖、不重复留痕）
+  //      ②verdict=keep（无子卡）不推——没有子卡就没有生命周期可接，源卡由主窗口自行处置
+  //      ③pipeline 不区分：full/work/direct 父卡物化后同样进 pending（direct 后续由 maybeAutoCloseParent 直接 resolved）。
+  if (created.length > 0 && t.status === 'draft') {
+    var ps0 = t.status
+    t.status = 'pending'
+    ah(t, ps0, 'pending', 'decomposer', '拆解提案就位，父卡进入待执行（待子卡 publish 派发）')
+  }
   return { ok: true, verdict: 'split', children: created.map(function (x) { return { id: x.id, title: x.title } }) }
 }

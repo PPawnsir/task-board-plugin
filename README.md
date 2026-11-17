@@ -248,7 +248,7 @@ draft → pending → in-progress → verifying → resolved → archived
 
 - **门禁**：源卡须 `draft`/`pending`（`in-progress`/`verifying`/已完成卡拒拆：「源卡须为 draft/pending」）；同一源卡已有活跃拆解 run → 拒并返回 `runId`（等落定再重拆）；仅主窗口可用（子代理调用被拒）。
 - **提案契约**：拆解官**零建卡工具**（权限口子根本不用开），唯一交付物是 `outputSchema` 强箍的 `{verdict, children[], rationale}`——`verdict` 只 `split`/`keep`；每个 child 必填 `title`/`description`/`size`/`touches`/`acceptance`，可选 `modelHint`/`dependsOn`；`children` 上限 **8 张**（`DECOMPOSE_MAX_CHILDREN`，超出截断）；`dependsOn` 以 1 起序号引用本批**前排**子卡（如第 2 张依赖第 1 张填 `["1"]`），物化时翻译成真实任务 id，按构造天然无环（坏序号丢弃+卡面留痕，task-mvr44rm3）。拆解纪律写死在 prompt：先 `read` 调研清单里的文件、按文件/模块边界从实现侧拆，每张卡 touches 精确到文件、acceptance 是可执行命令。
-- **物化**：run 落定后 host 读 `result.structured` 自动物化为 **draft 子卡**（`parentId`=源卡、`proposalOf`=源卡 id、size/model/touches/acceptance/dependsOn 全部落位，id 派生 `源卡id-N`），源卡追加「🧩 拆解提案已就位」消息并通知主窗口；**源卡状态不变**（仍 draft/pending），确认或调档后逐张 `task_update publish=true` 发布（也可 `batch-op publish` 批量）。`verdict=keep` = 判定不用拆：rationale 落源卡消息、零子卡，源卡按原样推进。
+- **物化**：run 落定后 host 读 `result.structured` 自动物化为 **draft 子卡**（`parentId`=源卡、`proposalOf`=源卡 id、size/model/touches/acceptance/dependsOn 全部落位，id 派生 `源卡id-N`），源卡追加「🧩 拆解提案已就位」消息并通知主窗口；**父卡只推一格 draft→pending**（进入待执行——让首个子卡派发时 `parentKickOnDispatch` 能把父卡推进 in-progress、全部子卡了结后由 `maybeAutoCloseParent` 自动收口，不被永远钉在草稿；**子卡仍是 draft**，发布决策仍归主窗口），确认或调档后逐张 `task_update publish=true` 发布（也可 `batch-op publish` 批量）。`verdict=keep` = 判定不用拆：rationale 落源卡消息、零子卡，源卡状态不变、按原样推进。
 - **幂等重拆**：新提案落地时清掉上次**未发布**的提案子卡（`proposalOf` 指向该源卡且仍 `draft` 的整批移除）；已 publish/已落定的子卡绝不碰；提案畸形或 run 失败时旧批**不清**（失败不毁已有资产），失败原因落源卡消息，可原样重试。
 - **并发位**：拆解官 run 计入 **Verifier 并发位**（`activeV`），**不占 Worker 位**；活跃拆解期间源卡**跳过派发**（不让 Worker 抢在拆解结论前整坨执行）；宿主不支持 `outputSchema` 时自动剥外挂参数重试，仍拿不到 `structured` 走失败臂（源卡零改动）。
 

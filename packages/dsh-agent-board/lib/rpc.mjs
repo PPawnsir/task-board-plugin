@@ -277,7 +277,7 @@ export function createRpc(ctx, state, deps) {
     // 提案由 host 读 result.structured 后物化成 draft 子卡（权限口子=根本不需要开）。
     // 门禁：源卡须 draft/pending（执行中/已落定卡不拆）；同卡已有活跃 decomposer run → 拒（幂等防重）。
     // 物化侧幂等（dispatch.settleDecompose → applyDecomposeProposal）：新提案落地时清掉上次未发布的提案子卡。
-    ctx.tools.register(defineTool({ name: 'task_decompose', description: '拆解官：对 draft/pending 源卡 spawn 一次性拆解 run（outputSchema 强箍结构化提案，role=decomposer 计入 verifier 并发位、不占 worker 位）。落定后 host 自动把提案物化为 draft 子卡（size/model/touches/acceptance/dependsOn 落位，上限 8 张）并通知主窗口；源卡状态不变，确认后逐张 task_update publish=true 发布。幂等：重拆自动清掉上次未发布的提案子卡。', parameters: { type: 'object', properties: { taskId: { type: 'string', description: '待拆解的源卡 id（须为 draft/pending）' } }, required: ['taskId'] }, output: jo(), execute: async function (args) {
+    ctx.tools.register(defineTool({ name: 'task_decompose', description: '拆解官：对 draft/pending 源卡 spawn 一次性拆解 run（outputSchema 强箍结构化提案，role=decomposer 计入 verifier 并发位、不占 worker 位）。落定后 host 自动把提案物化为 draft 子卡（size/model/touches/acceptance/dependsOn 落位，上限 8 张）并通知主窗口；物化后源卡只推一格 draft→pending（进入待执行，不进 in-progress），子卡仍 draft，确认后逐张 task_update publish=true 发布。幂等：重拆自动清掉上次未发布的提案子卡。', parameters: { type: 'object', properties: { taskId: { type: 'string', description: '待拆解的源卡 id（须为 draft/pending）' } }, required: ['taskId'] }, output: jo(), execute: async function (args) {
       var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }
       var sid = toolSessionId()
       var d = await rt(sid)
@@ -289,7 +289,7 @@ export function createRpc(ctx, state, deps) {
       if (typeof spawnOneShot !== 'function') return { ok: false, error: 'spawn 通道未接线（老宿主/测试桩）' }
       var rec = await spawnOneShot(sid, t, 'decomposer')
       if (!rec) return { ok: false, error: 'spawn 失败（无 root/provider 或落闸被否），详见 host 日志' }
-      return { ok: true, runId: String(rec.id), taskId: t.id, note: '拆解官运行中；落定后提案自动物化为 draft 子卡并通知主窗口（源卡状态不变，确认后逐张 publish）' }
+      return { ok: true, runId: String(rec.id), taskId: t.id, note: '拆解官运行中；落定后提案自动物化为 draft 子卡并通知主窗口（源卡只推一格 draft→pending，子卡仍 draft，确认后逐张 publish）' }
     } }))
 
     // ===== RPC =====

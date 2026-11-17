@@ -5168,7 +5168,7 @@ test('拆解回执④split：settleDecompose split 成功 → notifyDecomposed �
   assert.equal(r.deco[0].children[0].id, 'dec-src-1') // decomposeChildId：parentId-N
   assert.equal(r.notes.length, 0, '成功信号不得再借 pushSysNote 伪装成 ⚠️ 系统异常')
   const t = r.board.tasks.find(x => x.id === 'dec-src')
-  assert.equal(t.status, 'draft', '源卡状态不变')
+  assert.equal(t.status, 'pending', '物化出子卡后父卡只推一格 draft→pending（task-mwk2lf8m）')
   assert.ok(t.messages.some(m => /🧩 拆解提案已就位/.test(m.text)), '源卡 messages 留痕照旧')
 })
 

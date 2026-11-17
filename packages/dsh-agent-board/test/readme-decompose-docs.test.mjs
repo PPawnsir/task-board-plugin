@@ -2,7 +2,7 @@
 // 采用源码级断言（同 user-guide-client.test.mjs ⑤ 范式；client 无渲染 harness，文档类卡片一律读盘断言）：
 //   ① README 双份逐字一致——根 README 是唯一手写源，包内那份由 npm run sync-readme 生成，禁止手改；
 //   ② 拆解官工作流指南——何时拆 / draft-pending 门禁 / outputSchema 提案契约 / host 物化 draft 子卡 /
-//      逐张 publish / 幂等重拆语义，全部落字；
+//      父卡只推一格 draft→pending（task-mwk2lf8m）/ 逐张 publish / 幂等重拆语义，全部落字；
 //   ③ 力度路由使用指南——调档（task_update size）/ 配表（模型路由弹层力度路由 6 链编辑器 + laneModels 部分合并）/
 //      四级取模链 / modelSource 留档审计 / 按档位记分；
 //   ④ 工具表「16 个 Agent 工具」——任务管理 9 + 需求拆解 1 + 调研上下文 1 + 池治理 3 + 子代理上报 2，
@@ -40,8 +40,9 @@ test('②拆解官工作流指南：适用场景 + 门禁 + 提案契约 + 物�
     '不占 Worker 位',         // 并发位口径
     'TEAM_DECOMPOSE_FLOW',    // 与 Team 第 9 条工作流同源
   ]) assert.ok(rootReadme.includes(m), 'README 拆解官指南缺锚点：' + m)
-  // 两条关键纪律必须写清（防误解：拆完源卡自动关 / 拆解官能建卡）
-  assert.ok(rootReadme.includes('源卡状态不变'), '缺「源卡状态不变」口径')
+  // 三条关键纪律必须写清（防误解：拆完父卡被自动关进终态 / 拆完父卡永钉草稿（task-mwk2lf8m 实证） / 拆解官能建卡）
+  assert.ok(rootReadme.includes('父卡只推一格 draft→pending'), '缺「物化后父卡只推一格 draft→pending」口径')
+  assert.ok(rootReadme.includes('子卡仍是 draft'), '缺「子卡仍是 draft 待确认」口径')
   assert.ok(rootReadme.includes('零建卡工具'), '缺「拆解官零建卡工具」口径')
 })
 

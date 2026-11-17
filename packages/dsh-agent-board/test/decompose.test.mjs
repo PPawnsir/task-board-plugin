@@ -13,11 +13,14 @@
 //      epic 发布预检 epicPrecheck 不再对拆解子卡报「无调研包」missing
 //   ⑭ 拆解官粒度引导（task-mwk0ea5f）：prompt 2b 条（默认 3~5 张纵切 + 串行成本）位次正确、
 //      Team 第 9 条同口径在位的、上限 8 与物化口径零改动
+//   ⑯ 父卡生命周期（task-mwk2lf8m）：物化出子卡后父卡只推一格 draft→pending（已推进不重复 / keep 不动 /
+//      后续 parentKickOnDispatch 与 maybeAutoCloseParent 两道门槛链路打通）
+//   ⑰ 生产路径全链：物化 → 子卡 publish → poolCycle 首卡派发即 epic-kick（父卡 pending→in-progress）
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { DECOMPOSE_SCHEMA, DECOMPOSE_MAX_CHILDREN, buildDecomposerPrompt, applyDecomposeProposal, TEAM_DECOMPOSE_FLOW } from '../lib/policy.mjs'
-import { epicPrecheck, epicPrecheckNote } from '../lib/core.mjs'
+import { epicPrecheck, epicPrecheckNote, parentKickOnDispatch, maybeAutoCloseParent } from '../lib/core.mjs'
 import { createDispatch } from '../lib/dispatch.mjs'
 import { createRpc } from '../lib/rpc.mjs'
 
@@ -305,8 +308,8 @@ test('③ 全链：startActivation(caller + outputSchema) → structured=split �
   assert.deepEqual(b.dependsOn, [a.id], "dependsOn['1'] 序号翻译成本批真实 id")
   assert.equal(b.history[0].actor, 'decomposer')
   assert.ok(b.id.indexOf('epic1-') === 0, '子卡 id 由源卡派生')
-  // 源卡：状态不变 + 摘要消息 + run 留档关账
-  assert.equal(src.status, 'draft', '源卡状态不变')
+  // 源卡：物化后只推一格 draft→pending（task-mwk2lf8m）+ 摘要消息 + run 留档关账
+  assert.equal(src.status, 'pending', '物化出子卡后父卡 draft→pending（只推一格，不进 in-progress）')
   var dmsg = src.messages.filter(function (m) { return m.kind === 'decompose' })
   assert.equal(dmsg.length, 1); assert.match(dmsg[0].text, /拆解提案已就位（2 张草稿子卡）/)
   var drec = src.runs.filter(function (r) { return r.role === 'decomposer' })
@@ -883,4 +886,93 @@ test('⑮c 全链：spawnOneShot 提案物化后首卡带源卡外部依赖，�
   assert.deepEqual(k1.dependsOn, ['task-ext-9'], '端到端：首卡继承源卡外部前置（不再靠主窗口手工补挂）')
   assert.deepEqual(k2.dependsOn, [k1.id], '次卡只有批内链，不重复继承')
   assert.deepEqual(src.dependsOn, ['task-ext-9'], '源卡 dependsOn 零改动')
+})
+
+// ===== ⑯ 父卡生命周期：物化后 draft→pending（task-mwk2lf8m）=====
+// 实证（用户 2026-11-17「epic 卡在草稿」）：拆解官物化子卡后主卡仍停 draft —— parentKickOnDispatch 要求父卡
+// **pending**、maybeAutoCloseParent 要求父卡 **in-progress**，两个门槛都够不到，父卡永远进不了生命周期。
+// 修法：物化（applyDecomposeProposal）在子卡全部落位且父卡仍 draft 时**只推一格** draft→pending。
+// 边界：已 pending/in-progress 的不重复推进；verdict=keep（无子卡）不动；不改两个门槛的既有口径。
+test('⑯ 物化后父卡 draft→pending：只推一格 / 已推进不重复 / keep 不动 / 后续两道门槛打通', function () {
+  // ① draft 源卡物化出子卡 → 父卡 pending + history 审计行；子卡仍是 draft（发布决策仍归主窗口）
+  var src = mkTask({ id: 'life1', title: '生命周期父卡', status: 'draft' })
+  var board = mkBoard([src])
+  var r = applyDecomposeProposal(board, src, { verdict: 'split', children: [
+    { title: '子一', description: '', size: 'standard', touches: [], acceptance: 'a' },
+    { title: '子二', description: '', size: 'standard', touches: [], acceptance: 'b', dependsOn: ['1'] },
+  ] }, '2026-01-01T01:00:00Z')
+  assert.equal(r.ok, true)
+  assert.equal(src.status, 'pending', '物化出子卡后父卡只推一格 draft→pending')
+  var hl = src.history.filter(function (h) { return h.from === 'draft' && h.to === 'pending' })
+  assert.equal(hl.length, 1, '推进留一条 draft→pending 审计行')
+  assert.equal(hl[0].actor, 'decomposer')
+  assert.match(hl[0].note, /父卡进入待执行/)
+  var kids = board.tasks.filter(function (x) { return x.parentId === 'life1' })
+  assert.equal(kids.length, 2)
+  assert.ok(kids.every(function (k) { return k.status === 'draft' }), '子卡仍是 draft 待确认（只推父卡一格）')
+  // ② 父卡已 pending / in-progress → 不重复推进（status 不变、无新增 draft→pending 留痕、不回退）
+  var board2 = mkBoard([mkTask({ id: 'life2', status: 'pending' })])
+  var src2 = board2.tasks[0]
+  applyDecomposeProposal(board2, src2, { verdict: 'split', children: [{ title: 'A', description: '', size: 'standard', touches: [], acceptance: 'a' }] }, '2026-01-01T02:00:00Z')
+  assert.equal(src2.status, 'pending', '已 pending 的父卡不重复推进')
+  assert.equal(src2.history.filter(function (h) { return h.from === 'draft' && h.to === 'pending' }).length, 0, '不重复推、不留痕')
+  var board3 = mkBoard([mkTask({ id: 'life3', status: 'in-progress' })])
+  var src3 = board3.tasks[0]
+  applyDecomposeProposal(board3, src3, { verdict: 'split', children: [{ title: 'B', description: '', size: 'standard', touches: [], acceptance: 'a' }] }, '2026-01-01T03:00:00Z')
+  assert.equal(src3.status, 'in-progress', '已 in-progress 的父卡不被回退/覆盖')
+  // ③ verdict=keep（无子卡）→ 父卡状态不动
+  var board4 = mkBoard([mkTask({ id: 'life4', status: 'draft' })])
+  var src4 = board4.tasks[0]
+  applyDecomposeProposal(board4, src4, { verdict: 'keep', children: [], rationale: '单点小改' }, '2026-01-01T04:00:00Z')
+  assert.equal(src4.status, 'draft', 'keep 无子卡 → 父卡状态不动（生命周期归主窗口）')
+  // ④ 门槛一：物化后子卡首个派发 → parentKickOnDispatch 把父卡 pending→in-progress（链路打通）
+  var k1 = board.tasks.find(function (x) { return x.title === '子一' })
+  k1.status = 'in-progress' // 模拟首个子卡派发
+  var kicked = parentKickOnDispatch(board, k1)
+  assert.ok(kicked, '父卡 pending → 首个子卡派发能 kick（原 draft 时直接 return null）')
+  assert.equal(src.status, 'in-progress', 'parentKickOnDispatch：pending→in-progress')
+  // ⑤ 门槛二：子卡全落定 → maybeAutoCloseParent 收口（full → verifying；direct → resolved）
+  k1.status = 'resolved'
+  board.tasks.find(function (x) { return x.title === '子二' }).status = 'resolved'
+  var closed = maybeAutoCloseParent(board, k1)
+  assert.ok(closed, '全部子卡了结 → 父卡收口（原 draft 时直接 return null）')
+  assert.equal(src.status, 'verifying', 'full 父卡：全子卡了结 → verifying')
+  var boardD = mkBoard([mkTask({ id: 'lifeD', status: 'draft', pipeline: 'direct' })])
+  var srcD = boardD.tasks[0]
+  applyDecomposeProposal(boardD, srcD, { verdict: 'split', children: [{ title: 'D1', description: '', size: 'standard', touches: [], acceptance: 'a' }] }, '2026-01-01T05:00:00Z')
+  assert.equal(srcD.status, 'pending', 'direct 父卡物化后同样 draft→pending')
+  var d1 = boardD.tasks.find(function (x) { return x.parentId === 'lifeD' })
+  d1.status = 'in-progress'
+  parentKickOnDispatch(boardD, d1)
+  assert.equal(srcD.status, 'in-progress')
+  d1.status = 'resolved'
+  maybeAutoCloseParent(boardD, d1)
+  assert.equal(srcD.status, 'resolved', 'direct 父卡：全子卡了结 → 直接 resolved')
+})
+
+// ⑰ 生产路径全链：物化（父卡 pending）→ 子卡 publish → poolCycle 首卡派发即 epic-kick。
+// 与⑯的纯函数断言互补：这里走真实派发路径（pickDispatch → claimApply → parentKickOnDispatch），
+// 证明「父卡停在 draft 就永远 kick 不到」的死结确已解开（不再需要手工改父卡状态）。
+test('⑰ 生产路径：物化出子卡 → 子卡 publish → poolCycle 首卡派发把父卡 pending→in-progress', async function () {
+  var src = mkTask({ id: 'kickp', title: '待拆父卡', status: 'draft' })
+  var board = mkBoard([src])
+  var r = applyDecomposeProposal(board, src, { verdict: 'split', children: [
+    { title: 'K1', description: '', size: 'standard', touches: [], acceptance: 'node --test test/k.test.mjs' },
+  ] }, '2026-01-01T01:00:00Z')
+  assert.equal(r.ok, true)
+  assert.equal(src.status, 'pending', '物化后父卡已具备 kick 前提（pending）')
+  var kid = board.tasks.find(function (x) { return x.parentId === 'kickp' })
+  kid.status = 'pending' // 模拟主窗口确认 publish（子卡 draft→pending）
+  var spawnCalls = []
+  var h = mkDispatch(board, { subagents: {
+    list: function () { return ['p1'] },
+    getProvider: function () { return { inheritsParentContext: false } },
+    startActivation: async function (spec) { spawnCalls.push(spec); return { childId: 'child-' + spawnCalls.length, messageId: 'm' + spawnCalls.length, result: new Promise(function () {}), dispose: async function () {} } },
+    interrupt: function () {},
+  } })
+  await h.dispatch.poolCycle(SID)
+  assert.equal(spawnCalls.length, 1, '子卡被派发（父卡 pending 不再挡路）')
+  assert.equal(spawnCalls[0].label, 'worker:' + kid.id)
+  assert.equal(src.status, 'in-progress', '首卡派发即 epic-kick：父卡 pending→in-progress（生产路径打通）')
+  assert.ok(src.history.some(function (h2) { return h2.from === 'pending' && h2.to === 'in-progress' }), 'epic-kick 留痕')
 })
