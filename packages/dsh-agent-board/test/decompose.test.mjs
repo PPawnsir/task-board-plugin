@@ -11,6 +11,8 @@
 //      + 拆解期源卡不被派 Worker（skip-decomposing 守卫）+ recIsLive 不回收在跑 decomposer
 //   ⑦ 物化子卡自带调研包（task-mvnrtpxo）：context.files 自动 = touches（拆解官调研结论），
 //      epic 发布预检 epicPrecheck 不再对拆解子卡报「无调研包」missing
+//   ⑭ 拆解官粒度引导（task-mwk0ea5f）：prompt 2b 条（默认 3~5 张纵切 + 串行成本）位次正确、
+//      Team 第 9 条同口径在位的、上限 8 与物化口径零改动
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -742,4 +744,104 @@ test('⑬c GUI 源码 + 产物：详情顶跳按钮 / 列表徽标可点 / 历�
   for (const mk of ['🧩 → 查看拆解官会话', 'activeDecomposeRunOf', 'jumpToRun', '点击跳转拆解官会话']) {
     assert.ok(built.indexOf(mk) >= 0, 'client.js 缺标记：' + mk + '（需 npm run build-client 重组装）')
   }
+})
+
+// ===== ⑭ 拆解官粒度引导（task-mwk0ea5f）：默认 3~5 张纵切 + 串行成本纳入粒度判断 =====
+// 实证背景（看板反馈 n-mwj96103qrv9）：one_ledger 连续两个需求均顶格产出 8 张子卡——根因不是「需求天然要 8 张」
+// 而是 prompt 契约缺陷：拆解纪律只写了「每卡 10~30 分钟 + 上限 8 张」，**没有目标卡数引导、没有串行成本概念**，
+// 拆解官倾向拆细顶格。用户手工重排 8→5（-37.5%）实证有效。本卡只改 prompt 契约层：
+// buildDecomposerPrompt 插入 2b 粒度引导条（位次在第 2 条之后、第 3 条判档之前）+ TEAM_DECOMPOSE_FLOW 补同口径一句；
+// DECOMPOSE_MAX_CHILDREN=8 是硬顶不是目标（零改动）、outputSchema 与物化逻辑零改动。
+test('⑭ 粒度引导：prompt 2b 条（3~5/纵切/串行）位次正确 + Team 第 9 条同口径 + 上限与物化零改动', function () {
+  var p = buildDecomposerPrompt(mkTask({ id: 'g1', title: '大需求', description: '做点大事' }), '')
+  // ① 粒度引导三关键词在位（验收断言①）
+  assert.match(p, /3~5 张/, 'prompt 缺目标卡数引导「3~5 张」')
+  assert.match(p, /纵切/, 'prompt 缺「纵切」合并口径')
+  assert.match(p, /串行/, 'prompt 缺串行成本口径')
+  // 逐条要点：串行成本三要素（Worker+Verifier 双 spawn / 上下文重复加载）+ 同卡合并 + 禁纯类型纯文档 + 多拆四条件
+  assert.match(p, /每张卡都要独立 spawn Worker \+ Verifier/, 'prompt 缺「双 spawn」串行成本')
+  assert.match(p, /重复加载上下文/, 'prompt 缺 Worker 重复加载上下文成本')
+  assert.match(p, /代码\+测试\+直接类型\/文档尽量同卡/, 'prompt 缺「代码+测试+直接文档同卡」合并纪律')
+  assert.match(p, /禁止纯类型卡、纯文档卡、逐技术层机械拆卡/, 'prompt 缺禁纯类型/纯文档/逐技术层卡')
+  assert.match(p, /极小返工优先并入上游卡或原 Worker 续跑/, 'prompt 缺极小返工并卡/续跑纪律')
+  assert.match(p, /独立验收真实存在 \/ 并行收益真实存在 \/ 风险隔离真实存在 \/ 数据源差异真实存在/, 'prompt 缺多拆一张的四条件')
+  // ② 位次：2b 必须在第 2 条之后、第 3 条判档之前（位置错=判档前失去粒度约束）
+  var i2 = p.indexOf('2. 每张子卡必须 10~30 分钟')
+  var i2b = p.indexOf('2b. 粒度判断')
+  var i3 = p.indexOf('3. size 判档')
+  assert.ok(i2 >= 0 && i2b >= 0 && i3 >= 0, '2 / 2b / 3 三条应同时在位')
+  assert.ok(i2 < i2b && i2b < i3, '2b 粒度引导位次应在第 2 条之后、第 3 条判档之前')
+  // ③ 上限与判档口径零改动：8 是硬顶不是目标（验收边界「不改物化代码、不动 8 张上限」）
+  assert.equal(DECOMPOSE_MAX_CHILDREN, 8, '上限硬顶保持 8 不动')
+  assert.match(p, /上限 8 张/, 'prompt 仍须写明上限 8 张（硬顶）')
+  assert.match(p, /别顶格 8 张/, 'prompt 须明确「上限≠目标」')
+  // ④ Team 注入侧同口径（验收断言②）
+  assert.match(TEAM_DECOMPOSE_FLOW, /默认出 3~5 张业务纵切子卡/, 'Team 第 9 条缺目标卡数同口径引导')
+  assert.match(TEAM_DECOMPOSE_FLOW, /串行成本纳入粒度判断/, 'Team 第 9 条缺串行成本口径')
+  assert.match(TEAM_DECOMPOSE_FLOW, /禁止纯类型\/纯文档\/逐技术层机械拆卡/, 'Team 第 9 条缺禁机械拆卡口径')
+  // ⑤ 既有第 9 条要点与注入位置不破（core.test.mjs 既有拼接/位置断言口径）
+  assert.match(TEAM_DECOMPOSE_FLOW, /^9\. 需求卡工作流/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /一律走拆解官/)
+  assert.match(TEAM_DECOMPOSE_FLOW, /最后防线/)
+  // ⑥ 物化零改动：上限截断仍 8——粒度引导只活在 prompt 契约层，不碰代码路径
+  var srcM = mkTask({ id: 'g2', status: 'draft' })
+  var boardM = mkBoard([srcM])
+  var many = []
+  for (var i = 0; i < 9; i++) many.push({ title: 'G' + i, description: '', size: 'standard', touches: [], acceptance: 'c' + i })
+  var rm = applyDecomposeProposal(boardM, srcM, { verdict: 'split', children: many }, '2026-01-01T08:00:00Z')
+  assert.equal(rm.children.length, 8, '物化上限截断口径零改动（仍 8）')
+})
+
+// ===== ⑮ 首张子卡自动继承源卡外部依赖（task-mwk0f3f1）=====
+// 实证（主窗口 2026-11-17）：拆解官 dependsOn 序号只认同批**前排**子卡，跨批/外部前置在批内无任何表达通道——
+// 源卡 task-mwj3dc2x dependsOn=['task-mwj8d4b5'] 物化出的 -1 未带上该前置（主窗口手工补挂），首卡可能提前派发。
+// 修法=物化侧自动透传：仅本批首张（k2===0）继承源卡 dependsOn，继承段排在批内序号段之前且去重；
+// 后续子卡经批内 dependsOn 链天然传递该前置，不重复继承。序号解析口径（只认前排 + 坏序号 unres 留痕）零改动。
+test('⑮ 源卡 dependsOn 自动继承首张子卡：仅首卡 / 继承在前 / 去重过滤 / 空依赖与重拆逐字一致', function () {
+  // ① 首卡继承 + 保序 + 过滤（非字符串/空串）+ 去重；第二/三张只带批内链，不重复继承
+  var src = mkTask({ id: 'x1', status: 'draft', dependsOn: ['ext/a', 'ext/b', 'ext/a', '', 7, null] })
+  var board = mkBoard([src])
+  var r = applyDecomposeProposal(board, src, { verdict: 'split', children: [
+    { title: '首', description: '', size: 'standard', touches: [], acceptance: 'a' },
+    { title: '次', description: '', size: 'standard', touches: [], acceptance: 'b', dependsOn: ['1'] },
+    { title: '末', description: '', size: 'standard', touches: [], acceptance: 'c', dependsOn: ['2'] },
+  ] }, '2026-01-01T01:00:00Z')
+  assert.equal(r.ok, true)
+  var k1 = board.tasks.find(function (x) { return x.title === '首' })
+  var k2 = board.tasks.find(function (x) { return x.title === '次' })
+  var k3 = board.tasks.find(function (x) { return x.title === '末' })
+  assert.deepEqual(k1.dependsOn, ['ext/a', 'ext/b'], '首卡自动继承源卡外部依赖（非字符串/空串过滤 + 去重，保序）')
+  assert.deepEqual(k2.dependsOn, [k1.id], '第二张不重复继承源卡依赖（只有批内序号链）')
+  assert.deepEqual(k3.dependsOn, [k2.id], '第三张同理（外部前置经批内链天然传递）')
+  assert.deepEqual(src.dependsOn, ['ext/a', 'ext/b', 'ext/a', '', 7, null], '源卡 dependsOn 零改动（只读不写）')
+  assert.equal(k1.messages.length, 0, '继承是常态物化，不产生留痕消息')
+  // ② 源卡 dependsOn 缺省/为空时行为与现状逐字一致（首卡仍 []，无继承副作用）
+  var srcB = mkTask({ id: 'x2', status: 'draft' })
+  var boardB = mkBoard([srcB])
+  applyDecomposeProposal(boardB, srcB, { verdict: 'split', children: [
+    { title: '甲', description: '', size: 'standard', touches: [], acceptance: 'a' },
+    { title: '乙', description: '', size: 'standard', touches: [], acceptance: 'b', dependsOn: ['1'] },
+  ] }, '2026-01-01T02:00:00Z')
+  var jia = boardB.tasks.find(function (x) { return x.title === '甲' })
+  var yi = boardB.tasks.find(function (x) { return x.title === '乙' })
+  assert.deepEqual(jia.dependsOn, [], '源卡无 dependsOn → 首卡 []（现状逐字一致）')
+  assert.deepEqual(yi.dependsOn, [jia.id])
+  // ③ 重拆批次轮换：新批首卡照常继承（外部前置不因重拆丢失）；旧 draft 批已清
+  var srcC = mkTask({ id: 'x3', status: 'draft', dependsOn: ['ext/c'] })
+  var boardC = mkBoard([srcC])
+  applyDecomposeProposal(boardC, srcC, { verdict: 'split', children: [{ title: '一代', description: '', size: 'standard', touches: [], acceptance: 'a' }] }, '2026-01-01T03:00:00Z')
+  applyDecomposeProposal(boardC, srcC, { verdict: 'split', children: [{ title: '二代', description: '', size: 'standard', touches: [], acceptance: 'a' }] }, '2026-01-01T04:00:00Z')
+  var g2 = boardC.tasks.find(function (x) { return x.title === '二代' })
+  assert.deepEqual(g2.dependsOn, ['ext/c'], '重拆新批首卡同样继承源卡外部依赖')
+  assert.equal(boardC.tasks.filter(function (x) { return x.proposalOf === 'x3' }).length, 1, '旧 draft 批已清、新批首卡落位')
+  // ④ 撞号自引用防御：源卡依赖恰好等于本批首卡派生 id（该 id 空缺被复用）→ 丢弃该条，避免自锁死；其余照常继承
+  var srcD = mkTask({ id: 'x4', status: 'draft', dependsOn: ['x4-1', 'ext/d'] })
+  var boardD = mkBoard([srcD])
+  applyDecomposeProposal(boardD, srcD, { verdict: 'split', children: [
+    { title: 'D1', description: '', size: 'standard', touches: [], acceptance: 'a' },
+    { title: 'D2', description: '', size: 'standard', touches: [], acceptance: 'b' },
+  ] }, '2026-01-01T05:00:00Z')
+  var d1 = boardD.tasks.find(function (x) { return x.title === 'D1' })
+  assert.equal(d1.id, 'x4-1')
+  assert.deepEqual(d1.dependsOn, ['ext/d'], '自引用（x4-1 === 本卡 id）丢弃，其余照常继承')
 })

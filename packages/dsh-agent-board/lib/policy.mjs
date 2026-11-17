@@ -46,7 +46,7 @@ export var TEAM_CONTEXT_PACKING = '8. 拆解后的上下文装配：每张子卡
 // 拆解官参考方案起点（验证/修正而非从零重来），焊死「我已经设计好了」整卡直派的绕过缝隙。
 // ⚠️ 本条**不受 epicSplit 门禁**：它是「确认流怎么用」的流程引导，不是「主动劝你拆」——
 //    拆解官机制本身也不看 epicSplit（task_decompose 工具常驻）。dispatch 注入段在 splitRuleOf(...) 之后恒拼接本条。
-export var TEAM_DECOMPOSE_FLOW = '9. 需求卡工作流：用户用自然语言下达的大需求，先建成 draft 需求卡（保留需求原文），再用 task_decompose 派拆解官出实现侧子卡提案；提案以草稿子卡落位后，向用户呈现一览（标题/档位/模型/touches），用户确认或调档（task_update 改 size/model）后统一 publish。拆解官提案不是终稿——你的呈现与用户的那一眼确认是语义质量的最后防线。命中拆分树信号的需求，即使主窗口已在讨论中形成设计稿，也一律走拆解官——设计稿写进需求卡 contextNotes 作为参考方案；拆解官读它当起点，职责是验证/修正设计而非从零重来。禁止以『我已经设计好了』为由整卡直派。'
+export var TEAM_DECOMPOSE_FLOW = '9. 需求卡工作流：用户用自然语言下达的大需求，先建成 draft 需求卡（保留需求原文），再用 task_decompose 派拆解官出实现侧子卡提案；提案以草稿子卡落位后，向用户呈现一览（标题/档位/模型/touches），用户确认或调档（task_update 改 size/model）后统一 publish。拆解官提案不是终稿——你的呈现与用户的那一眼确认是语义质量的最后防线。拆解官默认出 3~5 张业务纵切子卡（别顶格 8 张），串行成本纳入粒度判断：每张卡都要独立 spawn Worker + Verifier、Worker 还会重复加载上下文，代码+测试+直接类型/文档尽量同卡，禁止纯类型/纯文档/逐技术层机械拆卡。命中拆分树信号的需求，即使主窗口已在讨论中形成设计稿，也一律走拆解官——设计稿写进需求卡 contextNotes 作为参考方案；拆解官读它当起点，职责是验证/修正设计而非从零重来。禁止以『我已经设计好了』为由整卡直派。'
 // Team 提示词第 10 条：力度档位判档指引（样例化口径，与 TASK_SIZE_CONTRACT / 拆解官 prompt 同源）。
 // ⚠️ 与第 9 条同款纪律：**不受 epicSplit 门禁**——档位怎么判与「要不要拆」正交，关掉拆分引导
 //    也不能让主窗口重新失去判档标准（那正是「全落标档」的成因）。dispatch 恒拼接。
@@ -159,6 +159,7 @@ export function buildDecomposerPrompt(t, pack) {
   p += '\n拆解纪律（硬约束）：\n'
   p += '1. 第一步必须先用 read 工具读上面文件清单里的文件（按所给行号范围），从**实现侧**拆（按模块/文件边界切分）；禁止不读代码就拍脑袋拆，禁止只做需求侧转述。\n'
   p += '2. 每张子卡必须 10~30 分钟可独立完成并验收：touches 精确到文件（文件级排他锁，同批子卡 touches 不得互相重叠），acceptance 必须是可执行命令（如 "node --test test/xxx.test.mjs"）。\n'
+  p += '2b. 粒度判断（默认 3~5 张，别顶格 8 张）：串行链越长交付越慢——每张卡都要独立 spawn Worker + Verifier，Worker 还会重复加载上下文。优先按**可独立交付/演示的业务纵切**合并：代码+测试+直接类型/文档尽量同卡，禁止纯类型卡、纯文档卡、逐技术层机械拆卡。极小返工优先并入上游卡或原 Worker 续跑，不另起卡。只有「独立验收真实存在 / 并行收益真实存在 / 风险隔离真实存在 / 数据源差异真实存在」之一才值得多拆一张。\n'
   p += '3. size 判档（按样例落档，别一律标档；与主窗口 Team 注入同口径）：' + SIZE_TIER_SAMPLES + '。' + SIZE_PICK_QUESTIONS + 'modelHint 仅在有特殊理由时填（如某子卡需超长上下文模型），否则留空。\n'
   p += '4. children 上限 ' + DECOMPOSE_MAX_CHILDREN + ' 张；有先后顺序时用 dependsOn 引用同批序号（只许引用本批**前排**子卡，序号 1 起计：如第 2 张依赖第 1 张填 ["1"]）。\n'
   p += '5. 源卡本身不大、不必拆时：verdict=keep，并在 rationale 写清理由。\n'
@@ -178,6 +179,8 @@ function decomposeChildId(d, parentId, n) {
 //   · 幂等：提案有效才清旧批（proposalOf===源卡 id 且仍 draft 的提案子卡整批移除；已 publish/落定的绝不碰）；
 //   · 子卡落位：status=draft、parentId=源卡、size（合法才落）、model=modelHint（空不落）、touches/acceptance/
 //     description 落位、dependsOn 序号 → 本批真实 id（只收前排序号，天然无环；坏序号丢弃+该子卡 messages 留痕）、上限 DECOMPOSE_MAX_CHILDREN 截断；
+//   · 首张子卡自动继承**源卡外部依赖**（task-mwk0f3f1：批内序号无法表达跨批/外部前置，源卡 dependsOn 透传到首卡，
+//     后续子卡经批内链天然传递；去重 + 自引用防御，不改序号解析口径）；
 //   · 源卡自身状态不变（仍 draft/pending，由用户处置），只追加 messages 提案摘要行 + history 审计行。
 // 返回 { ok, verdict, children?:[{id,title}], error? }——非空返回值驱动 mutateLocked 写盘。
 export function applyDecomposeProposal(d, t, proposal, now) {
@@ -223,6 +226,21 @@ export function applyDecomposeProposal(d, t, proposal, now) {
     // 发布前审阅子卡详情即可见，主窗口可 publish 后用 task_update dependsOn 手工补挂。
     var deps = []
     var unres = []
+    // 首张子卡自动继承源卡外部依赖（task-mwk0f3f1，主窗口 2026-11-17 实证）：拆解官的 dependsOn 序号
+    // **只能引用本批前排**子卡（下一段的 n>=1 && n<=k2），跨批/外部前置（源卡自己的 dependsOn）在批内没有任何
+    // 表达通道——不自动透传则首卡丢掉前置依赖、可能提前派发（实证：源卡 task-mwj3dc2x dependsOn=['task-mwj8d4b5']
+    // 物化出的 -1 未带上，主窗口手工补挂）。只给**首张**（k2===0）继承：后续子卡经批内 dependsOn 链天然传递
+    // 该前置，重复继承只会污染卡面。继承段排在批内序号段之前（外部前置是整批的入口依赖），并去重。
+    if (k2 === 0 && Array.isArray(t.dependsOn)) {
+      for (var ih = 0; ih < t.dependsOn.length; ih++) {
+        var iv = t.dependsOn[ih]
+        if (typeof iv !== 'string' || !iv) continue
+        // 自引用防御：重拆撞号（decomposeChildId 复用 T-1 这类派生 id）时源卡依赖可能恰好等于本卡 id，
+        // 落进去即自锁死（发布/派发永久阻塞）——丢弃该条，其余照常继承。
+        if (iv === ids[k2]) continue
+        if (deps.indexOf(iv) < 0) deps.push(iv)
+      }
+    }
     var dr = Array.isArray(c.dependsOn) ? c.dependsOn : []
     for (var dj = 0; dj < dr.length; dj++) {
       var ref = String(dr[dj] == null ? '' : dr[dj]).trim()
