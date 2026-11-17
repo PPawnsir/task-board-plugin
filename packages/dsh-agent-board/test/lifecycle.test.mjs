@@ -117,8 +117,10 @@ test('合法流冒烟：六推进点照常落状态（断言零干扰）', () =>
   assert.equal(r.ok, true); assert.equal(src.status, 'pending', '物化推进 draft→pending')
 })
 
-// ===== 死胡同检测器 sweepStuckCards（task-mwk481xj）：五类「应推进但没推进」形态 =====
-// 断言族：①五类各构造一例 → 全部识别 ②可自动推进的（①②③）被正确推进 ③只上报的（④⑤）产生
+// ===== 死胡同检测器 sweepStuckCards（task-mwk481xj）：六类「应推进但没推进」形态 =====
+// （⑥ 由 task-mwkb7djc 补：pending + direct 父卡 + 子卡全落定 → 直接收口 resolved——②类排除 direct
+//   而 maybeAutoCloseParent 要求父卡 in-progress，二者叠加留下的盲区，实证 task-mwk0daqx 停死）
+// 断言族：①六类各构造一例 → 全部识别 ②可自动推进的（①②③⑥）被正确推进 ③只上报的（④⑤）产生
 // pushSysNote 且不自动改状态 ④正常卡不误报 ⑤源码级挂点/查表断言锁。直调纯函数 + 薄桩 poolCycle
 //（mkGateDispatch 同款形态：真跑 createDispatch.poolCycle，stub 掉 IO/计时器）双面覆盖。
 import { createDispatch } from '../lib/dispatch.mjs'
@@ -303,6 +305,93 @@ test('死胡同⑤：verifying 超 24h 无 Verifier run → 上报不动状态�
   await cycle(h2)
   assert.deepEqual(h2.notes, [], '未满 24h / frozen（人裁决通道）/ spawn-pending（占位回收辖区）：一律不报')
   assert.equal(t3.status, 'verifying', 'frozen 不动')
+})
+
+// ===== ⑥类（task-mwkb7djc）：pending + direct 父卡 + 子卡全落定 → 直接收口 resolved（②类盲区） =====
+test('死胡同⑥：pending direct 父卡 + 子卡全落定 → 一轮直接收口 resolved（不经 verifying）；子卡未全落定不误动', async () => {
+  // 实证形态 task-mwk0daqx：子卡手动建、父卡 draft 时子卡已派发，父卡后 publish 成 pending，
+  // 子卡全落定后无任何未来事件够得到它（parentKick 要「首个子卡派发」时机且 direct 被②排除，
+  // maybeAutoCloseParent 又要求父卡 in-progress）。
+  var epic = mkCard({ id: 'e6', status: 'pending', pipeline: 'direct', title: '亲办容器史诗' })
+  var e1 = mkCard({ id: 'e6-1', parentId: 'e6', status: 'resolved' })
+  var e2 = mkCard({ id: 'e6-2', parentId: 'e6', status: 'cancelled' }) // 人主动取消=该子范围已了结
+  var e3 = mkCard({ id: 'e6-3', parentId: 'e6', status: 'archived' })  // 归档=人的显式了结（同 isChildSettled 口径）
+  var h = mkDispatch(mkBoard([epic, e1, e2, e3]))
+  await cycle(h)
+  assert.equal(epic.status, 'resolved', '⑥识别并直接收口 resolved（direct 不进派发池，verifying 够不到）')
+  assert.ok(epic.resolvedAt, 'resolvedAt 落卡')
+  assert.equal(epic.resolution, 'all subtasks resolved', '复用既有收口文案（maybeAutoCloseParent 原文案）')
+  var last = epic.history[epic.history.length - 1]
+  assert.ok(last && last.from === 'in-progress' && last.to === 'resolved', 'history 走既有 parentAuto 收口边')
+  assert.match(String(last.note || ''), /direct 父卡直接收口/, '留痕口径=既有 direct 分支（不新写状态语义）')
+  var kick = epic.history[epic.history.length - 2]
+  assert.ok(kick && kick.from === 'pending' && kick.to === 'in-progress', '先走既有 parentKick 边（复用 parentKickOnDispatch）')
+  assert.match(String(kick.note || ''), /首个子任务派发/, '复用 parentKickOnDispatch 原文案')
+  assert.deepEqual(h.notes, [], '⑥自动收口零通知（ah 留痕即审计）')
+  // 反例族：子卡未全落定（pending/draft/blocked）→ 不动、不记 pendingKickSince、不进 in-progress
+  // （子卡 assignMode=manual：否则池派发该子卡会经 parentKick 把父卡推 in-progress，那是②类正常语义，
+  //  与本类判定无关——本组只想看⑥分支自己动没动）
+  var p = mkCard({ id: 'p6', status: 'pending', pipeline: 'direct' })
+  var c1 = mkCard({ id: 'p6-1', parentId: 'p6', status: 'resolved' })
+  var c2 = mkCard({ id: 'p6-2', parentId: 'p6', status: 'pending', assignMode: 'manual' })
+  var c3 = mkCard({ id: 'p6-3', parentId: 'p6', status: 'draft' })
+  var p2 = mkCard({ id: 'p6b', status: 'pending', pipeline: 'direct' })
+  var b1 = mkCard({ id: 'p6b-1', parentId: 'p6b', status: 'blocked' }) // blocked=未了结（isChildSettled 口径）
+  var p3 = mkCard({ id: 'p6c', status: 'pending', pipeline: 'direct' }) // 零子卡：空容器不判（无可了结集合）
+  var h2 = mkDispatch(mkBoard([p, c1, c2, c3, p2, b1, p3]))
+  await cycle(h2)
+  assert.equal(p.status, 'pending', '子卡未全落定：direct 父卡原位不动（不误收口）')
+  assert.ok(!p.pendingKickSince, 'direct 不参与②类首见记时（⑥是独立分支）')
+  assert.equal(p2.status, 'pending', 'blocked 子卡不算了结：不收口')
+  assert.equal(p3.status, 'pending', '零子卡 direct 父卡不判（无终态集可凑齐）')
+  assert.deepEqual(h2.notes, [], '反例零通知')
+})
+
+test('死胡同⑥守卫与并集：busy/frozen/escalation 不收口；纯⑥死板预筛放行；非 direct 仍走②类', async () => {
+  // 只有「pending direct 父卡 + 全落定子卡」的板：预筛必须放行——否则锁外就被过滤，⑥永远扫不到
+  var only = mkCard({ id: 'o6', status: 'pending', pipeline: 'direct' })
+  var oc = mkCard({ id: 'o6-1', parentId: 'o6', status: 'resolved' })
+  var h = mkDispatch(mkBoard([only, oc]))
+  await cycle(h)
+  assert.equal(only.status, 'resolved', '预筛放行：纯 direct 死板也能被扫到并收口（本卡修法的另一半）')
+
+  var bz = mkCard({ id: 'b6', status: 'pending', pipeline: 'direct' })
+  var bzc = mkCard({ id: 'b6-1', parentId: 'b6', status: 'resolved' })
+  var fz = mkCard({ id: 'f6', status: 'pending', pipeline: 'direct', frozen: true, frozenAt: ago(3600000) })
+  var fzc = mkCard({ id: 'f6-1', parentId: 'f6', status: 'resolved' })
+  var es = mkCard({ id: 'x6', status: 'pending', pipeline: 'direct', escalation: { question: '歧义待裁决' } })
+  var esc = mkCard({ id: 'x6-1', parentId: 'x6', status: 'resolved' })
+  var h2 = mkDispatch(mkBoard([bz, bzc, fz, fzc, es, esc]))
+  h2.runs['b6'] = { id: 'run-b6', role: 'decomposer', taskId: 'b6', settled: false } // 活跃 run=有事在途
+  await cycle(h2)
+  assert.equal(bz.status, 'pending', '有活跃 run：不自动动卡（与②同款 busy 守卫）')
+  assert.equal(fz.status, 'pending', 'frozen（裁决挂起）：不动，归人通道')
+  assert.equal(es.status, 'pending', 'escalation（歧义待裁决）：不动，归人通道')
+  assert.deepEqual(h2.notes, [], '守卫态零通知')
+
+  // ③ 非 direct 父卡不受⑥影响：仍走②类（首见记时 → 宽限满 parentKick 推 in-progress → 全落定收口）
+  var np = mkCard({ id: 'n6', status: 'pending', assignMode: 'manual' })
+  var nc = mkCard({ id: 'n6-1', parentId: 'n6', status: 'resolved' })
+  var h3 = mkDispatch(mkBoard([np, nc]))
+  await cycle(h3)
+  assert.equal(np.status, 'pending', '非 direct：首见只记时（②类口径，⑥不接管）')
+  assert.ok(np.pendingKickSince, '②类首见标记落卡（⑥零干扰）')
+  np.pendingKickSince = ago(130000)
+  await cycle(h3)
+  assert.equal(np.status, 'verifying', '②类宽限满 → parentKick → 全落定收口 verifying（非 direct 路径零变化）')
+})
+
+// ===== ⑥源码锁：分支/预筛支存在；maybeAutoCloseParent 的 in-progress 门槛零改动（边界纪律硬锁）=====
+test('死胡同⑥源码锁：direct 收口分支 + 预筛 direct 支；maybeAutoCloseParent 门槛与 direct 分支原文未动', () => {
+  const ds = srcOf('../lib/dispatch.mjs')
+  assert.match(ds, /t\.pipeline === 'direct' && kids\.length > 0/, '⑥类分支存在（pending direct 父卡 + 子卡全落定）')
+  assert.match(ds, /t\.pipeline === 'direct' && kids\.every\(function \(k\) \{ return core\.isChildSettled\(k\) \}\)/, '预筛补 direct 全落定支（否则锁外预筛即过滤掉，⑥扫不到）')
+  assert.match(ds, /parentKickOnDispatch\(d, dchild\)/, '⑥复用既有推进点 parentKickOnDispatch（不新写状态语义）')
+  assert.match(ds, /core\.maybeAutoCloseParent\(d, dchild\)/, '⑥复用既有收口点（core 限定引用：解构行被 core.test.mjs 源码锁死）')
+  assert.match(ds, /t\.pipeline !== 'direct'/, '②类 non-direct 守卫原封未动（两分支并列不重叠）')
+  const coreSrc = srcOf('../lib/core.mjs')
+  assert.match(coreSrc, /if \(!p \|\| p\.status !== 'in-progress'\) return null/, '边界：maybeAutoCloseParent 的 in-progress 门槛零改动（正常 parentKick 链口径不动）')
+  assert.match(coreSrc, /if \(p\.pipeline === 'direct'\) \{/, 'direct 直接 resolved 的既有分支原文（⑥消费的就是它）')
 })
 
 // ===== 五类同板一轮全识别（头条断言）：①②③推进 + ④⑤汇总上报，互不牵连 =====

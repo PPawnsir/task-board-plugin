@@ -34,7 +34,8 @@ const { ah, cfg, claimApply, pickDispatch, isOrphan, buildWorkerPrompt, buildVer
 export { parseModelCooldown }
 export var parseRateLimit = parseModelCooldown
 
-// ===== 死胡同检测器 sweepStuckCards（task-mwk481xj）：五类「当前数据应推进但没推进」形态 =====
+// ===== 死胡同检测器 sweepStuckCards（task-mwk481xj）：六类「当前数据应推进但没推进」形态 =====
+// （⑥ 由 task-mwkb7djc 补：② 排除 direct 造成的盲区）
 // 挂 poolCycle 每轮扫一遍非归档卡（挂点见 poolCycleBody 内 stuckSweep 段），行为分级：
 //   ① 父卡 draft 但已有拆解物化子卡（proposalOf 命中）——applyDecomposeProposal 物化推进（task-mwk2lf8m）
 //      的回归锁：物化本应原子推父卡 draft→pending，残留此形态即回归/存量脏数据 → 自动推进
@@ -53,9 +54,18 @@ export var parseRateLimit = parseModelCooldown
 //      丢失/人工恢复现场残留）。不自动推进：收口方向（重跑/跳过/放弃）需人裁决 → pushSysNote 上报。
 //   ⑤ 卡 verifying 超 24h 无 verifierRun 且无活跃 run——验收卡住（派发侧过滤器全挡=frozen/manual/
 //      非 full 管线，或 maxVerifiers=0）→ pushSysNote 上报，不自动推进。
+//   ⑥ 父卡 pending 且 pipeline='direct' 且子卡全落定（resolved/cancelled/archived，与 isChildSettled
+//      同口径）→ 直接收口（task-mwkb7djc，② 类排除 direct 留下的盲区）。②类特意排除 direct（注释口径
+//      「direct 由 maybeAutoCloseParent 收口」），但 maybeAutoCloseParent 首道闸门要求父卡 in-progress：
+//      二者叠加，使「子卡全了结的 pending direct 父卡」谁都够不到（实证 task-mwk0daqx 停死：pending +
+//      direct + 子卡 2/2 resolved，stuckNotedAt 从未落卡）。⑥ 为独立收口分支：先以表上既有 parentKick 边
+//      推 in-progress（复用既有推进点 parentKickOnDispatch，不新写状态语义），同一轮内再由既有收口点
+//      maybeAutoCloseParent 的 direct 分支直接 resolved——语义即 core.mjs 既有口径「direct 父卡本就是
+//      主窗口亲办容器，子任务全了结即形式收口」，不需要等自然 parentKick（direct 卡不进派发池，那个
+//      「首个子卡派发」时机永不发生）。与②类并列不重叠：② 只管非 direct。
 //   ④⑤ 节流：每卡 stuckNotedAt 24h 一次（心跳 15s 一轮，不节流会对同一张卡刷屏）；检测窗口内静默
 //   且零写盘。② 首见标记 pendingKickSince 同为一次性写。正常板全条件不命中 → 零写零报。
-// 边界纪律：①②③只调既有推进点/既有转移语义，不新写状态变更；④⑤只上报；不动 poolCycle 既有
+// 边界纪律：①②③⑥只调既有推进点/既有转移语义，不新写状态变更；④⑤只上报；不动 poolCycle 既有
 // 派发/回收逻辑（本函数是独立扫描段，锁内纯函数零 IO，通知由 createDispatch 内 stuckSweep 投递）。
 export var STUCK_GRACE_MS = 120000 // ②③ 宽限（对齐 isOrphan/spawn-pending/hook-pre 的 2min 回收口径）
 export var STUCK_VERIFY_MS = 86400000 // ⑤ 验收卡住判定：verifying 超 24h 无 verifierRun
@@ -84,7 +94,10 @@ function stuckHasCandidates(tasks) {
     var kids = kidsOf[t.id] || []
     if (t.status === 'draft') { if (kids.some(function (k) { return k && k.proposalOf === t.id })) return true }
     else if (t.status === 'pending') {
-      if (kids.length && (t.pendingKickSince || (t.pipeline !== 'direct' && kids.some(function (k) { return k && k.status !== 'draft' })))) return true
+      if (kids.length && (t.pendingKickSince || (t.pipeline !== 'direct' && kids.some(function (k) { return k && k.status !== 'draft' }))
+        // ⑥ 超集粗筛（task-mwkb7djc）：direct 父卡 + 子卡全落定 → 锁内直接收口。没有这一支，
+        // 只有「pending direct 父卡」的（死）板会被预筛整体过滤掉，⑥ 永远扫不到（本轮修法的一半）。
+        || (t.pipeline === 'direct' && kids.every(function (k) { return core.isChildSettled(k) })))) return true
     }
     else if (t.status === 'in-progress') { if (!t.claimedBy && kids.length === 0) return true }
     else if (t.status === 'verifying') { if (!t.verifierRun || (t.hooks && t.hooks.post && t.hooks.post.enabled && t.hooks.post.state === 'running')) return true }
@@ -128,6 +141,18 @@ export function sweepStuckCards(d, runs, now, c) {
       // 才 kick（吞掉「发布→下轮派发 kick」瞬态）；条件失配或已离开 pending 态时清残留标记（标记是
       // 持久字段，不清会在下次合法进 pending 时带旧龄秒判）。
       if (t.status === 'pending') {
+        // ⑥ pending + direct 父卡 + 子卡全落定 → 独立收口（task-mwkb7djc）。判在②之前：direct 不参与
+        // ②类 kick 链（下方 kickable 的 non-direct 守卫），二者条件互斥。三条守卫与②同款：活跃 run 在途
+        // （busy）/ 人裁决挂起（frozen/escalation）时不自动动卡——那是有事在途或有人通道的合法态。
+        if (t.pipeline === 'direct' && kids.length > 0
+          && kids.every(function (k) { return core.isChildSettled(k) })
+          && !busy && !t.frozen && !t.escalation) {
+          var dchild = kids[0]
+          if (parentKickOnDispatch(d, dchild)) { out.advanced++; out.changed = true } // 既有 parentKick 边（pending→in-progress）
+          if (core.maybeAutoCloseParent(d, dchild)) out.changed = true // 既有收口点：direct 分支直接 resolved
+          if (t.pendingKickSince) { delete t.pendingKickSince; out.changed = true } // 残留首见标记随收口消费
+          return
+        }
         var kickable = kids.length > 0
           && t.pipeline !== 'direct'
           && !kids.some(function (k) { return !k || k.status === 'draft' })
@@ -1200,9 +1225,9 @@ export function createDispatch(ctx, state, deps) {
       var hungN = 0
       try { hungN = await hung.hungZeroOutputSweep(sid, runs, snap) } catch (e) { console.error('[task-board] 挂死零产出检测失败（本轮跳过）:', String(e)) }
       if (hungN > 0) { try { snap = await rt(sid) } catch (_) {} }
-      // 死胡同检测器（task-mwk481xj）：五类「应推进但没推进」形态的独立扫描段。位置在挂死检测之后、
-      // 活跃度计数与空闲快进之前——①类死胡同长在全草稿板上（无 pending/verifying/in-progress 卡），
-      // 挂在快进早退之后会永远扫不到；①②③ 推进会改卡面状态，推进后重读快照（与幽灵回收/挂死判死
+      // 死胡同检测器（task-mwk481xj + ⑥ task-mwkb7djc）：六类「应推进但没推进」形态的独立扫描段。位置在
+      // 挂死检测之后、活跃度计数与空闲快进之前——①类死胡同长在全草稿板上（无 pending/verifying/in-progress
+      // 卡），挂在快进早退之后会永远扫不到；①②③⑥ 推进会改卡面状态，推进后重读快照（与幽灵回收/挂死判死
       // 同款纪律，防下方空闲快进的 stalePool/staleInfo 拿旧快照误判）；④⑤ 只通知不改状态，零重读。
       var stuckN = 0
       try { stuckN = await stuckSweep(sid, runs, snap) } catch (e) { console.error('[task-board] 死胡同检测失败（本轮跳过，派发照常）:', String(e)) }
