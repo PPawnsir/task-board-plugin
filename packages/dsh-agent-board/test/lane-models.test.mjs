@@ -815,3 +815,155 @@ test('死锁⑦：板级 workerModel/verifierModel 同 diff——重存已下架
   assert.equal(board.fallbackModels, undefined, '拒写不落半截')
 })
 
+// ===== 思考等级元数据透出（task-mwkbm37s）：enumModels 逐模型补 resolveModelInfo → list-models 带 efforts/defaultEffort =====
+// 宿主契约（dsh-llm）：resolveModelInfo(provider, model) → LlmResolvedModelInfo，reasoning =
+// { efforts: [{id, name, description?}...], defaultEffort? }；缺席=模型不支持思考等级。
+// 断言清单（对应任务验收口径）：
+//   ① 有 reasoning 的模型：list-models 返回带 efforts（档位 id 清单）+ defaultEffort（默认档）+ 并行解析
+//      + 元数据不破坏既有校验通道（set-board-config 合法 id 照常放行）
+//   ② 无 reasoning 的模型（resolveModelInfo 无 reasoning / efforts 空数组 / 脏形态）：efforts 空数组、defaultEffort 省略
+//   ③ 单模型 resolveModelInfo 抛错 → 该模型 efforts 空数组，整体不阻塞（其余模型照常带元数据）
+//   ④ 老宿主无 resolveModelInfo 方法 → 不报错，模型对象无 efforts 字段（输出形态与升级前逐字一致）
+//   ⑤ 进程级缓存（rpc.mjs 模块级 REASONING_INFO_CACHE）：同模型二次枚举零调用；失败不入缓存下次
+//      重试，恢复后即带元数据；成功后入缓存再免调
+// 注：REASONING_INFO_CACHE 是 rpc.mjs 模块级（进程级），本文件进程内共享——本组用例独占 r1~r5
+// 前缀 provider id（其余测试组的 mock llm 均无 resolveModelInfo，走老宿主路径不写缓存），防串扰。
+function mkReasoningLlm(modelsByProvider, resolveSpec, opts) {
+  // resolveSpec: { 'provider/model': reasoning对象 | null | 'boom' }——reasoning 形态对齐宿主
+  // LlmResolvedModelInfo.reasoning；null=已解析但不支持思考等级；'boom'=resolveModelInfo 抛错。
+  // opts.settleDelayMs 给每次解析加在飞延时（实证 Promise.all 并行：重叠在飞计数 >1）。
+  var calls = []
+  var active = 0, maxActive = 0
+  var llm = {
+    get: function (name) {
+      if (name !== 'llm') return null
+      return {
+        listProviders: function () { return Object.keys(modelsByProvider).map(function (id) { return { id: id, name: id } }) },
+        listModels: async function (p) { return modelsByProvider[p] || [] },
+        resolveModelInfo: async function (p, m) {
+          calls.push(p + '/' + m)
+          active++; if (active > maxActive) maxActive = active
+          if (opts && opts.settleDelayMs) await new Promise(function (res) { setTimeout(res, opts.settleDelayMs) })
+          active--
+          var spec = resolveSpec[p + '/' + m]
+          if (spec === 'boom') throw new Error('resolve boom')
+          return { provider: p, id: m, name: m, reasoning: spec || undefined }
+        },
+      }
+    },
+    __resolveCalls: calls,
+    __maxActive: function () { return maxActive },
+    __spec: resolveSpec,
+  }
+  return llm
+}
+function pickModel(models, id) {
+  for (var i = 0; i < models.length; i++) { if (models[i].id === id) return models[i] }
+  return null
+}
+
+test('思考等级①：有 reasoning 的模型 → list-models 带 efforts 档位清单 + defaultEffort 默认档；逐模型并行解析；既有校验通道不受元数据影响', async function () {
+  var llm = mkReasoningLlm(
+    { r1: [{ id: 'thinker', name: 'Thinker' }, { id: 'plain', name: 'Plain' }] },
+    { 'r1/thinker': { efforts: [{ id: 'high', name: '高' }, { id: 'medium', name: '中' }, { id: 'low', name: '低' }], defaultEffort: 'medium' } }
+  )
+  var board = { version: 12, tasks: [], configLog: [] }
+  var h = mkRpcHandlers(board, {}, llm)
+  var r = await h['list-models']({})
+  assert.equal(r.ok, true)
+  assert.equal(r.models.length, 2)
+  var thinker = pickModel(r.models, 'r1/thinker')
+  assert.deepEqual(thinker.efforts, ['high', 'medium', 'low'], 'efforts=可用档位 id 清单（透出 id，name/description 留在宿主）')
+  assert.equal(thinker.defaultEffort, 'medium', 'defaultEffort=默认档 id')
+  assert.equal(thinker.name, 'Thinker', '既有字段不受影响')
+  // 元数据缺席省略语义：defaultEffort 未给（reasoning 无该键）→ 字段不出现
+  // ——注意 r1/plain 无 spec（resolveModelInfo 返回无 reasoning）由②覆盖，这里单锁 defaultEffort 缺席
+  // 并行实证：settleDelayMs 让每次解析在飞 30ms，串行实现 maxActive 恒 1、并行（Promise.all）≥2
+  var llmP = mkReasoningLlm(
+    { r5: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] },
+    { 'r5/a': { efforts: [{ id: 'high', name: '高' }], defaultEffort: 'high' }, 'r5/b': { efforts: [{ id: 'low', name: '低' }] }, 'r5/c': null },
+    { settleDelayMs: 30 }
+  )
+  var hP = mkRpcHandlers({ version: 12, tasks: [] }, {}, llmP)
+  var rp = await hP['list-models']({})
+  assert.equal(rp.ok, true)
+  assert.ok(llmP.__maxActive() >= 2, '逐模型并行解析（在飞重叠 ≥2，串行实现恒 1）')
+  // 既有校验通道（set-board-config 经 enumModels 比对 id）不受新增元数据字段影响
+  var rw = await h['set-board-config']({ key: 'workerModel', value: 'r1/thinker' })
+  assert.equal(rw.ok, true, '合法 id 在带元数据的清单里照常命中（校验只比 id，不看 efforts）')
+  assert.equal(board.workerModel, 'r1/thinker')
+})
+
+test('思考等级②：无 reasoning 的模型（无 reasoning / efforts 空数组 / 脏形态）→ efforts 空数组、defaultEffort 省略', async function () {
+  var llm = mkReasoningLlm(
+    { r2: [{ id: 'no-reasoning' }, { id: 'empty-efforts' }, { id: 'dirty-shape' }] },
+    {
+      'r2/no-reasoning': null, // resolveModelInfo 成功但无 reasoning（模型不支持思考等级）
+      'r2/empty-efforts': { efforts: [] }, // reasoning 在但 efforts 空数组
+      'r2/dirty-shape': { efforts: [{ noId: true }, 'junk', null], defaultEffort: '' }, // 脏形态防御（宿主已校验，这里锁兜底不炸）
+    }
+  )
+  var h = mkRpcHandlers({ version: 12, tasks: [] }, {}, llm)
+  var r = await h['list-models']({})
+  assert.equal(r.ok, true)
+  var ids = ['r2/no-reasoning', 'r2/empty-efforts', 'r2/dirty-shape']
+  for (var i = 0; i < ids.length; i++) {
+    var m = pickModel(r.models, ids[i])
+    assert.deepEqual(m.efforts, [], ids[i] + ' → efforts 空数组')
+    assert.equal('defaultEffort' in m, false, ids[i] + ' → defaultEffort 省略（缺席=不显示 effort 选择器）')
+  }
+})
+
+test('思考等级③：单模型 resolveModelInfo 抛错 → 该模型 efforts 空数组不阻塞，其余模型照常带元数据', async function () {
+  var llm = mkReasoningLlm(
+    { r3: [{ id: 'boom' }, { id: 'fine' }] },
+    { 'r3/boom': 'boom', 'r3/fine': { efforts: [{ id: 'low', name: '低' }], defaultEffort: 'low' } }
+  )
+  var h = mkRpcHandlers({ version: 12, tasks: [] }, {}, llm)
+  var r = await h['list-models']({})
+  assert.equal(r.ok, true, '单模型解析失败不阻塞整体枚举')
+  var boom = pickModel(r.models, 'r3/boom')
+  assert.deepEqual(boom.efforts, [], '失败模型降级 efforts 空数组')
+  assert.equal('defaultEffort' in boom, false)
+  var fine = pickModel(r.models, 'r3/fine')
+  assert.deepEqual(fine.efforts, ['low'], '其余模型照常带元数据')
+  assert.equal(fine.defaultEffort, 'low')
+})
+
+test('思考等级④：老宿主无 resolveModelInfo → list-models 照常返回且模型对象无 efforts 字段（形态与升级前逐字一致，不报错）', async function () {
+  // 既有 mkLlmCtx 只有 listProviders/listModels（老宿主形态）
+  var h = mkRpcHandlers({ version: 12, tasks: [] }, {}, mkLlmCtx(MOCK_MODELS))
+  var r = await h['list-models']({})
+  assert.equal(r.ok, true, '老宿主不报错')
+  assert.equal(r.models.length, 3)
+  for (var i = 0; i < r.models.length; i++) {
+    assert.equal('efforts' in r.models[i], false, '模型对象无 efforts 字段（零字段新增）')
+    assert.equal('defaultEffort' in r.models[i], false)
+  }
+  // 深等价锁定：输出与升级前形态完全一致（id/name/provider 三字段，无任何多余键）
+  assert.deepEqual(r.models[0], { id: 'deepseek/deepseek-chat', name: 'deepseek-chat', provider: 'deepseek' })
+})
+
+test('思考等级⑤：进程级缓存——同模型二次枚举零调用；失败不入缓存下次重试，恢复后即带元数据；成功后入缓存再免调', async function () {
+  var llm = mkReasoningLlm(
+    { r4: [{ id: 'cached' }, { id: 'flaky' }] },
+    { 'r4/cached': { efforts: [{ id: 'high', name: '高' }], defaultEffort: 'high' }, 'r4/flaky': 'boom' }
+  )
+  var h = mkRpcHandlers({ version: 12, tasks: [] }, {}, llm)
+  var r1 = await h['list-models']({})
+  assert.equal(llm.__resolveCalls.length, 2, '首轮逐模型各调一次（并行）')
+  assert.deepEqual(pickModel(r1.models, 'r4/cached').efforts, ['high'])
+  assert.deepEqual(pickModel(r1.models, 'r4/flaky').efforts, [], '首轮失败降级空数组')
+  // 第二轮：cached 命中进程级缓存零调用；flaky 失败不入缓存 → 重试一次（总调用 2→3）
+  var r2 = await h['list-models']({})
+  assert.equal(llm.__resolveCalls.length, 3, 'cached 走缓存 + flaky 重试 = 只新增 1 次调用')
+  assert.deepEqual(pickModel(r2.models, 'r4/cached').efforts, ['high'], '缓存命中返回同值')
+  // 失败恢复：宿主恢复后（spec 改为正常 reasoning）下次枚举即带元数据（瞬态失败不粘死缓存）
+  llm.__spec['r4/flaky'] = { efforts: [{ id: 'low', name: '低' }] }
+  var r3 = await h['list-models']({})
+  assert.deepEqual(pickModel(r3.models, 'r4/flaky').efforts, ['low'], '失败不粘缓存：恢复后下次枚举带元数据')
+  assert.equal(llm.__resolveCalls.length, 4, 'flaky 重试成功一次后入缓存')
+  var r4 = await h['list-models']({})
+  assert.equal(llm.__resolveCalls.length, 4, '两模型均入缓存：第四次枚举零调用')
+})
+

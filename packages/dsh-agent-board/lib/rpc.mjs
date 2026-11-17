@@ -37,6 +37,43 @@ function defineTool(options) {
     // 上限 20 条，与 contextFiles 上限一致，防止 prompt/看板文件被超长清单撑爆。
     function normTouches(v) { return Array.isArray(v) ? v.filter(function (x) { return typeof x === 'string' && x.trim() }).slice(0, 20).map(function (x) { return x.trim() }) : [] }
 
+    // ===== 思考等级元数据（task-mwkbm37s）：enumModels 逐模型补 llm.resolveModelInfo 拿 reasoning =====
+    // 宿主契约（dsh-llm）：resolveModelInfo(provider, model) → LlmResolvedModelInfo，其中 reasoning =
+    // { efforts: [{id, name, description?}...], defaultEffort? }——每个模型支持哪几档思考等级、默认哪档，
+    // 宿主自己知道，不用手填。本层只读透出：list-models 每个模型对象加 efforts: string[]（可用档位 id
+    // 清单，模型不支持思考等级时空数组）与 defaultEffort: string（默认档，缺席/空则省略）。
+    // 进程级缓存（模块级 Map）：模型目录不常变（宿主 llm/models-updated 才变），list-models 与
+    // set-board-config/cardModelErr 校验共用 enumModels，缓存把逐模型异步调用摊薄到进程生命周期一次。
+    // 值语义：{efforts, defaultEffort}（已解析，efforts 可为空=模型不支持）；Map 缺键=未缓存。
+    var REASONING_INFO_CACHE = new Map()
+    // 单模型 reasoning 解析（纯读宿主元数据，enumModels 并行调用）：成功（含模型不支持=reasoning
+    // 缺席/efforts 空）→ 归一值入缓存并返回；resolveModelInfo 抛错 → 返回 null 且**不入缓存**
+    // （调用方降级该模型 efforts 空数组，下次枚举可重试——瞬态失败不粘死）。
+    // 归一纪律：efforts 只收非空 string id（宿主 dsh-llm 已做过唯一性校验，这里只做形态防御）；
+    // defaultEffort 仅非空 string 透出，否则视同缺席。
+    async function resolveReasoningInfo(llm, providerId, modelId) {
+      var key = providerId + '/' + modelId
+      if (REASONING_INFO_CACHE.has(key)) return REASONING_INFO_CACHE.get(key)
+      try {
+        var info = await llm.resolveModelInfo(providerId, modelId)
+        var reasoning = info && info.reasoning
+        var efforts = []
+        var defaultEffort = ''
+        if (reasoning && Array.isArray(reasoning.efforts)) {
+          for (var i = 0; i < reasoning.efforts.length; i++) {
+            var e = reasoning.efforts[i]
+            if (e && typeof e.id === 'string' && e.id) efforts.push(e.id)
+          }
+          if (typeof reasoning.defaultEffort === 'string' && reasoning.defaultEffort) defaultEffort = reasoning.defaultEffort
+        }
+        var val = { efforts: efforts, defaultEffort: defaultEffort }
+        REASONING_INFO_CACHE.set(key, val)
+        return val
+      } catch (_) {
+        return null // 单模型失败降级：不入缓存（下次枚举可重试）
+      }
+    }
+
 export function createRpc(ctx, state, deps) {
     // deps：session/store/notify/dispatch 各模块公共 API（index.mjs 接线注入）
     var getActorId = deps.getActorId, resolveRoot = deps.resolveRoot, toolSessionId = deps.toolSessionId, rpcSessionId = deps.rpcSessionId
@@ -1367,15 +1404,30 @@ export function createRpc(ctx, state, deps) {
     } }))
     // 枚举当前网关可用模型（list-models handler 与 set-board-config 模型校验共用）：
     // llm.listProviders + listModels；llm 服务缺失（老宿主）返回 null——调用方据此降级，不炸。
+    // 思考等级元数据（task-mwkbm37s）：宿主带 resolveModelInfo 时逐模型并行补调拿 reasoning
+    // （Promise.all 并行 + 单模型失败降级为 efforts 空数组不阻塞整体 + resolveReasoningInfo
+    // 进程级缓存），每个模型对象加 efforts（档位 id 清单，模型不支持=空数组）与 defaultEffort
+    // （默认档，缺席省略）——list-models 据此透出，UI 侧据 efforts 空/缺席不显示 effort 选择器。
+    // 老宿主无 resolveModelInfo 方法 → 跳过元数据面：模型对象形态与升级前逐字一致，不报错。
     async function enumModels() {
       var llm = ctx.get('llm'); if (!llm) return null
       var providers = llm.listProviders()
       var out = []
+      var pairs = [] // 与 out 同序的 [providerId, modelId] 对：resolveModelInfo 按裸二元组调（不拆复合 id，防 provider/model 自带 '/' 的拆分歧义）
       for (var i = 0; i < providers.length; i++) {
         try {
           var models = await llm.listModels(providers[i].id)
-          for (var j = 0; j < models.length; j++) out.push({ id: providers[i].id + '/' + models[j].id, name: models[j].name || models[j].id, provider: providers[i].name || providers[i].id })
+          for (var j = 0; j < models.length; j++) {
+            out.push({ id: providers[i].id + '/' + models[j].id, name: models[j].name || models[j].id, provider: providers[i].name || providers[i].id })
+            pairs.push([providers[i].id, models[j].id])
+          }
         } catch (_) { /* 某 provider 枚举失败不阻塞整体 */ }
+      }
+      if (typeof llm.resolveModelInfo !== 'function') return out // 老宿主降级：无元数据面，不报错
+      var infos = await Promise.all(pairs.map(function (pair) { return resolveReasoningInfo(llm, pair[0], pair[1]) }))
+      for (var k = 0; k < out.length; k++) {
+        out[k].efforts = infos[k] ? infos[k].efforts : [] // 解析失败（null）或模型不支持 → 空数组
+        if (infos[k] && infos[k].defaultEffort) out[k].defaultEffort = infos[k].defaultEffort
       }
       return out
     }
@@ -1410,6 +1462,8 @@ export function createRpc(ctx, state, deps) {
       return value
     }
     // 枚举当前网关可用模型（供 Verifier 模型下拉选择）：llm.listProviders + listModels
+    //（task-mwkbm37s 起宿主带 resolveModelInfo 时模型对象可带 efforts/defaultEffort 思考等级
+    // 元数据——enumModels 统一补齐，此处透出即得，UI 侧据 efforts 空不显示 effort 选择器）
     handle('list-models', async function () {
       var models = await enumModels()
       if (!models) return { ok: false, error: 'llm service unavailable' }
