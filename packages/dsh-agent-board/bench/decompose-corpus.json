@@ -1,0 +1,115 @@
+{
+  "corpusVersion": 1,
+  "name": "decompose-bench-corpus",
+  "description": "拆解官行为 bench 语料：6 张真实需求卡。全部提炼自 one_ledger 仓已落地需求（真实设计文档 + 真实代码路径 + 真实测试命令），零编造；用于实证不同模型在拆解契约（buildDecomposerPrompt + DECOMPOSE_SCHEMA）下的子卡数/串行深度/纵切率等行为差异。",
+  "source": {
+    "repo": "D:/Code/one_ledger",
+    "note": "主窗口调研笔记指定的板文件 tasks-session-be397703 在本机不可得，语料按笔记指示从 one_ledger 已落地需求文档提炼。context.files 中的路径均相对 one_ledger 仓根，为真实存在的实现文件（含行号锚点）。",
+    "extractedAt": "2026-11-17"
+  },
+  "cards": [
+    {
+      "id": "reg-graph",
+      "title": "法规知识图谱：平台实体之上的只读关系投影 + 四分区导航 + clingo 人话注解",
+      "description": "在平台实体之上建「法规知识图谱」只读关系投影，回答八个问题：数据模型（节点/关系如何定义且不破坏 ASP 元数）、容量（按实数估算，千级节点/万级边以内）、存储（权威源/读模型/索引/幂等键/缓存失效）、查询投影与性能（反 N+1、批量读、预算与测量）、信息架构（四分区导航与规则说明卡）、clingo 人话注解规范、图谱交互（确定性分层布局、主路径、可访问性）、垂直切片与测试验收矩阵。\n\n三个用户硬约束：① 规则显著分类——法律与判定规则/感知规则/编目与质量规则/系统元规则四分区导航，规则中心（#/overview）与图谱页（#/graph）同步四分区，任一面都不回到 L0+L2 混合大表；② 按信息容量避免卡顿——容量按当前实数设计（52 文档、239 法律政策条目、21+5 规则、44 用例、77 适用范围、188 字典、190 编目映射、31 资产/249 字段、24 义务锚，节点上界约 831），明确不按 GBT.zip 全量约 3 万标准设计；③ clingo 人话注解与关键路径渲染可读——RuleGuide 独立侧表承载八字段人话注解，表达式默认折叠、法律依据禁 LLM 生成，关键路径「条款→义务→规则→注解→测试」主链路高亮渲染。\n\n数据模型原则：节点=实体行的投影，边=实体行间可推导关系的投影（永远现算、永不落库，数据零冗余）。新增三张侧表：norm_document/norm_clause 只读、rule_guide 可编辑（写权限模型：只读种子维护与 PUT 编辑不在同一实体上并存）。/api/graph/* 全只读，不做图谱写 API，维护走平台实体。硬边界：不新建本地 facts.db、不引入 Neo4j/图数据库、不改 rule_definition（恒 11 属性）、不改判定语义（26 规则 Kahn 拓扑序+五表事实、44 用例冻结期望、seed 对账钉线零改动）、不消灭规则中心页（清单/筛选/编辑入口职责保留，信息架构须同步四分区）。",
+      "acceptance": "uv run pytest backend/tests/test_graph_model.py backend/tests/test_graph_api.py backend/tests/test_norm_graph_seed.py",
+      "context": {
+        "instructions": "本方案 v1.1 评审通过之前，任何图谱实现切片（VS-1~VS-5）不得发布启动；本文档只产出设计与数据证据，一切实现动作留给评审后的切片卡。",
+        "files": [
+          "backend/app/core/graph_model.py:L1-L100 — 图模型与只读投影核心",
+          "backend/app/core/graph_schema.py:L1-L76 — 节点/边 schema 定义",
+          "backend/app/core/graph_seed.py:L1-L80 — seed 对账与钉线",
+          "backend/app/core/law_coverage.py:L1-L137 — 法条覆盖诚实口径（未解析锚不造假节点）",
+          "frontend/src/pages/GraphView.tsx:L1-L80 — 图谱页（#/graph）现状"
+        ],
+        "notes": "节点上界约 831（0.83k）、边约 1.7k~1.75k（万级以内）；APPLIES_TO 派生边查询时按需计算不进读模型物化；rule_definition 恒 11 属性不动，丰富注解一律放侧表；44 用例冻结期望零改动；格式锚源标准缺失时对应边如实缺席不造假节点。"
+      },
+      "source": { "doc": "docs/法规知识图谱实施方案.md", "taskCard": "task-mwc8vxr7" }
+    },
+    {
+      "id": "catalog-sim",
+      "title": "编目推荐接入相似度回落：两段式归类（精确匹配为主，相似度兜底）",
+      "description": "改动对象：/api/catalog/recommend 编目推荐端点（R-CRT-001 归类逻辑）。现状是纯精确匹配——clingo 表达式里硬编码 33 条 r_crt_001_map(字段名, 类别) 映射行，字段名逐字相等才归类；真实字段名有无数变体（xm/user_name/customerName/realName 都是「姓名」类），召回率/覆盖度低。\n\n方案核心=两段式归类：第①段精确匹配（clingo R-CRT-001 现有不动，命中→确定归类 match_type=exact）；第②段相似度回落（Python RapidFuzz 新增，命中→推测归类 match_type=similarity + 标注「推测」）；仍未命中→如实 unmatched（不凑数）。分工原则：clingo 管精确匹配（逻辑推理擅长、44 用例钉着），相似度在 Python 层做（clingo 不适合相似度计算），不需移除 clingo。LLM 不进编目推荐——编目是归类建议不该让 LLM 猜，相似度推测可解释（有 ratio 值）。\n\n性能三层优化（针对 N×M 计算量陷阱）：① 换算法 difflib→RapidFuzz（C 实现，快 10-50 倍）；② 长度预过滤粗筛（两字符串长度差过大则相似度必然低，先按长度砍掉不可能相似的词，通常把 M 砍到 1%~5%，最关键）；③ top-K 提前终止（只要 top-3 候选，用 limit=3 免全排序）。大词表场景实测口径：100 字段 × 10000 词表，优化后 ≈ 15ms（原 difflib ~20s）。",
+      "acceptance": "uv run pytest backend/tests/test_catalog_similarity.py backend/tests/test_catalog_scoring.py backend/tests/test_catalog_scope_map.py",
+      "context": {
+        "instructions": "用户裁决方案 C（接入感知相似度）并提三个注意点：① 性能 ② 证据链 ③ clingo 承接不了可移除。",
+        "files": [
+          "backend/app/core/catalog_similarity.py:L1-L100 — 相似度归类现状",
+          "backend/app/core/catalog_scope_map.py:L1-L60 — 编目范围映射",
+          "backend/app/core/rule_engine.py:L2800-L3378 — R-CRT-001 硬编码 33 条映射与引擎装配",
+          "frontend/src/pages/CatalogTools.tsx:L1-L60 — 编目工具页现状"
+        ],
+        "notes": "精确匹配不违背标准分类约定（标准只定义 13 类体系+示例），但覆盖度不足是真实工程局限；证据链必须带相似度 ratio 值；推测归类必须标注「推测」与 exact 区分。"
+      },
+      "source": { "doc": "docs/编目推荐相似度回落方案.md" }
+    },
+    {
+      "id": "rule-mgmt",
+      "title": "统一规则管理 MVP：规则六面体模型 + clingo 三段式流水线 + 元规则路由",
+      "description": "基于三份实际基准（GB/T 43697 数据分类分级 / GB/T 35273 个人信息安全规范 / 个保法）构建统一规则管理视图的最小实现。需求三句话（用户原话）：① 支持规则的查询/编辑；② 规则能够直接被机器识别并且根据入参返回结果；③ 根据数据资产类型判断应该走哪条规则做判断。\n\n核心模型=规则六面体：一条规则=六个面——① 定义（rule_id/name/kind/form/expression）② 契约（input_schema_json/output_schema_json，机器执行契约）③ 适用（rule_applicability：asset_form/asset_domain/field_pattern/cond_json，路由根基）④ 溯源（standard_ref 标准条款级引用）⑤ 测试（rule_test_case：input_json/expected_json，过测试才可信）⑥ 版本（version/status：draft→reviewing→published→deprecated）。\n\n规则类型学三段式：identify 识别（字段名+样例→是否个人信息/敏感度/判定路径）/ grade 评判（资产元数据→级别+依据链，就高从严）/ dispose 处置（级别+字段→mask_rule+允许消费形态）。表达形态 form=pattern（模式匹配）/decision_table（决策表）/clingo（逻辑程序），MVP 统一用 clingo，form 字段标注形态血统供未来分引擎执行。路由=元规则方案：路由本身也是规则跑在同一引擎（rule_applies 经形态/域匹配+条件判定推导），路由可解释、就高从严内置为系统级冲突消解、零新增基础设施。\n\n模型层：数据源 rule_gov.db（sqlite 新库）；实体 rule_definition（恒 11 属性）/rule_applicability/rule_test_case/asset_registry（路由对象 mock，3-5 个资产画像对齐一本账目录谱系：POI 资产/标准库/信令/药品许可/用电指数）；种子业务规则约 19 条 + clingo 元规则 5 条。路线：延续 dogfood——规则管理业务逻辑本体托管，零平台代码。",
+      "acceptance": "uv run pytest backend/tests/test_rule_engine.py backend/tests/test_rule_config.py",
+      "context": {
+        "instructions": "标准条款蒸馏底稿=原型/一本账/数据资产评判标准-整理.md；GB/T 20533 元数据基准已剔除（与政务/企业数据治理无关且零引用）。",
+        "files": [
+          "backend/app/core/rule_engine.py:L1-L80 — 引擎装配（26 规则 Kahn 拓扑序+五表事实）",
+          "backend/app/core/obligations.py:L1-L120 — 义务锚（rule_obligation 恒 6 属性）",
+          "backend/app/core/perception.py:L1-L80 — 感知管道四段（identify 判定路径输入侧）",
+          "frontend/src/components/AspEditor.tsx:L1-L116 — 规则编辑面现状"
+        ],
+        "notes": "rule_definition 事实以 L2Store.fact_rows() SELECT * 装载——列数=事实元数，schema 变更须守元数防线；路由可解释（「该资产为何走这组规则」可推导）；种子规则 expression 与平台注册表同文本（rule_id=规则 name）。"
+      },
+      "source": { "doc": "docs/规则管理设计初稿.md" }
+    },
+    {
+      "id": "rule-basis-chain",
+      "title": "规则双层依据链重构：l2_rule 新增 obligation_ref 列，21 条判定规则逐条挂靠法定义务",
+      "description": "用户裁决 A：全部 21 条判定规则改「双层依据链」。双层结构：l2_rule 新增 obligation_ref（法定义务来源）列，standard_ref 语义收窄为「技术判定依据」——standard_ref 回答「这个判定凭什么这么算」（标准号+条款号），obligation_ref 回答「法律为什么要求管这件事」（法规简称+条号+义务要点，如「个保法 §28 第1款（敏感个人信息定义与处理限制）」）。\n\n21 条核对结论（证伪优先，逐条对原文核验后）：16 条初稿方向确认（仅补款号/引文）；3 条待核落定（R-DSP-001→个保法 §51（三）；R-DSP-002→个保法 §25+§28 第2款；R-DSP-004→个保法 §28 第2款+§51（三））；1 条诚实标注无直接法定义务（R-QAS-001，三个邻近条款逐一考察后否决）；1 处款号更正（R-GRD-005 的目录义务=数据安全法 §21 第1款后段）。\n\n两个关键工程结论（落地必须执行）：① clingo 事实元数防线（最高风险）——rule_definition 事实由 L2Store.fact_rows() 以 SELECT * 装载，l2_rule 列数=事实元数；直接加列会把 rule_definition 事实从 11 元撑到 12 元，21 条规则表达式+5 条元规则的 11 元 rule_definition(...) 模式全部失配→已发布规则全量静默不点火（正是发布闸红线要防的事故形态）；防线=事实装载对 l2_rule 显式投影 11 列。② 基线移动收敛——standard_ref 20/21 行零文本变更，唯一候选=R-DSP-003 收窄（个保法 §6 移出，两档供裁决）。\n\n列设计：obligation_ref TEXT、可空（nullable=True，存量用户自建规则允许留空=「未挂靠」诚实态）、追加在 description 之后（表尾，ALTER TABLE ADD COLUMN 天然尾列）、本地 L2_SCHEMA 与平台 rule_gov.db 双侧同位镜像列序钉线。格式规范：{法规简称} §{条}[第{款}款][（{项}）]（{义务要点}），多条义务用 + 连接；同条多款且各款义务不同时必须标款；挂不上法条的规则取值恒为字面量「无直接法定义务（设计决策）」。简称表全库唯一：个保法/数据安全法/条例/国发51号。",
+      "acceptance": "uv run pytest backend/tests/test_rule_engine.py backend/tests/test_l2_admin.py",
+      "context": {
+        "instructions": "本卡零代码改动时代已结束：方案与 21 条逐条映射表经用户确认后才进落地卡；取证纪律=全部法条摘句逐字抄录自政策原文本地副本，无一处凭记忆补写。",
+        "files": [
+          "backend/app/core/rule_engine.py:L1-L60 — L2Store.fact_rows() SELECT * 装载（元数防线落点）",
+          "backend/app/core/obligations.py:L1-L120 — 义务锚与 law/clause 解析",
+          "backend/app/core/law_coverage.py:L1-L137 — 义务锚→条款解析与诚实口径",
+          "backend/tests/test_rule_engine.py:L1-L60 — 11 元事实装载现有断言"
+        ],
+        "notes": "义务进新列后 TC-GRD-005-P/N 快照零变更；standard_ref 语义收窄是文档口径收窄（该列今后只承载技术锚）；obligation_ref 纯元数据列绝不进事实装载（元数防线）。"
+      },
+      "source": { "doc": "docs/规则双层依据链重构方案.md", "taskCard": "task-mw642ddi" }
+    },
+    {
+      "id": "vector-infra",
+      "title": "向量基础设施：bge-large-zh-v1.5 本地嵌入 + FAISS HNSW 索引，编目推荐 embedding 语义兜底",
+      "description": "用户裁决：编目推荐多层归类（精确→归一化→拼音→编辑距离→embedding 语义兜底）。本需求=向量基础设施（存储+召回）架构落地，与前四层并行构建。\n\n规模与模型（先定两个数）：词表规模 100,000 词（设计目标，用户拍板）；向量模型=本地 bge-large-zh-v1.5（中文专优、离线可用、平台 models/ 已有）；向量维度 1024 维。存储量：10 万 × 1024 维 × float32 ≈ 400MB（float16 减半 ≈ 200MB），这个量级必须上向量索引不能暴力。\n\n架构=离线构建+在线召回两段：离线构建（一次性/词表变更时）——词表（13 类标准词+示例词+字段词+变体）批量向量化→向量矩阵 10 万×1024→建 FAISS 索引文件（本地 .index，可重建）；在线召回（每次归类）——输入字段名 bge 向量化（单个，毫秒级）→FAISS top-K 召回（毫秒级）→候选词+语义匹配得分→映射到 13 类→推测归类+证据链（语义得分）。\n\n关键设计决策：① 存储=FAISS 索引文件（本地可重建派生物，不是权威数据源——本地存不违反「去 SQLite 化」（去的是规则配置数据，这是计算基础设施），词表权威源仍在平台，向量索引只是检索加速层；平台实体不适合存 1024 维数组）；② 召回=FAISS HNSW 近似最近邻（10 万词毫秒级，暴力余弦要几十毫秒）；③ 缓存=字段名向量缓存（bge(field_name) 按字段名缓存避免重复向量化；词表向量预计算一次存 FAISS；缓存失效=词表变更时重建索引，保存即生效）；④ 证据链=语义匹配得分（用户定的最后一环）。",
+      "acceptance": "uv run pytest backend/tests/test_vector_infrastructure.py backend/tests/test_catalog_embedding.py",
+      "context": {
+        "instructions": "与编目推荐相似度回落（多层归类前四层）并行构建；向量索引可从词表+模型重建，任何时刻可删可重建。",
+        "files": [
+          "backend/app/core/embedding.py:L1-L185 — bge 嵌入调用与批量向量化",
+          "backend/app/core/vector_store.py:L1-L297 — 向量存储与召回",
+          "backend/app/core/fusion.py:L1-L230 — 多路归并/证据链融合",
+          "backend/app/core/catalog_similarity.py:L1-L60 — 编辑距离层（embedding 的上游层）"
+        ],
+        "notes": "模型路径 models/bge-large-zh-v1.5（仓内已有，离线可用）；10 万词设计目标下的毫秒级召回预算；证据链字段=语义匹配得分（可解释，与 ratio 同口径）。"
+      },
+      "source": { "doc": "docs/向量基础设施构建方案.md", "taskCard": "task-mw7adfhh 并行" }
+    },
+    {
+      "id": "impact-analysis",
+      "title": "对话式影响分析：六维场景提取 → 规则引擎+图谱快照复用 → 影响/真实依据/行动建议（只读辅助研判）",
+      "description": "入口在法规知识图谱页（#/graph）顶部「关系图谱 / 影响分析」双 Tab，不是新的顶级菜单。把一次业务场景描述整理成六维草稿，再复用既有规则引擎和法规图谱快照，给出影响、真实依据、行动建议与待复核信息。\n\n流程=对话→场景→影响/依据/行动：① 描述场景——左侧对话区输入当次业务目的、字段、处理方式、是否识别个人、保存期限和共享范围；② 取得并核对草稿——提交后前端先调 POST /api/impact/extract，随后用所得场景调 POST /api/impact/analyze 给出首版结果，LLM 提取永远是 draft 不是确认事实，右侧「我理解的业务场景」逐项检查补齐「待补充」维；③ 确认/编辑后分析——编辑会真实改变分析输入而非只改展示，用当前内存中的场景重跑；④ 阅读结果——字段影响矩阵、资产发现、行动项和待复核项，缺信息/未命中/证据未解析不会被渲染成「无风险」；⑤ 查看依据——切回「关系图谱」Tab 定位本次返回的真实节点（依据来自已确认分类、已发布规则及图谱条款投影，摘要文字不是依据）；⑥ 处理待复核——补充信息聚焦首个缺值维补齐后再分析。\n\n六维场景：business_purpose（如实描述，未说明保持待补充不让模型猜）/fields（字段名数组，不粘贴原始行或字段值样本）/processing_method/identifies_individual（只有明确才选 true/false，待补充≠false）/retention_period（不凭字段名推断合法保存期）/sharing_scope。提取不到的维显示 unknown/待补充/missing=true；提取器只能摘录原文明示内容，不应补写分类、政策/规则编号、影响等级、法律结论或来源。\n\n三状态与摘要降级：影响/证据状态=confirmed_fact（图谱已确认分类投影）/inferred_risk（已发布规则对真实输入的推导影响）/needs_review（行状态——只要存在待复核问题整行就是 needs_review，不会用一条规则命中掩盖缺口）；摘要三态=ok/unavailable/skipped（unavailable=摘要模型失败但本次分析仍有效：HTTP 200，矩阵/依据/行动完整，摘要退为确定性业务字段复述）；摘要恒为 display_only=true 绝不充当证据。输入约束：字段最多 50 项、每项字段名最多 200 字符、原文和各文本维最多 4000 字符，超限明确报错不截断。首版能力边界（只做当次、只读、辅助研判）：不做新旧政策对比、不出法律终局结论、不自动定级、不自动修改任何平台实体、不接收原始数据行或采样值。",
+      "acceptance": "uv run pytest backend/tests/test_impact_analysis.py backend/tests/test_impact_api.py backend/tests/test_impact_llm.py",
+      "context": {
+        "instructions": "法律、合规和处置决定由人工作出，页面不替用户确认或落账；风险/影响项仍须有权人员复核。",
+        "files": [
+          "backend/app/core/impact_analysis.py:L1-L100 — 分析内核（矩阵/依据/行动项）",
+          "backend/app/core/impact_llm.py:L1-L80 — LLM 提取器（六维场景 draft）与摘要",
+          "frontend/src/pages/ImpactWorkspace.tsx:L1-L80 — 影响分析工作区（双 Tab）",
+          "frontend/src/components/ImpactConversation.tsx:L1-L60 — 对话区与场景卡"
+        ],
+        "notes": "示例只是输入便利，点击后仍需自行核对提交，不是预设结论；空白文本不提交；action_items 只是既有法律/处置规则的判词集合供人参考不会自动执行。"
+      },
+      "source": { "doc": "docs/影响分析使用说明.md" }
+    }
+  ]
+}
