@@ -1442,12 +1442,13 @@ export function createRpc(ctx, state, deps) {
       return '非法模型 id: ' + mval + '（不在当前网关可用清单）。合法清单（' + legal.length + ' 个，示前 ' + sample.length + ' 个）：' + (sample.join('、') || '(空)') + '。完整清单见 list-models'
     }
     // ===== 模型键最终态计算（task-mwcw0z5 修删除死锁）：set-board-config 的 diff 校验与实际写入共用，防两处逻辑漂移 =====
-    // 口径与下方 mutateLocked 写入分支逐字一致：workerModel/verifierModel = 字符串直写（trim，非字符串→''=清除）；
-    // laneModels = cfg(d) 归一基座上只合显式给出的槽位（未给槽位保留现值）；fallbackModels = 整数组覆盖（归一）。
+    // 口径与下方 mutateLocked 写入分支逐字一致：workerModel/verifierModel = 字符串直写（trim）或 {id,effort?}
+    // 复合对象归一（task-mwkbmu9k），其余形态 → ''=清除；laneModels = cfg(d) 归一基座上只合显式给出的槽位
+    //（未给槽位保留现值，槽位项支持字符串/复合对象）；fallbackModels = 整数组覆盖（归一，项同前）。
     // 纯函数（cfg/normalizeLaneSlot/normalizeFallbackModels 均产新对象，不动入参 d）：diff 校验拿它算最终态，
     // 写入口拿它落盘——两处永远同一形态，改一处不会漂。
     function computeNextConfig(d, key, value) {
-      if (key === 'workerModel' || key === 'verifierModel') return typeof value === 'string' ? value.trim() : ''
+      if (key === 'workerModel' || key === 'verifierModel') return core.normalizeModelSlot(value)
       if (key === 'fallbackModels') return core.normalizeFallbackModels(value)
       if (key === 'laneModels') {
         var __cnBase = cfg(d).laneModels
@@ -1460,6 +1461,17 @@ export function createRpc(ctx, state, deps) {
         return __cnBase
       }
       return value
+    }
+    // ===== 复合槽位形态结构校验（task-mwkbmu9k，fail-loud）：{id, effort?} 对象的字段闸 =====
+    // 只管形态（id 非空字符串 / effort 省略或非空字符串 / 无未知键——防 effort 拼错被静默吞成「未配」）；
+    // effort 合法性（模型支不支持这档）在 set-board-config 的 diff 段用 enumModels 的 efforts 清单校验。
+    // 返回 null=合法；否则报错文案（调用方拼槽位路径前缀）。
+    function slotObjErr(v) {
+      if (typeof v.id !== 'string' || !v.id.trim()) return 'id 需为非空字符串（provider/model 复合格式）'
+      if (v.effort !== undefined && (typeof v.effort !== 'string' || !v.effort.trim())) return 'effort 需为非空字符串（思考等级档位，如 low/medium/high；省略=模型默认档）'
+      var ks = Object.keys(v)
+      for (var i = 0; i < ks.length; i++) { if (ks[i] !== 'id' && ks[i] !== 'effort') return '含未知键 ' + ks[i] + '（复合形态只允许 id 与 effort）' }
+      return null
     }
     // 枚举当前网关可用模型（供 Verifier 模型下拉选择）：llm.listProviders + listModels
     //（task-mwkbm37s 起宿主带 resolveModelInfo 时模型对象可带 efforts/defaultEffort 思考等级
@@ -1534,44 +1546,109 @@ export function createRpc(ctx, state, deps) {
               if (__rk !== 'worker' && __rk !== 'verifier') return { ok: false, error: 'laneModels.' + __ln + ' 未知角色键: ' + __rk + '（合法: worker/verifier）' }
               var __raw = __lobj[__rk]
               if (Array.isArray(__raw)) {
-                // 数组形态（同档优先序）：逐项必须字符串且 trim 后非空（空串项 fail-loud——清槽请传 [] 或 ''）
+                // 数组形态（同档优先序）：逐项字符串（trim 后非空——空串项 fail-loud，清槽请传 [] 或 ''）
+                // 或 {id, effort?} 复合对象（task-mwkbmu9k，slotObjErr 字段闸）
                 for (var __ai = 0; __ai < __raw.length; __ai++) {
-                  if (typeof __raw[__ai] !== 'string') return { ok: false, error: 'laneModels.' + __ln + '.' + __rk + '[' + __ai + '] 需为字符串（provider/model 复合格式）' }
-                  if (!__raw[__ai].trim()) return { ok: false, error: 'laneModels.' + __ln + '.' + __rk + '[' + __ai + '] 为空串（清槽请传空数组 [] 或空串）' }
+                  var __it = __raw[__ai]
+                  if (typeof __it === 'string') {
+                    if (!__it.trim()) return { ok: false, error: 'laneModels.' + __ln + '.' + __rk + '[' + __ai + '] 为空串（清槽请传空数组 [] 或空串）' }
+                  } else if (__it && typeof __it === 'object' && !Array.isArray(__it)) {
+                    var __oe = slotObjErr(__it)
+                    if (__oe) return { ok: false, error: 'laneModels.' + __ln + '.' + __rk + '[' + __ai + '] ' + __oe }
+                  } else {
+                    return { ok: false, error: 'laneModels.' + __ln + '.' + __rk + '[' + __ai + '] 需为字符串或 {id, effort?} 对象（provider/model 复合格式 + 可选思考等级）' }
+                  }
                 }
               } else if (typeof __raw !== 'string') {
-                return { ok: false, error: 'laneModels.' + __ln + '.' + __rk + ' 需为字符串或字符串数组（有序=同档优先序，空串/空数组=清槽）' }
+                // 单对象槽位（复合形态）：过字段闸；其余非字符串形态照旧 fail-loud
+                if (__raw && typeof __raw === 'object') {
+                  var __oe2 = slotObjErr(__raw)
+                  if (__oe2) return { ok: false, error: 'laneModels.' + __ln + '.' + __rk + ' ' + __oe2 }
+                } else {
+                  return { ok: false, error: 'laneModels.' + __ln + '.' + __rk + ' 需为字符串、字符串数组或 {id, effort?} 对象（有序=同档优先序，空串/空数组=清槽）' }
+                }
               }
             }
           }
         }
         if (__mk === 'fallbackModels') {
-          if (!Array.isArray(args.value)) return { ok: false, error: 'fallbackModels 需为字符串数组（有序备用链，如 ["gsmoma/kimi/kimi-k3","kimi-coding/k3.1-pro"]；空数组=清链）' }
+          if (!Array.isArray(args.value)) return { ok: false, error: 'fallbackModels 需为字符串数组（项允许字符串或 {id, effort?} 复合对象；有序备用链，如 ["gsmoma/kimi/kimi-k3",{id:"kimi/kimi-k3",effort:"low"}]；空数组=清链）' }
           for (var __fi = 0; __fi < args.value.length; __fi++) {
-            if (typeof args.value[__fi] !== 'string') return { ok: false, error: 'fallbackModels[' + __fi + '] 需为字符串（provider/model 复合格式）' }
-            if (!args.value[__fi].trim()) return { ok: false, error: 'fallbackModels[' + __fi + '] 为空串（清链请传空数组 []）' }
+            var __fbIt = args.value[__fi]
+            if (typeof __fbIt === 'string') {
+              if (!__fbIt.trim()) return { ok: false, error: 'fallbackModels[' + __fi + '] 为空串（清链请传空数组 []）' }
+            } else if (__fbIt && typeof __fbIt === 'object' && !Array.isArray(__fbIt)) {
+              var __oeFb = slotObjErr(__fbIt)
+              if (__oeFb) return { ok: false, error: 'fallbackModels[' + __fi + '] ' + __oeFb }
+            } else {
+              return { ok: false, error: 'fallbackModels[' + __fi + '] 需为字符串或 {id, effort?} 对象（provider/model 复合格式 + 可选思考等级）' }
+            }
+          }
+        }
+        // 复合形态（task-mwkbmu9k）：workerModel/verifierModel 值为对象时过字段闸（字符串/其余形态零约束，
+        // 老口径「非字符串=清除」不变——结构闸只拦「想写复合形态但写错了」的手滑，如 effort 拼错键名）。
+        if (__mk === 'workerModel' || __mk === 'verifierModel') {
+          var __wv = args.value
+          if (__wv && typeof __wv === 'object' && !Array.isArray(__wv)) {
+            var __oeW = slotObjErr(__wv)
+            if (__oeW) return { ok: false, error: __mk + ' ' + __oeW }
           }
         }
         // ② diff 校验：最终态里「当前配置没有的 id」= 首次出现的新值，必过合法清单（enumModels 至多拉一次；
-        //    纯删除/重存（无新值）零枚举零校验，天然放行）
+        //    纯删除/重存（无新值）零枚举零校验，天然放行）。复合形态（task-mwkbmu9k）取对象里的 id 参与同一
+        //    diff——槽位值形态变了，id 级 diff 口径不变。
+        // ③ effort 校验（task-mwkbmu9k）：**提交值**里带 effort 的 (id, effort) 对，必过 enumModels 的 efforts
+        //    清单——模型不支持该档 / 模型无 reasoning（efforts 空）→ 拒写。只查提交值不查最终态携带的存量值：
+        //    未被本次触碰的旧槽不因宿主侧 efforts 变化被连坐（与 diff 口径同哲学，删除/重排路径不被锁死）。
+        function __slotId(v) { return typeof v === 'string' ? v : (v && typeof v.id === 'string' ? v.id : '') }
         var __cur = null
         try { __cur = await rt(sid) } catch (_) { __cur = null } // 合并前当前配置=diff 基线；读不到按空板（等价全量校验，同旧口径）
         var __curIds = __cur ? core.configuredModelIds(__cur) : []
         var __next = computeNextConfig(__cur || {}, __mk, args.value)
         var __cand = [] // 候选新值（按序去重；workerModel/verifierModel 至多 1 个）
         if (__mk === 'workerModel' || __mk === 'verifierModel') {
-          if (__next && __curIds.indexOf(__next) < 0) __cand.push(__next)
+          var __nv = __slotId(__next)
+          if (__nv && __curIds.indexOf(__nv) < 0) __cand.push(__nv)
         } else if (__mk === 'fallbackModels') {
-          for (var __fi2 = 0; __fi2 < __next.length; __fi2++) { if (__curIds.indexOf(__next[__fi2]) < 0 && __cand.indexOf(__next[__fi2]) < 0) __cand.push(__next[__fi2]) }
+          for (var __fi2 = 0; __fi2 < __next.length; __fi2++) { var __fbId = __slotId(__next[__fi2]); if (__fbId && __curIds.indexOf(__fbId) < 0 && __cand.indexOf(__fbId) < 0) __cand.push(__fbId) }
         } else {
           for (var __li2 = 0; __li2 < TASK_SIZES.length; __li2++) {
             for (var __ri3 = 0; __ri3 < 2; __ri3++) {
               var __slot = __next[TASK_SIZES[__li2]][__ri3 === 0 ? 'worker' : 'verifier']
-              for (var __si = 0; __si < __slot.length; __si++) { if (__curIds.indexOf(__slot[__si]) < 0 && __cand.indexOf(__slot[__si]) < 0) __cand.push(__slot[__si]) }
+              for (var __si = 0; __si < __slot.length; __si++) { var __svId = __slotId(__slot[__si]); if (__svId && __curIds.indexOf(__svId) < 0 && __cand.indexOf(__svId) < 0) __cand.push(__svId) }
             }
           }
         }
-        if (__cand.length) {
+        // effort 候选收集：只收「提交值里显式带 effort」的对象（结构闸已过，这里仍防形态）；同 (id,effort) 去重。
+        var __effCand = []
+        function __pushEff(o) {
+          var id = typeof o.id === 'string' ? o.id.trim() : ''
+          var eff = typeof o.effort === 'string' ? o.effort.trim() : ''
+          if (!id || !eff) return
+          for (var q = 0; q < __effCand.length; q++) { if (__effCand[q].id === id && __effCand[q].effort === eff) return }
+          __effCand.push({ id: id, effort: eff })
+        }
+        if (__mk === 'workerModel' || __mk === 'verifierModel') {
+          if (args.value && typeof args.value === 'object' && !Array.isArray(args.value)) __pushEff(args.value)
+        } else if (__mk === 'fallbackModels') {
+          for (var __fi3 = 0; __fi3 < args.value.length; __fi3++) { if (args.value[__fi3] && typeof args.value[__fi3] === 'object' && !Array.isArray(args.value[__fi3])) __pushEff(args.value[__fi3]) }
+        } else {
+          // laneModels：提交的槽位逐个走（单对象槽/数组对象项都收；字符串项 __pushEff 自守卫跳过）
+          var __lvKeys = Object.keys(args.value)
+          for (var __lk = 0; __lk < __lvKeys.length; __lk++) {
+            var __lvv = args.value[__lvKeys[__lk]]
+            if (!__lvv || typeof __lvv !== 'object' || Array.isArray(__lvv)) continue
+            for (var __rk2 = 0; __rk2 < 2; __rk2++) {
+              var __rawSlot = __lvv[__rk2 === 0 ? 'worker' : 'verifier']
+              if (__rawSlot === undefined) continue
+              var __items = Array.isArray(__rawSlot) ? __rawSlot : [__rawSlot]
+              for (var __ii = 0; __ii < __items.length; __ii++) {
+                if (__items[__ii] && typeof __items[__ii] === 'object' && !Array.isArray(__items[__ii])) __pushEff(__items[__ii])
+              }
+            }
+          }
+        }
+        if (__cand.length || __effCand.length) {
           var __legal = await enumModels()
           if (__legal) {
             var __bad = [] // 全部非法 id（聚合报出，不再首个即停）
@@ -1583,6 +1660,22 @@ export function createRpc(ctx, state, deps) {
             if (__bad.length) {
               var __sample = __legal.slice(0, 8).map(function (m) { return m.id })
               return { ok: false, error: '非法模型 id: ' + __bad.join('、') + '（已不在当前网关可用清单）。合法清单（' + __legal.length + ' 个，示前 ' + __sample.length + ' 个）：' + (__sample.join('、') || '(空)') + '。完整清单见 list-models；如需移除已下架的残留项，直接删除即可（仅新增值校验）' }
+            }
+            // ===== effort 合法性校验（task-mwkbmu9k）：提交值带 effort 的模型，efforts 清单必须含该档 =====
+            // 跳过面（与既有降级纪律一致）：模型不在清单（新 id 已由上方 id 校验拒写；已存在残留不重校——
+            // 防「删除死锁」同款复发）；模型对象无 efforts 字段（老宿主无 resolveModelInfo，无元数据可校）。
+            // efforts 空（在册模型无 reasoning）→ 拒；efforts 非空但不含该档 → 拒（文案带支持清单）。
+            if (__effCand.length) {
+              var __badEff = []
+              for (var __ei = 0; __ei < __effCand.length; __ei++) {
+                var __em = null
+                for (var __gi2 = 0; __gi2 < __legal.length; __gi2++) { if (__legal[__gi2].id === __effCand[__ei].id) { __em = __legal[__gi2]; break } }
+                if (!__em) continue
+                if (!Array.isArray(__em.efforts)) continue
+                if (!__em.efforts.length) { __badEff.push('模型 ' + __effCand[__ei].id + ' 不支持思考等级配置（该模型无可用思考等级）'); continue }
+                if (__em.efforts.indexOf(__effCand[__ei].effort) < 0) __badEff.push('模型 ' + __effCand[__ei].id + ' 不支持思考等级 ' + __effCand[__ei].effort + '（支持：' + __em.efforts.join('/') + '）')
+              }
+              if (__badEff.length) return { ok: false, error: __badEff.join('；') + '。完整 efforts 清单见 list-models；如需模型默认档请用纯字符串槽位值' }
             }
           }
         }

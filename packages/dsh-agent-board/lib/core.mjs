@@ -422,16 +422,42 @@ export var TASK_SIZES = ['light', 'standard', 'heavy']
 // 适用面：create-task RPC / task_create 工具 / update-task publish / batch-op publish 四入口同文案拒写；
 // 非 Team 板零约束零提示（缺字段=标档语义照旧，存量卡零迁移）。错误文案自带三档语义，便于自助修正。
 export var TEAM_SIZE_REQUIRED_ERR = 'Team 模式板建卡/发布必须显式设力度档位 size：light=单点小改/文档/配置，standard=常规模块改动（缺省），heavy=跨模块/高风险/需强推理'
+// ===== 复合槽位形态（task-mwkbmu9k）：槽位值支持 {id, effort?} 对象（思考等级随槽位声明）=====
+// 形态扩展：laneModels 槽位 string | {id,effort?} | (string|{id,effort?})[]；workerModel/verifierModel
+// string | {id,effort?}；fallbackModels (string|{id,effort?})[]。纯字符串=不指定 effort（模型默认档，
+// 零回归）；对象形态归一为 {id, effort}（effort 省略/空串时不带该字段），其余键一律丢弃。
+// 归一出口保持两种形态并存：字符串（老数据/未配 effort）或 {id, effort}（新配）——下游按形态取 effort。
+// effort 合法性（该模型支不支持这档）是写路径校验的事（rpc.mjs set-board-config 查 list-models 的
+// efforts 清单），归一层只做形态防御（id 非空 string、effort 非空 string）。
+// 槽位对象归一：有效 → {id, effort?}（新对象，只含这两键）；无效（非对象/数组/id 缺失或空）→ null。
+export function normalizeSlotObj(v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null
+  var id = typeof v.id === 'string' ? v.id.trim() : ''
+  if (!id) return null
+  var out = { id: id }
+  if (typeof v.effort === 'string' && v.effort.trim()) out.effort = v.effort.trim()
+  return out
+}
+// 单模型槽（workerModel/verifierModel）归一：字符串 → trim（空=清除）；{id,effort?} 对象 → 归一对象；
+// 其余（数字/布尔/null/无效对象）→ ''（清除——与旧「非字符串=清除」口径逐字一致；写路径有 fail-loud 前置）。
+export function normalizeModelSlot(v) {
+  if (typeof v === 'string') return v.trim()
+  var o = normalizeSlotObj(v)
+  return o || ''
+}
 // 档位槽单槽归一（set-board-config 写入与读路径归一共用同一口径）：
-// 字符串 → trim 后非空则单元素数组、空串 → 空数组（=清槽/继承下一级）；数组 → 逐项滤脏保序；其他 → 空数组。
+// 字符串 → trim 后非空则单元素数组、空串 → 空数组（=清槽/继承下一级）；对象 → 单元素数组（复合形态）；
+// 数组 → 逐项滤脏保序（字符串项/对象项各自归一，脏项丢弃）；其他 → 空数组。
 export function normalizeLaneSlot(v) {
   if (typeof v === 'string') { var s = v.trim(); return s ? [s] : [] }
+  var o = normalizeSlotObj(v)
+  if (o) return [o]
   if (!Array.isArray(v)) return []
   var out = []
   for (var i = 0; i < v.length; i++) {
-    if (typeof v[i] !== 'string') continue
-    var s2 = v[i].trim()
-    if (s2) out.push(s2)
+    if (typeof v[i] === 'string') { var s2 = v[i].trim(); if (s2) { out.push(s2); continue } }
+    var oi = normalizeSlotObj(v[i])
+    if (oi) out.push(oi)
   }
   return out
 }
@@ -452,16 +478,16 @@ export function normalizeLaneModels(v) {
 // 原形事故：2026-10-24 glm 撞 5h 限额（429 带重置时间），重派还是 glm 继续撞——C5 只做了同表降档，
 // 缺跨供应商备用链。语义：取模候选被判「冷却中/熔断中」时，先按本链顺序找第一个健康模型
 // （同档替代，保住能力水位），链尽才走原降级路径（降档/降跳），最后 parent 兜底。
-// 形态固定为字符串数组（provider/model 复合格式）；缺省 [] = 不启用（行为与现状逐字一致）。
-// 脏值收敛：非数组→[]；逐项非字符串丢弃、字符串 trim、空串丢弃——消费面（spawnOneShot 取模链、
-// get-tasks 透出、set-board-config 写入）只认这一个形态，不各自兜底。
+// 形态固定为字符串或 {id,effort?} 复合对象的有序数组（provider/model 复合格式）；缺省 [] = 不启用
+//（行为与现状逐字一致）。脏值收敛：非数组→[]；逐项字符串 trim 非空保留、复合对象归一 {id,effort?} 保留、
+// 其余丢弃——消费面（spawnOneShot 取模链、get-tasks 透出、set-board-config 写入）只认这一个形态，不各自兜底。
 export function normalizeFallbackModels(v) {
   if (!Array.isArray(v)) return []
   var out = []
   for (var i = 0; i < v.length; i++) {
-    if (typeof v[i] !== 'string') continue
-    var s = v[i].trim()
-    if (s) out.push(s)
+    if (typeof v[i] === 'string') { var s = v[i].trim(); if (s) { out.push(s); continue } }
+    var o = normalizeSlotObj(v[i])
+    if (o) out.push(o)
   }
   return out
 }
@@ -495,7 +521,12 @@ export function normalizeProbeIntervalMin(v) {
 export function configuredModelIds(d) {
   d = d || {}
   var c = cfg(d), out = [], seen = {}
-  function add(v) { if (typeof v !== 'string') return; var s = v.trim(); if (s && !seen[s]) { seen[s] = true; out.push(s) } }
+  function add(v) {
+    var s = ''
+    if (typeof v === 'string') s = v.trim()
+    else if (v && typeof v === 'object' && !Array.isArray(v) && typeof v.id === 'string') s = v.id.trim() // 复合形态取 id（task-mwkbmu9k）
+    if (s && !seen[s]) { seen[s] = true; out.push(s) }
+  }
   add(d.workerModel); add(d.verifierModel)
   for (var i = 0; i < TASK_SIZES.length; i++) {
     var lane = c.laneModels[TASK_SIZES[i]]

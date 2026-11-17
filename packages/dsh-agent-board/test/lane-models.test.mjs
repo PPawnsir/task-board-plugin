@@ -9,9 +9,12 @@
 //   ④ spawnOneShot 四级取模优先级（card→lane→board→parent，桩断言 agentOptions）+ modelSource 留档
 //      + badModels 熔断逐跳降级；④c 槽内按序取首个健康（首选冷却/熔断→次选赢）；槽内全病→fallback/降档链照旧
 //   ⑤ get-tasks 透出 laneModels 归一形态（槽位数组）
+// ===== 复合槽位形态（task-mwkbmu9k）：laneModels/workerModel/verifierModel/fallbackModels 支持 {id, effort?} =====
+// 纯字符串=不指定 effort（模型默认档，零回归）；对象归一 {id, effort}（effort 省略不带字段）；
+// effort 合法性写时校验（list-models efforts 清单），老宿主无元数据/llm 缺失降级放行。断言组见文末。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { cfg, seed, normalizeBoard } from '../lib/core.mjs'
+import { cfg, seed, normalizeBoard, normalizeLaneSlot, normalizeFallbackModels, normalizeModelSlot, configuredModelIds } from '../lib/core.mjs'
 import { createRpc } from '../lib/rpc.mjs'
 import { createDispatch } from '../lib/dispatch.mjs'
 
@@ -965,5 +968,227 @@ test('思考等级⑤：进程级缓存——同模型二次枚举零调用；�
   assert.equal(llm.__resolveCalls.length, 4, 'flaky 重试成功一次后入缓存')
   var r4 = await h['list-models']({})
   assert.equal(llm.__resolveCalls.length, 4, '两模型均入缓存：第四次枚举零调用')
+})
+
+// ===== 复合槽位形态（task-mwkbmu9k）：配置面升级断言组 =====
+// 断言清单（对应任务验收口径）：
+//   ① 字符串槽位归一零回归（normalizeLaneSlot/normalizeFallbackModels/normalizeModelSlot 纯字符串/老脏值形态逐字不变）
+//   ② {id,effort} 槽位写入/读出正确（归一两形态并存 + cfg/normalizeBoard 读路径透出 + set-board-config
+//      四键写入归一落盘 + configLog 审计 + 字符串覆写解除 effort + configuredModelIds 对象取 id）
+//   ③ effort 非法（模型不支持该档）拒写——「模型 X 不支持思考等级 Y（支持：…）」+ 聚合报出 + 拒写不落半截
+//   ④ 模型无 reasoning（efforts 空）带 effort 拒写（「不支持思考等级配置」）；同模型纯字符串/{id} 放行
+//   ⑤ 降级与防线：老宿主无 resolveModelInfo / llm 缺失降级放行；结构 fail-loud（缺 id/effort 非字符串/
+//      未知键/数组混脏项）；diff 口径不因 effort 校验复发删除死锁（存量复合残留不连坐、重存/删除/挪槽放行）
+// 注：REASONING_INFO_CACHE 进程级共享——本组用 r6~r8 前缀 provider id 防串扰（对齐思考等级①~⑤组纪律）。
+test('复合①：字符串槽位归一零回归 + normalizeModelSlot 三形态（字符串 trim / 复合对象 / 脏值清除）', function () {
+  // 字符串零回归：既有形态在扩展后的归一器下逐字不变
+  assert.deepEqual(normalizeLaneSlot(' a/b '), ['a/b'])
+  assert.deepEqual(normalizeLaneSlot(''), [])
+  assert.deepEqual(normalizeLaneSlot([' a/b ', 42, '', null, 'c/d']), ['a/b', 'c/d'])
+  assert.deepEqual(normalizeLaneSlot(42), [])
+  assert.deepEqual(normalizeLaneSlot(null), [])
+  assert.deepEqual(normalizeFallbackModels([' a/b ', 42, '', 'c/d']), ['a/b', 'c/d'])
+  assert.deepEqual(normalizeFallbackModels('junk'), [])
+  // normalizeModelSlot：字符串 trim；复合对象归一；脏值 → ''（老「非字符串=清除」口径）
+  assert.equal(normalizeModelSlot(' a/b '), 'a/b')
+  assert.equal(normalizeModelSlot(''), '')
+  assert.deepEqual(normalizeModelSlot({ id: ' a/b ', effort: ' high ' }), { id: 'a/b', effort: 'high' }, '复合对象 trim 归一')
+  assert.deepEqual(normalizeModelSlot({ id: 'a/b' }), { id: 'a/b' }, 'effort 省略=不带字段')
+  assert.deepEqual(normalizeModelSlot({ id: 'a/b', effort: '' }), { id: 'a/b' }, '空 effort=不带字段（省略语义）')
+  assert.equal(normalizeModelSlot(42), '')
+  assert.equal(normalizeModelSlot(null), '')
+  assert.equal(normalizeModelSlot({ effort: 'high' }), '', '缺 id 的无效对象=清除（写路径有 fail-loud 前置）')
+})
+
+test('复合②a：对象项归一——单对象槽=单元素数组、混合数组滤脏保序、effort 省略不带字段、cfg/normalizeBoard 透出两形态', function () {
+  assert.deepEqual(normalizeLaneSlot({ id: ' a/b ', effort: ' high ' }), [{ id: 'a/b', effort: 'high' }], '单对象槽→单元素数组（对齐单字符串槽归一）')
+  assert.deepEqual(normalizeLaneSlot({ id: 'a/b' }), [{ id: 'a/b' }], 'effort 省略=不带该字段')
+  assert.deepEqual(normalizeLaneSlot(['x/y', { id: ' a/b ', effort: 'low' }, 42, { id: '' }, { effort: 'no-id' }, { id: 'c/d', extra: 1 }]), ['x/y', { id: 'a/b', effort: 'low' }, { id: 'c/d' }], '混合数组：字符串/对象项保序归一，脏项丢弃、多余键丢弃')
+  assert.deepEqual(normalizeFallbackModels(['x/y', { id: 'a/b', effort: 'high' }, 42, { id: '' }]), ['x/y', { id: 'a/b', effort: 'high' }], 'fallbackModels 混合数组同口径')
+  // cfg 读路径：两形态并存（老数据字符串 / 新配对象）
+  var c = cfg({ laneModels: { heavy: { worker: { id: 'x/y', effort: 'high' }, verifier: [{ id: 'a/b' }, 'c/d'] } } })
+  assert.deepEqual(c.laneModels.heavy.worker, [{ id: 'x/y', effort: 'high' }])
+  assert.deepEqual(c.laneModels.heavy.verifier, [{ id: 'a/b' }, 'c/d'])
+  assert.deepEqual(c.fallbackModels, [], 'fallbackModels 缺字段照旧空数组')
+  // normalizeBoard 读路径兜底：老看板文件带对象槽位读入归一（零迁移）
+  var d = { version: 12, tasks: [], laneModels: { standard: { worker: { id: 'x/y', effort: 'high' } } }, fallbackModels: [{ id: 'a/b', effort: 'low' }, 42] }
+  normalizeBoard(d)
+  assert.deepEqual(d.laneModels.standard.worker, [{ id: 'x/y', effort: 'high' }])
+  assert.deepEqual(d.laneModels.standard.verifier, [], '未给槽补空数组')
+  assert.deepEqual(d.fallbackModels, [{ id: 'a/b', effort: 'low' }], '复合备用链项归一（脏项丢弃）')
+})
+
+test('复合②b：set-board-config 四键复合值写入/读出正确 + configLog 审计（归一落盘，字符串零回归通道并存）', async function () {
+  var llm = mkReasoningLlm(
+    { r6: [{ id: 'thinker' }, { id: 'plain' }] },
+    { 'r6/thinker': { efforts: [{ id: 'high', name: '高' }, { id: 'low', name: '低' }], defaultEffort: 'low' } }
+  )
+  var board = { version: 12, tasks: [], configLog: [], laneModels: JSON.parse(JSON.stringify(DEFAULT_LANES)) }
+  var h = mkRpcHandlers(board, {}, llm)
+  // workerModel 复合对象写入：归一 {id, effort} 落盘 + 审计行
+  var r1 = await h['set-board-config']({ key: 'workerModel', value: { id: ' r6/thinker ', effort: ' high ' } })
+  assert.equal(r1.ok, true)
+  assert.deepEqual(board.workerModel, { id: 'r6/thinker', effort: 'high' }, '复合对象归一落盘（trim）')
+  var l1 = board.configLog[board.configLog.length - 1]
+  assert.equal(l1.key, 'workerModel')
+  assert.deepEqual(l1.to, { id: 'r6/thinker', effort: 'high' }, '审计 to 记归一后落盘值')
+  assert.equal(l1.from, null, 'from=null（原值为空，JSON 不容 undefined）')
+  // 字符串覆写=解除 effort（回到纯 id 形态，老通道零回归）
+  var r1b = await h['set-board-config']({ key: 'workerModel', value: 'r6/thinker' })
+  assert.equal(r1b.ok, true)
+  assert.equal(board.workerModel, 'r6/thinker', '字符串覆写回纯 id（effort 解除）')
+  // verifierModel 复合无 effort：{id} 落盘（不带 effort 字段）
+  var r2 = await h['set-board-config']({ key: 'verifierModel', value: { id: 'r6/plain' } })
+  assert.equal(r2.ok, true)
+  assert.deepEqual(board.verifierModel, { id: 'r6/plain' }, 'effort 省略=不带字段')
+  // laneModels 复合槽位：单对象槽 + 混合数组（字符串+对象）部分合并
+  var r3 = await h['set-board-config']({ key: 'laneModels', value: { heavy: { worker: { id: 'r6/thinker', effort: 'high' } }, standard: { worker: ['r6/plain', { id: 'r6/thinker', effort: 'low' }] } } })
+  assert.equal(r3.ok, true)
+  assert.deepEqual(board.laneModels.heavy.worker, [{ id: 'r6/thinker', effort: 'high' }], '单对象槽→单元素数组')
+  assert.deepEqual(board.laneModels.standard.worker, ['r6/plain', { id: 'r6/thinker', effort: 'low' }], '混合数组保序归一')
+  assert.deepEqual(board.laneModels.light, { worker: [], verifier: [] }, '未给槽位保留现值（部分合并不变）')
+  // fallbackModels 复合链：整个数组覆盖
+  var r4 = await h['set-board-config']({ key: 'fallbackModels', value: [{ id: 'r6/thinker', effort: 'low' }, 'r6/plain'] })
+  assert.equal(r4.ok, true)
+  assert.deepEqual(board.fallbackModels, [{ id: 'r6/thinker', effort: 'low' }, 'r6/plain'])
+  // 字符串槽位零回归（同一板上老形态照旧）
+  var r5 = await h['set-board-config']({ key: 'laneModels', value: { light: { worker: ' r6/plain ' } } })
+  assert.equal(r5.ok, true)
+  assert.deepEqual(board.laneModels.light.worker, ['r6/plain'], '字符串槽位→单元素数组（零回归）')
+  // get-tasks 透出两形态并存（读路径 rt 原样返板 → 透出=落盘形态）
+  var g = await h['get-tasks']({})
+  assert.deepEqual(g.laneModels.heavy.worker, [{ id: 'r6/thinker', effort: 'high' }], 'get-tasks 透出复合形态')
+  assert.deepEqual(g.fallbackModels, [{ id: 'r6/thinker', effort: 'low' }, 'r6/plain'], 'get-tasks 透出复合备用链')
+  assert.equal(g.workerModel, 'r6/thinker')
+  // configuredModelIds：对象形态取 id（健康探测/diff 基线共用）
+  board.workerModel = { id: 'r6/thinker', effort: 'high' }
+  board.laneModels.heavy.verifier = [{ id: 'r6/plain' }]
+  board.fallbackModels = [{ id: 'r6/thinker', effort: 'low' }, 'r6/plain']
+  assert.deepEqual(configuredModelIds(board), ['r6/thinker', 'r6/plain'], '复合形态全键 id 提取去重（workerModel∪lane∪fallback）')
+})
+
+test('复合③：effort 非法（模型不支持该档）拒写——报「模型 X 不支持思考等级 Y（支持：…）」；聚合报出；拒写不落半截', async function () {
+  var llm = mkReasoningLlm(
+    { r7: [{ id: 'thinker' }, { id: 'plain' }] },
+    { 'r7/thinker': { efforts: [{ id: 'high', name: '高' }, { id: 'medium', name: '中' }, { id: 'low', name: '低' }] } }
+  )
+  var board = { version: 12, tasks: [], configLog: [], laneModels: JSON.parse(JSON.stringify(DEFAULT_LANES)) }
+  var h = mkRpcHandlers(board, {}, llm)
+  var before = JSON.stringify(board.laneModels)
+  var r = await h['set-board-config']({ key: 'laneModels', value: { heavy: { worker: [{ id: 'r7/thinker', effort: 'ultra' }] } } })
+  assert.equal(r.ok, false)
+  assert.match(r.error, /模型 r7\/thinker 不支持思考等级 ultra（支持：high\/medium\/low）/, '报错带支持清单（任务口径文案）')
+  assert.equal(JSON.stringify(board.laneModels), before, '拒写不落半截')
+  assert.equal(board.configLog.length, 0, '拒写零审计行')
+  // 聚合：多槽多个非法 effort 一次报出（不首个即停，对齐非法 id 聚合口径）
+  var r2 = await h['set-board-config']({ key: 'laneModels', value: { heavy: { worker: [{ id: 'r7/thinker', effort: 'ultra' }], verifier: { id: 'r7/thinker', effort: 'extreme' } } } })
+  assert.equal(r2.ok, false)
+  assert.match(r2.error, /ultra/)
+  assert.match(r2.error, /extreme/, '多个非法 effort 聚合报出')
+  // 同 (id,effort) 对去重：同值重复提交只报一次
+  var r2b = await h['set-board-config']({ key: 'laneModels', value: { heavy: { worker: [{ id: 'r7/thinker', effort: 'ultra' }, { id: 'r7/thinker', effort: 'ultra' }] } } })
+  assert.equal(r2b.ok, false)
+  assert.equal(r2b.error.split('ultra').length - 1, 1, '同 (id,effort) 重复提交去重后只报一次')
+  // 已配合法档放行（含默认档 medium）
+  var r3 = await h['set-board-config']({ key: 'laneModels', value: { heavy: { worker: { id: 'r7/thinker', effort: 'medium' } } } })
+  assert.equal(r3.ok, true)
+  assert.deepEqual(board.laneModels.heavy.worker, [{ id: 'r7/thinker', effort: 'medium' }])
+  // workerModel / fallbackModels 同口径拒写
+  var r4 = await h['set-board-config']({ key: 'workerModel', value: { id: 'r7/thinker', effort: 'ultra' } })
+  assert.equal(r4.ok, false); assert.match(r4.error, /不支持思考等级 ultra/)
+  var r5 = await h['set-board-config']({ key: 'fallbackModels', value: [{ id: 'r7/thinker', effort: 'ultra' }] })
+  assert.equal(r5.ok, false); assert.match(r5.error, /不支持思考等级 ultra/)
+  assert.equal(board.workerModel, undefined, 'workerModel 拒写不落值')
+  // 非法 id + 非法 effort 同报：id 校验先拒（更根本——新 id 必过清单）
+  var r6w = await h['set-board-config']({ key: 'fallbackModels', value: [{ id: 'r7/ghost', effort: 'ultra' }] })
+  assert.equal(r6w.ok, false)
+  assert.match(r6w.error, /非法模型 id: r7\/ghost/, '新 id 先过清单校验（id 错误优先于 effort 错误）')
+})
+
+test('复合④：模型无 reasoning（efforts 空）带 effort 拒写——「不支持思考等级配置」；同模型纯字符串与 {id} 复合放行', async function () {
+  var llm = mkReasoningLlm(
+    { r8: [{ id: 'plain' }, { id: 'thinker' }] },
+    { 'r8/thinker': { efforts: [{ id: 'high', name: '高' }] } }
+  )
+  var board = { version: 12, tasks: [], configLog: [] }
+  var h = mkRpcHandlers(board, {}, llm)
+  var r = await h['set-board-config']({ key: 'workerModel', value: { id: 'r8/plain', effort: 'high' } })
+  assert.equal(r.ok, false, '无 reasoning 模型带 effort 拒写')
+  assert.match(r.error, /模型 r8\/plain 不支持思考等级配置/, '任务口径文案：该模型不支持思考等级配置')
+  assert.equal(board.workerModel, undefined, '拒写不落值')
+  var r2 = await h['set-board-config']({ key: 'workerModel', value: 'r8/plain' })
+  assert.equal(r2.ok, true, '同模型纯字符串（不带 effort）照常放行')
+  assert.equal(board.workerModel, 'r8/plain')
+  // efforts 空但 {id} 复合对象（不带 effort）也放行：形态合法、无 effort 可校
+  var r3 = await h['set-board-config']({ key: 'verifierModel', value: { id: 'r8/plain' } })
+  assert.equal(r3.ok, true)
+  assert.deepEqual(board.verifierModel, { id: 'r8/plain' })
+  // 有 efforts 的模型带支持的档照常落盘（对照组）
+  var r4 = await h['set-board-config']({ key: 'verifierModel', value: { id: 'r8/thinker', effort: 'high' } })
+  assert.equal(r4.ok, true)
+  assert.deepEqual(board.verifierModel, { id: 'r8/thinker', effort: 'high' })
+})
+
+test('复合⑤a：老宿主无 resolveModelInfo（模型对象无 efforts 字段）→ effort 无法校验降级放行；llm 缺失同（不炸）', async function () {
+  // mkLlmCtx：无 resolveModelInfo → enumModels 模型对象无 efforts 字段 → effort 校验跳过（宿主能力缺失不炸板）
+  var board = { version: 12, tasks: [], configLog: [] }
+  var h = mkRpcHandlers(board, {}, mkLlmCtx(MOCK_MODELS))
+  var r = await h['set-board-config']({ key: 'workerModel', value: { id: 'kimi/kimi-k2', effort: 'whatever' } })
+  assert.equal(r.ok, true, '老宿主无元数据：effort 校验降级放行（配置面绝不因宿主能力缺失而炸）')
+  assert.deepEqual(board.workerModel, { id: 'kimi/kimi-k2', effort: 'whatever' }, '复合值照常归一落盘')
+  // llm 缺失（get→null）：整体降级放行（id/effort 均不校验，老口径）
+  var hNo = mkRpcHandlers({ version: 12, tasks: [] }, {}, { get: function () { return null } })
+  var r2 = await hNo['set-board-config']({ key: 'laneModels', value: { heavy: { worker: { id: 'whatever/model', effort: 'whatever' } } } })
+  assert.equal(r2.ok, true)
+})
+
+test('复合⑤b：结构 fail-loud——缺 id / effort 非字符串 / 未知键 / 数组混脏项 / 单槽脏对象拒写（防 effort 拼错被静默吞）', async function () {
+  var board = { version: 12, tasks: [], configLog: [], laneModels: JSON.parse(JSON.stringify(DEFAULT_LANES)) }
+  var h = mkRpcHandlers(board, {}, mkLlmCtx(MOCK_MODELS)) // 结构闸在 diff 前，llm 形态不影响本组
+  var cases = [
+    { key: 'workerModel', value: { effort: 'high' }, re: /workerModel id 需为非空字符串/ },
+    { key: 'workerModel', value: { id: 'kimi/kimi-k2', effort: 42 }, re: /workerModel effort 需为非空字符串/ },
+    { key: 'workerModel', value: { id: 'kimi/kimi-k2', effort: 'high', note: 'x' }, re: /workerModel 含未知键 note/ },
+    { key: 'laneModels', value: { heavy: { worker: { id: '', effort: 'high' } } }, re: /laneModels\.heavy\.worker id 需为非空字符串/ },
+    { key: 'laneModels', value: { heavy: { worker: ['kimi/kimi-k2', { id: 'kimi/kimi-k2', effrt: 'high' }] } }, re: /laneModels\.heavy\.worker\[1\] 含未知键 effrt/ },
+    { key: 'laneModels', value: { heavy: { worker: ['kimi/kimi-k2', 42] } }, re: /laneModels\.heavy\.worker\[1\] 需为字符串或 \{id, effort\?\} 对象/ },
+    { key: 'laneModels', value: { heavy: { worker: ['kimi/kimi-k2', ['nested']] } }, re: /laneModels\.heavy\.worker\[1\] 需为字符串或 \{id, effort\?\} 对象/ },
+    { key: 'fallbackModels', value: ['kimi/kimi-k2', { effort: 'high' }], re: /fallbackModels\[1\] id 需为非空字符串/ },
+    { key: 'fallbackModels', value: ['kimi/kimi-k2', { id: 'kimi/kimi-k2', effort: null }], re: /fallbackModels\[1\] effort 需为非空字符串/ },
+  ]
+  for (var i = 0; i < cases.length; i++) {
+    var r = await h['set-board-config']({ key: cases[i].key, value: cases[i].value })
+    assert.equal(r.ok, false, 'case ' + i + ' 应拒写')
+    assert.match(r.error, cases[i].re, 'case ' + i + ' 报错文案命中')
+  }
+  assert.equal(board.workerModel, undefined, '全部拒写不落值')
+  assert.equal(board.configLog.length, 0, '拒写零审计行')
+})
+
+test('复合⑤c：diff 口径不因 effort 校验复发删除死锁——存量复合残留不被无关写入连坐、重存/删除/跨键挪槽放行', async function () {
+  // llm 目录只有 ok/c；板上预置目录外复合残留（老宿主形态无 efforts 元数据 → effort 校验整体降级，
+  // 本组锁 diff 面：残留值的 id 级放行路径不被复合形态破坏；effort 级重校由 r7 组在册模型锁）
+  var board = { version: 12, tasks: [], configLog: [], laneModels: JSON.parse(JSON.stringify(DEFAULT_LANES)) }
+  board.laneModels.standard.worker = [{ id: 'gone/a', effort: 'high' }, 'ok/c'] // 存量复合残留（目录外 id）
+  var h = mkRpcHandlers(board, {}, mkLlmCtx({ ok: [{ id: 'c' }] }))
+  // ① 未被本次触碰的存量复合槽不被连坐：写别的槽（已存在合法值）→ 原样保留
+  var r1 = await h['set-board-config']({ key: 'laneModels', value: { heavy: { verifier: 'ok/c' } } })
+  assert.equal(r1.ok, true, '无关槽位写入不被存量复合残留连坐')
+  assert.deepEqual(board.laneModels.standard.worker, [{ id: 'gone/a', effort: 'high' }, 'ok/c'])
+  // ② 目录外残留带 effort 原样重存/删除放行（id 已存在不重校 → effort 无元数据无从校 → 跳过）
+  var r2 = await h['set-board-config']({ key: 'laneModels', value: { standard: { worker: [{ id: 'gone/a', effort: 'high' }, 'ok/c'] } } })
+  assert.equal(r2.ok, true, '残留复合值原样重存放行（删除死锁口径保持）')
+  var r3 = await h['set-board-config']({ key: 'laneModels', value: { standard: { worker: ['ok/c'] } } })
+  assert.equal(r3.ok, true, '删除复合残留放行')
+  assert.deepEqual(board.laneModels.standard.worker, ['ok/c'])
+  // ③ 板级复合残留跨键挪槽放行（configuredModelIds 从对象形态取 id = diff 基线全板模型面）
+  board.workerModel = { id: 'gone/a', effort: 'high' }
+  var r4 = await h['set-board-config']({ key: 'laneModels', value: { heavy: { worker: [{ id: 'gone/a', effort: 'high' }] } } })
+  assert.equal(r4.ok, true, '板级复合残留跨键挪槽放行（diff 基线含对象形态 id）')
+  assert.deepEqual(board.laneModels.heavy.worker, [{ id: 'gone/a', effort: 'high' }])
+  // ④ 新复合值（目录外新 id）仍拒写：防护零损失
+  var r5 = await h['set-board-config']({ key: 'fallbackModels', value: [{ id: 'brandnew/x', effort: 'high' }] })
+  assert.equal(r5.ok, false, '新增目录外复合值仍过 id 校验拒写')
+  assert.match(r5.error, /非法模型 id: brandnew\/x/)
 })
 
