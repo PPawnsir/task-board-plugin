@@ -1167,6 +1167,25 @@ export function createDispatch(ctx, state, deps) {
       try {
         ctx.effect(function () { return ctx.on('agent/assistant-stream', hung.onAssistantFrame) })
       } catch (e) { console.error('[task-board] agent/assistant-stream 订阅失败:', String(e)) }
+      // teamModeCache 主动预填充（task-mwltzr8y）：rt 此前只在「工具/RPC/UI 三通道」被调时触发（被动填充），
+      // 新会话没走过任一通道 → rt 从未被调用 → teamModeCache 空 → Team 提示段不出现 → 主窗口直接用
+      // subagent 绕过看板（实证 session-74d69769：Team 已开启但提示段缺席；调一次 get-tasks 即恢复）。
+      // agent/created 是 serial 模式（宿主契约：listener 依序 await，全部落定前 creation 不 resolve、
+      // 排队输入不放行）——这里 await rt 能保证第一次 prompt 组装前 teamModeCache 已填充。payload.agent.id
+      // 即会话 id（宿主 enter() 强校验 agent.id === session.id；身份读取与 settle.onAgentStatus 同款防御式
+      // 双字段）。worker/verifier 子代理创建也会路过本事件：rt 对其板文件 ENOENT → 纯内存 seed 返回、
+      // teamModeCache 不落键（fill 只在「读盘成功且 ownerSession===sid」路径）、sessionCwd 对非 root 恒空
+      // → 继承闸天然关死——无误注入、无幻影板、无写盘。错误纪律：serial 监听器 throw/reject 会让宿主
+      // 创建失败并跳过后续 listener（README 明示）——必须吞错，绝不外抛（预填失败留待 section 兜底）。
+      async function onAgentCreated(payload) {
+        var agent = payload && payload.agent
+        var sid = agent ? String((agent.session && agent.session.id) || agent.id || '') : ''
+        if (!sid) return
+        try { await rt(sid) } catch (e) { console.error('[task-board] agent/created 预填充 rt 失败（忽略，留待 section 兜底）:', String(e)) }
+      }
+      try {
+        ctx.effect(function () { return ctx.on('agent/created', onAgentCreated) })
+      } catch (e) { console.error('[task-board] agent/created 订阅失败:', String(e)) }
     }
 
     // Worker run 结算（settleWorker）已拆至 lib/settle.mjs（拆分第 6 刀 task-mvt8c1yx-6）：spawnOneShot
@@ -1567,6 +1586,11 @@ export function createDispatch(ctx, state, deps) {
     // ===== Team 模式提示词引导（v65）：teamMode 开启时往主窗口 agent 的 system prompt 注入看板派发引导 =====
     // 用动态 section（text 函数每次组装求值）：开启时注入，关闭时返回空串不落盘。
     // 只对 root agent 注入（池中 worker/verifier 有自己的 prompt 契约，不需要这段）。
+    // 预填节流表（task-mwltzr8y）：sid → 上次 section 兜底预填发出时刻（ms）。键缺席且距上次发出 ≥60s
+    // 才再发——worker 子代理的键永不落（rt 对其 ENOENT → 纯内存 seed），不节流会让每次 prompt 组装都
+    // 白发一次盘读 + roots() 全表扫（正是下方注释警告过的组装期卡顿形态）。
+    var teamModePrefetchAt = {}
+    var TEAM_PREFETCH_RETRY_MS = 60000
     var sysPrompt = ctx.get('systemPrompt')
     if (sysPrompt) {
       var disposeSection = sysPrompt.section({
@@ -1579,7 +1603,20 @@ export function createDispatch(ctx, state, deps) {
           // teamModeCache 按会话 id 键——Worker/Verifier 自己的会话 id 不在缓存里，天然不会误注入。
           // 不能走 resolveRoot：该函数在每个 agent 每次 prompt 组装时同步执行，
           // resolveRoot 全表扫 agent 注册表会把宿主事件循环卡死（曾导致全局界面卡顿、用户消息延迟渲染）。
-          if (!teamModeCache[String(agent.id)]) return ''
+          // 未命中兜底（task-mwltzr8y）：键缺席（agent/created 没跑到的边界，如插件热重载后老 agent 已创建
+          // 完毕）→ fire-and-forget 预填 rt——text() 是同步函数不能 await，本轮返回空串、下一轮 prompt 组装
+          // 就有了；rt 异步不阻塞本轮返回，.catch 吞错（预填失败交后续轮次/三通道重试）。判定口径是
+          // 「键缺席」而非 falsy：rt 落键 false（teamMode 关）后键在场 → 命中快路径，不再重发（零重复）。
+          var __sid = String(agent.id)
+          if (teamModeCache[__sid] === undefined) {
+            var __pf = teamModePrefetchAt[__sid] || 0
+            if (Date.now() - __pf >= TEAM_PREFETCH_RETRY_MS) {
+              teamModePrefetchAt[__sid] = Date.now()
+              rt(__sid).then(function () {}, function () {})
+            }
+            return ''
+          }
+          if (!teamModeCache[__sid]) return ''
           // 第 6~8 条（拆分 doctrine）统一走 epicSplit 门禁：关掉只是不再主动劝拆，
           // 显式 parentId 建子卡 / 史诗自动收口 / hooks 状态机全部照常（机制不禁）。
           // 第 9 条（需求卡→拆解官→确认发布工作流，task-mvneoy1u）**不受 epicSplit 门禁**——

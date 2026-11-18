@@ -6149,6 +6149,119 @@ test('epicSplit 行为①：Team 提示词第 6~8 条随门禁注入/消失（�
   assert.equal(on.replace(splitRuleOf(true), ''), off.replace(splitRuleOf(false), '')) // 除第 6~8 条外逐字相同
 })
 
+// ===== teamModeCache 主动预填充（task-mwltzr8y）：agent/created 订阅 + section 未命中兜底 =====
+// 病灶（实证 session-74d69769）：Team 已开启的新会话没触发过 rt 三通道（工具/RPC/UI）→ teamModeCache 空
+// → Team 提示段不出现 → 主窗口直接用 subagent 绕过看板。修法双管：① 订阅 agent/created（serial 模式，
+// await rt 在第一次 prompt 组装前落键）；② section text() 键缺席 → fire-and-forget rt 兜底（agent/created
+// 没跑到的边界，如插件热重载后老 agent 已创建完毕）——本轮空串、下一轮有。
+// 观察口径：真跑 createDispatch 的 ctx.on 注册回调 + 真 section text() 组装（与可续跑 Worker②/epicSplit①
+// 同款）；mock rt 复刻 store.mjs rt() 的落键契约（vt(d) && d.ownerSession===sid → teamModeCache[sid]=
+// !!d.teamMode，ENOENT/owner 不符的 seed 路径不落键——这正是 worker 会话「键永不落」的成因）。
+function mkTeamSectionEnv(board, rt, withOn) {
+  const sections = []
+  const listeners = []
+  const state = { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: {} }
+  const ctx = {
+    fs: {}, timer: null,
+    get: function (name) { return name === 'systemPrompt' ? { section: function (cfg) { sections.push(cfg); return function () {} } } : null },
+    // 真实 cordis 的 ctx.effect 立即执行回调取 disposer（订阅当场建立）——与 mkContinuableDispatch 同款。
+    effect: function (f) { var d = f(); return function () { if (typeof d === 'function') d() } },
+  }
+  if (withOn) ctx.on = function (name, fn) { listeners.push({ name: name, fn: fn }); return function () {} }
+  createDispatch(ctx, state, {
+    rt: rt, wt: async function () {}, mutateLocked: async function (sid, fn) { fn(board) }, kickCycle: function () {},
+    rootForSession: () => undefined, sessionCwd: () => '', withTimeout: (p) => p, runsFor: () => ({}),
+    feedbackOn: () => false, epicSplitOn: () => true,
+    pushSysNote: () => {}, maybeNotify: () => {}, notifyTaskDone: () => {},
+  })
+  return { state: state, listeners: listeners, sec: sections.find((s) => s.name === 'task-board:team-mode') }
+}
+
+test('teamModeCache 预填充①：agent/created 触发 → await rt 落键 → 第一轮 prompt 组装即含 Team 提示段', async () => {
+  const SID = FULL_SID
+  const board = Object.assign(mkBoard([]), { ownerSession: SID, teamMode: true })
+  const rtCalls = []
+  const env = mkTeamSectionEnv(board, async function (sid) {
+    rtCalls.push(sid)
+    if (board.ownerSession === sid) env.state.teamModeCache[sid] = !!board.teamMode
+    return board
+  }, true)
+  // ① 订阅在位：agent/created 已注册，且追加在既有两订阅之后（agent/status 仍居 listeners[0]，
+  //    既有 index 口径不漂移——与可续跑 Worker① 的「顺序不断言死」纪律只锁首订阅位）。
+  const names = env.listeners.map((l) => l.name)
+  assert.ok(names.includes('agent/created'), 'agent/created 订阅在位')
+  assert.equal(names.indexOf('agent/status'), 0, 'agent/status 仍为首订阅（listeners[0] 既有口径不漂移）')
+  // ② 触发前缓存空（正是被修的病灶形态：Team 已开启但提示段缺席）
+  assert.ok(env.sec, 'team-mode 引导段已注册')
+  assert.equal(env.state.teamModeCache[SID], undefined)
+  // ③ 触发 agent/created（serial 语义：await 回调完成 = 宿主等全部 listener 落定才放行 creation），
+  //    rt 被调用且 teamModeCache 落键 true
+  const created = env.listeners.find((l) => l.name === 'agent/created')
+  await created.fn({ agent: { id: SID }, source: 'startup' })
+  assert.deepEqual(rtCalls, [SID], 'agent/created 触发时 rt 被调用')
+  assert.equal(env.state.teamModeCache[SID], true, 'teamModeCache 已填充')
+  // ④ 第一轮 prompt 组装（缓存命中）即含 Team 提示段——不等第二轮
+  assert.match(env.sec.text({ agent: { id: SID } }), /Team 模式已开启/)
+  // ⑤ 身份读取双字段兼容（settle.onAgentStatus 同款防御式）：payload 只带 session.id 也能命中
+  await created.fn({ agent: { session: { id: SID } }, source: 'resume' })
+  assert.deepEqual(rtCalls, [SID, SID], 'session.id 形态同样命中（老宿主 payload 形态兜底）')
+})
+
+test('teamModeCache 预填充②：section 未命中 → fire-and-forget rt（本轮空串不阻塞，落键后下一轮有）', async () => {
+  const SID = FULL_SID
+  const board = Object.assign(mkBoard([]), { ownerSession: SID, teamMode: true })
+  const rtCalls = []
+  // rt 挂在手动 deferred 上：text() 若 await 了它会直接挂死（测试超时红）——确定性证明 fire-and-forget。
+  let resolveRt = null
+  const gate = new Promise(function (r) { resolveRt = r })
+  const env = mkTeamSectionEnv(board, async function (sid) {
+    rtCalls.push(sid)
+    await gate
+    if (board.ownerSession === sid) env.state.teamModeCache[sid] = !!board.teamMode
+    return board
+  }, false)
+  assert.ok(env.sec, 'team-mode 引导段已注册（ctx.on 缺席的老宿主桩：兜底不依赖事件通道）')
+  // ① 本轮：键缺席 → 立刻返回空串（rt 已发出、键未落）——同步返回不等异步
+  const out = env.sec.text({ agent: { id: SID } })
+  assert.equal(out, '', '本轮返回空串（text() 同步返回，不 await rt）')
+  assert.deepEqual(rtCalls, [SID], 'fire-and-forget rt 已发出')
+  assert.equal(env.state.teamModeCache[SID], undefined, '本轮键尚未落（异步在途）')
+  // ② 节流闸：同一 sid 键未落也只发一次（60s 窗口内重复组装不连环发——worker 键永不落形态的防刷闸）
+  env.sec.text({ agent: { id: SID } })
+  env.sec.text({ agent: { id: SID } })
+  assert.deepEqual(rtCalls, [SID], '节流闸：60s 内重复组装不再发 rt')
+  // ③ rt 落键后：下一轮 prompt 组装即含 Team 提示段（本轮已返回空串，下一轮命中缓存）
+  resolveRt()
+  await flush()
+  assert.equal(env.state.teamModeCache[SID], true, 'rt 已落键')
+  assert.match(env.sec.text({ agent: { id: SID } }), /Team 模式已开启/, '下一轮组装注入 Team 提示段')
+  // ④ 落键后再组装零新发（命中快路径，不再走兜底）
+  const n = rtCalls.length
+  env.sec.text({ agent: { id: SID } })
+  assert.equal(rtCalls.length, n, '命中后不再发预填')
+})
+
+test('teamModeCache 预填充③：teamMode 关闭 → 落键 false 不注入、不再发预填（零回归）', async () => {
+  const SID = FULL_SID
+  const board = Object.assign(mkBoard([]), { ownerSession: SID, teamMode: false })
+  const rtCalls = []
+  const env = mkTeamSectionEnv(board, async function (sid) {
+    rtCalls.push(sid)
+    if (board.ownerSession === sid) env.state.teamModeCache[sid] = !!board.teamMode
+    return board
+  }, true)
+  // ① agent/created 路径：teamMode 关的板照常预填（rt 被调、键落 false）——但 prompt 恒不注入
+  const created = env.listeners.find((l) => l.name === 'agent/created')
+  await created.fn({ agent: { id: SID }, source: 'startup' })
+  assert.deepEqual(rtCalls, [SID], 'teamMode 关的板也照常 rt（预填本身不看 teamMode 值）')
+  assert.equal(env.state.teamModeCache[SID], false, '键落 false（teamMode 关）')
+  assert.equal(env.sec.text({ agent: { id: SID } }), '', 'teamMode 关闭 → 不注入（零回归）')
+  // ② 键在场（false）后不再发预填：「键缺席」判定口径（undefined），falsy ≠ 未命中——否则 team-off
+  //    板每次组装都会白发一次 rt
+  env.sec.text({ agent: { id: SID } })
+  assert.equal(rtCalls.length, 1, '键在场即命中判定，不再重发')
+})
+
 // ===== Team 提示词判档/pipeline 指引（task-mvxpzcr9）：三档具象样例 + 判档三问 + pipeline 场景 =====
 // 病灶（用户 2026-11-01 两连报）：① 判档文案原只写在拆解官一处、且原文「standard=常规模块改动（缺省）」
 // = 引力井 → 主窗口建卡全落标档；② pipeline 只有定义没场景（「回归/巡检类归 work」从未写过）→ 一律 full。
