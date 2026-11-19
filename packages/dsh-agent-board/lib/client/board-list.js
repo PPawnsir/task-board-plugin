@@ -267,26 +267,26 @@
         rpc('update-task', { taskId: id, resetToPending: true }).then(function () { fetchTasks() }).catch(function () {})
       }
       return React.createElement('div', null,
-        React.createElement('input', { value: q, onChange: function (e) { setQ(e.target.value); state.archQ = e.target.value }, placeholder: '检索标题 / ID / 标签…', style: { width: '100%', padding: '5px 8px', fontSize: 11, border: '1px solid ' + C.border2, borderRadius: 5, background: C.card, color: C.text, marginBottom: 8 } }),
-        React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 6 }, title: '归档 tab 含已归档 + 已取消两类；仪表盘「已归档」只数已归档，不数已取消' }, '共 ' + archived.length + ' 条' + (cancelledCount > 0 ? '（含已取消 ' + cancelledCount + ' 条）' : '')),
-        archived.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '暂无归档/已取消任务') :
-        list.length === 0 ? React.createElement('div', { style: { fontSize: 11, color: C.text2, padding: 12, textAlign: 'center' } }, '无匹配结果') :
+        React.createElement('input', { value: q, onChange: function (e) { setQ(e.target.value); state.archQ = e.target.value }, placeholder: '检索标题 / ID / 标签…', style: { width: '100%', padding: '7px 10px', fontSize: C.fsSub, border: '1px solid ' + C.border2, borderRadius: 6, background: C.card, color: C.text, marginBottom: 8 } }),
+        React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginBottom: 8 }, title: '归档 tab 含已归档 + 已取消两类；仪表盘「已归档」只数已归档，不数已取消' }, '共 ' + archived.length + ' 条' + (cancelledCount > 0 ? '（含已取消 ' + cancelledCount + ' 条）' : '')),
+        archived.length === 0 ? React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2, padding: 16, textAlign: 'center' } }, '暂无归档/已取消任务') :
+        list.length === 0 ? React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2, padding: 16, textAlign: 'center' } }, '无匹配结果') :
         list.map(function (t) {
           // 归档行点击进详情（用户 2026-10-09 指令）：复用 state.detailId 机制，与看板卡同路径；
           // 详情页对 archived 的操作区既有门禁不回归（恢复待办=保存并重置、删除仅 draft/pending/blocked）。
-          return React.createElement('div', { key: t.id, onClick: function () { state.detailId = t.id; notify() }, title: '点击查看详情', style: { padding: '6px 8px', marginBottom: 5, background: C.card, border: '1px solid ' + C.border, borderRadius: 6, cursor: 'pointer' } },
-            React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-              React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: C.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: t.title }, t.title),
-              reviewPending(t) ? React.createElement('span', { title: '👁 建议过目（命中风险信号）：\n' + ((t.reviewHint && t.reviewHint.reasons) || []).join('\n'), style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.warn + ' 22%, transparent)', color: C.warn, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 } }, '👁 建议过目') : null,
-              t.verification ? React.createElement('span', { title: '验收结论: ' + (t.verification.summary || '').slice(0, 100), style: { fontSize: 9, padding: '1px 5px', borderRadius: 3, background: t.verification.verdict === 'approved' ? C.ok : C.err, color: C_INV } }, t.verification.verdict === 'approved' ? '过' : '驳') : null,
-              t.status === 'cancelled' ? React.createElement('span', { title: '已取消（可恢复待办）', style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: 'color-mix(in srgb, ' + C.warn + ' 20%, transparent)', color: C.warn, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 } }, '已取消') : null,
-              React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, (t.archivedAt || t.cancelledAt) ? ago(t.archivedAt || t.cancelledAt) : '')),
-            t.verification && t.verification.summary ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '📝 ' + t.verification.summary) : null,
-            React.createElement('div', { style: { display: 'flex', gap: 5, marginTop: 4, flexWrap: 'wrap' } },
-              React.createElement('button', { onClick: function (e) { e.stopPropagation(); restore(t.id) }, title: wm === 'list' ? '恢复为待办' : '恢复为待办（将按当前工作模式立即重新派发，消耗一轮 Worker+Verifier token）', style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '↩ 恢复待办'),
+          return React.createElement('div', { key: t.id, onClick: function () { state.detailId = t.id; notify() }, title: '点击查看详情', style: { padding: '10px 12px', marginBottom: 8, background: C.card, border: '1px solid ' + C.border, borderRadius: 8, cursor: 'pointer' } },
+            React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+              React.createElement('span', { style: { fontSize: C.fsBody, fontWeight: 600, color: C.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: t.title }, t.title),
+              reviewPending(t) ? React.createElement('span', { title: '👁 建议过目（命中风险信号）：\n' + ((t.reviewHint && t.reviewHint.reasons) || []).join('\n'), style: { fontSize: C.fsAux, padding: '1px 6px', borderRadius: 4, background: 'color-mix(in srgb, ' + C.warn + ' 22%, transparent)', color: C.warn, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 } }, '👁 建议过目') : null,
+              t.verification ? React.createElement('span', { title: '验收结论: ' + (t.verification.summary || '').slice(0, 100), style: { fontSize: C.fsAux, padding: '1px 6px', borderRadius: 4, background: t.verification.verdict === 'approved' ? C.ok : C.err, color: C_INV } }, t.verification.verdict === 'approved' ? '过' : '驳') : null,
+              t.status === 'cancelled' ? React.createElement('span', { title: '已取消（可恢复待办）', style: { fontSize: C.fsAux, padding: '1px 6px', borderRadius: 4, background: 'color-mix(in srgb, ' + C.warn + ' 20%, transparent)', color: C.warn, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 } }, '已取消') : null,
+              React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2 } }, (t.archivedAt || t.cancelledAt) ? ago(t.archivedAt || t.cancelledAt) : '')),
+            t.verification && t.verification.summary ? React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '📝 ' + t.verification.summary) : null,
+            React.createElement('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
+              React.createElement('button', { onClick: function (e) { e.stopPropagation(); restore(t.id) }, title: wm === 'list' ? '恢复为待办' : '恢复为待办（将按当前工作模式立即重新派发，消耗一轮 Worker+Verifier token）', style: { fontSize: C.fsAux, padding: '3px 9px', border: '1px solid ' + C.brand, borderRadius: 4, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '↩ 恢复待办'),
               (function () {
                 var runs = historyRuns(t)
-                if (!runs.length) return React.createElement('span', { style: { fontSize: 9, color: C.text2, opacity: 0.6, padding: '2px 0' } }, '无历史会话')
+                if (!runs.length) return React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2, opacity: 0.6, padding: '3px 0' } }, '无历史会话')
                 // 拆解官可见性同族修正（task-mvomad6c ③）：runs 行此前 W/V 二元标签，decomposer 被误标 W——
                 // 加 🧩 标签与独立序数（W/V 序号口径逐字不变）
                 var wN = 0, vN = 0, dN = 0
@@ -297,7 +297,7 @@
                   return React.createElement('button', {
                     key: i, onClick: function (e) { e.stopPropagation(); if (uiWorkspaceSvc) uiWorkspaceSvc.openSession(r.id) },
                     title: (isV ? 'Verifier' : (isD ? '拆解官' : 'Worker')) + ' 第 ' + seq + ' 次' + (r.at ? ' · ' + ago(r.at) : '') + (r.model ? ' · ' + r.model : '') + '（' + r.id + '）',
-                    style: { fontSize: 9, padding: '2px 7px', border: '1px solid ' + (isV ? C.warn : C.brand), borderRadius: 3, background: 'transparent', color: isV ? C.warn : C.brand, cursor: 'pointer' }
+                    style: { fontSize: C.fsAux, padding: '3px 9px', border: '1px solid ' + (isV ? C.warn : C.brand), borderRadius: 4, background: 'transparent', color: isV ? C.warn : C.brand, cursor: 'pointer' }
                   }, '→ ' + (isV ? 'V' : (isD ? '🧩' : 'W')) + '#' + seq)
                 }))
               })()))

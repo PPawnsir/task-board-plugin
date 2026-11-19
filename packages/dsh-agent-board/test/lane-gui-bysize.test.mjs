@@ -1074,3 +1074,88 @@ test('⑱c effort 选择器·产物同步：client.js 已重组装且含全链�
     assert.ok(built.indexOf(m) >= 0, 'client.js 缺 effort 选择器标记：' + m + '（需 npm run build-client 重组装）')
   }
 })
+
+// ===== ⑲ UX redesign 阶段1（task-mwndiu77）：字号阶梯 + 仪表盘/归档卡片化（纯呈现层，零功能改动）=====
+// 口径：只调字号/布局/留白/卡片化，解决「文字太小内容过多」；参照 prototype/ux-redesign.html 阶梯。
+//   ① kernel C 对象字号 token（fsBody=13/fsSub=12/fsAux=11）且组件引用 token（替换写死 10-11px）；
+//      豁免：8px 图表微标签、既有锁死字号（onboarding 横幅 kernel fontSize:10 原文——别卡的断言口径）
+//   ② 仪表盘 16 区全保留 + 卡片化（圆角 8 / 内边距 12 / 区间隔 14）
+//   ③ 归档卡片化（行卡 + 标题 fsBody）且全信息保留（检索/计数/徽标/摘要/恢复/runs 链接）
+//   ④ 产物同步：client.js 含 token 与卡片化标记（build-client 重拼）
+const blsrc = readFileSync(new URL('../lib/client/board-list.js', import.meta.url), 'utf8')
+// 仪表盘呈现域：TrendChart（首组件）→ WorkModeSwitch（工具栏域，阶段边界外不越刀）
+const dashRegion = src.slice(src.indexOf('function TrendChart(props)'), src.indexOf('// 工作模式选择器（v75）'))
+// Dashboard 主体（16 区装配处）：Dashboard() → WorkModeSwitch
+const dashBody = src.slice(src.indexOf('function Dashboard()'), src.indexOf('// 工作模式选择器（v75）'))
+// 归档域：ArchiveView() → CreateTaskForm()
+const archRegion = blsrc.slice(blsrc.indexOf('function ArchiveView()'), blsrc.indexOf('function CreateTaskForm()'))
+
+test('⑲UX1-字号阶梯：C 对象 token 13/12/11 + 各域引用 token（呈现域写死 9/10/11 归零）', () => {
+  assert.match(ksrc, /fsBody: 13, fsSub: 12, fsAux: 11/, 'kernel C 对象缺字号阶梯 token（正文13/次要12/辅助11）')
+  // kernel 域引用：ViewTab 视图切换 + 顶栏错误条 + 徽标
+  assert.match(ksrc, /fontSize: C\.fsSub, padding: '4px 12px'/, 'ViewTab 未引用 fsSub token')
+  assert.ok(ksrc.indexOf('fontSize: C.fsSub, color: C.err') >= 0, '顶栏读错误条未引用 fsSub token')
+  assert.ok(ksrc.indexOf('fontSize: C.fsAux, fontWeight: 600') >= 0, '入口计数徽标未引用 fsAux token')
+  // 仪表盘呈现域：token 引用成规模 + 写死 9/10/11 归零（8px 图表微标签豁免）
+  assert.ok((dashRegion.match(/fontSize: C\.fsSub/g) || []).length >= 60, '仪表盘呈现域 fsSub 引用应覆盖正文/次要文字（≥60 处）')
+  assert.ok((dashRegion.match(/fontSize: C\.fsAux/g) || []).length >= 20, '仪表盘呈现域 fsAux 引用应覆盖辅助文字（≥20 处）')
+  assert.equal((dashRegion.match(/fontSize: (?:9|10|11)(?!\d)/g) || []).length, 0, '仪表盘呈现域仍写死 9/10/11px（应引用 C.fs* token）')
+  // 归档域：标题升 fsBody（正文 13）+ 写死 9/10/11 归零
+  assert.ok(archRegion.indexOf('fontSize: C.fsBody, fontWeight: 600') >= 0, '归档行标题未用 fsBody（正文 13）')
+  assert.equal((archRegion.match(/fontSize: (?:9|10|11)(?!\d)/g) || []).length, 0, '归档域仍写死 9/10/11px（应引用 C.fs* token）')
+})
+
+test('⑳UX1-仪表盘 16 区全保留 + 卡片化（圆角 8 / 内边距 12 / 区间隔 14）', () => {
+  // 16 功能区逐个点名（RangeFilter/GlobalBoards/StatCard×6/HealthHints/StorageCleanup/TokenUsage/
+  // ModelPerf/QualityTrends/RejectionClusters/状态分布/优先级分布/StatCardDual行/ResearchRoiRow/
+  // TrendChart/Agent 负载/最近活跃）——功能不丢是硬约束
+  for (const z of [
+    'React.createElement(RangeFilter)', 'React.createElement(GlobalBoards)',
+    "React.createElement(StatCard, { label: '总任务'", "React.createElement(StatCard, { label: '待办'",
+    "React.createElement(StatCard, { label: '进行中'", "React.createElement(StatCard, { label: '验证中'",
+    "React.createElement(StatCard, { label: '已完成'", "React.createElement(StatCard, { label: '已归档'",
+    'React.createElement(HealthHints)', 'React.createElement(StorageCleanup)',
+    'React.createElement(TokenUsage, { usage: state.usageSummary })', 'React.createElement(ModelPerf,',
+    'React.createElement(QualityTrends,', 'React.createElement(RejectionClusters,',
+    "'按状态分布'", "'按优先级分布'",
+    'React.createElement(StatCardDual,', 'React.createElement(ResearchRoiRow,',
+    'React.createElement(TrendChart,', "'Agent 负载（进行中+验证中）'", "'最近活跃'"
+  ]) { assert.ok(dashBody.indexOf(z) >= 0, '仪表盘缺功能区：' + z + '（16 区全保留是硬约束）') }
+  // 卡片化口径：全区卡片 radius 8 + padding 12 + 区间隔 14
+  assert.ok((src.match(/padding: '12px', background: C\.card, border: '1px solid ' \+ C\.border, borderRadius: 8/g) || []).length >= 10, '仪表盘区卡未卡片化（radius 8 + padding 12）')
+  assert.ok((src.match(/borderRadius: 8, marginBottom: 14/g) || []).length >= 9, '区间隔未调至 14px（卡片化留白口径）')
+  assert.match(src, /display: 'flex', gap: 14, marginBottom: 14, flexWrap: 'wrap'/, '分布图两卡行未用 14px 区间隔')
+  assert.match(src, /display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap'/, '统计卡行未调留白（gap 8 + 区间隔 14）')
+})
+
+test('㉑UX1-归档卡片化 + 全信息保留（检索/计数/徽标/摘要/恢复/runs 链接/详情跳转）', () => {
+  // 行卡片化（radius 8 + 行距 8）+ 标题 fsBody
+  assert.match(blsrc, /padding: '10px 12px', marginBottom: 8, background: C\.card, border: '1px solid ' \+ C\.border, borderRadius: 8, cursor: 'pointer'/, '归档行未卡片化（radius 8 + padding 10px 12px）')
+  // 检索 + 计数（含已取消单列口径）
+  assert.ok(archRegion.indexOf('检索标题 / ID / 标签…') >= 0, '归档检索框丢失')
+  assert.ok(archRegion.indexOf("'共 ' + archived.length + ' 条'") >= 0, '归档计数行丢失')
+  // 徽标族全保留：建议过目 / 验收结论 过·驳 / 已取消
+  assert.ok(archRegion.indexOf('👁 建议过目') >= 0, '「建议过目」徽标丢失')
+  assert.ok(archRegion.indexOf("? '过' : '驳'") >= 0, '验收结论徽标（过/驳）丢失')
+  assert.ok(archRegion.indexOf("'已取消'") >= 0, '「已取消」徽标丢失')
+  // 摘要 + 恢复（confirm 门禁口径不变）+ runs 链接 + 空态
+  assert.ok(archRegion.indexOf("'📝 ' + t.verification.summary") >= 0, '验收摘要行丢失')
+  assert.ok(archRegion.indexOf('↩ 恢复待办') >= 0, '「恢复待办」按钮丢失')
+  assert.ok(archRegion.indexOf('恢复待办后将按当前工作模式立即重新派发') >= 0, '恢复重派 confirm 门禁丢失')
+  assert.ok(archRegion.indexOf('无历史会话') >= 0, '「无历史会话」空态丢失')
+  assert.ok(archRegion.indexOf('uiWorkspaceSvc.openSession(r.id)') >= 0, 'runs 历史会话链接丢失')
+  assert.match(archRegion, /onClick: function \(\) \{ state\.detailId = t\.id; notify\(\) \}/, '归档行点击进详情丢失')
+  assert.match(archRegion, /onClick: function \(e\) \{ e\.stopPropagation\(\); restore\(t\.id\) \}/, '恢复按钮 handler 丢失')
+})
+
+test('㉒UX1-产物同步：client.js 含字号 token 与卡片化标记（需 npm run build-client 重组装）', () => {
+  for (const m of [
+    'fsBody: 13, fsSub: 12, fsAux: 11',
+    "padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8",
+    "padding: '10px 12px', marginBottom: 8, background: C.card, border: '1px solid ' + C.border, borderRadius: 8",
+    'fontSize: C.fsBody, fontWeight: 600',
+    "display: 'flex', gap: 14, marginBottom: 14, flexWrap: 'wrap'"
+  ]) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺阶段1标记：' + m + '（需 npm run build-client 重组装）')
+  }
+})

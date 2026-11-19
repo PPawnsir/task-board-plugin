@@ -63,8 +63,8 @@
     function TrendChart(props) {
       var data = props.data || []
       var max = 1; data.forEach(function (d) { if (d.count > max) max = d.count })
-      return React.createElement('div', { style: { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 } },
-        React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '近 7 天完成趋势'),
+      return React.createElement('div', { style: { padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, marginBottom: 14 } },
+        React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '近 7 天完成趋势'),
         React.createElement('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 4, height: 40 } },
           data.map(function (d, i) {
             var h = d.count > 0 ? Math.max(10, Math.round(d.count / max * 36)) : 3
@@ -75,10 +75,10 @@
           })))
     }
 
-    function StatCard(props) { return React.createElement('div', { style: { flex: '1 1 0', minWidth: 80, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, textAlign: 'center' } }, React.createElement('div', { style: { fontSize: 20, fontWeight: 700, color: props.color || C.text } }, String(props.value)), React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 2 } }, props.label)) }
+    function StatCard(props) { return React.createElement('div', { style: { flex: '1 1 0', minWidth: 80, padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, textAlign: 'center' } }, React.createElement('div', { style: { fontSize: 20, fontWeight: 700, color: props.color || C.text } }, String(props.value)), React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2, marginTop: 2 } }, props.label)) }
 
     // 双行指标卡（耗时口径三分离：原「平均完成时间」一个展示位拆为 排队/执行 两行，不挤占其他指标位）
-    function StatCardDual(props) { return React.createElement('div', { style: { flex: '1 1 0', minWidth: 80, padding: '6px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, textAlign: 'center' }, title: props.title }, React.createElement('div', { style: { fontSize: 14, fontWeight: 700, color: props.color || C.text } }, String(props.value1)), React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 1 } }, props.label1), React.createElement('div', { style: { fontSize: 14, fontWeight: 700, color: props.color || C.text, marginTop: 3 } }, String(props.value2)), React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 1 } }, props.label2)) }
+    function StatCardDual(props) { return React.createElement('div', { style: { flex: '1 1 0', minWidth: 80, padding: '10px 12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, textAlign: 'center' }, title: props.title }, React.createElement('div', { style: { fontSize: 14, fontWeight: 700, color: props.color || C.text } }, String(props.value1)), React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2, marginTop: 1 } }, props.label1), React.createElement('div', { style: { fontSize: 14, fontWeight: 700, color: props.color || C.text, marginTop: 3 } }, String(props.value2)), React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2, marginTop: 1 } }, props.label2)) }
 
     // 调研 ROI 对比行（task-mutnjesa）：让数据替道理说话——「有调研 vs 无调研」分组账单直接摆给主窗口看，
     //   比任何引导文案都管用。数据源 computeStats 的 roi（null = 任一组为空或总样本 <4，整块不渲染）；
@@ -99,14 +99,14 @@
           icon + ' ' + label + ' ',
           React.createElement('span', { style: { fontWeight: 600, color: warnNums ? C.warn : C.text } }, g.n + ' 卡 平均 ' + fmtM(g.execMs) + '/约 ' + (g.tok === null ? '-' : (approx ? '~' : '') + fmtTokens(g.tok)) + ' tok'))
       }
-      return React.createElement('div', { style: { padding: '6px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12, fontSize: 10, color: C.text2, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }, title: 'resolved/archived 且领取过的卡按有无调研注入分组现算（执行 = 被领取→完成；token 均值只计有 usage 结算记录的卡，口径 = 有效消耗：输入+输出+缓存写，不含缓存读；老卡无分量字段时退化为合计并标 ~）' },
-        React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('scale', 11), '调研 ROI'),
+      return React.createElement('div', { style: { padding: '10px 12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, marginBottom: 14, fontSize: C.fsSub, color: C.text2, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }, title: 'resolved/archived 且领取过的卡按有无调研注入分组现算（执行 = 被领取→完成；token 均值只计有 usage 结算记录的卡，口径 = 有效消耗：输入+输出+缓存写，不含缓存读；老卡无分量字段时退化为合计并标 ~）' },
+        React.createElement('span', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('scale', 11), '调研 ROI'),
         grp('📎', '有调研', roi.yes, false),
         React.createElement('span', null, '·'),
         grp('⚠️', '无调研', roi.no, noSlower))
     }
 
-    function BarRow(props) { var pct = props.total > 0 ? (props.count / props.total * 100) : 0; return React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 } }, React.createElement('span', { style: { width: 40, fontSize: 10, color: C.text2, textAlign: 'right', flexShrink: 0 } }, props.label), React.createElement('div', { style: { flex: 1, height: 8, background: C.nested, borderRadius: 4, overflow: 'hidden' } }, React.createElement('div', { style: { height: '100%', width: pct + '%', background: props.color || C.brand, borderRadius: 4, transition: 'width .3s' } })), React.createElement('span', { style: { width: 24, fontSize: 10, color: C.text2, flexShrink: 0 } }, String(props.count))) }
+    function BarRow(props) { var pct = props.total > 0 ? (props.count / props.total * 100) : 0; return React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 } }, React.createElement('span', { style: { width: 40, fontSize: C.fsSub, color: C.text2, textAlign: 'right', flexShrink: 0 } }, props.label), React.createElement('div', { style: { flex: 1, height: 8, background: C.nested, borderRadius: 4, overflow: 'hidden' } }, React.createElement('div', { style: { height: '100%', width: pct + '%', background: props.color || C.brand, borderRadius: 4, transition: 'width .3s' } })), React.createElement('span', { style: { width: 24, fontSize: C.fsSub, color: C.text2, flexShrink: 0 } }, String(props.count))) }
 
     // ===== 仪表盘：日期范围筛选（共享给报告与全局总览）=====
     function tsInRange(iso, from, to) {
@@ -145,29 +145,29 @@
         function fmt(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2) }
         setRange(fmt(from), fmt(to))
       }
-      var headBtn = { fontSize: 11, padding: '3px 10px', border: '1px solid ' + (rg.from || rg.to ? C.brand : C.border), borderRadius: 5, background: (rg.from || rg.to) ? C.nested : C.card, color: (rg.from || rg.to) ? C.brand : C.text2, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }
-      var chip = { fontSize: 10, padding: '2px 8px', border: '1px solid ' + C.border2, borderRadius: 10, background: C.card, color: C.text2, cursor: 'pointer' }
-      var dateInput = { fontSize: 11, padding: '2px 6px', border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text }
+      var headBtn = { fontSize: C.fsSub, padding: '3px 10px', border: '1px solid ' + (rg.from || rg.to ? C.brand : C.border), borderRadius: 5, background: (rg.from || rg.to) ? C.nested : C.card, color: (rg.from || rg.to) ? C.brand : C.text2, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }
+      var chip = { fontSize: C.fsSub, padding: '2px 8px', border: '1px solid ' + C.border2, borderRadius: 10, background: C.card, color: C.text2, cursor: 'pointer' }
+      var dateInput = { fontSize: C.fsSub, padding: '2px 6px', border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text }
       return React.createElement('div', { style: { marginBottom: 10 } },
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
           React.createElement('button', { onClick: function () { state.rfOpen = !open; setOpen(!open) }, style: headBtn },
             ic('calendar-days', 11),
             React.createElement('span', null, '统计范围: ' + rangeLabel()),
             ic(open ? 'chevron-up' : 'chevron-down', 10))),
-        open ? React.createElement('div', { style: { marginTop: 6, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } },
+        open ? React.createElement('div', { style: { marginTop: 6, padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8 } },
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
-            React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '快捷:'),
+            React.createElement('span', { style: { fontSize: C.fsSub, color: C.text2 } }, '快捷:'),
             React.createElement('button', { onClick: function () { preset(1) }, style: chip }, '今天'),
             React.createElement('button', { onClick: function () { preset(7) }, style: chip }, '近 7 天'),
             React.createElement('button', { onClick: function () { preset(30) }, style: chip }, '近 30 天'),
             React.createElement('button', { onClick: function () { preset(0) }, style: chip }, '全部'),
             React.createElement('span', { style: { flex: 1 } }),
-            React.createElement('label', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 4 } }, '开始',
+            React.createElement('label', { style: { fontSize: C.fsSub, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 4 } }, '开始',
               React.createElement('input', { type: 'date', value: rg.from, onChange: function (e) { setRange(e.target.value, rg.to) }, style: dateInput })),
-            React.createElement('label', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 4 } }, '截至',
+            React.createElement('label', { style: { fontSize: C.fsSub, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 4 } }, '截至',
               React.createElement('input', { type: 'date', value: rg.to, onChange: function (e) { setRange(rg.from, e.target.value) }, style: dateInput })),
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '作用于报告、全局总览与 Token 区（模型分布/Top8/累计）')),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 5 } }, '报告统计「时间范围内有活动」的任务；总览只显示范围内有活跃的会话；Token 区按 run 的本地日落点过滤（今日与近 7 天为固定口径，不受范围影响）。')) : null)
+            React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2 } }, '作用于报告、全局总览与 Token 区（模型分布/Top8/累计）')),
+          React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginTop: 5 } }, '报告统计「时间范围内有活动」的任务；总览只显示范围内有活跃的会话；Token 区按 run 的本地日落点过滤（今日与近 7 天为固定口径，不受范围影响）。')) : null)
     }
 
     function GlobalBoards() {
@@ -180,15 +180,15 @@
       var rg = activeRange()
       var shown = boards.filter(function (b) { return !rg.from && !rg.to ? true : tsInRange(b.lastActivity, rg.from, rg.to) })
       var activeN = boards.filter(function (b) { return b.counts.inProgress || b.counts.verifying || b.counts.pending || b.counts.blocked }).length
-      return React.createElement('div', { style: { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 } },
-        React.createElement('div', { onClick: function () { state.gboOpen = !open; setOpen(!open); if (!open) load() }, style: { fontSize: 11, fontWeight: 600, color: C.text2, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 } },
+      return React.createElement('div', { style: { padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, marginBottom: 14 } },
+        React.createElement('div', { onClick: function () { state.gboOpen = !open; setOpen(!open); if (!open) load() }, style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 } },
           ic('layout-grid', 11),
           React.createElement('span', null, '全局会话总览（本机 ' + boards.length + ' 个看板 · ' + activeN + ' 个活跃）'),
-          open && (rg.from || rg.to) ? React.createElement('span', { style: { fontSize: 9, color: C.brand } }, '范围: ' + rangeLabel()) : null,
+          open && (rg.from || rg.to) ? React.createElement('span', { style: { fontSize: C.fsAux, color: C.brand } }, '范围: ' + rangeLabel()) : null,
           React.createElement('span', { style: { marginLeft: 'auto', display: 'inline-flex', color: C.text2 } }, ic(open ? 'chevron-up' : 'chevron-down', 11))),
-        open ? (shown.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2, padding: '6px 0' } }, '时间范围内无活跃会话') : shown.map(function (b, i) {
+        open ? (shown.length === 0 ? React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2, padding: '6px 0' } }, '时间范围内无活跃会话') : shown.map(function (b, i) {
           var isSelf = b.session === state.sessionId
-          return React.createElement('div', { key: i, style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, padding: '3px 0', borderBottom: '1px solid ' + C.nested } },
+          return React.createElement('div', { key: i, style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: C.fsSub, padding: '3px 0', borderBottom: '1px solid ' + C.nested } },
             React.createElement('span', { onClick: function () { if (!isSelf && uiWorkspaceSvc) uiWorkspaceSvc.openSession(b.session) }, style: { color: isSelf ? C.text2 : C.brand, cursor: isSelf ? 'default' : 'pointer', textDecoration: isSelf ? 'none' : 'underline', minWidth: 90 } }, (isSelf ? '★ ' : '') + shortId(b.session)),
             React.createElement('span', { style: { color: C.text2 } }, workModeNames[b.teamMode ? 'team' : (b.boardMode === 'auto' ? 'auto' : 'list')]),
             React.createElement('span', { style: { display: 'inline-flex', gap: 5 } },
@@ -308,7 +308,7 @@
           try { var blob = new Blob([text], { type: 'text/markdown' }); var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'board-report.md'; a.click(); setMsg('✅ 已下载 board-report.md'); setTimeout(function () { setMsg('') }, 2500) } catch (_) { setMsg('⚠️ 导出失败') }
         }
       }
-      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5 } }, React.createElement('button', { onClick: gen, title: '生成本看板 markdown 报告并复制', style: { fontSize: 11, padding: '3px 10px', border: '1px solid ' + C.border, borderRadius: 5, background: C.card, color: C.text, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('file-down', 12), '生成报告'), msg ? React.createElement('span', { style: { fontSize: 10, color: C.ok } }, msg) : null)
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5 } }, React.createElement('button', { onClick: gen, title: '生成本看板 markdown 报告并复制', style: { fontSize: C.fsSub, padding: '3px 10px', border: '1px solid ' + C.border, borderRadius: 5, background: C.card, color: C.text, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('file-down', 12), '生成报告'), msg ? React.createElement('span', { style: { fontSize: C.fsSub, color: C.ok } }, msg) : null)
     }
 
     // ===== Token 消耗区（数据源：host 端 get-tasks 的 usageSummary）=====
@@ -347,20 +347,20 @@
       var pct = props.max > 0 ? Math.max(2, Math.round(props.value / props.max * 100)) : 0
       var clickable = !!props.onClick
       return React.createElement('div', { onClick: props.onClick, title: props.title, style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, cursor: clickable ? 'pointer' : 'default' } },
-        React.createElement('span', { style: { width: 110, fontSize: 10, color: props.labelColor || C.text2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 0 } }, props.label),
+        React.createElement('span', { style: { width: 110, fontSize: C.fsSub, color: props.labelColor || C.text2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 0 } }, props.label),
         React.createElement('div', { style: { flex: 1, height: 8, background: C.nested, borderRadius: 4, overflow: 'hidden' } },
           React.createElement('div', { style: { height: '100%', width: pct + '%', background: props.color || C.brand, borderRadius: 4, transition: 'width .3s' } })),
-        React.createElement('span', { style: { width: 54, fontSize: 10, color: C.text2, textAlign: 'right', flexShrink: 0 } }, fmtTokens(props.value)))
+        React.createElement('span', { style: { width: 54, fontSize: C.fsSub, color: C.text2, textAlign: 'right', flexShrink: 0 } }, fmtTokens(props.value)))
     }
     function TokenUsage(props) {
       var u = props.usage
-      var box = { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 }
+      var box = { padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, marginBottom: 14 }
       // 范围激活标记：Token 区的模型分布/Top8/累计已按「统计范围」过滤（host 侧重算），
       // 不加标记的话用户没法判断看到的数字是全量还是范围内——标记与 RangeFilter 同源（activeRange）。
       var tg = activeRange()
       var tgOn = !!(tg.from || tg.to)
-      var head = React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('bar-chart-3', 11), 'Token 消耗',
-        tgOn ? React.createElement('span', { style: { fontSize: 9, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '模型分布 / 任务消耗 Top 8 / 累计已按统计范围过滤：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
+      var head = React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('bar-chart-3', 11), 'Token 消耗',
+        tgOn ? React.createElement('span', { style: { fontSize: C.fsAux, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '模型分布 / 任务消耗 Top 8 / 累计已按统计范围过滤：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
       // ===== 主窗口（本会话对话）消耗（task-muwsol23）：host 增量尾读主会话 v4 日志聚合 =====
       // 隔离口径：只在 Token 区单列一行 + 模型分布尾部追加一条；不进累计 / Top 8 / 模型归属摊派。
       // 缺字段（老 host）/ 读不到日志 / 无 usage → mw=null → 两处都不渲染（静默降级，不炸轮询）。
@@ -376,13 +376,13 @@
       // 主窗口单列行（累计行下方）：「主窗口（本会话）：今日 X · 累计 Y」（总量口径，有效值见悬浮 title）
       function mwLine() {
         if (!mw) return null
-        return React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 8 }, title: '主窗口（本会话对话）消耗：总量口径（含缓存读）；有效消耗（输入+输出+缓存写，不含缓存读）= ' + String(mw.effective) + ' tok。host 增量尾读本会话 v4 日志聚合' + (tgOn ? '；随统计范围裁剪（按助手消息的本地日落点）' : '') + '。与看板派发口径并列展示——不进累计 / Top 8 / 模型归属摊派' },
+        return React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2, marginBottom: 8 }, title: '主窗口（本会话对话）消耗：总量口径（含缓存读）；有效消耗（输入+输出+缓存写，不含缓存读）= ' + String(mw.effective) + ' tok。host 增量尾读本会话 v4 日志聚合' + (tgOn ? '；随统计范围裁剪（按助手消息的本地日落点）' : '') + '。与看板派发口径并列展示——不进累计 / Top 8 / 模型归属摊派' },
           '主窗口（本会话）：今日 ',
           React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(mwToday)),
           ' · 累计 ',
           React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(mw.total)))
       }
-      if (!u || !u.total) return React.createElement('div', { style: box }, head, React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无数据（Worker/Verifier 会话日志里还没有 usage 记录）'), mwLine())
+      if (!u || !u.total) return React.createElement('div', { style: box }, head, React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2 } }, '暂无数据（Worker/Verifier 会话日志里还没有 usage 记录）'), mwLine())
       // ===== 主数字口径翻转（task-muxnqunk，用户 2026-10-07 裁决「算总的吧」，推翻 task-muwq9u04 的
       // 有效主显）：模型分布行与 Top8 行的主数字一律显示**总量**（byModel / topTasks[].total，含缓存读），
       // 有效消耗（byModelEff / topTasks[].effective）退到 title 悬浮；老 host 缺 byModelEff / 老卡无
@@ -421,16 +421,16 @@
       // maxDay 按总量归一（主显口径）——task-muwsnyqv ③ 的「只按有效归一 + 旧口径灰柱」规则随
       // 口径翻转退役：总量就是主口径，不再存在「缓存读撑歪有效柱」的问题。
       for (var di = 0; di < days.length; di++) { var dc = dayOf(byDay[days[di]]); if (dc.t > maxDay) maxDay = dc.t; if (dc.t > 0 || dc.e > 0) hasDayData = true }
-      function mini(label, value) { return React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, label + ' ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(value))) }
+      function mini(label, value) { return React.createElement('span', { style: { fontSize: C.fsSub, color: C.text2 } }, label + ' ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(value))) }
       // 累计三分量：有效（真实成本）+ 缓存读（占了 total 的大头，必须单列才看得出虚高来源）+ 合计
       var effTotal = (typeof u.effective === 'number') ? u.effective : ((u.input || 0) + (u.output || 0) + (u.cacheWrite || 0))
       return React.createElement('div', { style: box },
         head,
         React.createElement('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginBottom: 8 } },
           React.createElement('span', { style: { fontSize: 20, fontWeight: 700, color: C.brand }, title: '今日总量（本地日 ' + todayKey + '）= 输入+输出+缓存写+缓存读（含缓存读）；一次 run 的消耗整笔记在结算日；有效消耗（不含缓存读）' + (todayCell.e === null ? '不可知：该日账为旧口径数据，只有总量' : '= ' + String(todayCell.e) + ' tok') }, fmtTokens(todayCell.t)),
-          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, 'tokens（今日总量，含缓存读）'),
-          (todayCell.e !== null && todayCell.t > todayCell.e) ? React.createElement('span', { style: { fontSize: 10, color: C.text2 }, title: '今日有效消耗 = 输入+输出+缓存写（不含缓存读）；与总量的差额就是缓存读' }, '其中有效 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(todayCell.e))) : null,
-          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '累计（本看板） 有效 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(effTotal)), ' · 缓存读 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(u.cacheRead)), ' · 合计 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(u.total))),
+          React.createElement('span', { style: { fontSize: C.fsSub, color: C.text2 } }, 'tokens（今日总量，含缓存读）'),
+          (todayCell.e !== null && todayCell.t > todayCell.e) ? React.createElement('span', { style: { fontSize: C.fsSub, color: C.text2 }, title: '今日有效消耗 = 输入+输出+缓存写（不含缓存读）；与总量的差额就是缓存读' }, '其中有效 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(todayCell.e))) : null,
+          React.createElement('span', { style: { fontSize: C.fsSub, color: C.text2 } }, '累计（本看板） 有效 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(effTotal)), ' · 缓存读 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(u.cacheRead)), ' · 合计 ', React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, fmtTokens(u.total))),
           mini('输入', u.input), mini('输出', u.output), u.cacheWrite ? mini('缓存写', u.cacheWrite) : null),
         // 主窗口（本会话对话）单列行：累计行下方，与看板派发口径并列不混入（mw=null 静默不渲染）
         mwLine(),
@@ -438,7 +438,7 @@
         // 柱高一律取**总量**（含缓存读，口径翻转 task-muxnqunk）；e===null 的旧口径日就是正常柱
         // （t 恒有值），有效值在 tooltip 里对照（不可知则注明）。7 天全为 0 时整块不渲染。
         hasDayData ? React.createElement('div', { style: { marginBottom: 8 } },
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '近 7 天（总量，含缓存读）'),
+          React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '近 7 天（总量，含缓存读）'),
           React.createElement('div', { style: { display: 'flex', alignItems: 'flex-end', gap: 4 } },
             days.map(function (k) {
               var c = dayOf(byDay[k])
@@ -451,16 +451,16 @@
             }))) : null,
         React.createElement('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap' } },
           React.createElement('div', { style: { flex: '1 1 240px', minWidth: 200 } },
-            React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '按模型分布（总量）'),
-            models.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无数据') : models.map(function (m) {
+            React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '按模型分布（总量）'),
+            models.length === 0 ? React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2 } }, '暂无数据') : models.map(function (m) {
               return React.createElement(UsageRow, { key: m.model, label: m.model, value: m.total, max: maxM, color: C.brand, title: m.model + '：总量 ' + String(m.total) + ' tokens（含缓存读）' + (m.eff === null ? '；有效不可知（本模型无分量留账）' : ' · 有效 ' + String(m.eff) + ' tokens（输入+输出+缓存写）') })
             }),
             // 模型分布尾部追加「主窗口（对话）」一条（task-muwsol23）：总量为 0 不渲染；
             // 琥珀色与 run 模型（brand）区分，固定尾部不参与排序，与派发口径并列不混入
             (mw && mw.total > 0) ? React.createElement(UsageRow, { key: 'main-window', label: '主窗口（对话）', value: mw.total, max: maxM, color: C.warn, title: '主窗口（对话）：总量 ' + String(mw.total) + ' tokens（含缓存读）· 有效 ' + String(mw.effective) + ' tokens（不含缓存读）——本会话对话消耗，与看板派发口径并列不混入（不进累计 / Top 8）' }) : null),
           React.createElement('div', { style: { flex: '1 1 240px', minWidth: 200 } },
-            React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '任务消耗 Top 8（总量）'),
-            top.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无数据') : top.map(function (x) {
+            React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '任务消耗 Top 8（总量）'),
+            top.length === 0 ? React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2 } }, '暂无数据') : top.map(function (x) {
               var t = getTask(x.id)
               return React.createElement(UsageRow, { key: x.id, label: x.title || x.id, value: x.total, max: maxT, color: C.ok, labelColor: t ? C.brand : C.text2, title: x.title + '（总量 ' + String(x.total) + ' tokens（含缓存读） · 其中缓存读 ' + String(x.cacheRead || 0) + (x.eff === null ? '；有效不可知（老卡无五分量留账）' : ' · 有效 ' + String(x.eff) + ' tokens（输入+输出+缓存写）') + ' · ' + (x.runs || 0) + ' 次 run）' + (t ? '——点击查看详情' : ''), onClick: t ? function () { state.detailId = x.id; notify() } : undefined })
             }))),
@@ -469,11 +469,11 @@
         // 范围说明（task-muwc7hjd）：用户常把 RangeFilter 当成「整页过滤」，但今日大数字与近 7 天柱子
         // 是自身固定口径（今日=本地今天、近 7 天=最近 7 个本地日）——不随范围变，必须在文案里讲清，
         // 否则「选了范围数字没变」看起来像 bug。模型分布/Top8/累计才是范围生效的三处。
-        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：累计与 Top 8 仅看板派发的 Worker/Verifier run（= 一次执行）消耗；主窗口行=本会话对话消耗，与看板派发口径并列不混入（单列一行 + 模型分布尾部一条，不进累计 / Top 8）；主数字（今日 / 近 7 天 / 模型分布 / Top 8 / 主窗口行）均为总量口径（含缓存读）；有效消耗（input+output+cacheWrite，不含缓存读）见悬浮 title'),
-        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2, lineHeight: 1.5 } }, '统计范围作用于按模型分布 / 任务消耗 Top 8 / 累计三分量（按 run 的本地日落点过滤）；今日与「近 7 天」为固定口径，不随范围变化。'),
+        React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：累计与 Top 8 仅看板派发的 Worker/Verifier run（= 一次执行）消耗；主窗口行=本会话对话消耗，与看板派发口径并列不混入（单列一行 + 模型分布尾部一条，不进累计 / Top 8）；主数字（今日 / 近 7 天 / 模型分布 / Top 8 / 主窗口行）均为总量口径（含缓存读）；有效消耗（input+output+cacheWrite，不含缓存读）见悬浮 title'),
+        React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginTop: 2, lineHeight: 1.5 } }, '统计范围作用于按模型分布 / 任务消耗 Top 8 / 累计三分量（按 run 的本地日落点过滤）；今日与「近 7 天」为固定口径，不随范围变化。'),
         // 「→ 模型表现」滚动锚链接（task-muxhtgi2 卡3）：一键滚到下方模型×场景八指标表
         // （与详情页 goArbitration 同一 scrollIntoView 原语；目标区空态也挂锚 id，链接始终可达）
-        React.createElement('div', { style: { fontSize: 9, marginTop: 4 } },
+        React.createElement('div', { style: { fontSize: C.fsAux, marginTop: 4 } },
           React.createElement('span', { onClick: function () { var el = document.getElementById('tskb-model-perf'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start' }) }, style: { color: C.brand, cursor: 'pointer' }, title: '滚动到下方「模型表现」区：模型 × 场景（角色 × 规模段）八指标对比表' }, '→ 模型表现')))
     }
 
@@ -521,12 +521,12 @@
       var totalRuns = 0
       for (var li = 0; li < lanes.length; li++) totalRuns += (bySize[lanes[li]] && bySize[lanes[li]].runs) || 0
       if (!totalRuns) return null
-      var thL2 = { fontSize: 9, color: C.text2, fontWeight: 600, textAlign: 'left', padding: '2px 4px', borderBottom: '1px solid ' + C.border, whiteSpace: 'nowrap' }
-      var thR2 = { fontSize: 9, color: C.text2, fontWeight: 600, textAlign: 'right', padding: '2px 4px', borderBottom: '1px solid ' + C.border, whiteSpace: 'nowrap', cursor: 'help' }
-      var tdL2 = { fontSize: 10, color: C.text, textAlign: 'left', padding: '3px 4px', borderBottom: '1px solid ' + C.nested, whiteSpace: 'nowrap' }
-      var tdR2 = { fontSize: 10, color: C.text, textAlign: 'right', padding: '3px 4px', borderBottom: '1px solid ' + C.nested, whiteSpace: 'nowrap' }
+      var thL2 = { fontSize: C.fsAux, color: C.text2, fontWeight: 600, textAlign: 'left', padding: '2px 4px', borderBottom: '1px solid ' + C.border, whiteSpace: 'nowrap' }
+      var thR2 = { fontSize: C.fsAux, color: C.text2, fontWeight: 600, textAlign: 'right', padding: '2px 4px', borderBottom: '1px solid ' + C.border, whiteSpace: 'nowrap', cursor: 'help' }
+      var tdL2 = { fontSize: C.fsSub, color: C.text, textAlign: 'left', padding: '3px 4px', borderBottom: '1px solid ' + C.nested, whiteSpace: 'nowrap' }
+      var tdR2 = { fontSize: C.fsSub, color: C.text, textAlign: 'right', padding: '3px 4px', borderBottom: '1px solid ' + C.nested, whiteSpace: 'nowrap' }
       return React.createElement('div', { style: { marginTop: 8 } },
-        React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '按档位'),
+        React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 4 } }, '按档位'),
         React.createElement('table', { style: { width: '100%', borderCollapse: 'collapse' } },
           React.createElement('thead', null, React.createElement('tr', null,
             React.createElement('th', { style: thL2 }, '档位'),
@@ -544,7 +544,7 @@
               React.createElement('td', { style: tdR2 }, String(b.failed + b.timeouts)),
               React.createElement('td', { style: tdR2 }, fmtTokens(b.effSum)))
           }))),
-        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 4, lineHeight: 1.5 } }, '口径：行 = 力度档位（run.size 派发留档，老 run 无 size 归标档）；只计 Worker/Verifier run（hook 恒父模型不计入）；驳回 = 归因到该档 worker run 的验收驳回；异常 = 超时 + 跑崩；token = 有效口径（悬浮行看总量）；随统计范围裁剪'))
+        React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginTop: 4, lineHeight: 1.5 } }, '口径：行 = 力度档位（run.size 派发留档，老 run 无 size 归标档）；只计 Worker/Verifier run（hook 恒父模型不计入）；驳回 = 归因到该档 worker run 的验收驳回；异常 = 超时 + 跑崩；token = 有效口径（悬浮行看总量）；随统计范围裁剪'))
     }
     function ModelPerf(props) {
       var _R = React; var useState = _R.useState
@@ -552,38 +552,38 @@
       var _b = useState(state.mpSize || ''), sizeF = _b[0], setSizeF = _b[1]
       function pickRole(v) { state.mpRole = v; setRoleF(v) }
       function pickSize(v) { state.mpSize = v; setSizeF(v) }
-      var box = { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 }
+      var box = { padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, marginBottom: 14 }
       // 范围激活标记与 Token 区同源：scoreboard 由 host 按同一 range 裁剪，范围内数据必须亮明身份
       var tg = activeRange()
       var tgOn = !!(tg.from || tg.to)
-      var head = React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('bot', 11), '模型表现',
-        tgOn ? React.createElement('span', { style: { fontSize: 9, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '本区桶数据已按统计范围过滤（与 Token 区同一 range 口径）：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
+      var head = React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('bot', 11), '模型表现',
+        tgOn ? React.createElement('span', { style: { fontSize: C.fsAux, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '本区桶数据已按统计范围过滤（与 Token 区同一 range 口径）：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
       var sb = props.sb
       var buckets = (sb && Array.isArray(sb.buckets)) ? sb.buckets : []
       // 空态：无 scoreboard（老 host）/ 无入桶 run → 一句话空态（锚 id 照挂，Token 区链接始终可达）；
       // 按档位小表仍渲染（它不要求学模型名——无模型老 run 也烧了档位 token，档位视图可能恰好还有数据）
-      if (!buckets.length) return React.createElement('div', { id: 'tskb-model-perf', style: box }, head, React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无足够 run 数据（还没有可入桶的已落定 Worker/Verifier run 留账）'), React.createElement(LaneTable, { bySize: sb && sb.bySize }))
+      if (!buckets.length) return React.createElement('div', { id: 'tskb-model-perf', style: box }, head, React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2 } }, '暂无足够 run 数据（还没有可入桶的已落定 Worker/Verifier run 留账）'), React.createElement(LaneTable, { bySize: sb && sb.bySize }))
       // 本地筛选：角色 × 规模段，纯数组 pass 不重拉
       var shown = buckets.filter(function (b) { return (!roleF || b.role === roleF) && (!sizeF || b.size === sizeF) })
       function chip(cur, setter, v, label) {
         var on = cur === v
-        return React.createElement('button', { onClick: function () { setter(v) }, style: { fontSize: 10, padding: '1px 8px', border: '1px solid ' + (on ? C.brand : C.border2), borderRadius: 10, background: on ? C.nested : C.card, color: on ? C.brand : C.text2, cursor: 'pointer' } }, label)
+        return React.createElement('button', { onClick: function () { setter(v) }, style: { fontSize: C.fsSub, padding: '1px 8px', border: '1px solid ' + (on ? C.brand : C.border2), borderRadius: 10, background: on ? C.nested : C.card, color: on ? C.brand : C.text2, cursor: 'pointer' } }, label)
       }
-      var thL = { fontSize: 9, color: C.text2, fontWeight: 600, textAlign: 'left', padding: '2px 4px', borderBottom: '1px solid ' + C.border, whiteSpace: 'nowrap' }
-      var thR = { fontSize: 9, color: C.text2, fontWeight: 600, textAlign: 'right', padding: '2px 4px', borderBottom: '1px solid ' + C.border, whiteSpace: 'nowrap', cursor: 'help' }
-      var tdL = { fontSize: 10, color: C.text, textAlign: 'left', padding: '3px 4px', borderBottom: '1px solid ' + C.nested, whiteSpace: 'nowrap' }
-      var tdR = { fontSize: 10, color: C.text, textAlign: 'right', padding: '3px 4px', borderBottom: '1px solid ' + C.nested, whiteSpace: 'nowrap' }
+      var thL = { fontSize: C.fsAux, color: C.text2, fontWeight: 600, textAlign: 'left', padding: '2px 4px', borderBottom: '1px solid ' + C.border, whiteSpace: 'nowrap' }
+      var thR = { fontSize: C.fsAux, color: C.text2, fontWeight: 600, textAlign: 'right', padding: '2px 4px', borderBottom: '1px solid ' + C.border, whiteSpace: 'nowrap', cursor: 'help' }
+      var tdL = { fontSize: C.fsSub, color: C.text, textAlign: 'left', padding: '3px 4px', borderBottom: '1px solid ' + C.nested, whiteSpace: 'nowrap' }
+      var tdR = { fontSize: C.fsSub, color: C.text, textAlign: 'right', padding: '3px 4px', borderBottom: '1px solid ' + C.nested, whiteSpace: 'nowrap' }
       var insufN = shown.filter(function (b) { return b.insufficient }).length
       return React.createElement('div', { id: 'tskb-model-perf', style: box },
         head,
         // 场景筛选器（本地）：角色 + 规模段两组 chip；右侧计数「显示/总数 · 样本不足 N」
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', marginBottom: 6 } },
-          React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '角色'),
+          React.createElement('span', { style: { fontSize: C.fsSub, color: C.text2 } }, '角色'),
           chip(roleF, pickRole, '', '全部'), chip(roleF, pickRole, 'worker', 'worker'), chip(roleF, pickRole, 'verifier', 'verifier'),
-          React.createElement('span', { style: { fontSize: 10, color: C.text2, marginLeft: 6 } }, '规模段'),
+          React.createElement('span', { style: { fontSize: C.fsSub, color: C.text2, marginLeft: 6 } }, '规模段'),
           chip(sizeF, pickSize, '', '全部'), chip(sizeF, pickSize, 'small', '小'), chip(sizeF, pickSize, 'medium', '中'), chip(sizeF, pickSize, 'large', '大'),
-          React.createElement('span', { style: { fontSize: 9, color: C.text2, marginLeft: 'auto' } }, shown.length + '/' + buckets.length + ' 桶' + (insufN ? ' · ' + insufN + ' 桶样本不足' : ''))),
-        shown.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2, padding: '4px 0' } }, '当前筛选无匹配桶（试试放宽角色/规模段）')
+          React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2, marginLeft: 'auto' } }, shown.length + '/' + buckets.length + ' 桶' + (insufN ? ' · ' + insufN + ' 桶样本不足' : ''))),
+        shown.length === 0 ? React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2, padding: '4px 0' } }, '当前筛选无匹配桶（试试放宽角色/规模段）')
         : React.createElement('div', { style: { overflowX: 'auto' } },
           React.createElement('table', { style: { width: '100%', borderCollapse: 'collapse' } },
             React.createElement('thead', null, React.createElement('tr', null,
@@ -600,7 +600,7 @@
                 React.createElement('td', { style: tdR }, String(b.runs)),
                 MP_COLS.map(function (c) { return React.createElement('td', { key: c.k, style: tdR }, c.fmt(b)) }))
             })))),
-        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：每行 = 模型 × 角色 × 规模段桶（规模按任务有效 token：小 <1M / 中 1~10M / 大 >10M）；率类分母为桶内 runs，一次通过率分母为桶内 resolved 任务；失败率 = 跑崩落定（outcome 为 incomplete/error/failed）的 run / 桶内 runs，terminated 人工终止不计入；runs<5 行灰显 = 样本不足仅供参考；随统计范围裁剪（与 Token 区同一 range）'),
+        React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginTop: 6, lineHeight: 1.5 } }, '口径：每行 = 模型 × 角色 × 规模段桶（规模按任务有效 token：小 <1M / 中 1~10M / 大 >10M）；率类分母为桶内 runs，一次通过率分母为桶内 resolved 任务；失败率 = 跑崩落定（outcome 为 incomplete/error/failed）的 run / 桶内 runs，terminated 人工终止不计入；runs<5 行灰显 = 样本不足仅供参考；随统计范围裁剪（与 Token 区同一 range）'),
         // 按档位小表（task-mvneq4mw）：三档 × runs/驳回/异常/token，挂在八指标表下方
         React.createElement(LaneTable, { bySize: sb && sb.bySize }))
     }
@@ -642,12 +642,12 @@
     function QualityTrends(props) {
       var sb = props.sb
       var tr = (sb && sb.trends && typeof sb.trends === 'object') ? sb.trends : null
-      var box = { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 }
+      var box = { padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, marginBottom: 14 }
       // 范围激活标记与 Token / 模型表现区同源：trends 由 host 按同一 range 裁剪，范围内数据必须亮明身份
       var tg = activeRange()
       var tgOn = !!(tg.from || tg.to)
-      var head = React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('check-circle', 11), '质量趋势',
-        tgOn ? React.createElement('span', { style: { fontSize: 9, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '本区趋势数据已按统计范围过滤（与 Token 区同一 range 口径）：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
+      var head = React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('check-circle', 11), '质量趋势',
+        tgOn ? React.createElement('span', { style: { fontSize: C.fsAux, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '本区趋势数据已按统计范围过滤（与 Token 区同一 range 口径）：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
       var fpByDay = (tr && tr.firstPassByDay && typeof tr.firstPassByDay === 'object') ? tr.firstPassByDay : {}
       var durB = (tr && tr.durationBuckets && typeof tr.durationBuckets === 'object') ? tr.durationBuckets : null
       var toByDay = (tr && tr.timeoutByDay && typeof tr.timeoutByDay === 'object') ? tr.timeoutByDay : {}
@@ -660,14 +660,14 @@
       var rsmRuns = (rsm && rsm.runs) || 0
       if (!tr || (fpSum + toSum + durSum + rsmRuns) === 0) {
         return React.createElement('div', { id: 'tskb-quality-trends', style: box }, head,
-          React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无足够 run 数据（还没有可统计的已落定 Worker/Verifier run / resolved 任务）'))
+          React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2 } }, '暂无足够 run 数据（还没有可统计的已落定 Worker/Verifier run / resolved 任务）'))
       }
       var days14 = lastNDays(14)
       var todayKey = localDayKey()
       // 块头：左块名 + 右侧今日/汇总值（fontWeight 400 小字）
       function blockHead(label, rightEl, tip) {
-        return React.createElement('div', { title: tip, style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'flex', alignItems: 'baseline', gap: 6 } }, label,
-          rightEl ? React.createElement('span', { style: { marginLeft: 'auto', fontWeight: 400, fontSize: 9 } }, rightEl) : null)
+        return React.createElement('div', { title: tip, style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'flex', alignItems: 'baseline', gap: 6 } }, label,
+          rightEl ? React.createElement('span', { style: { marginLeft: 'auto', fontWeight: 400, fontSize: C.fsAux } }, rightEl) : null)
       }
       // ===== ① 一次通过率趋势（近 14 天）：当日率 = 落定 resolved 任务中零驳回（rejectCount=0）占比 =====
       var fpCells = days14.map(function (k) {
@@ -681,21 +681,21 @@
       var block1 = React.createElement('div', { style: { flex: '1 1 260px', minWidth: 230, overflow: 'hidden' } },
         blockHead('一次通过率（近 14 天）', React.createElement('span', null, '今日 ', React.createElement('span', { style: { color: fpToday.rate !== null ? C.brand : C.text2, fontWeight: 600 } }, fpToday.rate !== null ? mpPct(fpToday.rate) : '—')), '一次通过率 = 当天落定「已完成」任务里零驳回（rejectCount=0）的占比；驳回 = Verifier 验收判 reject'),
         fpHas ? qtDayBars(fpCells, C.ok, todayKey)
-          : React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '近 14 天窗口内暂无 resolved 任务落定'))
+          : React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2 } }, '近 14 天窗口内暂无 resolved 任务落定'))
       // ===== ② 卡时长分布（四桶横条）：创建 → 落定（verifiedAt||resolvedAt）墙钟，含排队/执行/验收全程 =====
       var durMax = 1
       if (durB) QT_DUR_BUCKETS.forEach(function (b) { var v = Number(durB[b.k]) || 0; if (v > durMax) durMax = v })
       var block2 = React.createElement('div', { style: { flex: '1 1 180px', minWidth: 170 } },
         blockHead('卡时长分布', durSum > 0 ? React.createElement('span', null, React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, String(durSum)), ' 张落定卡') : null, '卡时长 = 创建 → 落定的墙钟（含排队/执行/验收全程）'),
-        durSum === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无时长样本')
+        durSum === 0 ? React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2 } }, '暂无时长样本')
         : React.createElement('div', null, QT_DUR_BUCKETS.map(function (b) {
             var v = Number(durB[b.k]) || 0
             var pct = v > 0 ? Math.max(2, Math.round(v / durMax * 100)) : 0
             return React.createElement('div', { key: b.k, style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }, title: b.tip + '：' + v + ' 张（创建→落定墙钟，含排队 / 执行 / 验收全程）' },
-              React.createElement('span', { style: { width: 44, fontSize: 10, color: C.text2, textAlign: 'right', flexShrink: 0 } }, b.label),
+              React.createElement('span', { style: { width: 44, fontSize: C.fsSub, color: C.text2, textAlign: 'right', flexShrink: 0 } }, b.label),
               React.createElement('div', { style: { flex: 1, height: 8, background: C.nested, borderRadius: 4, overflow: 'hidden' } },
                 React.createElement('div', { style: { height: '100%', width: pct + '%', background: C.brand, borderRadius: 4, transition: 'width .3s' } })),
-              React.createElement('span', { style: { width: 24, fontSize: 10, color: C.text2, flexShrink: 0 } }, String(v)))
+              React.createElement('span', { style: { width: 24, fontSize: C.fsSub, color: C.text2, flexShrink: 0 } }, String(v)))
           })))
       // ===== ③ 超时率走势（近 14 天迷你柱行）：当日率 = 超时落定（timeout/error）run / 当日 runs =====
       var toCells = days14.map(function (k) {
@@ -709,12 +709,12 @@
       var block3 = React.createElement('div', { style: { flex: '1 1 260px', minWidth: 230, overflow: 'hidden' } },
         blockHead('超时率走势（近 14 天）', React.createElement('span', null, '今日 ', React.createElement('span', { style: { color: toToday.rate !== null ? C.warn : C.text2, fontWeight: 600 } }, toToday.rate !== null ? mpPct(toToday.rate) : '—')), '超时率 = 超时落定（timeout/error）的 run 占当天 run 的比例'),
         toHas ? qtDayBars(toCells, C.warn, todayKey)
-          : React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '近 14 天窗口内暂无 run 落定'))
+          : React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2 } }, '近 14 天窗口内暂无 run 落定'))
       // ===== ④ 续跑成功率（范围总量口径，卡2出参无 byDay）：resume:true 续跑记录中 completed 占比 =====
       var rsmRate = (rsm && typeof rsm.rate === 'number' && isFinite(rsm.rate)) ? rsm.rate : null
       var block4 = React.createElement('div', { style: { flex: '1 1 180px', minWidth: 170 } },
         blockHead('续跑成功率', rsmRuns > 0 ? React.createElement('span', null, React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, String((rsm && rsm.completed) || 0) + '/' + rsmRuns), ' 续跑成功') : null, '续跑成功率 = resume 续跑记录中 outcome=completed 的占比；续跑 = 前次超时/失败后继续跑'),
-        rsmRuns === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无续跑记录')
+        rsmRuns === 0 ? React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2 } }, '暂无续跑记录')
         : React.createElement('div', { title: '续跑成功率 = resume:true 续跑记录中 outcome=completed 的占比（范围总量口径，host 出参无逐日）；续跑 = 前次 run 超时/失败后续跑' },
             React.createElement('div', { style: { fontSize: 16, fontWeight: 700, color: rsmRate !== null ? C.ok : C.text2 } }, rsmRate !== null ? mpPct(rsmRate) : '—'),
             React.createElement('div', { style: { height: 6, background: C.nested, borderRadius: 3, overflow: 'hidden', marginTop: 4 } },
@@ -724,7 +724,7 @@
         React.createElement('div', { style: { display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 8 } }, block1, block2),
         React.createElement('div', { style: { display: 'flex', gap: 16, flexWrap: 'wrap' } }, block3, block4),
         // 口径 caption：一句讲清统计本体（看板派发 run / 任务落定）+ 驳回定义 + 固定窗口与范围的关系
-        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 8, lineHeight: 1.5 } }, '口径：仅看板派发的 Worker/Verifier run 与任务落定记录（按本地日落点，随统计范围裁剪）；一次通过率 = 当日落定 resolved 任务中零驳回占比（驳回 = 验收 verdict rejected，归因驳回前最近 worker run）；超时 = run 落定 timeout/error；续跑成功率 = resume 续跑记录中 completed 占比（范围总量口径，无逐日）；卡时长 = 创建 → 落定墙钟（含排队 / 验收）。通过率与超时率为近 14 天固定窗口——范围落在窗口外时对应日柱为空'))
+        React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginTop: 8, lineHeight: 1.5 } }, '口径：仅看板派发的 Worker/Verifier run 与任务落定记录（按本地日落点，随统计范围裁剪）；一次通过率 = 当日落定 resolved 任务中零驳回占比（驳回 = 验收 verdict rejected，归因驳回前最近 worker run）；超时 = run 落定 timeout/error；续跑成功率 = resume 续跑记录中 completed 占比（范围总量口径，无逐日）；卡时长 = 创建 → 落定墙钟（含排队 / 验收）。通过率与超时率为近 14 天固定窗口——范围落在窗口外时对应日柱为空'))
     }
 
     // ===== 驳回聚类区（记分卡卡5，task-muxhu1zv）：驳回原因 Top3 +「建议沉淀为约定」文本（一键复制）=====
@@ -740,15 +740,15 @@
       var sb = props.sb
       var rc = sb && sb.rejectionClusters
       if (!rc || typeof rc !== 'object') return null // 老 host 缺字段：整块不渲染（零残留）
-      var box = { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 }
+      var box = { padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, marginBottom: 14 }
       var tg = activeRange()
       var tgOn = !!(tg.from || tg.to)
-      var head = React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('flask-conical', 11), '驳回聚类',
-        tgOn ? React.createElement('span', { style: { fontSize: 9, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '本区已按统计范围过滤（按驳回消息本地日落点，与 Token 区同一 range）：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
+      var head = React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('flask-conical', 11), '驳回聚类',
+        tgOn ? React.createElement('span', { style: { fontSize: C.fsAux, fontWeight: 400, color: C.brand, border: '1px solid ' + C.brand, borderRadius: 8, padding: '0 6px' }, title: '本区已按统计范围过滤（按驳回消息本地日落点，与 Token 区同一 range）：' + rangeLabel() }, '范围内: ' + rangeLabel()) : null)
       var top = Array.isArray(rc.top) ? rc.top : []
       if (!rc.total || !top.length) {
         return React.createElement('div', { id: 'tskb-rejection-clusters', style: box }, head,
-          React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无驳回记录（验收驳回后会按关键词模板聚类出 Top3 类目与约定建议）'))
+          React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2 } }, '暂无驳回记录（验收驳回后会按关键词模板聚类出 Top3 类目与约定建议）'))
       }
       // 复制建议文本：clipboard API 不可用/被拒时静默降级（按钮不变样，下轮再试）
       function copySugg(c) {
@@ -765,14 +765,14 @@
         top.map(function (c, i) {
           var tip = (c.samples && c.samples.length) ? '代表原文：\n' + c.samples.map(function (s) { return '· ' + s }).join('\n') : '（无代表原文）'
           return React.createElement('div', { key: c.id, title: tip, style: { marginBottom: 6, paddingBottom: 6, borderBottom: i < top.length - 1 ? '1px solid ' + C.nested : 'none' } },
-            React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 } },
+            React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: C.fsSub } },
               React.createElement('span', { style: { color: C.warn, fontWeight: 700 } }, 'Top' + (i + 1)),
               React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, c.label),
-              React.createElement('span', { style: { color: C.text2, fontSize: 10 } }, c.pct + '%（' + c.count + '/' + rc.total + '）'),
-              React.createElement('button', { onClick: function () { copySugg(c) }, title: '复制「建议沉淀为约定」文本（粘贴到派发约定/Worker prompt，沉淀动作人工）', style: { marginLeft: 'auto', fontSize: 9, padding: '1px 8px', border: '1px solid ' + C.border2, borderRadius: 9, background: C.card, color: copiedId === c.id ? C.ok : C.text2, cursor: 'pointer' } }, copiedId === c.id ? '✅ 已复制' : '📋 复制约定建议')),
-            React.createElement('div', { style: { fontSize: 9, color: C.text2, lineHeight: 1.5, marginTop: 2 } }, String(c.suggestion || '')))
+              React.createElement('span', { style: { color: C.text2, fontSize: C.fsSub } }, c.pct + '%（' + c.count + '/' + rc.total + '）'),
+              React.createElement('button', { onClick: function () { copySugg(c) }, title: '复制「建议沉淀为约定」文本（粘贴到派发约定/Worker prompt，沉淀动作人工）', style: { marginLeft: 'auto', fontSize: C.fsAux, padding: '1px 8px', border: '1px solid ' + C.border2, borderRadius: 9, background: C.card, color: copiedId === c.id ? C.ok : C.text2, cursor: 'pointer' } }, copiedId === c.id ? '✅ 已复制' : '📋 复制约定建议')),
+            React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, lineHeight: 1.5, marginTop: 2 } }, String(c.suggestion || '')))
         }),
-        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 4, lineHeight: 1.5 } }, '口径：规则法关键词模板聚类（首命中归类，不上 embedding）；占比分母 = ' + (tgOn ? '范围内' : '') + '驳回总数（' + rc.total + ' 条）' + (rc.restCount ? '；另有 ' + rc.restCount + ' 类未进 Top3' : '') + '；建议文本一键复制后人工沉淀为约定'))
+        React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginTop: 4, lineHeight: 1.5 } }, '口径：规则法关键词模板聚类（首命中归类，不上 embedding）；占比分母 = ' + (tgOn ? '范围内' : '') + '驳回总数（' + rc.total + ' 条）' + (rc.restCount ? '；另有 ' + rc.restCount + ' 类未进 Top3' : '') + '；建议文本一键复制后人工沉淀为约定'))
     }
 
     // ===== 架构健康提示区（架构自省 L1 · 数据源：state.healthHints）=====
@@ -785,15 +785,15 @@
       if (!hints.length) return null
       // 三级配色：err=🚨 红（C.err，数据安全红线）；warn=⚠️ 琥珀（C.warn）；info=ℹ️ 蓝灰（DSH 现有 business 信息色）
       var infoColor = 'var(--dsw-alias-state-business-primary)'
-      return React.createElement('div', { style: { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 } },
-        React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('activity', 11), '架构健康'),
+      return React.createElement('div', { style: { padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, marginBottom: 14 } },
+        React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('activity', 11), '架构健康'),
         // 术语白话（巡检 n-muyg5m7o5r00）：settle/touches/p90 等黑话第一屏无解，补一行术语说明
-        React.createElement('div', { style: { fontSize: 9, color: C.text2, marginBottom: 5, lineHeight: 1.5 } }, '运行时自检告警，多为自动恢复的瞬时异常。术语：settle = 任务结算通道；touches = 任务声明的改动文件（文件锁）；p90 = 执行时长第 90 百分位'),
+        React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginBottom: 5, lineHeight: 1.5 } }, '运行时自检告警，多为自动恢复的瞬时异常。术语：settle = 任务结算通道；touches = 任务声明的改动文件（文件锁）；p90 = 执行时长第 90 百分位'),
         hints.map(function (h, i) {
           var warn = h.level === 'warn'
           var err = h.level === 'err'
           var col = err ? C.err : (warn ? C.warn : infoColor)
-          return React.createElement('div', { key: i, style: { display: 'flex', alignItems: 'baseline', gap: 5, fontSize: 10, lineHeight: 1.5, color: col, marginBottom: 3 } },
+          return React.createElement('div', { key: i, style: { display: 'flex', alignItems: 'baseline', gap: 5, fontSize: C.fsSub, lineHeight: 1.5, color: col, marginBottom: 3 } },
             React.createElement('span', { style: { flexShrink: 0 } }, err ? '🚨' : (warn ? '⚠️' : 'ℹ️')),
             React.createElement('span', null, String(h.text)))
         }))
@@ -831,38 +831,38 @@
           if (r && r.ok) { if (typeof fetchTasks === 'function') fetchTasks() } else { setMsg((r && r.error) || '清理失败') }
         }).catch(function (e) { setMsg('清理失败: ' + (e && e.message || e)); setBusy(false) })
       }
-      var box = { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 }
-      var head = React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('trash-2', 11), '存储清理')
-      var btn = { fontSize: 10, padding: '2px 10px', border: '1px solid ' + C.border, borderRadius: 5, background: C.card, color: C.text, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }
-      var dangerBtn = { fontSize: 10, padding: '2px 10px', border: '1px solid ' + C.err, borderRadius: 5, background: C.card, color: C.err, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }
+      var box = { padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, marginBottom: 14 }
+      var head = React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('trash-2', 11), '存储清理')
+      var btn = { fontSize: C.fsSub, padding: '2px 10px', border: '1px solid ' + C.border, borderRadius: 5, background: C.card, color: C.text, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }
+      var dangerBtn = { fontSize: C.fsSub, padding: '2px 10px', border: '1px solid ' + C.err, borderRadius: 5, background: C.card, color: C.err, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }
       function skippedLine(s, i) {
-        return React.createElement('div', { key: 'sk' + i, style: { fontSize: 9, color: C.text2, marginBottom: 2 } },
+        return React.createElement('div', { key: 'sk' + i, style: { fontSize: C.fsAux, color: C.text2, marginBottom: 2 } },
           React.createElement('span', { style: { color: C.warn } }, '⏭ '), String(s.id || '').slice(0, 14) + '…：' + (s.text || s.reason || ''))
       }
       return React.createElement('div', { style: box },
         head,
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
           React.createElement('button', { onClick: preview, disabled: busy, style: btn, title: '扫描本看板归档超过保留天数的卡片的会话，估算可释放空间（只读不删）' }, ic('refresh-cw', 11), busy ? '扫描中…' : '预览可清理会话'),
-          prev ? React.createElement('span', { style: { fontSize: 10, color: C.text } }, prev.total > 0 ? ('可删 ' + prev.total + ' 个会话 · 约 ' + fmtBytes(prev.totalBytes)) : '无可删会话') : null,
+          prev ? React.createElement('span', { style: { fontSize: C.fsSub, color: C.text } }, prev.total > 0 ? ('可删 ' + prev.total + ' 个会话 · 约 ' + fmtBytes(prev.totalBytes)) : '无可删会话') : null,
           prev && prev.total > 0 ? React.createElement('button', { onClick: function () { setOpen(!open); setConfirmOn(false) }, style: btn }, ic(open ? 'chevron-up' : 'chevron-down', 10), open ? '收起明细' : '展开明细') : null,
           prev && prev.total > 0 ? (confirmOn ? React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
               React.createElement('button', { onClick: runClean, disabled: busy, style: dangerBtn, title: '确认删除不可恢复；token 账已入卡不受影响' }, ic('check', 11), '确认清理（不可恢复）'),
               React.createElement('button', { onClick: function () { setConfirmOn(false) }, style: btn }, '取消'))
             : React.createElement('button', { onClick: function () { setConfirmOn(true) }, disabled: busy, style: btn, title: '删除不可恢复；token 账已入卡不受影响' }, ic('trash-2', 11), '清理')) : null),
-        msg ? React.createElement('div', { style: { fontSize: 9, color: C.err, marginTop: 4 } }, msg) : null,
-        report && report.ok ? React.createElement('div', { style: { fontSize: 10, color: C.text, marginTop: 5 } },
+        msg ? React.createElement('div', { style: { fontSize: C.fsAux, color: C.err, marginTop: 4 } }, msg) : null,
+        report && report.ok ? React.createElement('div', { style: { fontSize: C.fsSub, color: C.text, marginTop: 5 } },
           '✅ 已释放约 ' + fmtBytes(report.freedBytes) + '（删除 ' + report.deleted + ' 个会话' + ((report.skipped && report.skipped.length) ? ' · 跳过 ' + report.skipped.length + ' 个' : '') + '）') : null,
         report && report.ok && report.skipped && report.skipped.length ? React.createElement('div', { style: { marginTop: 4 } }, report.skipped.map(skippedLine)) : null,
         open && prev && prev.total > 0 ? React.createElement('div', { style: { marginTop: 6, borderTop: '1px solid ' + C.nested, paddingTop: 5 } },
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginBottom: 4 } }, '可删会话（会话目录 + projcache 缓存一并删除）'),
+          React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginBottom: 4 } }, '可删会话（会话目录 + projcache 缓存一并删除）'),
           (prev.byTask || []).map(function (b) {
-            return React.createElement('div', { key: b.taskId, style: { marginBottom: 3, fontSize: 9, color: C.text2 } },
+            return React.createElement('div', { key: b.taskId, style: { marginBottom: 3, fontSize: C.fsAux, color: C.text2 } },
               React.createElement('span', { style: { color: C.brand } }, shortId(b.title)), '：' + b.count + ' 个 · 约 ' + fmtBytes(b.bytes))
           }),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 2 } }, '数据来源：本看板 runs[] 里所属卡已归档超过 ' + (state.cleanupRetentionDays || 7) + ' 天、且 outcome 已落定并已不活跃的 Worker/Verifier 会话；token 账早已记入卡片，删除不影响任何统计。')
+          React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginTop: 2 } }, '数据来源：本看板 runs[] 里所属卡已归档超过 ' + (state.cleanupRetentionDays || 7) + ' 天、且 outcome 已落定并已不活跃的 Worker/Verifier 会话；token 账早已记入卡片，删除不影响任何统计。')
         ) : null,
         prev && prev.total === 0 && prev.skipped && prev.skipped.length ? React.createElement('div', { style: { marginTop: 5 } },
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginBottom: 3 } }, '无符合条件可删的会话（跳过项）'),
+          React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginBottom: 3 } }, '无符合条件可删的会话（跳过项）'),
           prev.skipped.slice(0, 8).map(skippedLine)) : null)
     }
 
@@ -871,7 +871,7 @@
       return React.createElement('div', null,
         React.createElement(RangeFilter),
         React.createElement(GlobalBoards),
-        React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' } }, React.createElement(StatCard, { label: '总任务', value: stats.total, color: C.text }), React.createElement(StatCard, { label: '待办', value: stats.byStatus['pending'] || 0, color: C.text2 }), React.createElement(StatCard, { label: '进行中', value: stats.byStatus['in-progress'] || 0, color: C.brand }), React.createElement(StatCard, { label: '验证中', value: stats.byStatus['verifying'] || 0, color: C.warn }), React.createElement(StatCard, { label: '已完成', value: stats.byStatus['resolved'] || 0, color: C.ok }), React.createElement(StatCard, { label: '已归档', value: stats.byStatus['archived'] || 0, color: C.text2 })),
+        React.createElement('div', { style: { display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' } }, React.createElement(StatCard, { label: '总任务', value: stats.total, color: C.text }), React.createElement(StatCard, { label: '待办', value: stats.byStatus['pending'] || 0, color: C.text2 }), React.createElement(StatCard, { label: '进行中', value: stats.byStatus['in-progress'] || 0, color: C.brand }), React.createElement(StatCard, { label: '验证中', value: stats.byStatus['verifying'] || 0, color: C.warn }), React.createElement(StatCard, { label: '已完成', value: stats.byStatus['resolved'] || 0, color: C.ok }), React.createElement(StatCard, { label: '已归档', value: stats.byStatus['archived'] || 0, color: C.text2 })),
         React.createElement(HealthHints),
         React.createElement(StorageCleanup),
         React.createElement(TokenUsage, { usage: state.usageSummary }),
@@ -881,14 +881,14 @@
         React.createElement(QualityTrends, { sb: (state.usageSummary && state.usageSummary.scoreboard) || null }),
         // 驳回聚类区（卡5）：质量趋势区正下方；scoreboard.rejectionClusters（老 host 缺字段 → 组件返回 null 整块不渲染）
         React.createElement(RejectionClusters, { sb: (state.usageSummary && state.usageSummary.scoreboard) || null }),
-        React.createElement('div', { style: { display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' } },
-          React.createElement('div', { style: { flex: '1 1 0', minWidth: 200, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '按状态分布'), statusOrder.map(function (s) { return React.createElement(BarRow, { key: s, label: statusLabels[s] || s, count: stats.byStatus[s] || 0, total: stats.total, color: statusColors[s] || C.brand }) })),
-          React.createElement('div', { style: { flex: '1 1 0', minWidth: 200, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '按优先级分布'), prioOrder.map(function (p) { return React.createElement(BarRow, { key: p, label: prioLabel[p] || p, count: stats.byPriority[p] || 0, total: stats.total, color: prioColor[p] || C.brand }) }))),
-        React.createElement('div', { style: { display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' } }, React.createElement(StatCardDual, { label1: '平均排队', value1: stats.avgQueue, label2: '平均执行', value2: stats.avgExec, title: '耗时口径三分离：⏳ 排队 = 创建 → 被领取（等了多久）；⏱ 执行 = 被领取 → 完成（干了多久）；均不含验收时长' }), React.createElement(StatCard, { label: '平均验证时间', value: stats.avgVerify }), React.createElement(StatCard, { label: '今日完成', value: stats.todayDone, color: C.ok })),
+        React.createElement('div', { style: { display: 'flex', gap: 14, marginBottom: 14, flexWrap: 'wrap' } },
+          React.createElement('div', { style: { flex: '1 1 0', minWidth: 200, padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8 } }, React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '按状态分布'), statusOrder.map(function (s) { return React.createElement(BarRow, { key: s, label: statusLabels[s] || s, count: stats.byStatus[s] || 0, total: stats.total, color: statusColors[s] || C.brand }) })),
+          React.createElement('div', { style: { flex: '1 1 0', minWidth: 200, padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8 } }, React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '按优先级分布'), prioOrder.map(function (p) { return React.createElement(BarRow, { key: p, label: prioLabel[p] || p, count: stats.byPriority[p] || 0, total: stats.total, color: prioColor[p] || C.brand }) }))),
+        React.createElement('div', { style: { display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' } }, React.createElement(StatCardDual, { label1: '平均排队', value1: stats.avgQueue, label2: '平均执行', value2: stats.avgExec, title: '耗时口径三分离：⏳ 排队 = 创建 → 被领取（等了多久）；⏱ 执行 = 被领取 → 完成（干了多久）；均不含验收时长' }), React.createElement(StatCard, { label: '平均验证时间', value: stats.avgVerify }), React.createElement(StatCard, { label: '今日完成', value: stats.todayDone, color: C.ok })),
         React.createElement(ResearchRoiRow, { roi: stats.roi }),
         React.createElement(TrendChart, { data: stats.dailyDone }),
-        Object.keys(stats.byAgent).length > 0 ? React.createElement('div', { style: { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, marginBottom: 12 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, 'Agent 负载（进行中+验证中）'), Object.keys(stats.byAgent).map(function (aid) { return React.createElement('div', { key: aid, style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, fontSize: 11 } }, React.createElement(ActorLink, { id: aid }), React.createElement('span', { style: { color: C.text2 } }, stats.byAgent[aid] + ' 个任务')) })) : null,
-        React.createElement('div', { style: { padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '最近活跃'), stats.recentActivity.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无记录') : stats.recentActivity.map(function (a, i) { return React.createElement('div', { key: i, style: { fontSize: 10, color: C.text2, marginBottom: 3, display: 'flex', gap: 4, alignItems: 'center' } }, React.createElement('span', { style: { color: statusColors[a.to] || C.brand, fontWeight: 600 } }, statusLabels[a.to] || a.to), React.createElement('span', { style: { color: C.text, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, a.title), React.createElement(ActorLink, { id: a.actor }), React.createElement('span', null, ago(a.timestamp))) })))
+        Object.keys(stats.byAgent).length > 0 ? React.createElement('div', { style: { padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, marginBottom: 14 } }, React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 6 } }, 'Agent 负载（进行中+验证中）'), Object.keys(stats.byAgent).map(function (aid) { return React.createElement('div', { key: aid, style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, fontSize: C.fsSub } }, React.createElement(ActorLink, { id: aid }), React.createElement('span', { style: { color: C.text2 } }, stats.byAgent[aid] + ' 个任务')) })) : null,
+        React.createElement('div', { style: { padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8 } }, React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 6 } }, '最近活跃'), stats.recentActivity.length === 0 ? React.createElement('div', { style: { fontSize: C.fsSub, color: C.text2 } }, '暂无记录') : stats.recentActivity.map(function (a, i) { return React.createElement('div', { key: i, style: { fontSize: C.fsSub, color: C.text2, marginBottom: 3, display: 'flex', gap: 4, alignItems: 'center' } }, React.createElement('span', { style: { color: statusColors[a.to] || C.brand, fontWeight: 600 } }, statusLabels[a.to] || a.to), React.createElement('span', { style: { color: C.text, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, a.title), React.createElement(ActorLink, { id: a.actor }), React.createElement('span', null, ago(a.timestamp))) })))
     }
 
     // 工作模式选择器（v75）：boardMode/teamMode 双开关收敛为一维三档，点击走 set-work-mode 单入口。
