@@ -2857,7 +2857,7 @@ function apply(ctx) {
     // 现口径：下限取 props.min，**maxWorkers 传 min:1**（1 是合法最小值；暂停派发请切「清单模式」），
     // Verifier 并发显式传 min:0（0=不要 Verifier，语义合法）；越界值失焦/回车即回弹服务端权威值（不写服务端），
     // input title 给出下限与出路（「最少 1（暂停派发请切清单模式）」）。
-    function PoolCfg(props) { var _R = React; var useState = _R.useState, useEffect = _R.useEffect; var lo = props.min === undefined ? 1 : props.min; var _a = useState(String(props.value)), val = _a[0], setVal = _a[1]; var _b = useState(false), dirty = _b[0], setDirty = _b[1]; useEffect(function () { setVal(String(props.value)); setDirty(false) }, [props.value]); function commit(v) { var n = parseInt(v, 10); if (isNaN(n) || n < lo || n > 10) { setVal(String(props.value)); setDirty(false); return } setVal(String(n)); setDirty(false); rpc('set-board-config', { key: props.cfgKey, value: n }).then(fetchTasks).catch(function () {}) } function step(d) { var n = parseInt(val, 10); if (isNaN(n)) n = lo; commit(String(Math.max(lo, Math.min(10, n + d)))) } var miniBtn = { fontSize: 9, padding: '0px 4px', border: '1px solid ' + C.border2, borderRadius: 2, background: C.nested, color: C.text2, cursor: 'pointer', lineHeight: '14px' }; return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 1, fontSize: 9, color: C.text2 } }, props.label, React.createElement('button', { onClick: function () { step(-1) }, title: '减 1', style: miniBtn }, '−'), React.createElement('input', { value: val, title: props.tip || (lo + ' ~ 10'), onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== String(props.value)) }, onBlur: function () { if (dirty) commit(val) }, onKeyDown: function (e) { if (e.key === 'Enter') commit(val) }, style: { width: 22, padding: '0px 2px', fontSize: 9, textAlign: 'center', border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text } }), React.createElement('button', { onClick: function () { step(1) }, title: '加 1', style: miniBtn }, '＋'), dirty ? React.createElement('button', { onClick: function () { commit(val) }, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null) }
+    function PoolCfg(props) { var _R = React; var useState = _R.useState, useEffect = _R.useEffect; var lo = props.min === undefined ? 1 : props.min; var _a = useState(String(props.value)), val = _a[0], setVal = _a[1]; var _b = useState(false), dirty = _b[0], setDirty = _b[1]; useEffect(function () { setVal(String(props.value)); setDirty(false) }, [props.value]); function commit(v) { var n = parseInt(v, 10); if (isNaN(n) || n < lo || n > 10) { setVal(String(props.value)); setDirty(false); return } setVal(String(n)); setDirty(false); rpc('set-board-config', { key: props.cfgKey, value: n }).then(fetchTasks).catch(function () {}) } function step(d) { var n = parseInt(val, 10); if (isNaN(n)) n = lo; commit(String(Math.max(lo, Math.min(10, n + d)))) } var miniBtn = { fontSize: C.fsAux, padding: '0px 4px', border: '1px solid ' + C.border2, borderRadius: 2, background: C.nested, color: C.text2, cursor: 'pointer', lineHeight: '14px' }; return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 1, fontSize: C.fsSub, color: C.text2 } }, props.label, React.createElement('button', { onClick: function () { step(-1) }, title: '减 1', style: miniBtn }, '−'), React.createElement('input', { value: val, title: props.tip || (lo + ' ~ 10'), onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== String(props.value)) }, onBlur: function () { if (dirty) commit(val) }, onKeyDown: function (e) { if (e.key === 'Enter') commit(val) }, style: { width: 22, padding: '0px 2px', fontSize: C.fsAux, textAlign: 'center', border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text } }), React.createElement('button', { onClick: function () { step(1) }, title: '加 1', style: miniBtn }, '＋'), dirty ? React.createElement('button', { onClick: function () { commit(val) }, title: '应用', style: { fontSize: C.fsAux, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null) }
     function MinCfg(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
       var _a = useState(String(props.value)), val = _a[0], setVal = _a[1]
@@ -2868,17 +2868,17 @@ function apply(ctx) {
         if (isNaN(n) || n < props.min || n > props.max) { setVal(String(props.value)); setDirty(false); return }
         setVal(String(n)); setDirty(false); rpc('set-board-config', { key: props.cfgKey, value: n }).then(function (r) { if (typeof props.onSaved === 'function') props.onSaved(r); return fetchTasks() }).catch(function () {})
       }
-      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } },
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: C.fsSub, color: C.text2 } },
         props.label,
         React.createElement('input', {
           value: val, title: props.tip || (props.min + ' ~ ' + props.max + ' 分钟'),
           onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== String(props.value)) },
           onBlur: function () { if (dirty) commit(val) },
           onKeyDown: function (e) { if (e.key === 'Enter') commit(val) },
-          style: { width: 38, padding: '0px 3px', fontSize: 9, textAlign: 'center', border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text }
+          style: { width: 38, padding: '0px 3px', fontSize: C.fsAux, textAlign: 'center', border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text }
         }),
-        React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '分'),
-        dirty ? React.createElement('button', { onClick: function () { commit(val) }, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
+        React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2 } }, '分'),
+        dirty ? React.createElement('button', { onClick: function () { commit(val) }, title: '应用', style: { fontSize: C.fsAux, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
     }
     // 清理保留天数输入（卡龄主闸设置项 cleanupRetentionDays，1~90 天）：与 MinCfg 同款受控输入 + 失焦/回车提交，
     // 越界值直接回弹到服务端权威值（不留脏态），成功走 set-board-config → fetchTasks 由服务端权威值纠偏。
@@ -2892,17 +2892,17 @@ function apply(ctx) {
         if (isNaN(n) || n < 1 || n > 90) { setVal(String(props.value)); setDirty(false); return }
         setVal(String(n)); setDirty(false); rpc('set-board-config', { key: 'cleanupRetentionDays', value: n }).then(fetchTasks).catch(function () {})
       }
-      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } },
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: C.fsSub, color: C.text2 } },
         props.label,
         React.createElement('input', {
           value: val, title: props.tip || ('1 ~ 90 天，默认 7'),
           onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== String(props.value)) },
           onBlur: function () { if (dirty) commit(val) },
           onKeyDown: function (e) { if (e.key === 'Enter') commit(val) },
-          style: { width: 38, padding: '0px 3px', fontSize: 9, textAlign: 'center', border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text }
+          style: { width: 38, padding: '0px 3px', fontSize: C.fsAux, textAlign: 'center', border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text }
         }),
-        React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '天'),
-        dirty ? React.createElement('button', { onClick: function () { commit(val) }, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
+        React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2 } }, '天'),
+        dirty ? React.createElement('button', { onClick: function () { commit(val) }, title: '应用', style: { fontSize: C.fsAux, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
     }
 
     // ===== 取模来源角标（task-mvnyc8vo，用户「能看到子 agent 当前在用什么模型跑」）=====
@@ -2974,16 +2974,16 @@ function apply(ctx) {
       // 与下方降级文本输入同款两段式语义，巡检路过戳一下不再直接写配置。
       function pick(v) { setVal(v); setDirty(v !== (props.value || '')) }
       if (models) {
-        return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, label,
-          React.createElement('select', { value: val, onChange: function (e) { pick(e.target.value) }, title: label + '（空=' + inhLabel + '；选中后点 ✓ 才保存）', style: { width: 150, padding: '0px 4px', fontSize: 9, border: '1px solid ' + (dirty ? C.brand : C.border), borderRadius: 2, background: C.card, color: C.text } },
+        return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: C.fsSub, color: C.text2 } }, label,
+          React.createElement('select', { value: val, onChange: function (e) { pick(e.target.value) }, title: label + '（空=' + inhLabel + '；选中后点 ✓ 才保存）', style: { width: 150, padding: '0px 4px', fontSize: C.fsAux, border: '1px solid ' + (dirty ? C.brand : C.border), borderRadius: 2, background: C.card, color: C.text } },
             React.createElement('option', { value: '' }, inhLabel),
             models.map(function (m) { return React.createElement('option', { key: m.id, value: m.id }, m.name + ' (' + m.provider + ')') })),
-          dirty ? React.createElement('button', { onClick: save, title: '保存 ' + label, style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
+          dirty ? React.createElement('button', { onClick: save, title: '保存 ' + label, style: { fontSize: C.fsAux, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
       }
       // 降级：文本输入（模型枚举不可用时）
-      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, label,
-        React.createElement('input', { value: val, onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== (props.value || '')) }, onBlur: function () { if (dirty) save() }, onKeyDown: function (e) { if (e.key === 'Enter') save() }, placeholder: '空=' + inhLabel, style: { width: 110, padding: '0px 4px', fontSize: 9, border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text } }),
-        dirty ? React.createElement('button', { onClick: save, title: '应用', style: { fontSize: 9, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: C.fsSub, color: C.text2 } }, label,
+        React.createElement('input', { value: val, onChange: function (e) { setVal(e.target.value); setDirty(e.target.value !== (props.value || '')) }, onBlur: function () { if (dirty) save() }, onKeyDown: function (e) { if (e.key === 'Enter') save() }, placeholder: '空=' + inhLabel, style: { width: 110, padding: '0px 4px', fontSize: C.fsAux, border: '1px solid ' + (dirty ? C.brand : C.border2), borderRadius: 2, background: C.card, color: C.text } }),
+        dirty ? React.createElement('button', { onClick: save, title: '应用', style: { fontSize: C.fsAux, padding: '0px 5px', border: 'none', borderRadius: 2, background: C.brand, color: C_INV, cursor: 'pointer', lineHeight: '14px', fontWeight: 600, display: 'inline-flex', alignItems: 'center' } }, ic('check', 9)) : null)
     }
 
     // 界面缩放档位选择（task-mv58e01j，用户反馈「字体整体偏小」）：90/100/110/125/150% 五档下拉。
@@ -2998,8 +2998,8 @@ function apply(ctx) {
         try { localStorage.setItem(UI_ZOOM_KEY, String(n)) } catch (_) {}
         notify()
       }
-      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, '界面缩放',
-        React.createElement('select', { value: String(cur), onChange: function (e) { pick(e.target.value) }, title: '界面缩放：等比放大/缩小面板内字体、图标与间距（选中即时生效，本地记忆）', style: { padding: '0px 4px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: C.fsSub, color: C.text2 } }, '界面缩放',
+        React.createElement('select', { value: String(cur), onChange: function (e) { pick(e.target.value) }, title: '界面缩放：等比放大/缩小面板内字体、图标与间距（选中即时生效，本地记忆）', style: { padding: '0px 4px', fontSize: C.fsAux, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
           UI_ZOOM_LEVELS.map(function (z) { return React.createElement('option', { key: String(z), value: String(z) }, Math.round(z * 100) + '%' + (z === 1 ? '（默认）' : '')) })))
     }
 
@@ -3013,8 +3013,8 @@ function apply(ctx) {
         try { localStorage.removeItem(ONBOARD_DISMISS_KEY) } catch (_) {}
         state.onboardDismissed = false; notify()
       }
-      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: C.text2 } }, '引导横幅',
-        React.createElement('button', { onClick: reopen, title: '重新显示首用引导横幅（board 视图顶部定位行）', style: { padding: '0px 5px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text, cursor: 'pointer', lineHeight: '14px' } }, '重新显示'))
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: C.fsSub, color: C.text2 } }, '引导横幅',
+        React.createElement('button', { onClick: reopen, title: '重新显示首用引导横幅（board 视图顶部定位行）', style: { padding: '0px 5px', fontSize: C.fsAux, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text, cursor: 'pointer', lineHeight: '14px' } }, '重新显示'))
     }
 
     // ===== 模型健康点（task-mvoulhm7）：🟢健康 / 🟡降级（链路存活，task-mvrqdw4k 空响应分治） / 🟡冷却中至HH:mm / 🔴熔断 / ⚪未知 =====
@@ -3149,8 +3149,8 @@ function apply(ctx) {
       // 纯删除在 host diff 校验（子卡A task-mwcw0z5t：仅「当前配置没有的新值」过合法清单）下天然放行——
       // 只删不增、剩余项全在合法目录，零新增 RPC、零校验改动；成功后 fetchTasks 回读由 commit 既有逻辑承接。
       function cleanRetired() { if (!inDir) return; commit(list.filter(function (m) { return !!inDir[m] })) }
-      var chipBtn = { fontSize: 9, padding: '0px 2px', border: 'none', background: 'transparent', color: C.text2, cursor: 'pointer', lineHeight: '12px' }
-      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'flex-start', gap: 4, fontSize: 9, color: C.text2, whiteSpace: 'normal' } },
+      var chipBtn = { fontSize: C.fsAux, padding: '0px 2px', border: 'none', background: 'transparent', color: C.text2, cursor: 'pointer', lineHeight: '12px' }
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'flex-start', gap: 4, fontSize: C.fsAux, color: C.text2, whiteSpace: 'normal' } },
         props.label ? React.createElement('span', { style: { paddingTop: 1, minWidth: 62 } }, props.label) : null,
         React.createElement('span', { style: { display: 'inline-flex', flexWrap: 'wrap', gap: 3, alignItems: 'center', maxWidth: 250 } },
           list.length === 0 ? React.createElement('span', { style: { color: C.text2, fontStyle: 'italic', paddingTop: 1 } }, props.emptyHint || '无') : null,
@@ -3169,7 +3169,7 @@ function apply(ctx) {
               // effort 文本段（task-mwkbo9z6 ①③）：gated 于 eff——纯字符串槽位不渲染（芯片只显 id，零视觉变化）；
               // 点击展开改档小下拉（选项=efforts+「默认」）；改档中渲染 select 替换文本，失焦收起不下发
               eff ? (effEdit === i
-                ? React.createElement('select', { value: eff, onChange: function (e) { changeEffort(i, e.target.value) }, onBlur: function () { setEffEdit(null) }, title: '改思考等级（默认=不指定 effort，走模型默认档）', style: { fontSize: 9, padding: '0px 1px', border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
+                ? React.createElement('select', { value: eff, onChange: function (e) { changeEffort(i, e.target.value) }, onBlur: function () { setEffEdit(null) }, title: '改思考等级（默认=不指定 effort，走模型默认档）', style: { fontSize: C.fsAux, padding: '0px 1px', border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
                   React.createElement('option', { value: '' }, '默认'),
                   (effOpts || []).map(function (ef) { return React.createElement('option', { key: ef, value: ef }, ef) }))
                 : React.createElement('span', { onClick: function () { if (effOpts) setEffEdit(effEdit === i ? null : i) }, title: effOpts ? '点击修改思考等级（当前 ' + eff + '）' : '思考等级 ' + eff, style: { cursor: effOpts ? 'pointer' : 'default' } }, ' · ' + eff)) : null,
@@ -3178,20 +3178,20 @@ function apply(ctx) {
               React.createElement('button', { onClick: function () { removeAt(i) }, title: '移除（×）', style: chipBtn }, '×'))
           })),
         // 尾部：下拉（过滤已选）/ 目录缺失降级文本输入 + effort 下拉（task-mwkbo9z6 ②）+「添加」追加链尾
-        avail ? React.createElement('select', { value: pickVal, onChange: function (e) { setPickVal(e.target.value); setPickEff(e.target.value ? defaultEffortOf(e.target.value) : '') }, title: '选择要追加到链尾的模型（已在链中的已过滤）', style: { width: 150, padding: '0px 2px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
+        avail ? React.createElement('select', { value: pickVal, onChange: function (e) { setPickVal(e.target.value); setPickEff(e.target.value ? defaultEffortOf(e.target.value) : '') }, title: '选择要追加到链尾的模型（已在链中的已过滤）', style: { width: 150, padding: '0px 2px', fontSize: C.fsAux, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
           React.createElement('option', { value: '' }, '选择模型…'),
           avail.map(function (m) { return React.createElement('option', { key: m.id, value: m.id }, m.name + ' (' + m.provider + ')') }))
-          : React.createElement('input', { value: pickVal, onChange: function (e) { setPickVal(e.target.value) }, onKeyDown: function (e) { if (e.key === 'Enter') add() }, placeholder: 'provider/model', title: '模型目录不可用，手输 provider/model 后点添加', style: { width: 110, padding: '0px 4px', fontSize: 9, border: '1px solid ' + C.border2, borderRadius: 2, background: C.card, color: C.text } }),
+          : React.createElement('input', { value: pickVal, onChange: function (e) { setPickVal(e.target.value) }, onKeyDown: function (e) { if (e.key === 'Enter') add() }, placeholder: 'provider/model', title: '模型目录不可用，手输 provider/model 后点添加', style: { width: 110, padding: '0px 4px', fontSize: C.fsAux, border: '1px solid ' + C.border2, borderRadius: 2, background: C.card, color: C.text } }),
         // 添加时 effort 下拉（task-mwkbo9z6 ②）：选中模型带 efforts 清单才渲染（无 efforts/未选/目录不可用/
         // 降级手输 → pickEfforts=null → 隐藏，只添加 id）；选项=该模型 efforts，默认选中 defaultEffort
         //（模型切换即重置）；「默认」=不指定 effort（纯字符串添加，走模型默认档）。
-        pickEfforts ? React.createElement('select', { value: pickEff, onChange: function (e) { setPickEff(e.target.value) }, title: '思考等级（默认=不指定 effort，走模型默认档）', style: { padding: '0px 2px', fontSize: 9, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
+        pickEfforts ? React.createElement('select', { value: pickEff, onChange: function (e) { setPickEff(e.target.value) }, title: '思考等级（默认=不指定 effort，走模型默认档）', style: { padding: '0px 2px', fontSize: C.fsAux, border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: C.text } },
           React.createElement('option', { value: '' }, '默认'),
           pickEfforts.map(function (ef) { return React.createElement('option', { key: ef, value: ef }, ef) })) : null,
-        React.createElement('button', { onClick: add, disabled: !pickVal, title: '追加到链尾', style: { fontSize: 9, padding: '0px 5px', border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: pickVal ? C.brand : C.text2, cursor: pickVal ? 'pointer' : 'default', lineHeight: '14px', fontWeight: 600 } }, '添加'),
+        React.createElement('button', { onClick: add, disabled: !pickVal, title: '追加到链尾', style: { fontSize: C.fsAux, padding: '0px 5px', border: '1px solid ' + C.border, borderRadius: 2, background: C.card, color: pickVal ? C.brand : C.text2, cursor: pickVal ? 'pointer' : 'default', lineHeight: '14px', fontWeight: 600 } }, '添加'),
         // 「清理失效（N）」一键按钮（task-mwcw2jx8）：retiredCount>0 才渲染（同槽多个下架模型逐个 × 要点 N
         // 次等 N 次 RPC，此键一次收口）；warn 描边与「⚠️下架」芯片标记同色系；busy 置灰防连点
-        retiredCount ? React.createElement('button', { onClick: cleanRetired, disabled: busy, title: '一键移除全部已下架模型（仅删除，不新增）', style: { fontSize: 9, padding: '0px 5px', border: '1px solid ' + C.warn, borderRadius: 2, background: C.card, color: C.warn, cursor: busy ? 'default' : 'pointer', lineHeight: '14px', fontWeight: 600, flexShrink: 0 } }, '清理失效（' + retiredCount + '）') : null,
+        retiredCount ? React.createElement('button', { onClick: cleanRetired, disabled: busy, title: '一键移除全部已下架模型（仅删除，不新增）', style: { fontSize: C.fsAux, padding: '0px 5px', border: '1px solid ' + C.warn, borderRadius: 2, background: C.card, color: C.warn, cursor: busy ? 'default' : 'pointer', lineHeight: '14px', fontWeight: 600, flexShrink: 0 } }, '清理失效（' + retiredCount + '）') : null,
         msg ? React.createElement('span', { style: { color: C.err, maxWidth: 140 } }, msg) : null)
     }
 
@@ -3285,42 +3285,51 @@ function apply(ctx) {
         if (!open && btnRef.current) { var r = btnRef.current.getBoundingClientRect(); setPos(clampPopoverPos(r, ROUTE_POPOVER_W, z, popoverBounds(btnRef.current))) }
         setOpen(!open)
       }
+      // 分组卡片 + 字号阶梯（阶段1 补漏，task-mwnlwd0e）：与仪表盘/归档卡片同族——弹层根已是 C.card，
+      // 组卡抬一层 C.nested 圆角卡；组头 fsSub·600，配置项标签 fsSub / 值·输入·注释 fsAux（取代旧
+      // 10/9px 平铺）。只改布局与信息层级：定位（fixed + clampPopoverPos + uiZoom 补偿）、读写通道零改动。
+      var cfgCard = { background: C.nested, border: '1px solid ' + C.border, borderRadius: 8, padding: '8px 10px', marginBottom: 8 }
+      var cfgHead = { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 5 }
       return React.createElement('span', { ref: ref, style: { position: 'relative', display: 'inline-flex' } },
         React.createElement('button', { ref: btnRef, onClick: toggle, title: '模型路由（板级模型 / 力度路由六槽 / 备用模型链）', style: { fontSize: 12, padding: '3px 8px', border: '1px solid ' + (open ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: open ? C.nested : 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('cpu', 13)),
         open && pos ? React.createElement('div', { style: { position: 'fixed', top: pos.top + 'px', left: pos.left != null ? pos.left + 'px' : null, right: pos.right != null ? pos.right + 'px' : null, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: (pos.maxH || 300) + 'px', overflowY: 'auto' } },
           // ① 板级模型（从池配置弹层搬入，组件与写通道逐字不变）
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 5 } }, '板级模型'),
-          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
-            React.createElement(ModelCfg, { label: 'Worker 模型', cfgKey: 'workerModel', value: props.workerModel }),
-            props.workerModel ? React.createElement(ModelHealthDot, { model: props.workerModel, health: modelHealth }) : null,
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Worker 执行模型）')),
-          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-            React.createElement(ModelCfg, { label: 'Verifier 模型', cfgKey: 'verifierModel', value: props.verifierModel }),
-            props.verifierModel ? React.createElement(ModelHealthDot, { model: props.verifierModel, health: modelHealth }) : null,
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（Verifier 异构审查）')),
+          React.createElement('div', { style: cfgCard },
+            React.createElement('div', { style: cfgHead }, '板级模型'),
+            React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
+              React.createElement(ModelCfg, { label: 'Worker 模型', cfgKey: 'workerModel', value: props.workerModel }),
+              props.workerModel ? React.createElement(ModelHealthDot, { model: props.workerModel, health: modelHealth }) : null,
+              React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2 } }, '（Worker 执行模型）')),
+            React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+              React.createElement(ModelCfg, { label: 'Verifier 模型', cfgKey: 'verifierModel', value: props.verifierModel }),
+              props.verifierModel ? React.createElement(ModelHealthDot, { model: props.verifierModel, health: modelHealth }) : null,
+              React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2 } }, '（Verifier 异构审查）'))),
           // 主动健康嗅探配置：只打本页已配置模型；关掉后冷却/熔断/run 被动健康面仍然保留。
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '健康嗅探（事前调度）'),
-          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', whiteSpace: 'normal', maxWidth: 360 } },
-            React.createElement('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 9, color: C.text, cursor: 'pointer' }, title: '每间隔对板级/档位/备用链中已配置模型发一次 maxTokens=1 的极短 ping；不创建子代理' },
-              React.createElement('input', { type: 'checkbox', checked: !!probeEnabled, onChange: function (e) { saveProbeEnabled(e.target.checked) } }), '主动探测'),
-            React.createElement(MinCfg, { label: '间隔', cfgKey: 'probeIntervalMin', value: probeIntervalMin, min: 1, max: 1440, tip: '主动健康探测间隔（1~1440 分钟，默认 15）', onSaved: refreshModelHealth }),
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '仅已配置模型 · 关闭仍保留被动健康')),
+          React.createElement('div', { style: cfgCard },
+            React.createElement('div', { style: cfgHead }, '健康嗅探（事前调度）'),
+            React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', whiteSpace: 'normal', maxWidth: 360 } },
+              React.createElement('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: C.fsSub, color: C.text, cursor: 'pointer' }, title: '每间隔对板级/档位/备用链中已配置模型发一次 maxTokens=1 的极短 ping；不创建子代理' },
+                React.createElement('input', { type: 'checkbox', checked: !!probeEnabled, onChange: function (e) { saveProbeEnabled(e.target.checked) } }), '主动探测'),
+              React.createElement(MinCfg, { label: '间隔', cfgKey: 'probeIntervalMin', value: probeIntervalMin, min: 1, max: 1440, tip: '主动健康探测间隔（1~1440 分钟，默认 15）', onSaved: refreshModelHealth }),
+              React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2 } }, '仅已配置模型 · 关闭仍保留被动健康'))),
           // ② 力度路由六槽（链编辑器，task-mvokikl3）：三档 × Worker/Verifier 各一条有序模型链——
           // 读写整个槽位数组（非仅首选）；空链=继承上方板级模型行。
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '力度路由'),
-          [['light', '轻档'], ['standard', '标档'], ['heavy', '重档']].map(function (ln) {
-            var laneObj = (props.laneModels && props.laneModels[ln[0]]) || {}
-            return React.createElement('div', { key: ln[0], style: { marginBottom: 4 } },
-              React.createElement('div', { style: { marginBottom: 2 } },
-                React.createElement(OrderedModelsEditor, { label: ln[1] + ' Worker', value: laneObj.worker, models: routeModels, emptyHint: '继承板级', health: modelHealth, onSave: function (next) { return saveLaneSlot(ln[0], 'worker', next) } })),
-              React.createElement('div', null,
-                React.createElement(OrderedModelsEditor, { label: ln[1] + ' Verifier', value: laneObj.verifier, models: routeModels, emptyHint: '继承板级', health: modelHealth, onSave: function (next) { return saveLaneSlot(ln[0], 'verifier', next) } })))
-          }),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 1, whiteSpace: 'normal', maxWidth: 360 } }, '每槽=有序模型链：按序取第一个健康模型（首选冷却/熔断则次选递补，槽内全病走备用链→降档→父模型）；空链 = 继承上方 Worker/Verifier 模型行；卡档位走对话 task_update size=light/standard/heavy'),
+          React.createElement('div', { style: cfgCard },
+            React.createElement('div', { style: cfgHead }, '力度路由'),
+            [['light', '轻档'], ['standard', '标档'], ['heavy', '重档']].map(function (ln) {
+              var laneObj = (props.laneModels && props.laneModels[ln[0]]) || {}
+              return React.createElement('div', { key: ln[0], style: { marginBottom: 4 } },
+                React.createElement('div', { style: { marginBottom: 2 } },
+                  React.createElement(OrderedModelsEditor, { label: ln[1] + ' Worker', value: laneObj.worker, models: routeModels, emptyHint: '继承板级', health: modelHealth, onSave: function (next) { return saveLaneSlot(ln[0], 'worker', next) } })),
+                React.createElement('div', null,
+                  React.createElement(OrderedModelsEditor, { label: ln[1] + ' Verifier', value: laneObj.verifier, models: routeModels, emptyHint: '继承板级', health: modelHealth, onSave: function (next) { return saveLaneSlot(ln[0], 'verifier', next) } })))
+            }),
+            React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginTop: 1, whiteSpace: 'normal', maxWidth: 360 } }, '每槽=有序模型链：按序取第一个健康模型（首选冷却/熔断则次选递补，槽内全病走备用链→降档→父模型）；空链 = 继承上方 Worker/Verifier 模型行；卡档位走对话 task_update size=light/standard/heavy')),
           // ③ 备用模型链：同款链编辑器（task-mvokikl3，替代逗号/换行文本框）
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '备用模型链'),
-          React.createElement(OrderedModelsEditor, { label: '备用链', value: props.fbModels, models: routeModels, emptyHint: '无（不启用）', health: modelHealth, onSave: saveFallbackChain }),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 360 } }, '取模口径：卡级特例 → 档位路由 → 板级模型；备用链=档位链全不可用时的跨档逃生索——候选冷却/熔断时按链顺序找首个健康替代，链尽再走降档/父模型兜底；空链=不启用')) : null)
+          React.createElement('div', { style: cfgCard },
+            React.createElement('div', { style: cfgHead }, '备用模型链'),
+            React.createElement(OrderedModelsEditor, { label: '备用链', value: props.fbModels, models: routeModels, emptyHint: '无（不启用）', health: modelHealth, onSave: saveFallbackChain }),
+            React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 360 } }, '取模口径：卡级特例 → 档位路由 → 板级模型；备用链=档位链全不可用时的跨档逃生索——候选冷却/熔断时按链顺序找首个健康替代，链尽再走降档/父模型兜底；空链=不启用'))) : null)
     }
 
     function PoolCfgPopover(props) {
@@ -3355,65 +3364,78 @@ function apply(ctx) {
         if (!open && btnRef.current) { var r = btnRef.current.getBoundingClientRect(); setPos(clampPopoverPos(r, POOL_POPOVER_W, z, popoverBounds(btnRef.current))) }
         setOpen(!open)
       }
+      // 分组卡片 + 字号阶梯（阶段1 补漏，task-mwnlwd0e，与 ModelRoutePopover 同款）：组卡 C.nested 圆角卡
+      // + 组头 fsSub·600，配置项标签 fsSub / 值·输入·注释 fsAux——只改布局与信息层级，定位（fixed +
+      // clampPopoverPos + uiZoom 补偿）与开关读写（setCfg 乐观更新/失败回滚）零改动。
+      var cfgCard = { background: C.nested, border: '1px solid ' + C.border, borderRadius: 8, padding: '8px 10px', marginBottom: 8 }
+      var cfgHead = { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 5 }
       return React.createElement('span', { ref: ref, style: { position: 'relative', display: 'inline-flex' } },
         React.createElement('button', { ref: btnRef, onClick: toggle, title: '池配置', style: { fontSize: 12, padding: '3px 8px', border: '1px solid ' + (open ? C.brand : C.border), borderRadius: 6, cursor: 'pointer', background: open ? C.nested : 'transparent', color: C.text2, display: 'inline-flex', alignItems: 'center' } }, ic('settings', 13)),
         open && pos ? React.createElement('div', { style: { position: 'fixed', top: pos.top + 'px', left: pos.left != null ? pos.left + 'px' : null, right: pos.right != null ? pos.right + 'px' : null, padding: '8px 10px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.15)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: (pos.maxH || 300) + 'px', overflowY: 'auto' } },
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 5 } }, '并发上限（一次性派发，用完即销毁）'),
-          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 5 } },
-            React.createElement(PoolCfg, { label: 'Worker 并发', cfgKey: 'maxWorkers', value: props.maxW, min: 1, tip: '最少 1（暂停派发请切清单模式）；1 ~ 10' }),
-            React.createElement(PoolCfg, { label: 'Verifier 并发', cfgKey: 'maxVerifiers', value: props.maxV, min: 0, tip: '0 ~ 5；0=不要 Verifier（验收需人工）' })),
+          React.createElement('div', { style: cfgCard },
+            React.createElement('div', { style: cfgHead }, '并发上限（一次性派发，用完即销毁）'),
+            React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+              React.createElement(PoolCfg, { label: 'Worker 并发', cfgKey: 'maxWorkers', value: props.maxW, min: 1, tip: '最少 1（暂停派发请切清单模式）；1 ~ 10' }),
+              React.createElement(PoolCfg, { label: 'Verifier 并发', cfgKey: 'maxVerifiers', value: props.maxV, min: 0, tip: '0 ~ 5；0=不要 Verifier（验收需人工）' }))),
           // 模型相关配置（板级 Worker/Verifier 模型行 + 力度路由六槽）已搬至「模型路由」独立弹层
           //（task-mvnyc8vo，ModelRoutePopover）——本弹层只留并发/超时/开关。
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '两级超时（软超时只提醒主窗口，由你决定继续等待或终止）'),
-          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-            React.createElement(MinCfg, { label: '软超时', cfgKey: 'softTimeoutMin', value: props.softT, min: 1, max: 480, tip: '超过后在看板提醒主窗口，不终止 run（1~480 分钟）' }),
-            React.createElement(MinCfg, { label: '硬超时', cfgKey: 'hardTimeoutMin', value: props.hardT, min: 1, max: 1440, tip: '兜底：人不在线时自动终止挂死 run 并重试（1~1440 分钟）' })),
+          React.createElement('div', { style: cfgCard },
+            React.createElement('div', { style: cfgHead }, '两级超时（软超时只提醒主窗口，由你决定继续等待或终止）'),
+            React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+              React.createElement(MinCfg, { label: '软超时', cfgKey: 'softTimeoutMin', value: props.softT, min: 1, max: 480, tip: '超过后在看板提醒主窗口，不终止 run（1~480 分钟）' }),
+              React.createElement(MinCfg, { label: '硬超时', cfgKey: 'hardTimeoutMin', value: props.hardT, min: 1, max: 1440, tip: '兜底：人不在线时自动终止挂死 run 并重试（1~1440 分钟）' }))),
           // 学习飞轮 v1 总开关：关掉后不生成候选教训、prompt 不提软召回、详情页不渲染「沉淀」按钮
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '学习反馈'),
-          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
-            React.createElement('input', { type: 'checkbox', checked: !!props.feedbackEnabled, onChange: function (e) { setCfg('feedbackEnabled', e.target.checked) } }),
-            React.createElement('span', null, '候选教训（Verifier 驳回/仲裁结论自动生成候选，Worker prompt 提示先检索历史教训）')),
+          React.createElement('div', { style: cfgCard },
+            React.createElement('div', { style: cfgHead }, '学习反馈'),
+            React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: C.fsSub, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 300 } },
+              React.createElement('input', { type: 'checkbox', checked: !!props.feedbackEnabled, onChange: function (e) { setCfg('feedbackEnabled', e.target.checked) } }),
+              React.createElement('span', null, '候选教训（Verifier 驳回/仲裁结论自动生成候选，Worker prompt 提示先检索历史教训）'))),
           // 回执开关（用户要求「回执可以做一个开关，放到设置里」）：派发/完成两类回执各自可关，缺省都开。
           // 只影响回执播报，不影响派发与状态机；歧义裁决通知不在此闸门内（见下行说明文案）。
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '通知'),
-          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
-            React.createElement('input', { type: 'checkbox', checked: props.notifyDispatch !== false, onChange: function (e) { setCfg('notifyDispatch', e.target.checked) } }),
-            React.createElement('span', null, '⚡ 派发回执（任务被 Worker/Verifier 领走时播报）')),
-          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260, marginTop: 3 } },
-            React.createElement('input', { type: 'checkbox', checked: props.notifyDone !== false, onChange: function (e) { setCfg('notifyDone', e.target.checked) } }),
-            React.createElement('span', null, '✅ 完成回执（任务完成或阻塞时聚合播报）')),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '歧义裁决通知不受这两个开关影响（任务等人裁决必须提醒）'),
+          React.createElement('div', { style: cfgCard },
+            React.createElement('div', { style: cfgHead }, '通知'),
+            React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: C.fsSub, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 300 } },
+              React.createElement('input', { type: 'checkbox', checked: props.notifyDispatch !== false, onChange: function (e) { setCfg('notifyDispatch', e.target.checked) } }),
+              React.createElement('span', null, '⚡ 派发回执（任务被 Worker/Verifier 领走时播报）')),
+            React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: C.fsSub, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 300, marginTop: 3 } },
+              React.createElement('input', { type: 'checkbox', checked: props.notifyDone !== false, onChange: function (e) { setCfg('notifyDone', e.target.checked) } }),
+              React.createElement('span', null, '✅ 完成回执（任务完成或阻塞时聚合播报）')),
+            React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 300 } }, '歧义裁决通知不受这两个开关影响（任务等人裁决必须提醒）')),
           // 自测指南开关（verifyUserGuide，缺省 true，「通知」小节旁的「验收」小节）：关掉后
           // ① Verifier prompt 不再要求「## 自测指南」段（省 token）；② 验收落账不挂 userTest；
           // ③ 详情页自测指南块与报告「本版自测清单」段整块不渲染。老看板缺字段=开。
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '验收'),
-          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
-            React.createElement('input', { type: 'checkbox', checked: props.verifyUserGuide !== false, onChange: function (e) { setCfg('verifyUserGuide', e.target.checked) } }),
-            React.createElement('span', null, '📋 自测指南（验收结论附用户自测步骤，详情页与报告展示）')),
+          React.createElement('div', { style: cfgCard },
+            React.createElement('div', { style: cfgHead }, '验收'),
+            React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: C.fsSub, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 300 } },
+              React.createElement('input', { type: 'checkbox', checked: props.verifyUserGuide !== false, onChange: function (e) { setCfg('verifyUserGuide', e.target.checked) } }),
+              React.createElement('span', null, '📋 自测指南（验收结论附用户自测步骤，详情页与报告展示）'))),
           // 史诗拆分总开关（板级 epicSplit，缺省 true）：**只关引导，不禁机制**——关掉后 Team 提示词不再
           // 注入「大任务必须拆分」第 6~8 条拆分 doctrine、create-task 响应不再附 suggestSplit 软提示；显式传 parentId 建
           // 子卡、史诗自动收口/hooks 状态机照常（用户/主窗口明确要拆时不受阻）。勾选态缺字段=开，与 host 同口径。
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '功能'),
-          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 260 } },
-            React.createElement('input', { type: 'checkbox', checked: props.epicSplit !== false, onChange: function (e) { setCfg('epicSplit', e.target.checked) } }),
-            React.createElement('span', null, '🧩 史诗拆分：大任务引导拆为 epic + 子任务')),
-          React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 260 } }, '关掉只停引导：显式 parentId 建子卡与史诗自动收口照常工作'),
+          React.createElement('div', { style: cfgCard },
+            React.createElement('div', { style: cfgHead }, '功能'),
+            React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 5, fontSize: C.fsSub, color: C.text, cursor: 'pointer', whiteSpace: 'normal', maxWidth: 300 } },
+              React.createElement('input', { type: 'checkbox', checked: props.epicSplit !== false, onChange: function (e) { setCfg('epicSplit', e.target.checked) } }),
+              React.createElement('span', null, '🧩 史诗拆分：大任务引导拆为 epic + 子任务')),
+            React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginTop: 3, whiteSpace: 'normal', maxWidth: 300 } }, '关掉只停引导：显式 parentId 建子卡与史诗自动收口照常工作')),
           // 清理保留天数（卡龄主闸 cleanupRetentionDays，默认 7、可配 1-90）：回收与归档生命周期对齐——
           // 卡片归档满该天数后，其会话才进入可清理池。仪表盘「存储清理」区文案读同一服务端权威值。
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '存储清理'),
-          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-            React.createElement(RetentionCfg, { label: '归档保留', value: props.retentionDays, tip: '卡片归档后多少天可被完全回收（1~90 天，默认 7）' }),
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（归档满该天数后其会话可被清理回收）')),
+          React.createElement('div', { style: cfgCard },
+            React.createElement('div', { style: cfgHead }, '存储清理'),
+            React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+              React.createElement(RetentionCfg, { label: '归档保留', value: props.retentionDays, tip: '卡片归档后多少天可被完全回收（1~90 天，默认 7）' }),
+              React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2 } }, '（归档满该天数后其会话可被清理回收）'))),
           // 界面缩放档位（task-mv58e01j）：设置弹层「界面」小节——五档下拉选中即 localStorage
           // 持久化 + state.uiZoom + notify 即时生效（zoom 挂在 TopPanel 根容器，只影响本面板）。
-          React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, margin: '7px 0 5px' } }, '界面'),
-          React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-            React.createElement(ZoomCfg, null),
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（等比缩放面板字体/图标/间距，仅本面板生效并本地记忆）')),
-          // 引导横幅重开行（task-mvnnkv7x-2）：仅关闭态（obd=true）渲染——横幅挂着时无需重开入口
-          state.onboardDismissed ? React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 3 } },
-            React.createElement(OnboardReset, null),
-            React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '（首用定位行已 ✕ 关闭，点此重新显示）')) : null) : null)
+          React.createElement('div', { style: cfgCard },
+            React.createElement('div', { style: cfgHead }, '界面'),
+            React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+              React.createElement(ZoomCfg, null),
+              React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2 } }, '（等比缩放面板字体/图标/间距，仅本面板生效并本地记忆）')),
+            // 引导横幅重开行（task-mvnnkv7x-2）：仅关闭态（obd=true）渲染——横幅挂着时无需重开入口
+            state.onboardDismissed ? React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 3 } },
+              React.createElement(OnboardReset, null),
+              React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2 } }, '（首用定位行已 ✕ 关闭，点此重新显示）')) : null)) : null)
     }
 
     function TeamView() {

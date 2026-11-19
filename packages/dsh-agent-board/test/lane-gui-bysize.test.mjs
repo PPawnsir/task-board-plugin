@@ -21,6 +21,9 @@
 //   ⑱ effort 选择器（task-mwkbo9z6）：{id,effort} 槽位芯片显示「id · effort」（纯字符串只显 id 零视觉
 //      变化）+ 添加时 effort 下拉（选项=该模型 efforts、默认 defaultEffort、「默认」=不指定；无 efforts/
 //      目录不可用隐藏）+ 芯片 effort 文本点击改档走 onSave 提交 {id,effort}（重建纯函数行为级锁定）
+//   ㉝㉞ UX 阶段1 补漏（task-mwnlwd0e）：设置弹层（PoolCfgPopover/ModelRoutePopover）配置项按分组卡片
+//      组织（每组一张 C.nested 圆角卡）+ 字号阶梯（组头/配置项标签 fsSub、值·输入·注释 fsAux，与阶段1
+//      同族）——定位（fixed+clamp+uiZoom 补偿+预算宽常量）与开关 setCfg 通道零改动 + 产物同步
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -1533,5 +1536,70 @@ test('㉜执行池四区·产物同步：client.js 已重组装且含三区全�
     'function saveTimeout(cfgKey, v, min, max)', '超时策略:', '忙碌', 'modelSourceBadge(m.modelSource)',
   ]) {
     assert.ok(built.indexOf(m) >= 0, 'client.js 缺执行池四区标记：' + m + '（需 npm run build-client 重组装）')
+  }
+})
+
+// ===== ㉝㉞ UX 阶段1 补漏（task-mwnlwd0e）：设置弹层卡片化 + 字号阶梯 =====
+// 口径（原型 prototype/ux-redesign.html 设置视图 setting-card）：PoolCfgPopover 与 ModelRoutePopover
+// 的配置项按「分组卡片」组织——每组一张 C.nested 圆角卡（弹层根已是 C.card，组卡抬一层 bg-layer-2，
+// 与仪表盘/归档卡片同族）；字号阶梯与阶段1 同族：组头 fsSub·600、配置项标签 fsSub、值·输入·注释 fsAux，
+// 取代旧 10/9px 平铺。红线：只改布局与信息层级——定位（fixed + clampPopoverPos + uiZoom 补偿 + 预算宽
+// 常量）、配置读写通道、开关 setCfg 乐观更新行为零改动。
+test('㉝设置弹层卡片化：两弹层分组圆角卡（模型路由4卡/池配置8卡）+ 组头挂卡片 + 定位常量与开关通道零改动', () => {
+  const iMr = src.indexOf('function ModelRoutePopover(props)')
+  const iPc = src.indexOf('function PoolCfgPopover(props)')
+  const iTv = src.indexOf('function TeamView()')
+  assert.ok(iMr >= 0 && iPc > iMr && iTv > iPc, '弹层组件切片失败')
+  const mrBody = src.slice(iMr, iPc)
+  const pcBody = src.slice(iPc, iTv)
+  // ① 组卡样式（两弹层同款局部声明）：C.nested 圆角卡 + 组头 fsSub·600
+  for (const body of [mrBody, pcBody]) {
+    assert.ok(body.indexOf("var cfgCard = { background: C.nested, border: '1px solid ' + C.border, borderRadius: 8, padding: '8px 10px', marginBottom: 8 }") >= 0, '弹层缺组卡样式 cfgCard（C.nested 圆角卡，弹层根 C.card 抬一层）')
+    assert.ok(body.indexOf('var cfgHead = { fontSize: C.fsSub, fontWeight: 600, color: C.text2, marginBottom: 5 }') >= 0, '弹层缺组头样式 cfgHead（fsSub·600 字号阶梯）')
+  }
+  // ② 模型路由 4 张分组卡：板级模型 / 健康嗅探 / 力度路由 / 备用模型链（组头逐一绑定在卡内）
+  assert.equal((mrBody.match(/React\.createElement\('div', \{ style: cfgCard \},/g) || []).length, 4, 'ModelRoutePopover 应 4 张分组卡（板级模型/健康嗅探/力度路由/备用模型链）')
+  for (const h of ["React.createElement('div', { style: cfgHead }, '板级模型')", "React.createElement('div', { style: cfgHead }, '健康嗅探（事前调度）')", "React.createElement('div', { style: cfgHead }, '力度路由')", "React.createElement('div', { style: cfgHead }, '备用模型链')"]) {
+    assert.ok(mrBody.indexOf(h) >= 0, '模型路由弹层缺组头卡片绑定：' + h)
+  }
+  // ③ 池配置 8 张分组卡：并发/两级超时/学习反馈/通知/验收/功能/存储清理/界面
+  assert.equal((pcBody.match(/React\.createElement\('div', \{ style: cfgCard \},/g) || []).length, 8, 'PoolCfgPopover 应 8 张分组卡（并发/两级超时/学习反馈/通知/验收/功能/存储清理/界面）')
+  for (const h of ["React.createElement('div', { style: cfgHead }, '学习反馈')", "React.createElement('div', { style: cfgHead }, '通知')", "React.createElement('div', { style: cfgHead }, '验收')", "React.createElement('div', { style: cfgHead }, '功能')", "React.createElement('div', { style: cfgHead }, '存储清理')", "React.createElement('div', { style: cfgHead }, '界面')"]) {
+    assert.ok(pcBody.indexOf(h) >= 0, '池配置弹层缺组头卡片绑定：' + h)
+  }
+  assert.ok(pcBody.indexOf("'并发上限（一次性派发，用完即销毁）'") >= 0 && pcBody.indexOf("'两级超时（软超时只提醒主窗口") >= 0, '池配置弹层缺并发/两级超时组头文案')
+  // ④ 定位红线：预算宽常量与 clamp 接线零改动（task-mvt05utl / task-mv58e01j 口径原样）
+  assert.ok(src.indexOf('var POOL_POPOVER_W = 360') >= 0 && src.indexOf('var ROUTE_POPOVER_W = 500') >= 0, '弹层预算宽常量被改动（定位口径红线）')
+  assert.match(src, /setPos\(clampPopoverPos\(r, ROUTE_POPOVER_W, z, popoverBounds\(btnRef\.current\)\)\)/, 'ModelRoutePopover clamp 接线被改动')
+  assert.match(src, /setPos\(clampPopoverPos\(r, POOL_POPOVER_W, z, popoverBounds\(btnRef\.current\)\)\)/, 'PoolCfgPopover clamp 接线被改动')
+  // 两弹层根定位样式逐字保留（fixed + 双锚渲染 + maxH/overflowY 滚动）
+  assert.equal((src.match(/padding: '8px 10px', background: C\.card, border: '1px solid ' \+ C\.border, borderRadius: 8, boxShadow: '0 4px 16px rgba\(0,0,0,0\.15\)', zIndex: 1000, whiteSpace: 'nowrap', maxHeight: \(pos\.maxH \|\| 300\) \+ 'px', overflowY: 'auto'/g) || []).length, 2, '两弹层根定位样式须逐字保留（卡片化不得动定位）')
+  // ⑤ 开关行为红线：池配置 5 个开关仍走 setCfg 乐观通道（onChange 单调用形态逐一在位）
+  const knobs = [...pcBody.matchAll(/type: 'checkbox', checked: [^,]+, onChange: function \(e\) \{ setCfg\('([a-zA-Z]+)', e\.target\.checked\) \}/g)].map(m => m[1])
+  assert.deepEqual(knobs.slice().sort(), ['epicSplit', 'feedbackEnabled', 'notifyDispatch', 'notifyDone', 'verifyUserGuide'], '池配置开关 setCfg 乐观通道被误伤（卡片化只改布局）')
+})
+
+test('㉞设置弹层字号阶梯：配置项标签 fsSub / 值·输入·注释 fsAux（七个配置组件全迁）+ 下架徽章既有形态不动 + 产物同步', () => {
+  // ① 标签 fsSub：PoolCfg 根（gap:1）+ MinCfg/RetentionCfg/ModelCfg×2/ZoomCfg/OnboardReset 根（gap:3 共 6 处）
+  //   + 弹层内开关行/主动探测 label（共 6 处）
+  assert.ok(src.indexOf('gap: 1, fontSize: C.fsSub, color: C.text2') >= 0, 'PoolCfg 配置项标签未上 fsSub')
+  assert.equal((src.match(/gap: 3, fontSize: C\.fsSub, color: C\.text2/g) || []).length, 6, 'MinCfg/RetentionCfg/ModelCfg/ZoomCfg/OnboardReset 标签须 6 处 fsSub')
+  assert.equal((src.match(/fontSize: C\.fsSub, color: C\.text, cursor: 'pointer'/g) || []).length, 6, '开关行/主动探测 label 须 6 处 fsSub')
+  // ② 值·输入·按钮 fsAux：应用/添加/清理失效按钮（7 处）+ 各输入/下拉/步进钮
+  assert.equal((src.match(/fontSize: C\.fsAux, padding: '0px 5px'/g) || []).length, 7, '应用/添加/清理失效按钮须 7 处 fsAux')
+  for (const m of ["width: 22, padding: '0px 2px', fontSize: C.fsAux", "width: 38, padding: '0px 3px', fontSize: C.fsAux", "width: 150, padding: '0px 4px', fontSize: C.fsAux", "width: 110, padding: '0px 4px', fontSize: C.fsAux", "width: 150, padding: '0px 2px', fontSize: C.fsAux", "var chipBtn = { fontSize: C.fsAux"]) {
+    assert.ok(src.indexOf(m) >= 0, '配置值/输入未上 fsAux：' + m)
+  }
+  assert.ok(src.indexOf("gap: 4, fontSize: C.fsAux, color: C.text2, whiteSpace: 'normal'") >= 0, 'OrderedModelsEditor 编辑器根未上 fsAux（链芯片/下拉同族）')
+  // ③ 注释 fsAux：弹层内注释 span 与口径 hint（（Worker 执行模型）等）
+  assert.ok(src.indexOf("React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2 } }, '（Worker 执行模型）')") >= 0, '弹层注释未上 fsAux')
+  assert.ok(src.indexOf("React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginTop: 1, whiteSpace: 'normal', maxWidth: 360 } }, '每槽=有序模型链") >= 0, '力度路由口径 hint 未上 fsAux')
+  // ④ 既有锁定形态不动：⚠️下架徽章 fontSize:8（徽章非标签/值，⑩ 断言原样）；池状态条/健康点图标 fontSize:9 不属弹层
+  assert.ok(src.indexOf("fontSize: 8, lineHeight: '12px', flexShrink: 0 } }, '⚠️下架'") >= 0, '⚠️下架徽章 fontSize:8 既有形态被误改')
+  // ⑤ 产物同步：client.js 已重组装（组卡样式×2 + 字号阶梯标记族）
+  assert.equal((built.match(/var cfgCard = \{ background: C\.nested, border: '1px solid ' \+ C\.border, borderRadius: 8, padding: '8px 10px', marginBottom: 8 \}/g) || []).length, 2, 'client.js 缺两弹层组卡样式（需 npm run build-client）')
+  assert.equal((built.match(/var cfgHead = \{ fontSize: C\.fsSub, fontWeight: 600, color: C\.text2, marginBottom: 5 \}/g) || []).length, 2, 'client.js 缺两弹层组头样式（需 npm run build-client）')
+  for (const m of ['gap: 3, fontSize: C.fsSub, color: C.text2', "fontSize: C.fsSub, color: C.text, cursor: 'pointer'", "fontSize: C.fsAux, padding: '0px 5px'"]) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺字号阶梯标记：' + m + '（需 npm run build-client）')
   }
 })
