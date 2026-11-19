@@ -333,16 +333,65 @@
       return last
     }
 
+    // ===== 耗时口径（阶段2 详情页重构①·核心信息四格卡）：纯函数，只读 t 现有字段 =====
+    // in-progress/verifying 读 claimedAt（当前 run 已跑时长）；verifying 无领取位时读 resolvedAt（验收已跑）；
+    // resolved/archived 读 createdAt→resolvedAt 净总耗时；其余（draft/pending/blocked/cancelled）读 createdAt 存在时长。
+    // 纯展示口径，与「当前动作」运行信息行（elapsedSince(claimedAt)）同源不同壳，不影响任何结算逻辑。
+    function coreDurText(t) {
+      if (!t) return '—'
+      if ((t.status === 'in-progress' || t.status === 'verifying') && t.claimedAt) return '已跑 ' + elapsedSince(t.claimedAt)
+      if (t.status === 'verifying' && t.resolvedAt) return '验收 ' + elapsedSince(t.resolvedAt)
+      if (t.resolvedAt && t.createdAt) return '总耗时 ' + fmtDur(new Date(t.createdAt).getTime(), new Date(t.resolvedAt).getTime())
+      return t.createdAt ? '存在 ' + elapsedSince(t.createdAt) : '—'
+    }
+
+    // ===== 分区折叠（阶段2 详情页重构③）：通用 Section 组件（受控折叠，状态由 DetailView folds 持有） =====
+    // 信息层级口径：核心信息（四格卡）+ 操作区 + 当前动作默认展开；系统记录/仲裁史/执行历史(runs)/高级操作默认折叠。
+    // 折叠头必须是原生 button（本文件 div+onClick 纪律归零，键盘可达 + aria-expanded 供读屏）；
+    // 视觉沿用全库卡片语言（border + C.card + 圆角 8）；箭头 chevron-right 旋转 90° 指示展开态。
+    function Section(props) {
+      var open = props.open !== false
+      var hint = typeof props.hint === 'string' ? props.hint : ''
+      return React.createElement('div', { id: props.id, style: { marginBottom: 8, border: '1px solid ' + C.border, borderRadius: 8, background: C.card, overflow: 'hidden' } },
+        React.createElement('button', { onClick: function () { if (props.onToggle) props.onToggle(props.k) }, 'aria-expanded': open ? 'true' : 'false', title: (open ? '收起' : '展开') + '「' + props.title + '」分区（核心信息/操作/当前动作默认展开；系统记录/仲裁史/执行历史/高级操作默认折叠）', style: { display: 'flex', alignItems: 'center', gap: 6, width: '100%', padding: '8px 12px', border: 'none', background: 'transparent', color: C.text, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' } },
+          React.createElement('span', { style: { fontSize: 10, color: C.text2, display: 'inline-block', flexShrink: 0, transform: open ? 'rotate(90deg)' : 'none' } }, ic('chevron-right', 10)),
+          React.createElement('span', { style: { fontSize: C.fsSub, fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, props.title),
+          hint ? React.createElement('span', { style: { fontSize: C.fsAux, color: C.text2, flexShrink: 0, maxWidth: '55%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, hint) : null),
+        open ? React.createElement('div', { style: { padding: '2px 12px 10px' } }, props.children) : null)
+    }
+
     function DetailView() {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect; var task = getTask(state.detailId)
       var _a = useState(task ? task.title : ''), editTitle = _a[0], setEditTitle = _a[1]; var _b = useState(task ? task.description || '' : ''), editDesc = _b[0], setEditDesc = _b[1]; var _c = useState(false), saving = _c[0], setSaving = _c[1]; var _d = useState(state.boardMode), mode = _d[0], setMode = _d[1]
       var _e2 = useState(''), arbAnswer = _e2[0], setArbAnswer = _e2[1]; var _f2 = useState(''), interveneMsg = _f2[0], setInterveneMsg = _f2[1]; var _g2 = useState(''), actionMsg = _g2[0], setActionMsg = _g2[1]; var _h2 = useState('resume'), arbAction = _h2[0], setArbAction = _h2[1]
+      // ===== 分区折叠状态（阶段2 详情页重构③④）===== 操作区/当前动作默认展开；系统记录/仲裁史/runs 默认折叠；
+      // 高级操作默认折叠，但打开的卡存在活跃歧义（escalation 待裁决）时自动展开——仲裁表单收在该区，
+      // 不能让待裁决的上报被折叠埋没。切卡（detailId 变化）重置回默认口径。
+      var _y = useState(function () { return { ops: true, act: true, sys: false, arb: false, runs: false, adv: !!(task && task.escalation) } }), folds = _y[0], setFolds = _y[1]
       useEffect(function () { function update() { setMode(state.boardMode) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
       // 已阅落账（异常驱动审视①③）：打开命中且未阅的详情页即幂等 mark-reviewed——
       // host 幂等只写一次；本轮渲染仍按「未阅」展示审视摘要区（fetchTasks 回来前不闪退）。
       useEffect(function () { var t = getTask(state.detailId); if (t && t.reviewHint && t.reviewHint.score > 0 && !t.reviewedAt) { rpc('mark-reviewed', { taskId: t.id }).then(fetchTasks).catch(function () {}) } }, [state.detailId])
+      // 切卡重置折叠态（默认口径不变）；歧义上报出现时自动展开高级操作区（tskb-escalation 仲裁表单在内）
+      useEffect(function () { var t = getTask(state.detailId); setFolds({ ops: true, act: true, sys: false, arb: false, runs: false, adv: !!(t && t.escalation) }) }, [state.detailId])
+      useEffect(function () { if (task && task.escalation) setFolds(function (f) { return f.adv ? f : Object.assign({}, f, { adv: true }) }) }, [state.detailId, (task && task.escalation && task.escalation.at) || ''])
       if (!task) { state.detailId = null; return React.createElement('div', { style: { padding: 20, color: C.text2 } }, '任务不存在') }
       function doAction(fn) { fn().then(fetchTasks).catch(function () {}) }
+      // ===== 折叠交互（阶段2 ③④）===== toggleFold 切分区；openAdv 展开高级操作并滚到锚点
+      //（操作区「编辑/干预」按钮即走此通道——操作区列全生命周期操作，表单本体收在高级操作折叠区）。
+      function toggleFold(k) { var nf = {}; nf[k] = !folds[k]; setFolds(Object.assign({}, folds, nf)) }
+      function openAdv(anchor) {
+        setFolds(Object.assign({}, folds, { adv: true }))
+        // 折叠区展开是异步重渲染：下一拍再滚（与 HooksSection goArbitration 同款 scrollIntoView 口径）
+        setTimeout(function () { var el = document.getElementById(anchor); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' }) }, 50)
+      }
+      // 恢复待办/重开（resolved·cancelled·archived 操作区主档）：与归档 tab restore 同款 confirm 门禁
+      //（auto/team 模式恢复即重派，先确认防误触烧 token）；RPC 走既有 update-task resetToPending 通道。
+      function doResetPending(what) {
+        var wm = state.workMode || (state.teamMode ? 'team' : (state.boardMode === 'auto' ? 'auto' : 'list'))
+        if (wm !== 'list') { if (!window.confirm(what + '后将按当前工作模式立即重新派发，消耗一轮 Worker+Verifier token。继续？')) return }
+        doAction(function () { return rpc('update-task', { taskId: task.id, resetToPending: true }) })
+      }
       function saveEdit() { setSaving(true); rpc('update-task', { taskId: task.id, title: editTitle, description: editDesc, resetToPending: true }).then(function () { setSaving(false); fetchTasks() }).catch(function () { setSaving(false) }) }
       function jumpToAgent() { if (uiWorkspaceSvc && task.claimedBy) uiWorkspaceSvc.openSession(task.claimedBy) }
       // 拆解官会话跳转（task-mw0dz3ki ①）：与 jumpToAgent 同款，只是绑定拆解 run id 而非 claimedBy
@@ -383,6 +432,53 @@
         'verifying': [{ to: 'resolved', label: '✔ 验收通过', color: C.ok, tip: '验收通过（验证中 → 已完成）' }, { to: 'in-progress', label: '↩ 驳回重投', color: C.err, tip: '驳回回执行中（验证中 → 进行中）' }]
       }
       var flowBtns = FLOW_DEF[task.status] || []
+      // ===== 操作区·生命周期操作表（阶段2 详情页重构②）：按状态择出不同操作按钮，主/次/危险三档 =====
+      // 档位视觉：primary=brand 实底（推进主线）/ok·warn 实底=发布/派发类彩色操作（沿用既有按钮配色）/
+      // secondary=描边辅助（表单类入口）/danger=err 描边（与「危险操作」区同款破坏性视觉）。
+      // 硬约束：全部复用既有动作函数与 RPC（saveEdit/doManualDispatch/doTerminate/doResetPending/…），
+      // 零新增数据源/事件流——「编辑/干预」是展开高级操作折叠区的入口（表单本体在折叠区内），
+      // 状态流转按钮仍由上方 FLOW_DEF「流转到」组承载（合法迁移与拖拽 transition() 逐条对齐，不变）。
+      // draft 无「拆解」按钮：拆解官只走对话工具 task_decompose（host 无对应 HTTP RPC，GUI 不能私开通道），
+      // 拆解可见性由顶部「🧩 拆解官正在拆解本卡」横幅承载。
+      var OPS_TIER = {
+        primary: { border: 'none', background: C.brand, color: C_INV, fontWeight: 600 },
+        ok: { border: 'none', background: C.ok, color: C_INV, fontWeight: 600 },
+        warn: { border: 'none', background: C.warn, color: C_INV, fontWeight: 600 },
+        secondary: { border: '1px solid ' + C.border2, background: 'transparent', color: C.text2, fontWeight: 400 },
+        danger: { border: '1px solid ' + C.err, background: 'transparent', color: C.err, fontWeight: 600 }
+      }
+      var OPS_DEF = {
+        'draft': [
+          { tier: 'primary', label: '保存并发布', icon: 'save', run: function () { saveEdit() }, tip: '保存标题/描述并发布（草稿 → 待办）；发布后按当前工作模式可能被立即派发' },
+          { tier: 'ok', label: '发布（进入派发池）', icon: 'rocket', run: function () { doAction(function () { return rpc('update-task', { taskId: task.id, publish: true }) }) }, tip: '不改内容直接发布：草稿 → 待办，进入派发池' },
+          { tier: 'secondary', label: '编辑', run: function () { openAdv('tskb-adv-edit') }, tip: '展开高级操作·编辑区（标题/描述/优先级/档位/标签/touches）' }
+        ],
+        'pending': [
+          { tier: 'warn', label: '派发', icon: 'zap', run: function () { doAction(function () { return doManualDispatch('worker') }) }, tip: '手动派发给一次性 Worker 子代理（文件锁冲突时弹 confirm 列出持锁卡，确认后带 force 越权）' },
+          { tier: 'secondary', label: '编辑', run: function () { openAdv('tskb-adv-edit') }, tip: '展开高级操作·编辑区（标题/描述/优先级/档位/标签/touches）' }
+        ],
+        'in-progress': [
+          { tier: 'secondary', label: '干预', icon: 'message-square', run: function () { openAdv('tskb-adv-intervene') }, tip: '展开高级操作·高优干预输入（插入执行 Agent 队首，当前 step 结束即响应）' }
+        ],
+        'verifying': [
+          { tier: 'warn', label: '派发验收（换 verifier）', icon: 'zap', gate: function () { return !task.escalation }, run: function () { doAction(function () { return doManualDispatch('verifier') }) }, tip: '手动派发给一次性 Verifier 子代理（换人重验；已挂歧义时先裁决再派）' },
+          { tier: 'secondary', label: '干预', icon: 'message-square', run: function () { openAdv('tskb-adv-intervene') }, tip: '展开高级操作·高优干预输入' }
+        ],
+        'resolved': [
+          { tier: 'primary', label: '归档', icon: 'archive', run: function () { doAction(function () { return rpc('archive-task', { taskId: task.id }) }) }, tip: '归档入历史（列表移入归档 tab，可恢复）' },
+          { tier: 'secondary', label: '重开（回待办）', icon: 'refresh-cw', run: function () { doResetPending('重开') }, tip: '重置回待办重新执行（auto/team 模式恢复即重派，有 confirm 门禁）' }
+        ],
+        'blocked': [],
+        'cancelled': [
+          { tier: 'primary', label: '恢复待办', icon: 'refresh-cw', run: function () { doResetPending('恢复待办') }, tip: '已取消可恢复：重置回待办重新入池（auto/team 模式有 confirm 门禁）' }
+        ],
+        'archived': [
+          { tier: 'primary', label: '恢复待办', icon: 'refresh-cw', run: function () { doResetPending('恢复待办') }, tip: '归档可恢复：重置回待办重新入池（与归档 tab「恢复待办」同款 confirm 门禁）' }
+        ]
+      }
+      // in-progress 危险档：终止当前 run（与「当前动作」运行信息行同款 doTerminate；有活跃 run 才出现）
+      if (task.status === 'in-progress' && task.claimedBy) OPS_DEF['in-progress'].push({ tier: 'danger', label: '终止', icon: 'stop-circle', run: function () { doTerminate() }, tip: '终止执行 Agent，任务回待办重新排队' })
+      var extraOps = (OPS_DEF[task.status] || []).filter(function (o) { return !o.gate || o.gate() })
       function flowTo(to) {
         var p = null
         if (to === 'in-progress' && (task.status === 'pending' || task.status === 'blocked')) p = rpc('claim-task', { taskId: task.id })
@@ -403,6 +499,22 @@
           // 仍 11px / brand 色 / cursor:pointer；onClick 与 Esc 快捷键路径均不变。
           React.createElement('button', { onClick: function () { state.detailId = null; notify() }, title: '返回看板列表（Esc 快捷键同样可关闭详情）', style: { fontFamily: 'inherit', fontSize: 11, lineHeight: 'inherit', color: C.brand, cursor: 'pointer', border: 'none', background: 'transparent', padding: 0 } }, '← 返回看板'),
           React.createElement('button', { onClick: function () { state.detailId = null; notify() }, title: '关闭详情面板（返回看板）', style: { fontSize: 11, padding: '1px 6px', border: '1px solid ' + C.border, borderRadius: 3, background: 'transparent', color: C.text2, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', lineHeight: 1.4 } }, ic('x', 11))),
+        // ===== 核心信息四格卡（阶段2 详情页重构①）：状态/优先级·档位/执行模型/耗时置顶，一眼可读 =====
+        // 只读汇总（编辑入口=操作区「编辑」→高级操作·编辑区）；数据源全是既有字段（statusColors/prioLabel/
+        // task.size/task.model/coreDurText），零新增采集。2×2 栅格对齐原型 prototype/ux-redesign.html .detail-core。
+        (function () {
+          function cell(label, value, color, tip) {
+            return React.createElement('div', { title: tip || '', style: { padding: '8px 10px', background: C.nested, borderRadius: 6, minWidth: 0 } },
+              React.createElement('div', { style: { fontSize: C.fsAux, color: C.text2, marginBottom: 2 } }, label),
+              React.createElement('div', { style: { fontSize: C.fsSub, fontWeight: 700, color: color || C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, value))
+          }
+          var sizeTxt = task.size ? ((task.size === 'light' ? '轻' : task.size === 'heavy' ? '重' : '标') + '（' + task.size + '）') : '标（继承）'
+          return React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 8 } },
+            cell('状态', statusLabels[task.status] || task.status, statusColors[task.status] || C.text2, '当前生命周期状态（' + (statusLabels[task.status] || task.status) + '）；状态流转走下方「操作区·流转到」按钮组或拖拽卡片'),
+            cell('优先级 / 档位', (prioLabel[task.priority] || '中') + ' · ' + sizeTxt, prioColor[task.priority] || C.brand, '优先级四档（紧急/高/中/低）+ 力度档位（路由板级 laneModels 三档表定模）；调档走下方「编辑」区或 size 下拉'),
+            cell('执行模型', task.model || '板级默认', C.text2, task.model ? '卡级模型特例 model=' + task.model + '（取模链最高优先；只读展示——改/删走对话 task_update）' : '无卡级特例：按档位走 laneModels 档位路由，缺省回板级 Worker/Verifier 模型'),
+            cell('耗时', coreDurText(task), C.text2, '口径：执行/验收中=当前 run 已跑时长；已落定=创建→落定净总耗时；其余=存在时长。明细见「当前动作」区与执行历史'))
+        })(),
         // ===== 拆解官顶部跳（task-mw0dz3ki ①，用户 2026-11-03 反馈「拆解期间看不到会话跳转」）=====
         // 只在存在活跃拆解官 run 时渲染（activeDecomposeRunOf：末条 running + 超龄守卫）：
         // 源卡 draft/pending 无 claimedBy → 顶部 canJump 恒不亮，此前唯一入口在底部历史会话区，
@@ -412,12 +524,29 @@
           React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '源卡 draft/pending 期间不派 Worker；想看拆解过程点右侧按钮，不必等落定后翻底部历史区'),
           React.createElement('button', { onClick: function () { jumpToRun(decRun.id) }, title: '打开拆解官子会话（run ' + decRun.id + (decRun.model ? ' · ' + decRun.model : '') + '）：实时查看拆解过程与提案产出', style: { fontSize: 11, padding: '4px 12px', border: '1px solid ' + C.brand, borderRadius: 4, background: 'transparent', color: C.brand, cursor: 'pointer', fontWeight: 600, marginLeft: 'auto' } }, '🧩 → 查看拆解官会话')) : null,
         React.createElement(ReviewSummary, { task: task }),
-        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 } }, React.createElement('select', { value: task.priority || 'medium', onChange: function (e) { rpc('update-task', { taskId: task.id, priority: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '优先级（四档：紧急/高/中/低）', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: (prioColor[task.priority] || prioColor.low), fontWeight: 600 } }, ['critical', 'high', 'medium', 'low'].map(function (p) { return React.createElement('option', { key: p, value: p }, prioLabel[p] + '（' + p + '）') })), React.createElement('span', { style: { fontSize: 11, padding: '1px 8px', borderRadius: 3, background: C.nested, color: C.text } }, statusLabels[task.status] || task.status), React.createElement('select', { value: task.size || (state.teamMode ? 'standard' : ''), onChange: function (e) { rpc('update-task', { taskId: task.id, size: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '力度档位（路由板级 laneModels 三档表定模）：轻=单点小改/文档/配置，标=常规模块改动，重=跨模块/高风险' + (state.teamMode ? '；Team 板硬闸必填，不可调回继承' : '；继承=清除 size 回标档语义'), style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.brand, fontWeight: 600 } }, (state.teamMode ? [] : [React.createElement('option', { key: '', value: '' }, '继承（标）')]).concat([['light', '轻（light）'], ['standard', '标（standard）'], ['heavy', '重（heavy）']].map(function (s) { return React.createElement('option', { key: s[0], value: s[0] }, s[1]) }))), task.model ? React.createElement('span', { style: { fontSize: 9, padding: '1px 6px', borderRadius: 3, background: 'color-mix(in srgb, ' + C.warn + ' 18%, transparent)', color: C.warn, fontWeight: 700, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: '卡级模型特例 model=' + task.model + '（取模链最高优先；只读展示——改/删走对话 task_update，v1 不做 GUI 编辑）' }, '🎯 ' + task.model) : null, React.createElement('select', { value: task.pipeline || 'full', onChange: function (e) { rpc('update-task', { taskId: task.id, pipeline: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '管线档位', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'full' }, '全流程（执行+验证）'), React.createElement('option', { value: 'work' }, '免验证（只做不验）'), React.createElement('option', { value: 'direct' }, '主窗口处理')), task.pipelineAuto ? React.createElement('span', { style: { fontSize: 9, color: C.text2 }, title: '由规则自动分类，可手动覆盖' }, 'auto') : null, isManual ? React.createElement('span', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('user', 10), '手动派发') : null),
-        React.createElement(TagsEditor, { key: task.id, task: task }),
-        // 流转到按钮组（键盘可达的状态迁移入口，替代拖拽；无合法迁移的状态（draft/resolved 等）整块不渲染）
-        flowBtns.length > 0 ? React.createElement('div', { role: 'group', 'aria-label': '状态流转', style: { display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginBottom: 8, padding: '5px 8px', border: '1px solid ' + C.border, borderRadius: 6, background: C.card } },
-          React.createElement('span', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '⇄ 流转到：'),
-          flowBtns.map(function (b) { return React.createElement('button', { key: b.to, onClick: function () { flowTo(b.to) }, title: b.tip, style: { fontSize: 10, padding: '3px 9px', border: '1px solid ' + b.color, borderRadius: 3, background: 'transparent', color: b.color, cursor: 'pointer', fontWeight: 600 } }, b.label) })) : null,
+        // ===== 操作区（阶段2 详情页重构②·默认展开）：状态流转按钮组 + 生命周期操作行 + 危险操作档 =====
+        // 状态流转（键盘可达的状态迁移入口，替代拖拽；无合法迁移的状态（draft/resolved 等）整块不渲染）
+        // + 按生命周期择出的操作按钮（主/次/危险三档，OPS_DEF）+ 破坏性操作独立成区（视觉分层口径保留：
+        // 虚线分隔 + 「危险操作」前缀 + aria-label，与历史事故 n-mv2turadjv63 误触防护一脉相承）。
+        React.createElement(Section, { k: 'ops', title: '⚡ 操作', hint: '当前状态：' + (statusLabels[task.status] || task.status), open: folds.ops, onToggle: toggleFold },
+          flowBtns.length > 0 ? React.createElement('div', { role: 'group', 'aria-label': '状态流转', style: { display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginBottom: 8, padding: '5px 8px', border: '1px solid ' + C.border, borderRadius: 6, background: C.card } },
+            React.createElement('span', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '⇄ 流转到：'),
+            flowBtns.map(function (b) { return React.createElement('button', { key: b.to, onClick: function () { flowTo(b.to) }, title: b.tip, style: { fontSize: 10, padding: '3px 9px', border: '1px solid ' + b.color, borderRadius: 3, background: 'transparent', color: b.color, cursor: 'pointer', fontWeight: 600 } }, b.label) })) : null,
+          // 生命周期操作行：extraOps 按状态择出（主/次/危险三档配色 OPS_TIER）；「编辑/干预」展开高级操作折叠区
+          extraOps.length > 0 ? React.createElement('div', { role: 'group', 'aria-label': '生命周期操作', style: { display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginBottom: 8, padding: '5px 8px', border: '1px solid ' + C.border, borderRadius: 6, background: C.nested } },
+            React.createElement('span', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '操作（' + (statusLabels[task.status] || task.status) + '）：'),
+            extraOps.map(function (o) { return React.createElement('button', { key: o.label, onClick: o.run, title: o.tip, style: Object.assign({ fontSize: 10, padding: '3px 9px', borderRadius: 3, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 }, OPS_TIER[o.tier]) }, o.icon ? [ic(o.icon, 10), ' ' + o.label] : o.label) })) : null,
+          // ===== 破坏性操作区（task-mv493xjs 消歧，巡检实证 n-mv2turadjv63 误触）=====
+          // 视觉分层：与上方操作按钮组（流转/生命周期操作）拉开——独立一行 + 顶部虚线分隔 + 「危险操作」
+          // 前缀标签。「取消」改名「取消任务」：按表单惯例会被误读为「关面板」，实际是 task_cancel
+          // 破坏性流转（confirm 确认在 kernel.cancelTask 已存在）。
+          // 取消（仅草稿/待办/阻塞）语义=作废留档（可恢复）；删除=真删不可恢复，被 host 门禁拒绝时原因回显 actionMsg。
+          (canCancel(task) || canDelete(task)) ? React.createElement('div', { role: 'group', 'aria-label': '危险操作', style: { display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center', marginTop: 8, paddingTop: 6, borderTop: '1px dashed ' + C.err } },
+            React.createElement('span', { style: { fontSize: 9, color: C.err, fontWeight: 700, marginRight: 2, letterSpacing: 1 } }, '危险操作'),
+            canCancel(task) ? React.createElement('button', { onClick: function () { cancelTask(task.id, task.title, setActionMsg) }, title: '取消任务（取消后不再派发，可在归档恢复待办）', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.warn, borderRadius: 3, background: 'transparent', color: C.warn, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('ban', 10), '取消任务') : null,
+            canDelete(task) ? React.createElement('button', { onClick: function () { deleteTask(task.id, task.title, setActionMsg) }, title: '删除任务（不可恢复；执行中请先终止，已落定请用归档）', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.err, borderRadius: 3, background: 'transparent', color: C.err, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('trash-2', 10), '删除') : null) : null),
+        // 操作回显行（流转/派发/裁决等动作的 ⚠️/✅ 结果统一落 actionMsg，紧跟操作区）
+        actionMsg ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6 } }, actionMsg) : null,
         // 最近失败（host settle 失败路径写入 task.lastError；缺字段静默不渲染，≤2 行截断，悬停看全文）
         task.lastError ? React.createElement('div', { style: { fontSize: 11, color: C.err, marginBottom: 8, padding: '4px 8px', border: '1px solid ' + C.err, borderRadius: 6, background: 'color-mix(in srgb, ' + C.err + ' 8%, transparent)', display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden', wordBreak: 'break-all' }, title: String(task.lastError) }, '最近失败: ' + String(task.lastError)) : null,
         task.frozen ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 8, padding: '6px 8px', border: '1px solid ' + C.brand, borderRadius: 6, background: 'color-mix(in srgb, ' + C.brand + ' 8%, transparent)', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
@@ -429,18 +558,36 @@
           React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 4 } }, '本任务声明的 touches 与以下进行中任务重叠（同一批文件并行改会互踩）；它们提交验收/完成后自动派发。'),
           React.createElement('div', { style: { fontSize: 10, display: 'flex', flexWrap: 'wrap', gap: 5 } }, task.waitingForTouches.map(function (id) { var t2 = getTask(id); return React.createElement('span', { key: id, onClick: function () { if (t2) { state.detailId = id; notify() } }, title: t2 ? (t2.title + ' (' + id + ')') : id, style: { padding: '1px 5px', borderRadius: 3, background: C.nested, border: '1px solid ' + C.border, color: t2 ? C.brand : C.text2, cursor: t2 ? 'pointer' : 'default' } }, (t2 ? t2.title.slice(0, 20) : shortId(id)) + ' · ' + shortId(id)) })),
           Array.isArray(task.touches) && task.touches.length ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 4 } }, '本任务 touches: ' + task.touches.join('、')) : null) : null,
-        React.createElement(TouchesEditor, { key: task.id + '|touches', task: task }),
         // 起草 lint（task.lintWarnings[]，host 建卡/更新卡现算落盘，get-tasks 透出）：
         // 四规则软警告（粒度过粗/双仓库歧义/缺验收/标题缺动词或描述空）随卡展示，缺字段/空数组整块不渲染（老卡零影响）。
         Array.isArray(task.lintWarnings) && task.lintWarnings.length ? React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, padding: '5px 8px', border: '1px solid ' + C.warn, borderRadius: 6, background: 'color-mix(in srgb, ' + C.warn + ' 8%, transparent)' } },
           task.lintWarnings.map(function (w, i) { return React.createElement('div', { key: i, style: { fontSize: 10, color: C.text2, lineHeight: 1.6, display: 'flex', alignItems: 'flex-start', gap: 4 } }, React.createElement('span', { style: { flexShrink: 0 } }, '⚠️'), React.createElement('span', null, w)) })) : null,
-        (task.status === 'in-progress' || task.status === 'verifying') && state.activity[task.id] ? React.createElement('div', { style: { fontSize: 10, color: C.brand, marginBottom: 8, padding: '4px 8px', background: C.nested, borderRadius: 4, display: 'flex', alignItems: 'center', gap: 4, animation: 'tskb-pulse 2s ease-in-out infinite' } }, ic('activity', 10), React.createElement('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '当前动作: ' + state.activity[task.id])) : null,
-        task.status === 'in-progress' && task.claimedBy ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 8, padding: '5px 8px', background: C.nested, borderRadius: 4, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
-          ic('activity', 10),
-          React.createElement('span', null, '已运行 ' + elapsedSince(task.claimedAt) + '（软超时 ' + state.softTimeoutMin + ' 分提醒 · 硬超时 ' + state.hardTimeoutMin + ' 分自动终止）'),
-          elapsedMin(task.claimedAt) > state.softTimeoutMin ? React.createElement('span', { style: { color: C.warn, fontWeight: 600 } }, '⏱ 已超软超时') : null,
-          React.createElement('span', { title: '当前活跃 run 的子会话 id（continuable 即 childId）；终止前先到子代理列表核对该 id 的同名条目，避免误杀别的合法 Worker', style: { fontSize: 10, color: C.text2, fontFamily: 'monospace', wordBreak: 'break-all', flexBasis: '100%' } }, '子会话 id: ' + task.claimedBy + '（对应子代理列表同名条目）'),
-          React.createElement('button', { onClick: doTerminate, title: '终止该执行 Agent，任务回 pending 重新排队', style: { fontSize: 10, padding: '2px 8px', border: '1px solid ' + C.err, borderRadius: 3, background: 'transparent', color: C.err, cursor: 'pointer', marginLeft: 'auto' } }, '⏹ 立即终止')) : null,
+        // ===== 当前动作区（阶段2 详情页重构③·默认展开）：实时动作脉冲 + 运行信息行 =====
+        // 两块按既有门禁渲染（activity 仅 in-progress/verifying；运行信息仅 in-progress+claimedBy），
+        // 都缺席时整区不渲染（draft/pending 卡零 DOM 变化）。
+        (function () {
+          var act = (task.status === 'in-progress' || task.status === 'verifying') && state.activity[task.id] ? React.createElement('div', { style: { fontSize: 10, color: C.brand, padding: '4px 8px', background: C.nested, borderRadius: 4, display: 'flex', alignItems: 'center', gap: 4, animation: 'tskb-pulse 2s ease-in-out infinite', marginBottom: 6 } }, ic('activity', 10), React.createElement('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '当前动作: ' + state.activity[task.id])) : null
+          var run = task.status === 'in-progress' && task.claimedBy ? React.createElement('div', { style: { fontSize: 10, color: C.text2, padding: '5px 8px', background: C.nested, borderRadius: 4, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+            ic('activity', 10),
+            React.createElement('span', null, '已运行 ' + elapsedSince(task.claimedAt) + '（软超时 ' + state.softTimeoutMin + ' 分提醒 · 硬超时 ' + state.hardTimeoutMin + ' 分自动终止）'),
+            elapsedMin(task.claimedAt) > state.softTimeoutMin ? React.createElement('span', { style: { color: C.warn, fontWeight: 600 } }, '⏱ 已超软超时') : null,
+            React.createElement('span', { title: '当前活跃 run 的子会话 id（continuable 即 childId）；终止前先到子代理列表核对该 id 的同名条目，避免误杀别的合法 Worker', style: { fontSize: 10, color: C.text2, fontFamily: 'monospace', wordBreak: 'break-all', flexBasis: '100%' } }, '子会话 id: ' + task.claimedBy + '（对应子代理列表同名条目）'),
+            React.createElement('button', { onClick: doTerminate, title: '终止该执行 Agent，任务回 pending 重新排队', style: { fontSize: 10, padding: '2px 8px', border: '1px solid ' + C.err, borderRadius: 3, background: 'transparent', color: C.err, cursor: 'pointer', marginLeft: 'auto' } }, '⏹ 立即终止')) : null
+          if (!act && !run) return null
+          return React.createElement(Section, { k: 'act', title: '📡 当前动作', hint: state.activity[task.id] ? String(state.activity[task.id]).slice(0, 30) : (task.claimedBy ? '执行中' : (statusLabels[task.status] || task.status)), open: folds.act, onToggle: toggleFold }, act, run)
+        })(),
+        task.stuckSince ? React.createElement('div', { style: { marginBottom: 8, padding: '8px 10px', border: '1px solid ' + C.warn, borderRadius: 6, background: 'color-mix(in srgb, ' + C.warn + ' 8%, transparent)' } },
+          React.createElement('div', { style: { fontSize: 12, fontWeight: 700, color: C.warn, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('alert-triangle', 13), '执行 Agent 疑似卡顿'),
+          React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6 } }, '标记于 ' + ago(task.stuckSince) + '（assistant 帧静默 ≥2 分钟（120s），仅标卡不终止，裁决权交主窗口/用户；静默 ≥10 分钟（600s）将由看门狗判死并按模型面故障结算重派）。你可以查看其会话后决定：'),
+          React.createElement('div', { style: { display: 'flex', gap: 6 } },
+            React.createElement('button', { onClick: doTerminate, style: { fontSize: 11, padding: '4px 12px', border: 'none', borderRadius: 4, background: C.err, color: C_INV, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('stop-circle', 12), '终止任务（重新排队）'),
+            React.createElement('button', { onClick: doDismiss, style: { fontSize: 11, padding: '4px 12px', border: '1px solid ' + C.border, borderRadius: 4, background: 'transparent', color: C.text2, cursor: 'pointer' } }, '继续观察'),
+            canJump ? React.createElement('button', { onClick: jumpToAgent, style: { fontSize: 11, padding: '4px 12px', border: '1px solid ' + C.brand, borderRadius: 4, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '→ 查看会话') : null)) : null,
+        // ===== 高级操作区（阶段2 详情页重构④·默认折叠）：仲裁 / 干预 / 手动派发 / 跳转 / 编辑 =====
+        // 低频强操作收进折叠区，解决详情页被系统区淹没的问题；操作区按生命周期列出的「编辑/干预」
+        // 按钮走 openAdv 展开本区并滚到对应锚点。活跃歧义（escalation）时本区自动展开——仲裁表单在内，
+        // 待裁决的上报不能被折叠埋没（hooks 失败「前往裁决」的锚点 tskb-escalation 也落在此区）。
+        React.createElement(Section, { k: 'adv', title: '⚙ 高级操作', hint: '仲裁 · 干预 · 手动派发 · 跳转 · 编辑', open: folds.adv, onToggle: toggleFold },
         task.escalation ? React.createElement('div', { id: 'tskb-escalation', style: { marginBottom: 8, padding: '8px 10px', border: '1px solid ' + C.err, borderRadius: 6, background: 'color-mix(in srgb, ' + C.err + ' 8%, transparent)' } },
           React.createElement('div', { style: { fontSize: 12, fontWeight: 700, color: C.err, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('alert-triangle', 13), 'Worker 上报歧义 — 等待主窗口裁决'),
           React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6, whiteSpace: 'pre-wrap', maxHeight: 160, overflowY: 'auto' } }, task.escalation.question),
@@ -452,14 +599,33 @@
               React.createElement('option', { value: 'hold' }, '裁决后：挂起冻结 ❄')),
             React.createElement('button', { onClick: submitArbitration, disabled: !arbAnswer.trim(), style: { fontSize: 11, padding: '4px 12px', border: 'none', borderRadius: 4, background: C.err, color: C_INV, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('scale', 12), '提交裁决'),
             arbAction === 'hold' ? React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '冻结后不参与自动派发，补完上下文可在详情页「解除冻结」放行') : null)) : null,
-        actionMsg ? React.createElement('div', { style: { fontSize: 11, color: C.text2, marginBottom: 6 } }, actionMsg) : null,
-        task.stuckSince ? React.createElement('div', { style: { marginBottom: 8, padding: '8px 10px', border: '1px solid ' + C.warn, borderRadius: 6, background: 'color-mix(in srgb, ' + C.warn + ' 8%, transparent)' } },
-          React.createElement('div', { style: { fontSize: 12, fontWeight: 700, color: C.warn, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('alert-triangle', 13), '执行 Agent 疑似卡顿'),
-          React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 6 } }, '标记于 ' + ago(task.stuckSince) + '（assistant 帧静默 ≥2 分钟（120s），仅标卡不终止，裁决权交主窗口/用户；静默 ≥10 分钟（600s）将由看门狗判死并按模型面故障结算重派）。你可以查看其会话后决定：'),
-          React.createElement('div', { style: { display: 'flex', gap: 6 } },
-            React.createElement('button', { onClick: doTerminate, style: { fontSize: 11, padding: '4px 12px', border: 'none', borderRadius: 4, background: C.err, color: C_INV, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('stop-circle', 12), '终止任务（重新排队）'),
-            React.createElement('button', { onClick: doDismiss, style: { fontSize: 11, padding: '4px 12px', border: '1px solid ' + C.border, borderRadius: 4, background: 'transparent', color: C.text2, cursor: 'pointer' } }, '继续观察'),
-            canJump ? React.createElement('button', { onClick: jumpToAgent, style: { fontSize: 11, padding: '4px 12px', border: '1px solid ' + C.brand, borderRadius: 4, background: 'transparent', color: C.brand, cursor: 'pointer' } }, '→ 查看会话') : null)) : null,
+        canIntervene ? React.createElement('div', { id: 'tskb-adv-intervene', style: { marginTop: 8, padding: '6px 8px', border: '1px dashed ' + C.warn, borderRadius: 6 } },
+          React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.warn, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('zap', 11), '高优先级介入（插入执行 Agent 队首）'),
+          React.createElement('div', { style: { display: 'flex', gap: 4 } },
+            React.createElement('input', { value: interveneMsg, onChange: function (e) { setInterveneMsg(e.target.value) }, onKeyDown: function (e) { if (e.key === 'Enter') submitIntervene() }, placeholder: '给执行中的 Agent 下达高优指令…', style: { flex: 1, fontSize: 11, padding: '4px 8px', border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text } }),
+            React.createElement('button', { onClick: submitIntervene, disabled: !interveneMsg.trim(), style: { fontSize: 11, padding: '4px 10px', border: 'none', borderRadius: 4, background: C.warn, color: C_INV, cursor: 'pointer', fontWeight: 600 } }, '介入'))) : null,
+        // 手动派发 / 终止子区：按钮与操作区生命周期操作行同一动作函数（doManualDispatch/doTerminate），
+        // 此处为高级通道（附文件锁越权说明）；门禁口径不变——派发仅 pending、派发验收仅 verifying 且无歧义、
+        // 终止仅 in-progress 且有活跃 run。
+        (task.status === 'pending' || (task.status === 'verifying' && !task.escalation) || (task.status === 'in-progress' && task.claimedBy)) ? React.createElement('div', { style: { marginTop: 8, padding: '6px 8px', border: '1px dashed ' + C.warn, borderRadius: 6 } },
+          React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.warn, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('zap', 11), '手动派发 / 终止'),
+          React.createElement('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap' } },
+            task.status === 'pending' ? React.createElement('button', { onClick: function () { doAction(function () { return doManualDispatch('worker') }) }, title: '手动派发给一次性 Worker 子代理', style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.warn, color: C_INV, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('zap', 10), '派发') : null,
+            task.status === 'verifying' && !task.escalation ? React.createElement('button', { onClick: function () { doAction(function () { return doManualDispatch('verifier') }) }, title: '手动派发给一次性 Verifier 子代理', style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.warn, color: C_INV, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('zap', 10), '派发验收') : null,
+            task.status === 'in-progress' && task.claimedBy ? React.createElement('button', { onClick: doTerminate, title: '终止该执行 Agent，任务回 pending 重新排队', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.err, borderRadius: 3, background: 'transparent', color: C.err, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('stop-circle', 10), '终止当前 run') : null),
+          React.createElement('div', { style: { fontSize: 10, color: C.text2, marginTop: 4, lineHeight: 1.6 } }, '文件锁冲突时弹 confirm 列出持锁卡（in-progress/verifying 卡持锁，落定即放行），确认后带 force:true 越权派发；终止=停掉执行 Agent 回待办重排。与操作区同名按钮同一动作，此处附完整口径说明。')) : null,
+        // 跳转子区：Worker/Verifier 会话（canJump 口径零改动）+ 拆解官会话（顶部横幅的折叠区副本）
+        (canJump || decRun) ? React.createElement('div', { style: { marginTop: 8, padding: '6px 8px', border: '1px dashed ' + C.border, borderRadius: 6 } },
+          React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('bot', 11), '跳转（子会话）'),
+          React.createElement('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap' } },
+            canJump ? React.createElement('button', { onClick: jumpToAgent, title: '打开当前执行/验收 Agent 的子会话（' + task.claimedBy + '）', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer', fontWeight: 600 } }, '→ Worker 会话') : null,
+            decRun ? React.createElement('button', { onClick: function () { jumpToRun(decRun.id) }, title: '打开拆解官子会话（run ' + decRun.id + '）：实时查看拆解过程与提案产出', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.brand, borderRadius: 3, background: 'transparent', color: C.brand, cursor: 'pointer', fontWeight: 600 } }, '🧩 拆解官会话') : null)) : null,
+        // 编辑子区（tskb-adv-edit）：标题/描述/优先级/档位/模型徽标/管线/标签/touches/保存——原散落控件收拢
+        React.createElement('div', { id: 'tskb-adv-edit', style: { marginTop: 8 } },
+          React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('file-text', 11), '编辑（标题 / 描述 / 属性 / 标签 / touches）'),
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' } }, React.createElement('select', { value: task.priority || 'medium', onChange: function (e) { rpc('update-task', { taskId: task.id, priority: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '优先级（四档：紧急/高/中/低）', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: (prioColor[task.priority] || prioColor.low), fontWeight: 600 } }, ['critical', 'high', 'medium', 'low'].map(function (p) { return React.createElement('option', { key: p, value: p }, prioLabel[p] + '（' + p + '）') })), React.createElement('span', { style: { fontSize: 11, padding: '1px 8px', borderRadius: 3, background: C.nested, color: C.text } }, statusLabels[task.status] || task.status), React.createElement('select', { value: task.size || (state.teamMode ? 'standard' : ''), onChange: function (e) { rpc('update-task', { taskId: task.id, size: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '力度档位（路由板级 laneModels 三档表定模）：轻=单点小改/文档/配置，标=常规模块改动，重=跨模块/高风险' + (state.teamMode ? '；Team 板硬闸必填，不可调回继承' : '；继承=清除 size 回标档语义'), style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.brand, fontWeight: 600 } }, (state.teamMode ? [] : [React.createElement('option', { key: '', value: '' }, '继承（标）')]).concat([['light', '轻（light）'], ['standard', '标（standard）'], ['heavy', '重（heavy）']].map(function (s) { return React.createElement('option', { key: s[0], value: s[0] }, s[1]) }))), task.model ? React.createElement('span', { style: { fontSize: 9, padding: '1px 6px', borderRadius: 3, background: 'color-mix(in srgb, ' + C.warn + ' 18%, transparent)', color: C.warn, fontWeight: 700, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: '卡级模型特例 model=' + task.model + '（取模链最高优先；只读展示——改/删走对话 task_update，v1 不做 GUI 编辑）' }, '🎯 ' + task.model) : null, React.createElement('select', { value: task.pipeline || 'full', onChange: function (e) { rpc('update-task', { taskId: task.id, pipeline: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '管线档位', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'full' }, '全流程（执行+验证）'), React.createElement('option', { value: 'work' }, '免验证（只做不验）'), React.createElement('option', { value: 'direct' }, '主窗口处理')), task.pipelineAuto ? React.createElement('span', { style: { fontSize: 9, color: C.text2 }, title: '由规则自动分类，可手动覆盖' }, 'auto') : null, isManual ? React.createElement('span', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('user', 10), '手动派发') : null),
+          React.createElement(TagsEditor, { key: task.id, task: task }),
+          React.createElement(TouchesEditor, { key: task.id + '|touches', task: task }),
         React.createElement('input', { value: editTitle, onChange: function (e) { setEditTitle(e.target.value) }, style: { width: '100%', fontSize: 13, fontWeight: 600, padding: '4px 6px', marginBottom: 6, border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text, boxSizing: 'border-box' } }),
         React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 8, lineHeight: 1.7 } }, React.createElement('div', null, 'ID: ' + task.id), React.createElement('div', null, '创建: ' + fmtTime(task.createdAt) + '（' + ago(task.createdAt) + '）'), task.claimedBy ? React.createElement('div', null, '领取人: ', React.createElement(ActorLink, { id: task.claimedBy }), ' · ' + ago(task.claimedAt)) : null, task.resolvedAt ? React.createElement('div', null, '提交: ' + fmtTime(task.resolvedAt)) : null, task.verifiedAt ? React.createElement('div', null, '验收: ' + fmtTime(task.verifiedAt) + ' by ', React.createElement(ActorLink, { id: task.verifiedBy })) : null),
         React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 3 } }, '任务描述'),
@@ -483,6 +649,8 @@
           return React.createElement('div', { style: { fontSize: 11, marginBottom: 8, padding: '4px 8px', border: '1px solid ' + (empty ? C.warn : C.border), borderRadius: 6, background: empty ? 'color-mix(in srgb, ' + C.warn + ' 8%, transparent)' : C.nested, color: empty ? C.warn : C.text2, wordBreak: 'break-word' }, title: tip },
             '📎 调研注入: ' + (empty ? '无调研注入——Worker 需自行定位，建议补 contextFiles/contextNotes' : parts.join(' · ')))
         })(),
+        // 保存按钮（编辑区收尾；草稿态语义=保存并发布——发布预警 title，巡检 n-muyi5yfec8m0）
+        React.createElement('button', { onClick: saveEdit, disabled: saving, title: task.status === 'draft' ? '发布后按当前工作模式可能被立即派发' : '保存并重置为待办', style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.brand, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, saving ? '保存中…' : [ic('save', 10), task.status === 'draft' ? ' 保存并发布' : ' 保存并重置']))),
         React.createElement(FamilySection, { task: task }),
         // Hooks 区（史诗可选点位）：key=task.id 保证切换任务时重挂，编辑缓冲不串卡
         React.createElement(HooksSection, { key: task.id, task: task }),
@@ -519,27 +687,14 @@
           React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 4 } }, String(task.lateVerdict.note || '')),
           React.createElement('div', { style: { fontSize: 11, color: C.text, marginBottom: 4, whiteSpace: 'pre-wrap' } }, (task.lateVerdict.verdict === 'approved' ? '验收通过' : '验收驳回') + (task.lateVerdict.summary ? '：' + task.lateVerdict.summary : '')),
           task.lateVerdict.checks ? React.createElement('div', { style: { marginTop: 4 } }, React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2 } }, '核对项'), React.createElement('div', { style: { fontSize: 10, color: C.text2, whiteSpace: 'pre-wrap', maxHeight: 120, overflowY: 'auto' } }, task.lateVerdict.checks)) : null) : null,
-        React.createElement(MsgThread, { messages: task.messages, taskId: task.id }),
-        Array.isArray(task.history) && task.history.length > 0 ? React.createElement('div', { style: { marginBottom: 8 } }, React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 3 } }, '流转轨迹'), React.createElement('div', { style: { fontSize: 10, color: C.text2, padding: '4px 6px', background: C.nested, borderRadius: 4 } }, task.history.map(function (h, i) { return React.createElement('div', { key: i, style: { marginBottom: 2 } }, React.createElement('span', { style: { color: C.brand } }, statusLabels[h.to] || h.to), ' · ' + ago(h.timestamp) + ' · ', React.createElement(ActorLink, { id: h.actor }), h.note ? ' · ' + h.note : '') }))) : null,
-        React.createElement('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6 } },
-          // 草稿态「保存并重置」实为 resetToPending 静默发布：按钮文案改「保存并发布」+ title 发布预警（巡检 n-muyi5yfec8m0）
-        React.createElement('button', { onClick: saveEdit, disabled: saving, title: task.status === 'draft' ? '发布后按当前工作模式可能被立即派发' : '保存并重置为待办', style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.brand, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, saving ? '保存中…' : [ic('save', 10), task.status === 'draft' ? ' 保存并发布' : ' 保存并重置']),
-          task.status === 'draft' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('update-task', { taskId: task.id, publish: true }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.ok, color: C_INV, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('rocket', 10), '发布（进入派发池）') : null,
-          (task.status === 'pending' || task.status === 'blocked') ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('claim-task', { taskId: task.id }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.brand, color: C_INV, cursor: 'pointer' } }, '领取') : null,
-          task.status === 'pending' ? React.createElement('button', { onClick: function () { doAction(function () { return doManualDispatch('worker') }) }, title: '手动派发给一次性 Worker 子代理', style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.warn, color: C_INV, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('zap', 10), '派发') : null,
-          task.status === 'verifying' && !task.escalation ? React.createElement('button', { onClick: function () { doAction(function () { return doManualDispatch('verifier') }) }, title: '手动派发给一次性 Verifier 子代理', style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.warn, color: C_INV, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('zap', 10), '派发验收') : null,
-          task.status === 'verifying' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'approved' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.ok, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('check-circle', 10), '通过') : null,
-          task.status === 'verifying' ? React.createElement('button', { onClick: function () { var r = window.prompt('驳回原因：'); doAction(function () { return rpc('verify-task', { taskId: task.id, verdict: 'rejected', comment: r || '' }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.err, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('x-circle', 10), '驳回') : null,
-          task.status === 'resolved' ? React.createElement('button', { onClick: function () { doAction(function () { return rpc('archive-task', { taskId: task.id }) }) }, style: { fontSize: 10, padding: '3px 8px', border: 'none', borderRadius: 3, background: C.text2, color: C_INV, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('archive', 10), '归档') : null),
-          // ===== 破坏性操作区（task-mv493xjs 消歧，巡检实证 n-mv2turadjv63 误触）=====
-          // 视觉分层：与上方表单按钮组（保存/发布/领取/派发/通过/驳回/归档）拉开——独立一行 +
-          // 顶部虚线分隔 + 「危险操作」前缀标签。「取消」改名「取消任务」：按表单惯例会被误读为
-          // 「关面板」，实际是 task_cancel 破坏性流转（confirm 确认在 kernel.cancelTask 已存在）。
-          // 取消（仅草稿/待办/阻塞）语义=作废留档（可恢复）；删除=真删不可恢复，被 host 门禁拒绝时原因回显 actionMsg。
-          (canCancel(task) || canDelete(task)) ? React.createElement('div', { role: 'group', 'aria-label': '危险操作', style: { display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center', marginTop: 8, paddingTop: 6, borderTop: '1px dashed ' + C.err } },
-            React.createElement('span', { style: { fontSize: 9, color: C.err, fontWeight: 700, marginRight: 2, letterSpacing: 1 } }, '危险操作'),
-            canCancel(task) ? React.createElement('button', { onClick: function () { cancelTask(task.id, task.title, setActionMsg) }, title: '取消任务（取消后不再派发，可在归档恢复待办）', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.warn, borderRadius: 3, background: 'transparent', color: C.warn, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('ban', 10), '取消任务') : null,
-            canDelete(task) ? React.createElement('button', { onClick: function () { deleteTask(task.id, task.title, setActionMsg) }, title: '删除任务（不可恢复；执行中请先终止，已落定请用归档）', style: { fontSize: 10, padding: '3px 8px', border: '1px solid ' + C.err, borderRadius: 3, background: 'transparent', color: C.err, cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 3 } }, ic('trash-2', 10), '删除') : null) : null,
+        // ===== 仲裁史（阶段2 详情页重构③·默认折叠）：裁决对话消息流（上报/裁决/介入/进展/候选教训） =====
+        // 高频信息上移后，消息流整段折叠收起；有内容才渲染（空卡零 DOM）。
+        (Array.isArray(task.messages) && task.messages.length) ? React.createElement(Section, { k: 'arb', title: '⚖ 仲裁史 · 裁决对话', hint: task.messages.length + ' 条', open: folds.arb, onToggle: toggleFold },
+          React.createElement(MsgThread, { messages: task.messages, taskId: task.id })) : null,
+        // ===== 系统记录（阶段2 详情页重构③·默认折叠）：流转轨迹（状态迁移审计行，actor+时间+备注） =====
+        Array.isArray(task.history) && task.history.length > 0 ? React.createElement(Section, { k: 'sys', title: '🗂 系统记录 · 流转轨迹', hint: task.history.length + ' 条', open: folds.sys, onToggle: toggleFold },
+          React.createElement('div', { style: { fontSize: 10, color: C.text2, padding: '4px 6px', background: C.nested, borderRadius: 4 } }, task.history.map(function (h, i) { return React.createElement('div', { key: i, style: { marginBottom: 2 } }, React.createElement('span', { style: { color: C.brand } }, statusLabels[h.to] || h.to), ' · ' + ago(h.timestamp) + ' · ', React.createElement(ActorLink, { id: h.actor }), h.note ? ' · ' + h.note : '') }))) : null,
+        // （破坏性操作区已上移至「操作区」末档——虚线分隔/「危险操作」前缀/aria-label 视觉分层口径原样保留）
         (function () {
           // 历史会话：无论任务处于哪个阶段都完整列出（Worker 各次 + Verifier 各次 + 拆解官各次）
           var runs = historyRuns(task)
@@ -549,7 +704,9 @@
           // 序数按角色分桶：W/V 序号与旧口径逐字一致（未知角色如 hook 仍计 Worker 桶，与 fallback 标签同桶）；
           // decomposer 独立编号（🧩 #1 #2…重拆次数一眼可读）。
           var seqN = {}
-          return React.createElement('div', { style: { marginTop: 8, padding: '6px 8px', background: C.nested, borderRadius: 6 } },
+          // ===== 执行历史（阶段2 详情页重构③·默认折叠）：Worker/Verifier/拆解官全部会话（含重试/续跑） =====
+          return React.createElement(Section, { k: 'runs', title: '👥 执行历史（runs）', hint: runs.length + ' 条 · 点击跳转', open: folds.runs, onToggle: toggleFold },
+            React.createElement('div', { style: { padding: '6px 8px', background: C.nested, borderRadius: 6 } },
             React.createElement('div', { style: { fontSize: 10, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('users', 10), '历史会话（点击跳转查看，含全部重试）'),
             React.createElement('div', { style: { display: 'flex', gap: 5, flexWrap: 'wrap' } },
               runs.map(function (r, i) {
@@ -570,11 +727,6 @@
                   title: rm.tip + ' 第 ' + seq + ' 次' + (r.resume === true ? '（↻ 冷复活续跑：沿用上一次的子会话，非新开）' : '') + (r.at ? ' · ' + ago(r.at) : '') + (r.model ? ' · ' + r.model : '') + (r.outcome ? ' · ' + r.outcome : '') + durTxt + '（' + r.id + '）',
                   style: { fontSize: 10, padding: '2px 8px', border: '1px solid ' + (isCur ? rm.color : C.border), borderRadius: 3, background: isCur ? C.card : 'transparent', color: rm.color, cursor: 'pointer', fontWeight: isCur ? 600 : 400 }
                 }, '→ ' + rm.tip + ' #' + seq + (r.at ? ' · ' + ago(r.at) : '') + okMark + rsMark)
-              })))
-        })(),
-        canIntervene ? React.createElement('div', { style: { marginTop: 8, padding: '6px 8px', border: '1px dashed ' + C.warn, borderRadius: 6 } },
-          React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.warn, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('zap', 11), '高优先级介入（插入执行 Agent 队首）'),
-          React.createElement('div', { style: { display: 'flex', gap: 4 } },
-            React.createElement('input', { value: interveneMsg, onChange: function (e) { setInterveneMsg(e.target.value) }, onKeyDown: function (e) { if (e.key === 'Enter') submitIntervene() }, placeholder: '给执行中的 Agent 下达高优指令…', style: { flex: 1, fontSize: 11, padding: '4px 8px', border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text } }),
-            React.createElement('button', { onClick: submitIntervene, disabled: !interveneMsg.trim(), style: { fontSize: 11, padding: '4px 10px', border: 'none', borderRadius: 4, background: C.warn, color: C_INV, cursor: 'pointer', fontWeight: 600 } }, '介入'))) : null)
+              }))))
+        })())
     }

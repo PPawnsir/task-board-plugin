@@ -1238,3 +1238,154 @@ test('㉔方案F boardStatusCounts 行为级：五计数归位/歧义跨状态�
     assert.ok(built.indexOf(m) >= 0, 'client.js 缺方案F状态条标记：' + m + '（需 npm run build-client 重组装）')
   }
 })
+
+// ===== ㉕㉖㉗㉘ UX redesign 阶段2（task-mwndjspx）：详情页重构——核心信息四格卡 + 操作区 + 分区折叠 + 高级操作折叠 =====
+// 口径（原型 prototype/ux-redesign.html 详情页）：核心信息置顶（状态/优先级·档位/执行模型/耗时四格卡，2×2 栅格）
+// + 操作区（FLOW_DEF「流转到」组保留 + 生命周期操作表 OPS_DEF 主/次/危险三档 + 危险操作档原样上移）
+// + 分区折叠（操作区/当前动作默认展开；系统记录/仲裁史/执行历史 runs 默认折叠）
+// + 高级操作折叠（仲裁/干预/手动派发/跳转/编辑收进折叠区；活跃歧义 escalation 自动展开）。
+// 硬约束红线：零功能逻辑改动——FLOW_DEF/flowTo/canJump/jumpToRun/仲裁/干预/手动派发全部既有行为不变（逐字锁）。
+const tdsrc = readFileSync(new URL('../lib/client/task-detail.js', import.meta.url), 'utf8')
+// 详情域切片：DetailView() → 文件末（本卡主刀区）
+const tdv = tdsrc.slice(tdsrc.indexOf('function DetailView()'))
+// 高级操作折叠区切片：k: 'adv' → FamilySection（编辑子区以保存按钮收尾）
+const advRegion = tdv.slice(tdv.indexOf("k: 'adv'"), tdv.indexOf('React.createElement(FamilySection'))
+
+test('㉕UX2-核心信息四格卡：状态/优先级·档位/执行模型/耗时 + 2×2 栅格 + 置顶 + 耗时口径纯函数 + 产物同步', () => {
+  // 四格标签逐个点名（缺一不可）
+  for (const cell of ["'状态'", "'优先级 / 档位'", "'执行模型'", "'耗时'"]) {
+    assert.ok(tdv.indexOf(cell) >= 0, '四格卡缺格：' + cell)
+  }
+  // 2×2 栅格（对齐原型 .detail-core grid 1fr 1fr）
+  assert.match(tdv, /gridTemplateColumns: 'repeat\(2, 1fr\)'/, '四格卡缺 2×2 栅格')
+  // 置顶：四格卡在 ReviewSummary 与操作区之前（核心信息置顶硬口径）
+  const iCore = tdv.indexOf("gridTemplateColumns: 'repeat(2, 1fr)'")
+  assert.ok(iCore >= 0 && tdv.indexOf('React.createElement(ReviewSummary') > iCore, '四格卡必须置顶（先于 ReviewSummary）')
+  assert.ok(tdv.indexOf("k: 'ops'") > iCore, '四格卡必须先于操作区')
+  // 模型格数据源：卡级特例或板级默认（只读）
+  assert.ok(tdv.indexOf("cell('执行模型', task.model || '板级默认'") >= 0, '模型格缺 task.model || 板级默认口径')
+  // 耗时口径纯函数行为级（注入 elapsedSince/fmtDur 桩提取执行，与 ⑩ decomposeBadgeOf 同手法）
+  const fnM = tdsrc.match(/function coreDurText\(t\) \{[\s\S]*?\n    \}/)
+  assert.ok(fnM, '缺 coreDurText 函数体（源码提取失败）')
+  const coreDurText = new Function('elapsedSince', 'fmtDur', fnM[0] + '\nreturn coreDurText')(function () { return '5m' }, function () { return '12m' })
+  assert.equal(coreDurText({ status: 'in-progress', claimedAt: 'x' }), '已跑 5m', 'in-progress+claimedAt → 已跑')
+  assert.equal(coreDurText({ status: 'verifying', claimedAt: 'x' }), '已跑 5m', 'verifying+claimedAt → 已跑（当前 run）')
+  assert.equal(coreDurText({ status: 'verifying', resolvedAt: 'x' }), '验收 5m', 'verifying 无领取位 → 验收已跑')
+  assert.equal(coreDurText({ status: 'resolved', createdAt: 'a', resolvedAt: 'b' }), '总耗时 12m', 'resolved → 创建→落定净总耗时')
+  assert.equal(coreDurText({ status: 'pending', createdAt: 'a' }), '存在 5m', '其余 → 存在时长')
+  assert.equal(coreDurText(null), '—', 'null 防御不炸')
+  // 产物同步（npm run build-client）
+  for (const m of ["'优先级 / 档位'", "'执行模型'", 'function coreDurText(t)', "gridTemplateColumns: 'repeat(2, 1fr)'"]) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺四格卡标记：' + m + '（需 npm run build-client 重组装）')
+  }
+})
+
+test('㉖UX2-操作区：生命周期操作表 OPS_DEF 七态+archived + 主/次/危险三档 + FLOW_DEF 流转组/危险操作区既有标记零回归', () => {
+  assert.match(tdv, /var OPS_DEF = \{/, '缺 OPS_DEF 生命周期操作表')
+  // 七态 + archived 全有入口（blocked 空数组=流转组承载恢复待办/开始处理）
+  const opsRegion = tdv.slice(tdv.indexOf('var OPS_DEF'), tdv.indexOf('var extraOps'))
+  for (const st of ["'draft'", "'pending'", "'in-progress'", "'verifying'", "'resolved'", "'blocked'", "'cancelled'", "'archived'"]) {
+    assert.ok(opsRegion.indexOf(st + ':') >= 0, 'OPS_DEF 缺状态：' + st)
+  }
+  // 主/次/危险三档配色表（primary brand 实底 / secondary 描边 / danger err 描边）
+  assert.match(tdv, /var OPS_TIER = \{/, '缺 OPS_TIER 三档配色')
+  for (const tier of ["primary: { border: 'none', background: C.brand", "secondary: { border: '1px solid ' + C.border2", "danger: { border: '1px solid ' + C.err"]) {
+    assert.ok(tdv.indexOf(tier) >= 0, 'OPS_TIER 缺档位：' + tier)
+  }
+  // 各状态核心操作逐个点名（主档推进主线，含 in-progress 危险档终止）
+  for (const op of ["'保存并发布'", "'发布（进入派发池）'", "'派发'", "'派发验收（换 verifier）'", "'归档'", "'重开（回待办）'", "'恢复待办'", "'终止'", "'干预'", "'编辑'"]) {
+    assert.ok(opsRegion.indexOf(op) >= 0, 'OPS_DEF 缺操作：' + op)
+  }
+  // 三档标注成规模（primary/secondary/danger 各 ≥3/≥4/≥1）
+  assert.ok((opsRegion.match(/tier: 'primary'/g) || []).length >= 3, 'primary 主档应 ≥3（保存并发布/归档/恢复待办×2）')
+  assert.ok((opsRegion.match(/tier: 'secondary'/g) || []).length >= 4, 'secondary 次档应 ≥4（编辑×2/重开/干预×2）')
+  assert.ok((opsRegion.match(/tier: 'danger'/g) || []).length >= 1, 'danger 危险档应 ≥1（in-progress 终止）')
+  // gate 门禁：verifying 派发验收须避开活跃歧义（既有 !task.escalation 口径）
+  assert.match(opsRegion, /label: '派发验收（换 verifier）', icon: 'zap', gate: function \(\) \{ return !task\.escalation \}/)
+  // 操作区行渲染：按 OPS_TIER 档位落样式 + 生命周期组名（读屏可报）
+  assert.match(tdv, /extraOps\.map\(function \(o\) \{ return React\.createElement\('button', \{ key: o\.label, onClick: o\.run, title: o\.tip/)
+  assert.match(tdv, /Object\.assign\(\{ fontSize: 10, padding: '3px 9px', borderRadius: 3, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3 \}, OPS_TIER\[o\.tier\]\)/)
+  assert.match(tdv, /role: 'group', 'aria-label': '生命周期操作'/)
+  // FLOW_DEF 流转组零回归（既有断言口径逐字保留——本卡红线：flowTo 行为不变）
+  for (const m of ['var FLOW_DEF = {', "role: 'group', 'aria-label': '状态流转'", "'⇄ 流转到：'", 'function flowTo(to)', "setActionMsg('⚠️ 流转失败：' + (r.error || '未知错误'))", "'▶ 开始处理'", "'✅ 提交验收'", "'⛔ 标记阻塞'", "'↩ 重投待办'", "'✔ 验收通过'", "'↩ 驳回重投'"]) {
+    assert.ok(tdv.indexOf(m) >= 0, 'FLOW_DEF 流转组标记丢失：' + m)
+  }
+  // 危险操作区既有标记零回归（task-mv493xjs 视觉分层：虚线分隔 + aria-label + 取消任务/删除接线收进操作区末档）
+  for (const m of ["'aria-label': '危险操作'", "borderTop: '1px dashed ' + C.err", "ic('ban', 10), '取消任务'", 'cancelTask(task.id, task.title, setActionMsg)', 'canCancel(task) ? React.createElement', "ic('trash-2', 10), '删除'"]) {
+    assert.ok(tdv.indexOf(m) >= 0, '危险操作区标记丢失：' + m)
+  }
+  // 产物同步
+  for (const m of ['var OPS_DEF = {', 'var OPS_TIER = {', "k: 'ops'", "'操作（' + (statusLabels[task.status] || task.status) + '）：'"]) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺操作区标记：' + m + '（需 npm run build-client）')
+  }
+})
+
+test('㉗UX2-分区折叠：Section 组件（原生 button 头 + aria-expanded）+ 默认口径（操作/当前动作展开；系统记录/仲裁史/runs 折叠）+ 三折叠区有内容才渲染', () => {
+  assert.match(tdsrc, /function Section\(props\)/, '缺 Section 折叠组件')
+  // 折叠头必须原生 button（本文件 div+onClick 纪律归零；键盘可达 + aria-expanded 供读屏）
+  assert.match(tdsrc, /React\.createElement\('button', \{ onClick: function \(\) \{ if \(props\.onToggle\) props\.onToggle\(props\.k\) \}, 'aria-expanded': open \? 'true' : 'false'/, 'Section 头缺原生 button / aria-expanded')
+  // 默认口径：ops/act 展开，sys/arb/runs 折叠，adv 默认折叠但有歧义自动展开（useState 初始化 + 切卡重置同款）
+  assert.match(tdv, /return \{ ops: true, act: true, sys: false, arb: false, runs: false, adv: !!\(task && task\.escalation\) \}/, '缺省折叠口径不符（操作/当前动作展开；系统记录/仲裁史/runs 折叠）')
+  assert.match(tdv, /setFolds\(\{ ops: true, act: true, sys: false, arb: false, runs: false, adv: !!\(t && t\.escalation\) \}\)/, '切卡重置折叠态缺失')
+  // 五分区标题逐个点名 + open: folds 接线（受控折叠，状态在 DetailView）
+  for (const s of ["k: 'ops', title: '⚡ 操作'", "k: 'act', title: '📡 当前动作'", "k: 'sys', title: '🗂 系统记录 · 流转轨迹'", "k: 'arb', title: '⚖ 仲裁史 · 裁决对话'", "k: 'runs', title: '👥 执行历史（runs）'"]) {
+    const i = tdv.indexOf(s)
+    assert.ok(i >= 0, '缺分区：' + s)
+    assert.ok(/open: folds\./.test(tdv.slice(i, i + 320)), '分区缺 open: folds 接线：' + s)
+  }
+  // 有内容才渲染（空卡零 DOM）：仲裁史 gate messages / 系统记录 gate history / runs 沿用 !runs.length / 当前动作 act&run
+  assert.match(tdv, /\(Array\.isArray\(task\.messages\) && task\.messages\.length\) \? React\.createElement\(Section, \{ k: 'arb'/, '仲裁史折叠区缺内容门禁')
+  assert.match(tdv, /Array\.isArray\(task\.history\) && task\.history\.length > 0 \? React\.createElement\(Section, \{ k: 'sys'/, '系统记录折叠区缺内容门禁')
+  assert.match(tdv, /if \(!runs\.length\) return null/, 'runs 折叠区缺内容门禁（沿用既有口径）')
+  assert.match(tdv, /if \(!act && !run\) return null/, '当前动作区缺内容门禁')
+  // 当前动作区收拢既有两块：activity 脉冲行 + 运行信息行（子会话 id 标注原样保留）
+  assert.match(tdv, /'当前动作: ' \+ state\.activity\[task\.id\]/, '当前动作区缺 activity 脉冲行')
+  assert.match(tdv, /'子会话 id: ' \+ task\.claimedBy \+ '（对应子代理列表同名条目）'/, '当前动作区缺运行信息行（子会话 id）')
+  // 产物同步
+  for (const m of ['function Section(props)', "k: 'sys', title: '🗂 系统记录 · 流转轨迹'", "k: 'arb', title: '⚖ 仲裁史 · 裁决对话'", "k: 'runs', title: '👥 执行历史（runs）'"]) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺分区折叠标记：' + m + '（需 npm run build-client）')
+  }
+})
+
+test('㉘UX2-高级操作折叠：仲裁/干预/手动派发/跳转/编辑收进折叠区 + 歧义自动展开 + openAdv 锚点 + canJump 零改动 + 产物同步', () => {
+  // 高级操作 Section 在位（默认折叠，adv key；hint 列五要素）
+  assert.ok(advRegion.indexOf("k: 'adv', title: '⚙ 高级操作'") >= 0, '缺 ⚙ 高级操作 折叠区')
+  assert.ok(advRegion.indexOf('仲裁 · 干预 · 手动派发 · 跳转 · 编辑') >= 0, '高级操作 hint 缺五要素')
+  // ① 仲裁：tskb-escalation 块收进折叠区（HooksSection goArbitration 锚点不悬空）
+  assert.ok(advRegion.indexOf("id: 'tskb-escalation'") >= 0, '仲裁块未收进高级操作折叠区（tskb-escalation）')
+  assert.ok(advRegion.indexOf('Worker 上报歧义 — 等待主窗口裁决') >= 0, '仲裁块标题丢失')
+  // ② 干预：tskb-adv-intervene 输入块收进折叠区
+  assert.ok(advRegion.indexOf("id: 'tskb-adv-intervene'") >= 0, '干预输入未收进高级操作折叠区（tskb-adv-intervene）')
+  assert.ok(advRegion.indexOf('高优先级介入（插入执行 Agent 队首）') >= 0, '干预块标题丢失')
+  // ③ 手动派发：子区收进折叠区（与操作区同一动作函数 doManualDispatch/doTerminate）
+  assert.ok(advRegion.indexOf('手动派发 / 终止') >= 0, '手动派发子区未收进高级操作折叠区')
+  assert.match(advRegion, /doAction\(function \(\) \{ return doManualDispatch\('worker'\) \}\)/, '折叠区派发按钮未复用 doManualDispatch')
+  assert.match(advRegion, /doAction\(function \(\) \{ return doManualDispatch\('verifier'\) \}\)/, '折叠区派发验收按钮未复用 doManualDispatch')
+  assert.match(advRegion, /onClick: doTerminate/, '折叠区终止按钮未复用 doTerminate')
+  // ④ 跳转：子区收进折叠区（canJump Worker 会话 + 拆解官会话）
+  assert.ok(advRegion.indexOf('跳转（子会话）') >= 0, '跳转子区未收进高级操作折叠区')
+  assert.ok(advRegion.indexOf('jumpToAgent') >= 0 && advRegion.indexOf('jumpToRun(decRun.id)') >= 0, '跳转子区缺 jumpToAgent/jumpToRun 接线')
+  // ⑤ 编辑：tskb-adv-edit 子区（标题/描述/属性行/标签/touches/保存按钮全收拢）
+  assert.ok(advRegion.indexOf("id: 'tskb-adv-edit'") >= 0, '编辑子区未收进高级操作折叠区（tskb-adv-edit）')
+  for (const m of ['React.createElement(TagsEditor, { key: task.id, task: task })', "React.createElement(TouchesEditor, { key: task.id + '|touches', task: task })", 'onClick: saveEdit', "task.status === 'draft' ? ' 保存并发布' : ' 保存并重置'"]) {
+    assert.ok(advRegion.indexOf(m) >= 0, '编辑子区缺控件：' + m)
+  }
+  // 属性编辑行（优先级/档位下拉）收进编辑子区：size 下拉紧随状态徽章（既有断言口径串原样保留）
+  assert.ok(advRegion.indexOf("statusLabels[task.status] || task.status), React.createElement('select', { value: task.size || (state.teamMode ? 'standard' : ''") >= 0, '属性编辑行未收进编辑子区（size 下拉）')
+  // 歧义自动展开：escalation 出现时 adv 折叠区自动展开（待裁决上报不能被折叠埋没）
+  assert.match(tdv, /if \(task && task\.escalation\) setFolds\(function \(f\) \{ return f\.adv \? f : Object\.assign\(\{\}, f, \{ adv: true \}\) \}\)/, '缺歧义自动展开高级操作')
+  // openAdv 锚点通道：操作区「编辑/干预」按钮展开折叠区并滚动（goArbitration 同款 scrollIntoView）
+  assert.match(tdv, /function openAdv\(anchor\) \{[\s\S]*?document\.getElementById\(anchor\)/, '缺 openAdv 锚点滚动通道')
+  assert.ok(tdv.indexOf("openAdv('tskb-adv-edit')") >= 0, '操作区「编辑」未接 openAdv')
+  assert.ok(tdv.indexOf("openAdv('tskb-adv-intervene')") >= 0, '操作区「干预」未接 openAdv')
+  // canJump / jumpToRun 零改动红线（decompose ⑬c 同款逐字锁）
+  assert.ok(tdv.indexOf("var canJump = (task.status === 'in-progress' || task.status === 'verifying') && task.claimedBy && task.claimedBy !== state.sessionId") >= 0, 'canJump 条件被改动（应保持原样）')
+  assert.match(tdv, /function jumpToRun\(runId\) \{ if \(uiWorkspaceSvc && runId\) uiWorkspaceSvc\.openSession\(runId\) \}/, 'jumpToRun 缺 openSession 接线')
+  // 恢复待办/重开主档：与归档 tab restore 同款 confirm 门禁 + 既有 resetToPending 通道
+  assert.match(tdv, /function doResetPending\(what\) \{[\s\S]*?window\.confirm\(what \+ '后将按当前工作模式立即重新派发，消耗一轮 Worker\+Verifier token。继续？'\)/, 'doResetPending 缺 confirm 门禁')
+  assert.match(tdv, /function doResetPending\(what\) \{[\s\S]*?rpc\('update-task', \{ taskId: task\.id, resetToPending: true \}\)/, 'doResetPending 未走既有 resetToPending 通道')
+  // 产物同步
+  for (const m of ["k: 'adv', title: '⚙ 高级操作'", "id: 'tskb-escalation'", "id: 'tskb-adv-intervene'", "id: 'tskb-adv-edit'", 'function openAdv(anchor)', 'function doResetPending(what)']) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺高级操作折叠区标记：' + m + '（需 npm run build-client）')
+  }
+})
