@@ -1389,3 +1389,149 @@ test('㉘UX2-高级操作折叠：仲裁/干预/手动派发/跳转/编辑收进
     assert.ok(built.indexOf(m) >= 0, 'client.js 缺高级操作折叠区标记：' + m + '（需 npm run build-client）')
   }
 })
+
+// ===== ㉙㉚㉛㉜ UX redesign 阶段3（task-mwndka2w）：执行池四区——模型健康 + 最近完成 + 资源水位 =====
+// 口径（原型 prototype/ux-redesign.html 执行池）：TeamView 保留成员卡细节与超时策略编辑（零回归硬约束），
+// 新增三区——②模型健康（每模型健康态 + effort 档 + 目录外「已下架」）③最近完成 feed（带时间）④资源水位
+// （Worker/Verifier 并发 + 本小时 token + 今日完成）。数据面红线：三区全部复用既有通道现算零新增采集——
+// 模型清单/水位/feed 读 state（laneModels / poolStatus / tasks 的 run 留账）；健康四态与 effort/下架元数据走
+// 既有 RPC（get-tasks.modelHealth 局部 15s 刷新 + list-models 目录一次取），与 ModelRoutePopover 同款
+// 「局部拉取不改 kernel 全局 state」。
+const i3tv = src.indexOf('function TeamView()')
+assert.ok(i3tv >= 0, '缺 TeamView 组件')
+const tv3 = src.slice(i3tv) // TeamView 本体 + 其后三区纯函数助手（本卡主刀区）
+
+test('㉙执行池四区·骨架与保留面：成员卡细节 + 超时策略编辑零回归 + 三区标题/卡片化在位', () => {
+  // ① 保留面（既有功能红线，验收口径①②）：成员卡四要素逐个点名
+  assert.match(tv3, /'🧬 ' \+ m\.model/, '成员卡缺模型行（🧬 + m.model）')
+  assert.ok(tv3.indexOf('modelSourceBadge(m.modelSource)') >= 0, '成员卡缺取模来源角标')
+  assert.match(tv3, /curTask \? React\.createElement\('div', \{ onClick: function \(\) \{ state\.detailId = curTask\.id; state\.view = 'board'; notify\(\) \}/, '成员卡缺当前任务点击链接（进详情）')
+  assert.ok(tv3.indexOf("'会话 ' + String(m.runId || '').slice(0, 8) + '…（用完即销毁）'") >= 0, '成员卡缺一次性会话 id 行')
+  assert.ok(tv3.indexOf("'忙碌'") >= 0, '成员卡缺忙碌徽标')
+  // 超时策略编辑（软/硬双输入 + saveTimeout 写通道）逐字保留（验收口径②）
+  assert.match(tv3, /function saveTimeout\(cfgKey, v, min, max\)/, '缺 saveTimeout 超时保存函数')
+  assert.match(tv3, /rpc\('set-board-config', \{ key: cfgKey, value: n \}\)/, '超时保存未走 set-board-config')
+  assert.ok(tv3.indexOf("'超时策略:'") >= 0, '缺超时策略行标题')
+  assert.ok(tv3.indexOf("saveTimeout('softTimeoutMin'") >= 0 && tv3.indexOf("saveTimeout('hardTimeoutMin'") >= 0, '软/硬超时输入接线丢失')
+  // ② 三区标题逐个点名（验收口径③④⑤的门面）
+  for (const z of ["'模型健康 ('", "'最近完成 ('", "'资源水位'"]) assert.ok(tv3.indexOf(z) >= 0, '缺三区标题：' + z)
+  // 三区容器：flex wrap 三卡（卡片化口径与仪表盘一致 radius 8 + padding 12，窄面板可折行）
+  assert.match(tv3, /flex: '1 1 230px', minWidth: 230, padding: '12px', background: C\.card, border: '1px solid ' \+ C\.border, borderRadius: 8/, '三区卡片化口径缺失（zoneBox）')
+  assert.match(tv3, /display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12/, '三区容器缺 flex wrap 布局')
+})
+
+test('㉚执行池四区·模型健康：每模型健康态（ModelHealthDot 复用）+ effort 档 + 已下架 + 局部拉取零新增采集', () => {
+  // ① 健康态：行内复用 ModelHealthDot（🟢🟡🔴⚪四态 + 悬浮详情，与模型路由弹层同源）+ 状态标签着色
+  assert.match(tv3, /React\.createElement\(ModelHealthDot, \{ model: mid, health: mhData \}\)/, '健康行缺 ModelHealthDot 接线')
+  assert.ok(tv3.indexOf('(h && MODEL_HEALTH_META[h.state]) || MODEL_HEALTH_META.unknown') >= 0, '健康行缺状态标签（MODEL_HEALTH_META 着色）')
+  // ② effort 档：显式档优先 → 目录 defaultEffort 兜底 → '—' 空档（title 三态说明）
+  assert.match(tv3, /var eff = tmr\.effConf\[mid\] \|\| \(tmr\.defEff && tmr\.defEff\[mid\]\) \|\| ''/, '缺 effort 档合成（显式档→模型默认档→空）')
+  assert.ok(tv3.indexOf("eff || '—'") >= 0, '缺 effort 空档「—」占位')
+  assert.ok(tv3.indexOf('思考等级 effort 档：') >= 0, '缺 effort title 口径说明')
+  // ③ 已下架：目录可用才标（inCat=null 目录不可用/老宿主不误标——OrderedModelsEditor 同口径）
+  assert.match(tv3, /var retired = !!\(tmr\.inCat && !tmr\.inCat\[mid\]\)/, '缺已下架判定（inCat 索引缺项）')
+  assert.ok(tv3.indexOf("'⚠️已下架'") >= 0, '缺「⚠️已下架」行内标记')
+  // ④ 局部拉取（数据源红线：不改 kernel 全局 state、零新增采集——健康面走既有 get-tasks 通道）
+  assert.match(tv3, /function refreshTeamHealth\(\) \{/, '缺 refreshTeamHealth 局部健康拉取')
+  assert.match(tv3, /rpc\('get-tasks', args\)/, '健康拉取未走既有 get-tasks 通道')
+  assert.ok(tv3.indexOf('setMhData(d.modelHealth || null)') >= 0, '健康拉取未取 d.modelHealth')
+  assert.ok(tv3.indexOf('setInterval(refreshTeamHealth, 15000)') >= 0, '缺 15s 局部健康刷新')
+  assert.ok(tv3.indexOf('epoch !== mhEpoch.current') >= 0, '缺 epoch 迟到响应丢弃（卸载后 setState 防护）')
+  assert.ok(tv3.indexOf("rpc('list-models')") >= 0, '缺 list-models 目录拉取（efforts/defaultEffort 元数据已透出）')
+  // 空态与降级提示：未配置模型 / 健康信号读取中 / 目录不可用（能力检测不误报）
+  assert.ok(tv3.indexOf('未配置模型（板级 / 力度路由 / 备用链均为空') >= 0, '缺未配置模型空态')
+  assert.ok(tv3.indexOf('模型目录不可用：已下架判定与默认 effort 档关闭') >= 0, '缺目录不可用降级提示')
+})
+
+test('㉚b执行池四区·teamModelRows 行为级：板级∪六槽∪备用链去重保序 + 两形态 effort + 目录索引/已下架/默认档/脏防御', () => {
+  const fnM = src.match(/function teamModelRows\(workerModel, verifierModel, laneModels, fallbackModels, catModels\) \{[\s\S]*?\n    \}/)
+  assert.ok(fnM, '缺 teamModelRows 函数体（源码提取失败）')
+  const teamModelRows = new Function(fnM[0] + '\nreturn teamModelRows')()
+  // ① 清单=板级∪六槽∪备用链，去重保序（与 host 侧 configuredModelIds 同口径）
+  const LANES = { light: { worker: [], verifier: ['p/d'] }, standard: { worker: [], verifier: [] }, heavy: { worker: ['p/b', 'p/a'], verifier: [] } }
+  const r1 = teamModelRows('p/a', 'p/v', LANES, ['p/c', 'p/a'], null)
+  assert.deepEqual(r1.order, ['p/a', 'p/v', 'p/d', 'p/b', 'p/c'], '清单=板级∪六槽∪备用链去重保序')
+  // ② 两形态 effort：{id,effort} 显式档收录（六槽/备用链同形）；首见无档、后续带档 → 补上
+  const L2 = { light: { worker: ['p/x'], verifier: [] }, standard: { worker: [], verifier: [] }, heavy: { worker: [], verifier: [] } }
+  assert.equal(teamModelRows('', '', L2, [{ id: 'p/x', effort: 'high' }], null).effConf['p/x'], 'high', '备用链 {id,effort} 显式档收录')
+  const r3 = teamModelRows('p/x', '', { light: { worker: [], verifier: [] }, standard: { worker: [], verifier: [] }, heavy: { worker: [], verifier: [] } }, [{ id: 'p/x', effort: 'low' }], null)
+  assert.equal(r3.effConf['p/x'], 'low', '板级首见无档、备用链带档 → 补上（首个非空档优先）')
+  // ③ 目录索引：非空才建 inCat/defEff；defaultEffort 收录、无者不猜；目录外 id 下架可判定
+  const r4 = teamModelRows('p/a', 'p/b', null, ['p/zz'], [{ id: 'p/a', defaultEffort: 'high' }, { id: 'p/b' }])
+  assert.deepEqual(r4.inCat, { 'p/a': 1, 'p/b': 1 }, '目录非空建索引')
+  assert.equal(r4.defEff['p/a'], 'high', 'defaultEffort 收录')
+  assert.equal(r4.defEff['p/b'], undefined, '无 defaultEffort 不猜')
+  assert.equal(r4.inCat['p/zz'], undefined, '目录外模型已下架可判定')
+  // ④ 目录不可用（null）/空目录：不建索引（下架不误标——OrderedModelsEditor inCat 同口径）
+  assert.equal(teamModelRows('p/a', '', null, null, null).inCat, null, '目录 null 不建索引')
+  assert.equal(teamModelRows('p/a', '', null, null, []).inCat, null, '空目录不建索引（枚举回空无法判定）')
+  // ⑤ 脏防御：非字符串/空 id 丢弃、id trim；laneModels 数组/备用链字符串等脏形态不炸
+  const r7 = teamModelRows('', '', { light: { worker: [42, { id: '' }, ' x/y '], verifier: [] }, standard: {}, heavy: {} }, null, null)
+  assert.deepEqual(r7.order, ['x/y'], '脏项丢弃 + id trim')
+  assert.deepEqual(teamModelRows('', '', [], 'junk', null).order, [], 'laneModels 数组/备用链字符串脏形态不炸')
+})
+
+test('㉛执行池四区·最近完成+资源水位源码级：feed 倒序带时间点击进详情 + 并发/本小时 token/今日完成水位行', () => {
+  // ① 最近完成 feed 渲染：相对时间 ago + 点击进详情（与成员卡任务链接同款交互）+ 空态
+  assert.ok(tv3.indexOf("'· ' + ago(doneAt)") >= 0, 'feed 条目缺相对时间（ago）')
+  assert.ok(tv3.indexOf("state.detailId = t.id; state.view = 'board'; notify()") >= 0, 'feed 条目缺点击进详情')
+  assert.ok(tv3.indexOf('暂无已完成任务') >= 0, 'feed 缺空态文案')
+  assert.ok(tv3.indexOf("'最近完成 (' + feed.length") >= 0, 'feed 标题缺计数')
+  // ② 资源水位：并发（poolStatus busy / maxWorkers·maxVerifiers 上限分母）+ 三行水位 + 今日完成
+  assert.match(tv3, /var wBusyN = \(ps\.workers \|\| \[\]\)\.filter\(function \(m\) \{ return m && m\.busy \}\)\.length/, '缺 Worker busy 并发计数')
+  assert.match(tv3, /var vBusyN = \(ps\.verifiers \|\| \[\]\)\.filter\(function \(m\) \{ return m && m\.busy \}\)\.length/, '缺 Verifier busy 并发计数')
+  assert.ok(tv3.indexOf('state.maxWorkers || 3') >= 0 && tv3.indexOf('state.maxVerifiers || 2') >= 0, '缺并发上限分母（state.maxWorkers/maxVerifiers）')
+  for (const row of ["'Worker 并发'", "'Verifier 并发'", "'本小时 token 消耗'", "'今日完成任务'"]) assert.ok(tv3.indexOf(row) >= 0, '资源水位缺行：' + row)
+  // 水位条与百分比：pctOf（0 值不显条、非零保底 2%）+ waterRow 渲染 + 消耗空态
+  assert.match(tv3, /function pctOf\(v, max\) \{ var x = Number\(v\) \|\| 0; if \(!\(max > 0\)\) return 0; var p = Math\.round\(x \/ max \* 100\); return x > 0 \? Math\.max\(2, p\) : 0 \}/, '缺 pctOf 水位百分比')
+  assert.match(tv3, /function waterRow\(label, valText, pct, tip, color\) \{/, '缺 waterRow 水位条组件')
+  assert.ok(tv3.indexOf("'暂无消耗'") >= 0, 'token 水位缺零消耗空态')
+})
+
+test('㉛b执行池四区·水位行为级：teamHourTokens（本小时/峰值/今日合计+分量兜底+他日不计）+ teamTodayDone（今日零点口径）', () => {
+  const fnH = src.match(/function teamHourTokens\(tasks, now\) \{[\s\S]*?\n    \}/)
+  assert.ok(fnH, '缺 teamHourTokens 函数体（源码提取失败）')
+  const teamHourTokens = new Function(fnH[0] + '\nreturn teamHourTokens')()
+  const fnD = src.match(/function teamTodayDone\(tasks, now\) \{[\s\S]*?\n    \}/)
+  assert.ok(fnD, '缺 teamTodayDone 函数体（源码提取失败）')
+  const teamTodayDone = new Function(fnD[0] + '\nreturn teamTodayDone')()
+  function isoOf(y, m, d, h) { return new Date(y, m - 1, d, h).toISOString() }
+  const now = new Date(2026, 10, 19, 15, 30) // 2026-11-19 15:30 本地
+  const tk = [
+    { runs: [{ at: isoOf(2026, 11, 19, 14), usage: { total: 100 } }, { at: isoOf(2026, 11, 19, 15), usage: { total: 300 } }] },
+    { runs: [{ at: isoOf(2026, 11, 19, 15), usage: { total: 120, input: 0, output: 0 } }, { at: isoOf(2026, 11, 18, 20), usage: { total: 999 } }] },
+    { runs: [{ at: isoOf(2026, 11, 19, 15), usage: { total: 0, input: 10, output: 5, cacheRead: 0, cacheWrite: 0 } }] }, // total=0 → 分量兜底
+    { runs: [{ at: isoOf(2026, 11, 19, 15) }] }, // 无 usage run 不计（不伪造 0）
+    { junk: 1 }, // 无 runs 脏项
+  ]
+  const ht = teamHourTokens(tk, now)
+  assert.equal(ht.cur, 300 + 120 + 15, '当前时钟小时合计（含 total=0 分量兜底；无 usage/他日均不计）')
+  assert.equal(ht.peak, 435, '峰值小时=15 点桶（14 点桶 100 更小）')
+  assert.equal(ht.today, 100 + 300 + 120 + 15, '今日合计（昨日 999 不计）')
+  assert.equal(teamHourTokens([], now).cur, 0, '空板零消耗')
+  assert.equal(teamHourTokens(null, now).peak, 0, 'null 防御')
+  // 今日完成：resolvedAt 过今日零点（与仪表盘 computeStats.todayDone 同口径）；脏项/未完成不计
+  const td = [
+    { resolvedAt: isoOf(2026, 11, 19, 0) },
+    { resolvedAt: isoOf(2026, 11, 19, 23) },
+    { resolvedAt: isoOf(2026, 11, 18, 23) },
+    { resolvedAt: null },
+    null,
+  ]
+  assert.equal(teamTodayDone(td, now), 2, '今日完成=过了今日零点的 resolvedAt（与时钟时分无关）')
+  assert.equal(teamTodayDone(null, now), 0, 'null 防御')
+})
+
+test('㉜执行池四区·产物同步：client.js 已重组装且含三区全链标记（验收口径⑥）', () => {
+  for (const m of [
+    '模型健康', '最近完成', '资源水位', '⚠️已下架',
+    'function teamModelRows(workerModel, verifierModel, laneModels, fallbackModels, catModels)',
+    'function teamDoneFeed(tasks, n)', 'function teamHourTokens(tasks, now)', 'function teamTodayDone(tasks, now)',
+    'function refreshTeamHealth()', 'setInterval(refreshTeamHealth, 15000)', 'setMhData(d.modelHealth || null)',
+    '本小时 token 消耗', '今日完成任务', '未配置模型（板级 / 力度路由 / 备用链均为空',
+    // 保留面产物级复核（验收口径①②：成员卡细节与超时策略不得在产物里走样）
+    'function saveTimeout(cfgKey, v, min, max)', '超时策略:', '忙碌', 'modelSourceBadge(m.modelSource)',
+  ]) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺执行池四区标记：' + m + '（需 npm run build-client 重组装）')
+  }
+})

@@ -1508,12 +1508,57 @@
       }
       var ws = ps.workers || [], vs = ps.verifiers || []
       var _R2 = React; var _st = _R2.useState(''), editMsg = _st[0], setEditMsg = _st[1]
+      // ===== 执行池四区（task-mwndka2w，原型 prototype/ux-redesign.html 执行池）：成员卡与超时策略之外 =====
+      // 新增 模型健康 / 最近完成 / 资源水位 三区。数据面纪律：全部复用既有通道现算、零新增采集——
+      // ① 模型清单/水位/feed 读 state（laneModels / poolStatus / tasks 的 run 留账）；
+      // ② 健康四态与 effort/下架元数据走既有 RPC：get-tasks.modelHealth（挂载即取 + 15s 局部刷新，
+      //    与 ModelRoutePopover 同款「局部拉取、不改 kernel 全局 state」，epoch 丢迟到响应）+
+      //    list-models 目录（一次取；老宿主/枚举失败 → null：已下架不标、默认 effort 档关闭，不误报
+      //    ——OrderedModelsEditor 的 inCat 同口径）。
+      var _tvh = _R2.useState(null), mhData = _tvh[0], setMhData = _tvh[1]
+      var _tvc = _R2.useState(null), catModels = _tvc[0], setCatModels = _tvc[1]
+      var mhEpoch = _R2.useRef(0)
+      function refreshTeamHealth() {
+        var epoch = mhEpoch.current, args = state.tasksHash ? { ifHash: state.tasksHash } : {}
+        return rpc('get-tasks', args).then(function (d) {
+          if (!d || d.error || epoch !== mhEpoch.current) return d
+          setMhData(d.modelHealth || null)
+          return d
+        }).catch(function () { return null })
+      }
+      _R2.useEffect(function () { refreshTeamHealth(); var timer = setInterval(refreshTeamHealth, 15000); return function () { clearInterval(timer); mhEpoch.current++ } }, [])
+      _R2.useEffect(function () {
+        var cancelled = false
+        rpc('list-models').then(function (r) { if (!cancelled && r && r.ok && Array.isArray(r.models) && r.models.length) setCatModels(r.models) }).catch(function () {})
+        return function () { cancelled = true }
+      }, [])
       function saveTimeout(cfgKey, v, min, max) {
         var n = parseInt(v, 10)
         if (isNaN(n) || n < min || n > max) { setEditMsg('范围 ' + min + '~' + max + ' 分钟'); setTimeout(function () { setEditMsg('') }, 2500); return }
         rpc('set-board-config', { key: cfgKey, value: n }).then(function () { setEditMsg('✅ 已保存'); setTimeout(function () { setEditMsg('') }, 2000); fetchTasks() }).catch(function () { setEditMsg('⚠️ 保存失败'); setTimeout(function () { setEditMsg('') }, 2500) })
       }
       var tIn = { width: 44, padding: '1px 3px', fontSize: 10, textAlign: 'center', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text }
+      // ===== 三区现算数据（纯函数助手定义在本组件之后，函数声明提升跨用）=====
+      var tmr = teamModelRows(state.workerModel, state.verifierModel, state.laneModels, state.fallbackModels, catModels)
+      var feed = teamDoneFeed(state.tasks, 6)
+      var hourTok = teamHourTokens(state.tasks, new Date())
+      var todayN = teamTodayDone(state.tasks, new Date())
+      var wBusyN = (ps.workers || []).filter(function (m) { return m && m.busy }).length
+      var vBusyN = (ps.verifiers || []).filter(function (m) { return m && m.busy }).length
+      var wCap = state.maxWorkers || 3, vCap = state.maxVerifiers || 2
+      function pctOf(v, max) { var x = Number(v) || 0; if (!(max > 0)) return 0; var p = Math.round(x / max * 100); return x > 0 ? Math.max(2, p) : 0 }
+      function waterRow(label, valText, pct, tip, color) {
+        return React.createElement('div', { style: { marginBottom: 8 } },
+          React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: 10, color: C.text2, marginBottom: 3 }, title: tip },
+            React.createElement('span', null, label),
+            React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, valText)),
+          React.createElement('div', { style: { height: 8, background: C.nested, borderRadius: 4, overflow: 'hidden' } },
+            React.createElement('div', { style: { height: '100%', width: pct + '%', background: color || C.brand, borderRadius: 4, transition: 'width .3s' } })))
+      }
+      var zoneBox = { flex: '1 1 230px', minWidth: 230, padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 8 }
+      function zoneHead(icon, text, tip) {
+        return React.createElement('div', { title: tip, style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 4 } }, ic(icon, 11), text)
+      }
       return React.createElement('div', null,
         React.createElement('div', { style: { marginBottom: 10, padding: '6px 8px', background: C.card, border: '1px solid ' + C.border, borderRadius: 6, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 10, color: C.text2 } },
           ic('activity', 11),
@@ -1529,5 +1574,149 @@
         React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('zap', 12), 'Worker 池 (' + ws.length + ')'),
         ws.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2, marginBottom: 10 } }, '暂无 Worker（有待办任务时自动扩容）') : React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 } }, ws.map(function (m) { return memberCard(m, 'worker') })),
         React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 } }, ic('clipboard-check', 12), 'Verifier 池 (' + vs.length + ')'),
-        vs.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无 Verifier（有验证中任务时自动扩容）') : React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } }, vs.map(function (m) { return memberCard(m, 'verifier') })))
+        vs.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无 Verifier（有验证中任务时自动扩容）') : React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } }, vs.map(function (m) { return memberCard(m, 'verifier') })),
+        // ===== 执行池四区 · 新增三区（task-mwndka2w）：模型健康 / 最近完成 / 资源水位 =====
+        React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 } },
+          // ② 模型健康：本板已配置模型（板级 ∪ 力度路由六槽 ∪ 备用链，与 host 侧 configuredModelIds 同口径）
+          // 逐个健康态（ModelHealthDot 四态图标 + 状态标签）+ effort 档 + 目录外「已下架」标记。
+          React.createElement('div', { style: zoneBox },
+            zoneHead('activity', '模型健康 (' + tmr.order.length + ')', '本板已配置模型的健康态（get-tasks.modelHealth，15s 局部刷新）与 effort 档；「已下架」按 list-models 目录判定（目录不可用不标，不误报）'),
+            tmr.order.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '未配置模型（板级 / 力度路由 / 备用链均为空，可在「模型路由」弹层配置）') : tmr.order.map(function (mid) {
+              var h = (mhData && mhData[mid]) || null
+              var meta = (h && MODEL_HEALTH_META[h.state]) || MODEL_HEALTH_META.unknown
+              var retired = !!(tmr.inCat && !tmr.inCat[mid])
+              var eff = tmr.effConf[mid] || (tmr.defEff && tmr.defEff[mid]) || ''
+              return React.createElement('div', { key: mid, style: { display: 'flex', alignItems: 'center', gap: 5, padding: '5px 0', borderBottom: '1px solid ' + C.nested } },
+                React.createElement(ModelHealthDot, { model: mid, health: mhData }),
+                React.createElement('span', { title: mid, style: { flex: 1, minWidth: 0, fontSize: 10, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, mid),
+                React.createElement('span', { title: '思考等级 effort 档：' + (eff ? (tmr.effConf[mid] ? '档位槽显式配置「' + eff + '」' : '模型默认档「' + eff + '」（list-models defaultEffort）') : '未指定（走模型默认档）'), style: { fontSize: 9, color: C.text2, flexShrink: 0 } }, eff || '—'),
+                retired ? React.createElement('span', { title: '该模型已不在当前网关可用清单（list-models 目录无此 id）——可到「模型路由」弹层清理或替换', style: { fontSize: 9, color: C.err, fontWeight: 600, flexShrink: 0 } }, '⚠️已下架') : React.createElement('span', { title: (h && h.note) || '尚无健康信号', style: { fontSize: 9, color: meta.color, flexShrink: 0, cursor: 'help' } }, meta.label))
+            }),
+            mhData === null ? React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 6 } }, '健康信号读取中（get-tasks.modelHealth）…') : null,
+            catModels === null ? React.createElement('div', { style: { fontSize: 9, color: C.text2, marginTop: 3 } }, '模型目录不可用：已下架判定与默认 effort 档关闭') : null),
+          // ③ 最近完成：resolved 卡按 resolvedAt（兜底 verifiedAt）倒序 feed（带相对时间，点击进详情）。
+          React.createElement('div', { style: zoneBox },
+            zoneHead('check', '最近完成 (' + feed.length + ')', 'state.tasks 中 status=resolved 的卡按完成时间倒序取近 6 条（数据零新增采集）；点击条目进任务详情'),
+            feed.length === 0 ? React.createElement('div', { style: { fontSize: 10, color: C.text2 } }, '暂无已完成任务（Worker 提交验收、验收通过后出现在这里）') : feed.map(function (t) {
+              var doneAt = t.resolvedAt || t.verifiedAt
+              return React.createElement('div', { key: t.id, onClick: function () { state.detailId = t.id; state.view = 'board'; notify() }, title: (t.title || t.id) + '\n完成时间：' + healthTimeText(doneAt) + '（点击查看任务详情）', style: { display: 'flex', alignItems: 'center', gap: 4, padding: '5px 0', borderBottom: '1px solid ' + C.nested, cursor: 'pointer' } },
+                React.createElement('span', { style: { flex: 1, minWidth: 0, fontSize: 10, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, '✅ ' + (t.title || t.id)),
+                React.createElement('span', { style: { fontSize: 9, color: C.text2, flexShrink: 0 } }, '· ' + ago(doneAt)))
+            })),
+          // ④ 资源水位：Worker/Verifier 并发水位条（poolStatus busy / 上限，与池状态条同口径）+
+          // 本小时 token 消耗（run 留账按 at 归桶现算，水位对照今日峰值小时）+ 今日完成数。
+          React.createElement('div', { style: zoneBox },
+            zoneHead('bar-chart-3', '资源水位', 'Worker/Verifier 并发（poolStatus busy / 上限）· 本小时 token 消耗（run 留账现算，对照今日峰值小时）· 今日完成数（resolvedAt 过今日零点，与仪表盘统计卡同口径）'),
+            waterRow('Worker 并发', wBusyN + ' / ' + wCap, pctOf(wBusyN, wCap), '在跑 Worker 数 / 并发上限（⚡ = 在跑）'),
+            waterRow('Verifier 并发', vBusyN + ' / ' + vCap, pctOf(vBusyN, vCap), '在跑 Verifier 数 / 并发上限（拆解官在跑也占 Verifier 并发位）'),
+            waterRow('本小时 token 消耗', hourTok.cur ? '~' + fmtTokens(hourTok.cur) : '暂无消耗', pctOf(hourTok.cur, hourTok.peak), '今日当前时钟小时（' + ('0' + new Date().getHours()).slice(-2) + ':00 起）run 留账 token 合计，总量口径（input+output+缓存读+缓存写，老 run 缺 total 时分量兜底）；今日峰值小时 ' + (hourTok.peak ? fmtTokens(hourTok.peak) : '—') + ' · 今日合计 ' + fmtTokens(hourTok.today), C.warn),
+            React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: 10, color: C.text2 } },
+              React.createElement('span', null, '今日完成任务'),
+              React.createElement('span', { style: { color: C.text, fontWeight: 600 } }, todayN + ' 张')))))
+    }
+
+    // ===== 执行池四区纯函数（task-mwndka2w）：三区数据面全部「入参显式现算、零存储零采集」，行为级可测 =====
+    // 模型清单：板级 ∪ 力度路由六槽 ∪ 备用链（与 host 侧 configuredModelIds 同口径去重保序）；
+    // 槽位两形态（string | {id,effort}，task-mwkbo9z6）→ 每模型 effort 档（首个非空显式档优先）；
+    // 目录（list-models）非空才建 inCat/defEff 索引——null/空目录不标下架、不猜默认档（OrderedModelsEditor 同口径）。
+    function teamModelRows(workerModel, verifierModel, laneModels, fallbackModels, catModels) {
+      var occ = []
+      function add(v) {
+        var s = '', eff = ''
+        if (typeof v === 'string') s = v.trim()
+        else if (v && typeof v === 'object' && !Array.isArray(v) && typeof v.id === 'string') { s = v.id.trim(); if (typeof v.effort === 'string' && v.effort.trim()) eff = v.effort.trim() }
+        if (s) occ.push({ id: s, eff: eff })
+      }
+      add(workerModel); add(verifierModel)
+      if (laneModels && typeof laneModels === 'object' && !Array.isArray(laneModels)) {
+        var lanes = ['light', 'standard', 'heavy']
+        for (var i = 0; i < lanes.length; i++) {
+          var lane = laneModels[lanes[i]] || {}
+          for (var role in lane) {
+            if (!Object.prototype.hasOwnProperty.call(lane, role)) continue
+            var arr = lane[role]
+            if (Array.isArray(arr)) for (var j = 0; j < arr.length; j++) add(arr[j])
+          }
+        }
+      }
+      if (Array.isArray(fallbackModels)) for (var f = 0; f < fallbackModels.length; f++) add(fallbackModels[f])
+      var order = [], effConf = {}
+      for (var k = 0; k < occ.length; k++) {
+        var o = occ[k]
+        if (!Object.prototype.hasOwnProperty.call(effConf, o.id)) { effConf[o.id] = o.eff; order.push(o.id) }
+        else if (!effConf[o.id] && o.eff) effConf[o.id] = o.eff
+      }
+      var inCat = null, defEff = null
+      if (catModels && catModels.length) {
+        inCat = {}; defEff = {}
+        for (var c = 0; c < catModels.length; c++) {
+          var cm = catModels[c]
+          if (cm && typeof cm.id === 'string' && cm.id) {
+            inCat[cm.id] = 1
+            if (typeof cm.defaultEffort === 'string' && cm.defaultEffort) defEff[cm.id] = cm.defaultEffort
+          }
+        }
+      }
+      return { order: order, effConf: effConf, inCat: inCat, defEff: defEff }
+    }
+    // 最近完成 feed：resolved 卡按 resolvedAt（兜底 verifiedAt）倒序取近 N 条（默认 6）；
+    // 点击进详情的交互在 TeamView 渲染层，本函数只管过滤排序切片。
+    function teamDoneFeed(tasks, n) {
+      var take = Number(n) > 0 ? Math.floor(Number(n)) : 6
+      var list = Array.isArray(tasks) ? tasks : []
+      var out = []
+      for (var i = 0; i < list.length; i++) {
+        var t = list[i]
+        if (!t || t.status !== 'resolved' || !(t.resolvedAt || t.verifiedAt)) continue
+        out.push(t)
+      }
+      out.sort(function (a, b) { return String(b.resolvedAt || b.verifiedAt || '').localeCompare(String(a.resolvedAt || a.verifiedAt || '')) })
+      return out.slice(0, take)
+    }
+    // 本小时 token 消耗（资源水位）：任务 run 留账（t.runs[].at + usage，总量口径、老 run 缺 total 时
+    // 分量兜底求和）按今天的小时桶归集——cur=当前时钟小时，peak=今日峰值小时（水位条分母），
+    // today=今日合计；非今日/无法解析/无 usage 的 run 一律不计（不伪造 0）。
+    function teamHourTokens(tasks, now) {
+      var n = (now instanceof Date) ? now : new Date()
+      var buckets = {}, total = 0
+      var list = Array.isArray(tasks) ? tasks : []
+      for (var i = 0; i < list.length; i++) {
+        var t = list[i]
+        if (!t || !Array.isArray(t.runs)) continue
+        for (var j = 0; j < t.runs.length; j++) {
+          var r = t.runs[j]
+          if (!r || !r.at) continue
+          var at = new Date(r.at)
+          if (isNaN(at.getTime())) continue
+          if (at.getFullYear() !== n.getFullYear() || at.getMonth() !== n.getMonth() || at.getDate() !== n.getDate()) continue
+          var u = (r.usage && typeof r.usage === 'object') ? r.usage : null
+          var tok = 0
+          if (u) {
+            tok = Number(u.total) || 0
+            if (!tok) tok = (Number(u.input) || 0) + (Number(u.output) || 0) + (Number(u.cacheRead) || 0) + (Number(u.cacheWrite) || 0)
+          }
+          if (!tok) continue
+          var hk = at.getHours()
+          buckets[hk] = (buckets[hk] || 0) + tok
+          total += tok
+        }
+      }
+      var cur = buckets[n.getHours()] || 0, peak = 0
+      for (var k in buckets) if (Object.prototype.hasOwnProperty.call(buckets, k) && buckets[k] > peak) peak = buckets[k]
+      return { cur: cur, peak: peak, today: total }
+    }
+    // 今日完成数（资源水位）：resolvedAt 过了今天本地零点的任务数（与仪表盘 computeStats 的
+    // todayDone 同口径：只认 resolvedAt、不筛 status——驳回重投的卡 resolvedAt 已被置空，天然不计）。
+    function teamTodayDone(tasks, now) {
+      var n = (now instanceof Date) ? now : new Date()
+      var start = new Date(n.getFullYear(), n.getMonth(), n.getDate())
+      var list = Array.isArray(tasks) ? tasks : []
+      var cnt = 0
+      for (var i = 0; i < list.length; i++) {
+        var t = list[i]
+        if (!t || !t.resolvedAt) continue
+        var d = new Date(t.resolvedAt)
+        if (!isNaN(d.getTime()) && d >= start) cnt++
+      }
+      return cnt
     }
