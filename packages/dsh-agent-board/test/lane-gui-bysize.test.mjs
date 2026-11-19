@@ -1159,3 +1159,82 @@ test('㉒UX1-产物同步：client.js 含字号 token 与卡片化标记（需 n
     assert.ok(built.indexOf(m) >= 0, 'client.js 缺阶段1标记：' + m + '（需 npm run build-client 重组装）')
   }
 })
+
+// ===== ㉓/㉔ 方案 F：会话标题栏常驻看板状态条（BoardStatusBar，task-mwndjbb8）=====
+// 口径（原型 prototype/ux-redesign.html 方案 F）：常驻显示 ⚡在跑/📋待办/🔍验收/⚠歧义(红)/⛔阻塞(黄)
+// 五计数（仅显非零段）；有歧义变红、有阻塞变黄（歧义优先红）；点状态条=展开完整看板（与按钮同效
+// toggle）；五计数全零淡化为静态「📋 看板」入口；数据源复用 state.tasks（零新增采集）；per-session
+// 一对一不变（isRootStable 同口径：子代理会话不显示）；按钮本体/行为零改动 + 零新增 slots.inject
+// （core.test vm 沙箱锁 injects:2/disposers:9，状态条必须挂既有注册内）。
+// 组件域切片：BoardStatusBar() → ViewTab()
+const iBsb = ksrc.indexOf('function BoardStatusBar(props)')
+const iBsbEnd = ksrc.indexOf('function ViewTab()')
+const bsbBody = ksrc.slice(iBsb, iBsbEnd)
+
+test('㉓方案F状态条·源码：组件在位（按钮旁）+ 五计数段 + 红黄变色 + 点击同效 toggle + 无活跃静态入口 + 零新增 inject', () => {
+  // ① 组件在位：定义在 BoardButton 之后、ViewTab 之前（按钮旁的骨架区），纯函数 helper 同域
+  assert.ok(iBsb > ksrc.indexOf('function BoardButton(props)'), 'BoardStatusBar 须定义在 BoardButton 之后')
+  assert.ok(iBsbEnd > iBsb, 'BoardStatusBar 须定义在 ViewTab 之前（标题栏骨架域）')
+  assert.ok(ksrc.indexOf('function boardStatusCounts(tasks)') >= 0, '缺 boardStatusCounts 纯函数')
+  // ② 五计数段：在跑/待办/验收/歧义/阻塞（仅显非零段，段定义在组件体内）
+  for (const seg of ["icon: 'zap', n: cnt.run, label: '在跑'", "icon: 'clipboard-list', n: cnt.pend, label: '待办'", "icon: 'search', n: cnt.verify, label: '验收'", "icon: 'alert-triangle', n: esc, label: '歧义'", "icon: 'ban', n: blk, label: '阻塞'"]) {
+    assert.ok(bsbBody.indexOf(seg) >= 0, '状态条缺计数段：' + seg)
+  }
+  assert.ok(ksrc.indexOf("'search': [") >= 0 && ksrc.indexOf('m21 21-4.3-4.3') >= 0, '缺 Lucide search 图标（验收段）')
+  // ③ 变色口径：歧义红（C.err）优先于阻塞黄（C.warn）；红/黄均上描边（border 用 alertColor）
+  assert.match(bsbBody, /var alertColor = esc > 0 \? C\.err : \(blk > 0 \? C\.warn : null\)/, '缺红黄变色判定（歧义红优先）')
+  assert.match(bsbBody, /border: '1px solid ' \+ \(alertColor \|\| C\.border\)/, '变色未上状态条描边')
+  assert.match(bsbBody, /color-mix\(in srgb, ' \+ alertColor \+ ' 10%, transparent\)/, '变色未上淡底衬')
+  assert.match(bsbBody, /color: C\.err, tip: '待主窗口裁决', bold: true/, '歧义段未用红色加粗')
+  assert.match(bsbBody, /color: C\.warn, tip: '任务阻塞待处理', bold: true/, '阻塞段未用黄色加粗')
+  // ④ 点状态条=展开/收起完整看板（与「智能看板」按钮同效 toggle；静态入口从收起态点开）
+  assert.match(bsbBody, /onClick: function \(\) \{ state\.open = !state\.open; notify\(\) \}/, '状态条缺与按钮同效的 toggle')
+  assert.ok(bsbBody.indexOf("'看板状态：'") >= 0 && bsbBody.indexOf('点击展开完整看板') >= 0, '状态条缺汇总 title（看板状态：…——点击展开完整看板）')
+  // ⑤ 无活跃淡化为静态「📋 看板」入口：五计数全零判定 + 淡化 + 点击同效 toggle
+  assert.match(bsbBody, /var active = cnt\.run \+ cnt\.pend \+ cnt\.verify \+ cnt\.esc \+ cnt\.block > 0/, '缺无活跃判定（五计数求和）')
+  assert.ok(bsbBody.indexOf("title: '看板（当前无活跃任务）——点击展开'") >= 0, '缺静态入口 title')
+  assert.ok(bsbBody.indexOf('opacity: 0.7') >= 0, '静态入口未淡化（opacity 0.7）')
+  assert.equal((bsbBody.match(/onClick: function \(\) \{ state\.open = !state\.open; notify\(\) \}/g) || []).length, 2, '两分支点击都须与按钮同效 toggle（活跃条 + 静态入口）')
+  // ⑥ 数据源零新增采集 + per-session：复用 state.tasks 订阅（listeners），体内无 rpc；isRoot 同口径
+  assert.ok(bsbBody.indexOf('setCnt(boardStatusCounts(state.tasks))') >= 0, '数据源未复用 state.tasks')
+  assert.equal(bsbBody.indexOf('rpc('), -1, '状态条体内不得新增 RPC 采集')
+  assert.match(bsbBody, /listeners\.push\(update\); update\(\);/, '状态条缺 listeners 订阅（notify 驱动实时刷新）')
+  assert.match(bsbBody, /setIsRoot\(state\.isRootStable\)/, '缺 isRootStable 订阅（子代理会话不显示，与按钮同口径）')
+  assert.ok(bsbBody.indexOf('if (!isRoot) return null') >= 0, '缺子代理会话不渲染闸口')
+  // ⑦ 挂接与边界：挂既有 header.actions 注册（span 内与按钮并列）；BoardButton 本体零改动；零新增 inject
+  assert.ok(ksrc.indexOf("React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } }, React.createElement(BoardButton, props), React.createElement(BoardStatusBar, props))") >= 0, '状态条未挂既有注册（按钮旁并列 span）')
+  assert.ok(ksrc.indexOf("title: '智能看板' + (pendingCount > 0 ? '（' + pendingCount + ' 待办）' : '')") >= 0, 'BoardButton 本体被误改（既有行为红线）')
+  assert.equal((ksrc.match(/slots\.inject\(/g) || []).length, 2, '不得新增 slots.inject（vm 沙箱锁 injects:2/disposers:9）')
+  assert.equal((ksrc.match(/ctx\.effect\(/g) || []).length, 1, '不得新增裸 ctx.effect（regEffect 计数闸）')
+})
+
+test('㉔方案F boardStatusCounts 行为级：五计数归位/歧义跨状态计数/脏项防御/空板归零 + 产物同步', () => {
+  // 抽真函数跑（与 ②b cfgKnobsChanged / ⑱b rebuildEffItems 同手法）
+  const fnM = ksrc.match(/function boardStatusCounts\(tasks\) \{[\s\S]*?\n    \}/)
+  assert.ok(fnM, '缺 boardStatusCounts 函数体（源码提取失败）')
+  const boardStatusCounts = new Function(fnM[0] + '\nreturn boardStatusCounts')()
+  // 空板/无任务：五计数全零（无活跃 → 静态入口口径）
+  assert.deepEqual(boardStatusCounts([]), { run: 0, pend: 0, verify: 0, esc: 0, block: 0 }, '空板五计数应全零')
+  assert.deepEqual(boardStatusCounts(null), { run: 0, pend: 0, verify: 0, esc: 0, block: 0 }, 'null 防御不炸')
+  assert.deepEqual(boardStatusCounts([{ status: 'draft' }, { status: 'resolved' }, { status: 'cancelled' }, { status: 'archived' }]), { run: 0, pend: 0, verify: 0, esc: 0, block: 0 }, '草稿/已完成/已取消/已归档不计入五计数')
+  // 五计数归位：2 在跑 + 3 待办 + 1 验收 + 1 阻塞
+  const mk = (over) => Object.assign({ id: 'x', status: 'pending' }, over || {})
+  const counts = boardStatusCounts([
+    mk({ status: 'in-progress' }), mk({ status: 'in-progress' }),
+    mk({ status: 'pending' }), mk({ status: 'pending' }), mk({ status: 'pending' }),
+    mk({ status: 'verifying' }), mk({ status: 'blocked' }),
+  ])
+  assert.deepEqual(counts, { run: 2, pend: 3, verify: 1, esc: 0, block: 1 }, '五计数逐项归位')
+  // 歧义跨状态计数（与按钮 esc 徽章同口径：t.escalation 与 status 无关，resolved 卡上的歧义照计）
+  assert.equal(boardStatusCounts([mk({ status: 'resolved', escalation: { question: 'q' } })]).esc, 1, 'resolved 卡上的歧义仍计数（与按钮徽章同口径）')
+  assert.equal(boardStatusCounts([mk({ escalation: { question: 'q' } }), mk({ escalation: 1 })]).esc, 2, '多歧义累加')
+  // 歧义+阻塞并存：计数各自独立（红黄优先级在渲染层 alertColor，数据层不合并）
+  const both = boardStatusCounts([mk({ status: 'blocked', escalation: { question: 'q' } })])
+  assert.deepEqual(both, { run: 0, pend: 0, verify: 0, esc: 1, block: 1 }, '歧义与阻塞并存时两计数独立')
+  // 脏项防御：null 项/无 status 项不炸不误计
+  assert.deepEqual(boardStatusCounts([null, {}, mk({ status: 'pending' })]), { run: 0, pend: 1, verify: 0, esc: 0, block: 0 }, 'null/缺 status 脏项防御')
+  // 产物同步：client.js 重组装后含状态条全链标记（npm run build-client）
+  for (const m of ['function BoardStatusBar(props)', 'function boardStatusCounts(tasks)', 'React.createElement(BoardStatusBar, props)', "'search': [", "title: '看板（当前无活跃任务）——点击展开'", 'var alertColor = esc > 0 ? C.err : (blk > 0 ? C.warn : null)', "icon: 'ban', n: blk, label: '阻塞'"]) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺方案F状态条标记：' + m + '（需 npm run build-client 重组装）')
+  }
+})

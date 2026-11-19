@@ -14,7 +14,7 @@ function apply(ctx) {
 // ============================================================================
 // kernel —— 底座域：渲染原语（ic/icText/ActorLink）· RPC 封装（rpc + fetchTasks 轮询族）
 //   · 共享状态（state/listeners/notify）· 图标（ICONS）· 共享任务工具（筛选/依赖/管线/耗时）
-//   · 面板骨架入口（BoardButton / ViewTab / TopPanel / slots.inject）
+//   · 面板骨架入口（BoardButton / BoardStatusBar（方案F常驻状态条）/ ViewTab / TopPanel / slots.inject）
 // 本文件是 apply(ctx) 函数体片段，不可独立运行；由 scripts/build-client.cjs 按序拼接生成 lib/client.js。
 // ============================================================================
 
@@ -82,6 +82,11 @@ function apply(ctx) {
       ],
       'zap': [
         ['polygon', { points: '13 2 3 14 12 14 11 22 21 10 12 10 13 2' }]
+      ],
+      // 方案 F 状态条「验收」段图标（task-mwndjbb8）：Lucide search，口径同 icon-style-guide（线性/currentColor）
+      'search': [
+        ['circle', { cx: 11, cy: 11, r: 8 }],
+        ['path', { d: 'm21 21-4.3-4.3' }]
       ],
       'check': [
         ['path', { d: 'M20 6 9 17l-5-5' }]
@@ -670,6 +675,49 @@ function apply(ctx) {
       return React.createElement('button', { onClick: function () { state.open = !state.open; notify() }, title: '智能看板' + (pendingCount > 0 ? '（' + pendingCount + ' 待办）' : '') + (escCount > 0 ? '（' + escCount + ' 待裁决）' : ''), style: { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', border: '1px solid ' + (escCount > 0 ? C.err : C.border), borderRadius: 6, background: isOpen ? C.nested : 'transparent', color: C.text, cursor: 'pointer', fontSize: 12 } }, React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center' } }, ic('clipboard-list', 14)), React.createElement('span', null, '智能看板'), escCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.err, color: C_INV, fontSize: C.fsAux, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 1, animation: 'tskb-pulse 1s ease-in-out infinite' }, title: escCount + ' 个任务待裁决' }, ic('alert-triangle', 10), escCount) : null, pendingCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.brand, color: C_INV, fontSize: C.fsAux, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' } }, String(pendingCount)) : null)
     }
 
+    // ===== 方案 F：会话标题栏常驻看板状态条（BoardStatusBar，task-mwndjbb8）=====
+    // 状态常驻：不点开看板就知道「有没有事、什么事」（原型 prototype/ux-redesign.html 方案 F）。
+    //   ⚡ 在跑数 / 📋 待办数 / 🔍 验收数 / ⚠️ 歧义数（红）/ ⛔ 阻塞数（黄），仅显非零段。
+    // 数据源复用 state.tasks（get-tasks 3s 轮询已有全量，零新增采集）；per-session 一对一不变
+    // （state.tasks 随会话切换由 BoardButton 的 sessionId effect 重置，状态条跟着切）。
+    // 点状态条 = 展开/收起完整看板（与「智能看板」按钮同效 toggle，按钮本体与行为零改动）。
+    // 有歧义变红、有阻塞变黄（歧义优先红——待裁决比阻塞更需要主窗口注意力，与按钮 esc 徽章同 C.err）；
+    // 五计数全零（无活跃）时淡化为静态「📋 看板」入口，不占注意力（仍可点开）。
+    function boardStatusCounts(tasks) {
+      var n = 0, p = 0, v = 0, e = 0, b = 0
+      for (var i = 0; i < (tasks || []).length; i++) {
+        var t = tasks[i] || {}
+        if (t.status === 'in-progress') n++
+        else if (t.status === 'pending') p++
+        else if (t.status === 'verifying') v++
+        else if (t.status === 'blocked') b++
+        if (t.escalation) e++
+      }
+      return { run: n, pend: p, verify: v, esc: e, block: b }
+    }
+    function BoardStatusBar(props) {
+      var _R = React; var useState = _R.useState, useEffect = _R.useEffect
+      var _a = useState(boardStatusCounts(state.tasks)), cnt = _a[0], setCnt = _a[1]; var _b = useState(state.open), isOpen = _b[0], setIsOpen = _b[1]; var _c = useState(state.isRootStable), isRoot = _c[0], setIsRoot = _c[1]
+      useEffect(function () { function update() { setCnt(boardStatusCounts(state.tasks)); setIsOpen(state.open); setIsRoot(state.isRootStable) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
+      if (!isRoot) return null // 子代理会话不显示看板状态条（与按钮同口径，读 isRootStable 防抖态）
+      var active = cnt.run + cnt.pend + cnt.verify + cnt.esc + cnt.block > 0
+      if (!active) { // 无活跃：淡化为静态「📋 看板」入口（不占注意力；点击与按钮同效 toggle）
+        return React.createElement('button', { onClick: function () { state.open = !state.open; notify() }, title: '看板（当前无活跃任务）——点击展开', style: { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', border: '1px solid ' + C.border, borderRadius: 6, background: isOpen ? C.nested : 'transparent', color: C.text2, cursor: 'pointer', fontSize: C.fsSub, opacity: 0.7 } }, React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center' } }, ic('clipboard-list', 14)), React.createElement('span', null, '看板'))
+      }
+      var esc = cnt.esc, blk = cnt.block
+      var alertColor = esc > 0 ? C.err : (blk > 0 ? C.warn : null) // 歧义红优先于阻塞黄（同色均不打扰：仅描边+淡底，不整条脉动）
+      var segs = []
+      if (cnt.run > 0) segs.push({ icon: 'zap', n: cnt.run, label: '在跑', color: C.text, tip: 'Worker 子代理正在执行' })
+      if (cnt.pend > 0) segs.push({ icon: 'clipboard-list', n: cnt.pend, label: '待办', color: C.text2, tip: '已发布待派发' })
+      if (cnt.verify > 0) segs.push({ icon: 'search', n: cnt.verify, label: '验收', color: C.text, tip: 'Verifier 独立验收中' })
+      if (esc > 0) segs.push({ icon: 'alert-triangle', n: esc, label: '歧义', color: C.err, tip: '待主窗口裁决', bold: true })
+      if (blk > 0) segs.push({ icon: 'ban', n: blk, label: '阻塞', color: C.warn, tip: '任务阻塞待处理', bold: true })
+      var tip = '看板状态：' + segs.map(function (s) { return s.n + ' ' + s.label }).join(' / ') + '——点击展开完整看板'
+      return React.createElement('button', { onClick: function () { state.open = !state.open; notify() }, title: tip, style: { display: 'inline-flex', alignItems: 'center', gap: 7, padding: '3px 10px', border: '1px solid ' + (alertColor || C.border), borderRadius: 6, background: isOpen ? C.nested : (alertColor ? 'color-mix(in srgb, ' + alertColor + ' 10%, transparent)' : 'transparent'), color: C.text, cursor: 'pointer', fontSize: C.fsSub } }, segs.map(function (s, i) {
+        return React.createElement('span', { key: i, title: s.n + ' ' + s.label + '：' + s.tip, style: { display: 'inline-flex', alignItems: 'center', gap: 2, color: s.color, fontWeight: s.bold ? 700 : 500, whiteSpace: 'nowrap' } }, ic(s.icon, 11), React.createElement('b', null, String(s.n)), React.createElement('span', null, s.label))
+      }))
+    }
+
     function ViewTab() { var btnBase = { fontSize: C.fsSub, padding: '4px 12px', border: 'none', cursor: 'pointer', fontWeight: 500, borderRadius: 5, transition: 'all .15s' }; function goArch() { state.view = 'archive'; notify(); fetchArchived() } return React.createElement('div', { style: { display: 'inline-flex', borderRadius: 6, border: '1px solid ' + C.border, overflow: 'hidden', background: C.card } }, React.createElement('button', { onClick: function () { state.view = 'board'; notify() }, style: Object.assign({}, btnBase, state.view === 'board' ? { background: C.brand, color: C_INV } : { background: 'transparent', color: C.text2 }) }, React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } }, ic('clipboard-list', 12), '看板')), React.createElement('button', { onClick: function () { state.view = 'team'; notify() }, title: 'Worker / Verifier 执行池（一次性子代理，随任务结算销毁）', style: Object.assign({}, btnBase, state.view === 'team' ? { background: C.brand, color: C_INV } : { background: 'transparent', color: C.text2 }) }, icText('users', 12, '执行池')), React.createElement('button', { onClick: function () { state.view = 'dashboard'; notify() }, style: Object.assign({}, btnBase, state.view === 'dashboard' ? { background: C.brand, color: C_INV } : { background: 'transparent', color: C.text2 }) }, icText('bar-chart-3', 12, '仪表盘')), React.createElement('button', { onClick: goArch, title: '已归档任务（可检索、可恢复）', style: Object.assign({}, btnBase, state.view === 'archive' ? { background: C.brand, color: C_INV } : { background: 'transparent', color: C.text2 }) }, icText('archive', 12, '归档'))) }
 
     function TopPanel() {
@@ -738,7 +786,9 @@ function apply(ctx) {
         createOpen ? React.createElement(CreateTaskForm, null) : null)
     }
 
-    __tskbTrack(slots.inject('conversation.session.header.actions', function () { return slots.register({ name: 'conversation.session.header.actions', id: 'task-board-btn', label: '任务看板', order: 30 }, function (props) { return React.createElement(BoardButton, props) }) }))
+    // 方案 F（task-mwndjbb8）：按钮旁并列常驻状态条——复用既有注册（不新增 slots.inject，vm 沙箱
+    // 断言锁 injects:2/disposers:9），span 容器内 BoardButton（行为零改动）+ BoardStatusBar 并排。
+    __tskbTrack(slots.inject('conversation.session.header.actions', function () { return slots.register({ name: 'conversation.session.header.actions', id: 'task-board-btn', label: '任务看板', order: 30 }, function (props) { return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } }, React.createElement(BoardButton, props), React.createElement(BoardStatusBar, props)) }) }))
     __tskbTrack(slots.inject('shell.overlay', function () { return slots.register({ name: 'shell.overlay', id: 'task-board-top-panel' }, function () { return React.createElement(TopPanel) }) }))
 
 // ============================================================================
