@@ -1095,10 +1095,11 @@ const archRegion = blsrc.slice(blsrc.indexOf('function ArchiveView()'), blsrc.in
 
 test('⑲UX1-字号阶梯：C 对象 token 13/12/11 + 各域引用 token（呈现域写死 9/10/11 归零）', () => {
   assert.match(ksrc, /fsBody: 13, fsSub: 12, fsAux: 11/, 'kernel C 对象缺字号阶梯 token（正文13/次要12/辅助11）')
-  // kernel 域引用：ViewTab 视图切换 + 顶栏错误条 + 徽标
+  // kernel 域引用：ViewTab 视图切换 + 顶栏错误条 + 入口状态条（合并入口后状态条即唯一入口）
   assert.match(ksrc, /fontSize: C\.fsSub, padding: '4px 12px'/, 'ViewTab 未引用 fsSub token')
   assert.ok(ksrc.indexOf('fontSize: C.fsSub, color: C.err') >= 0, '顶栏读错误条未引用 fsSub token')
-  assert.ok(ksrc.indexOf('fontSize: C.fsAux, fontWeight: 600') >= 0, '入口计数徽标未引用 fsAux token')
+  assert.ok(ksrc.indexOf("cursor: 'pointer', fontSize: C.fsSub }") >= 0, '入口状态条（活跃）未引用 fsSub token')
+  assert.ok(ksrc.indexOf("cursor: 'pointer', fontSize: C.fsSub, opacity: 0.7 }") >= 0, '入口状态条（全零静态）未引用 fsSub token')
   // 仪表盘呈现域：token 引用成规模 + 写死 9/10/11 归零（8px 图表微标签豁免）
   assert.ok((dashRegion.match(/fontSize: C\.fsSub/g) || []).length >= 60, '仪表盘呈现域 fsSub 引用应覆盖正文/次要文字（≥60 处）')
   assert.ok((dashRegion.match(/fontSize: C\.fsAux/g) || []).length >= 20, '仪表盘呈现域 fsAux 引用应覆盖辅助文字（≥20 处）')
@@ -1163,22 +1164,24 @@ test('㉒UX1-产物同步：client.js 含字号 token 与卡片化标记（需 n
   }
 })
 
-// ===== ㉓/㉔ 方案 F：会话标题栏常驻看板状态条（BoardStatusBar，task-mwndjbb8）=====
-// 口径（原型 prototype/ux-redesign.html 方案 F）：常驻显示 ⚡在跑/📋待办/🔍验收/⚠歧义(红)/⛔阻塞(黄)
-// 五计数（仅显非零段）；有歧义变红、有阻塞变黄（歧义优先红）；点状态条=展开完整看板（与按钮同效
-// toggle）；五计数全零淡化为静态「📋 看板」入口；数据源复用 state.tasks（零新增采集）；per-session
-// 一对一不变（isRootStable 同口径：子代理会话不显示）；按钮本体/行为零改动 + 零新增 slots.inject
+// ===== ㉓/㉔ 方案 F：会话标题栏常驻看板状态条（BoardStatusBar；task-mwndjbb8 落地，task-mwnn0m74 合并入口）=====
+// 口径（原型 prototype/ux-redesign.html 方案 F + 合并入口）：常驻显示 ⚡在跑/📋待办/🔍验收/⚠歧义(红)/⛔阻塞(黄)
+// 五计数（仅显非零段）；有歧义变红、有阻塞变黄（歧义优先红）；点状态条=展开完整看板——状态条是「智能看板」
+// 唯一入口（独立按钮已彻底移除：定义与渲染都不再存在），toggle 与按钮逐字同效；五计数全零淡化为静态
+// 「📋 看板」入口；数据源复用 state.tasks（零新增采集）；per-session 一对一不变（isRootStable 同口径：
+// 子代理会话不显示；会话切换重置 effect 随按钮迁入状态条，保 per-session 数据生命周期）+ 零新增 slots.inject
 // （core.test vm 沙箱锁 injects:2/disposers:9，状态条必须挂既有注册内）。
 // 组件域切片：BoardStatusBar() → ViewTab()
 const iBsb = ksrc.indexOf('function BoardStatusBar(props)')
 const iBsbEnd = ksrc.indexOf('function ViewTab()')
 const bsbBody = ksrc.slice(iBsb, iBsbEnd)
 
-test('㉓方案F状态条·源码：组件在位（按钮旁）+ 五计数段 + 红黄变色 + 点击同效 toggle + 无活跃静态入口 + 零新增 inject', () => {
-  // ① 组件在位：定义在 BoardButton 之后、ViewTab 之前（按钮旁的骨架区），纯函数 helper 同域
-  assert.ok(iBsb > ksrc.indexOf('function BoardButton(props)'), 'BoardStatusBar 须定义在 BoardButton 之后')
+test('㉓方案F状态条·源码：唯一入口在位（独立按钮已移除）+ 五计数段 + 红黄变色 + 点击同效 toggle + 无活跃静态入口 + 会话重置迁入 + 零新增 inject', () => {
+  // ① 组件在位：定义在 ViewTab 之前（标题栏骨架域），纯函数 helper 同域；独立按钮（BoardButton）彻底移除
+  assert.ok(iBsb > 0, '缺 BoardStatusBar 组件定义')
   assert.ok(iBsbEnd > iBsb, 'BoardStatusBar 须定义在 ViewTab 之前（标题栏骨架域）')
   assert.ok(ksrc.indexOf('function boardStatusCounts(tasks)') >= 0, '缺 boardStatusCounts 纯函数')
+  assert.equal(ksrc.indexOf('BoardButton'), -1, '独立看板按钮（BoardButton）残留：合并入口必须移除其定义与渲染')
   // ② 五计数段：在跑/待办/验收/歧义/阻塞（仅显非零段，段定义在组件体内）
   for (const seg of ["icon: 'zap', n: cnt.run, label: '在跑'", "icon: 'clipboard-list', n: cnt.pend, label: '待办'", "icon: 'search', n: cnt.verify, label: '验收'", "icon: 'alert-triangle', n: esc, label: '歧义'", "icon: 'ban', n: blk, label: '阻塞'"]) {
     assert.ok(bsbBody.indexOf(seg) >= 0, '状态条缺计数段：' + seg)
@@ -1204,9 +1207,17 @@ test('㉓方案F状态条·源码：组件在位（按钮旁）+ 五计数段 + 
   assert.match(bsbBody, /listeners\.push\(update\); update\(\);/, '状态条缺 listeners 订阅（notify 驱动实时刷新）')
   assert.match(bsbBody, /setIsRoot\(state\.isRootStable\)/, '缺 isRootStable 订阅（子代理会话不显示，与按钮同口径）')
   assert.ok(bsbBody.indexOf('if (!isRoot) return null') >= 0, '缺子代理会话不渲染闸口')
-  // ⑦ 挂接与边界：挂既有 header.actions 注册（span 内与按钮并列）；BoardButton 本体零改动；零新增 inject
-  assert.ok(ksrc.indexOf("React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } }, React.createElement(BoardButton, props), React.createElement(BoardStatusBar, props))") >= 0, '状态条未挂既有注册（按钮旁并列 span）')
-  assert.ok(ksrc.indexOf("title: '智能看板' + (pendingCount > 0 ? '（' + pendingCount + ' 待办）' : '')") >= 0, 'BoardButton 本体被误改（既有行为红线）')
+  // ⑥b 合并入口：原独立按钮的会话切换重置 effect 必须随按钮迁入状态条（否则切会话后状态条显示旧会话数据）
+  assert.match(bsbBody, /useEffect\(function \(\) \{ if \(props && props\.sessionId\)/, '缺会话切换重置 effect（合并入口后须由状态条自持）')
+  for (const m of ['state.sessionId = sid', 'reqEpoch++', 'state.tasks = []', 'state.children = []', 'state.activity = {}', 'state.detailId = null', 'state.isRootEverTrue = false', 'state.isRootStable = false', 'fetchTasks(); fetchChildren()']) {
+    assert.ok(bsbBody.indexOf(m) >= 0, '会话切换重置 effect 不完整，缺：' + m)
+  }
+  assert.equal((bsbBody.match(/useEffect\(function/g) || []).length, 2, '状态条须恰有 2 个 effect（会话重置 + listeners 订阅）')
+  // ⑦ 挂接与边界：状态条挂既有 header.actions 注册且为唯一渲染入口；独立按钮零残留；零新增 inject
+  const entryReg = ksrc.slice(ksrc.indexOf("id: 'task-board-btn'"), ksrc.indexOf("slots.inject('shell.overlay'"))
+  assert.ok(entryReg.indexOf('React.createElement(BoardStatusBar, props)') >= 0, '状态条未挂既有 header.actions 注册')
+  assert.equal((entryReg.match(/createElement\(BoardStatusBar, props\)/g) || []).length, 1, '状态条须为唯一渲染入口')
+  assert.equal(entryReg.indexOf('BoardButton'), -1, 'header.actions 注册内仍有独立按钮残留')
   assert.equal((ksrc.match(/slots\.inject\(/g) || []).length, 2, '不得新增 slots.inject（vm 沙箱锁 injects:2/disposers:9）')
   assert.equal((ksrc.match(/ctx\.effect\(/g) || []).length, 1, '不得新增裸 ctx.effect（regEffect 计数闸）')
 })
@@ -1240,6 +1251,8 @@ test('㉔方案F boardStatusCounts 行为级：五计数归位/歧义跨状态�
   for (const m of ['function BoardStatusBar(props)', 'function boardStatusCounts(tasks)', 'React.createElement(BoardStatusBar, props)', "'search': [", "title: '看板（当前无活跃任务）——点击展开'", 'var alertColor = esc > 0 ? C.err : (blk > 0 ? C.warn : null)', "icon: 'ban', n: blk, label: '阻塞'"]) {
     assert.ok(built.indexOf(m) >= 0, 'client.js 缺方案F状态条标记：' + m + '（需 npm run build-client 重组装）')
   }
+  // 产物同步（合并入口）：独立按钮定义/渲染在产物里同样不得残留
+  assert.equal(built.indexOf('BoardButton'), -1, 'client.js 产物残留独立看板按钮（需 npm run build-client 重组装）')
 })
 
 // ===== ㉕㉖㉗㉘ UX redesign 阶段2（task-mwndjspx）：详情页重构——核心信息四格卡 + 操作区 + 分区折叠 + 高级操作折叠 =====

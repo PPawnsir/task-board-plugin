@@ -14,7 +14,7 @@ function apply(ctx) {
 // ============================================================================
 // kernel —— 底座域：渲染原语（ic/icText/ActorLink）· RPC 封装（rpc + fetchTasks 轮询族）
 //   · 共享状态（state/listeners/notify）· 图标（ICONS）· 共享任务工具（筛选/依赖/管线/耗时）
-//   · 面板骨架入口（BoardButton / BoardStatusBar（方案F常驻状态条）/ ViewTab / TopPanel / slots.inject）
+//   · 面板骨架入口（BoardStatusBar（方案F常驻状态条，合并后的唯一入口）/ ViewTab / TopPanel / slots.inject）
 // 本文件是 apply(ctx) 函数体片段，不可独立运行；由 scripts/build-client.cjs 按序拼接生成 lib/client.js。
 // ============================================================================
 
@@ -348,7 +348,7 @@ function apply(ctx) {
     // （host 3s 心跳 ≈ 9s）才把 isRootStable 翻成 false——覆盖瞬态窗口，真正降级仍会收敛。
     // 为什么子代理会话不防抖：everTrue=false 的会话（新打开的子代理）立即 isRootStable=false，
     // 保护语义不削弱——子代理会话本就不该出现看板入口/抽屉，即时收起没有代价。
-    // 消费口径：强收（本函数）/按钮（BoardButton）/面板（TopPanel）/活动心跳省流（fetchActivity）
+    // 消费口径：强收（本函数）/状态条入口（BoardStatusBar）/面板（TopPanel）/活动心跳省流（fetchActivity）
     // 四处一律读 isRootStable，不读单次轮询的 state.isRoot 原始值。
     var IS_ROOT_FALSE_LIMIT = 3
     function applyIsRoot(rawIsRoot) {
@@ -666,21 +666,13 @@ function apply(ctx) {
 
     function ActorLink(props) { var id = props.id; if (!id || id === 'system' || id === 'unknown' || id === 'auto-dispatch') return React.createElement('span', { style: { color: C.text2 } }, id || '-'); return React.createElement('span', { onClick: function (e) { e.stopPropagation(); jumpTo(id) }, style: { color: C.brand, cursor: 'pointer', textDecoration: 'underline' }, title: '跳转到 ' + id }, shortId(id)) }
 
-    function BoardButton(props) {
-      var _R = React; var useState = _R.useState, useEffect = _R.useEffect
-      var _a = useState(0), pendingCount = _a[0], setPendingCount = _a[1]; var _b = useState(false), isOpen = _b[0], setIsOpen = _b[1]; var _c = useState(0), escCount = _c[0], setEscCount = _c[1]; var _d2 = useState(true), isRoot = _d2[0], setIsRoot = _d2[1]
-      useEffect(function () { if (props && props.sessionId) { var sid = String(props.sessionId); if (state.sessionId !== sid) { state.sessionId = sid; reqEpoch++; state.tasks = []; state.tasksHash = ''; state.children = []; state.activity = {}; state.archived = []; state.detailId = null; state.childStats = {}; state.tasksErr = ''; state.isRootEverTrue = false; state.isRootFalseN = 0; state.isRootStable = false; notify(); fetchTasks(); fetchChildren() } } }, [props && props.sessionId]) // 会话切换重置 isRoot 防抖态（everTrue/计数/stable 都按会话生命周期——旧会话的"曾确认 true"不得漂到新会话）；reset 后首轮 get-tasks 判定前按"未确认 root"保守隐藏，避免切进子代理会话时入口闪现
-      useEffect(function () { function update() { var n = 0, e = 0; for (var i = 0; i < state.tasks.length; i++) { if (state.tasks[i].status === 'pending') n++; if (state.tasks[i].escalation) e++ }; setPendingCount(n); setEscCount(e); setIsOpen(state.open); setIsRoot(state.isRootStable) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
-      if (!isRoot) return null // 子代理会话不显示看板入口（读 isRootStable：瞬态 false 不收，见 isRoot 蝶变防抖）
-      return React.createElement('button', { onClick: function () { state.open = !state.open; notify() }, title: '智能看板' + (pendingCount > 0 ? '（' + pendingCount + ' 待办）' : '') + (escCount > 0 ? '（' + escCount + ' 待裁决）' : ''), style: { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', border: '1px solid ' + (escCount > 0 ? C.err : C.border), borderRadius: 6, background: isOpen ? C.nested : 'transparent', color: C.text, cursor: 'pointer', fontSize: 12 } }, React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center' } }, ic('clipboard-list', 14)), React.createElement('span', null, '智能看板'), escCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.err, color: C_INV, fontSize: C.fsAux, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 1, animation: 'tskb-pulse 1s ease-in-out infinite' }, title: escCount + ' 个任务待裁决' }, ic('alert-triangle', 10), escCount) : null, pendingCount > 0 ? React.createElement('span', { style: { minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, background: C.brand, color: C_INV, fontSize: C.fsAux, fontWeight: 600, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' } }, String(pendingCount)) : null)
-    }
-
     // ===== 方案 F：会话标题栏常驻看板状态条（BoardStatusBar，task-mwndjbb8）=====
     // 状态常驻：不点开看板就知道「有没有事、什么事」（原型 prototype/ux-redesign.html 方案 F）。
     //   ⚡ 在跑数 / 📋 待办数 / 🔍 验收数 / ⚠️ 歧义数（红）/ ⛔ 阻塞数（黄），仅显非零段。
     // 数据源复用 state.tasks（get-tasks 3s 轮询已有全量，零新增采集）；per-session 一对一不变
-    // （state.tasks 随会话切换由 BoardButton 的 sessionId effect 重置，状态条跟着切）。
-    // 点状态条 = 展开/收起完整看板（与「智能看板」按钮同效 toggle，按钮本体与行为零改动）。
+    // （state.tasks 随会话切换由状态条自身的 sessionId effect 重置——合并入口后该 effect 随按钮迁入本组件）。
+    // 点状态条 = 展开/收起完整看板（task-mwnn0m74 合并入口：这就是「智能看板」的唯一入口，独立按钮已移除，
+    // toggle 行为与原按钮逐字同效：state.open 取反 + notify）。
     // 有歧义变红、有阻塞变黄（歧义优先红——待裁决比阻塞更需要主窗口注意力，与按钮 esc 徽章同 C.err）；
     // 五计数全零（无活跃）时淡化为静态「📋 看板」入口，不占注意力（仍可点开）。
     function boardStatusCounts(tasks) {
@@ -698,8 +690,12 @@ function apply(ctx) {
     function BoardStatusBar(props) {
       var _R = React; var useState = _R.useState, useEffect = _R.useEffect
       var _a = useState(boardStatusCounts(state.tasks)), cnt = _a[0], setCnt = _a[1]; var _b = useState(state.open), isOpen = _b[0], setIsOpen = _b[1]; var _c = useState(state.isRootStable), isRoot = _c[0], setIsRoot = _c[1]
+      // 合并入口（task-mwnn0m74）：原「智能看板」独立按钮的会话切换重置 effect 原样迁入——状态条是唯一入口，
+      // per-session 数据生命周期（tasks/children/activity/archived/detail + isRoot 防抖态）必须由它自己按
+      // props.sessionId 重置，否则切会话后状态条会显示旧会话数据。
+      useEffect(function () { if (props && props.sessionId) { var sid = String(props.sessionId); if (state.sessionId !== sid) { state.sessionId = sid; reqEpoch++; state.tasks = []; state.tasksHash = ''; state.children = []; state.activity = {}; state.archived = []; state.detailId = null; state.childStats = {}; state.tasksErr = ''; state.isRootEverTrue = false; state.isRootFalseN = 0; state.isRootStable = false; notify(); fetchTasks(); fetchChildren() } } }, [props && props.sessionId]) // 会话切换重置 isRoot 防抖态（everTrue/计数/stable 都按会话生命周期——旧会话的"曾确认 true"不得漂到新会话）；reset 后首轮 get-tasks 判定前按"未确认 root"保守隐藏，避免切进子代理会话时入口闪现
       useEffect(function () { function update() { setCnt(boardStatusCounts(state.tasks)); setIsOpen(state.open); setIsRoot(state.isRootStable) }; listeners.push(update); update(); return function () { var i = listeners.indexOf(update); if (i >= 0) listeners.splice(i, 1) } }, [])
-      if (!isRoot) return null // 子代理会话不显示看板状态条（与按钮同口径，读 isRootStable 防抖态）
+      if (!isRoot) return null // 子代理会话不显示看板入口（读 isRootStable：合并入口后状态条即入口，瞬态 false 不收，见 isRoot 蝶变防抖）
       var active = cnt.run + cnt.pend + cnt.verify + cnt.esc + cnt.block > 0
       if (!active) { // 无活跃：淡化为静态「📋 看板」入口（不占注意力；点击与按钮同效 toggle）
         return React.createElement('button', { onClick: function () { state.open = !state.open; notify() }, title: '看板（当前无活跃任务）——点击展开', style: { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', border: '1px solid ' + C.border, borderRadius: 6, background: isOpen ? C.nested : 'transparent', color: C.text2, cursor: 'pointer', fontSize: C.fsSub, opacity: 0.7 } }, React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center' } }, ic('clipboard-list', 14)), React.createElement('span', null, '看板'))
@@ -786,9 +782,9 @@ function apply(ctx) {
         createOpen ? React.createElement(CreateTaskForm, null) : null)
     }
 
-    // 方案 F（task-mwndjbb8）：按钮旁并列常驻状态条——复用既有注册（不新增 slots.inject，vm 沙箱
-    // 断言锁 injects:2/disposers:9），span 容器内 BoardButton（行为零改动）+ BoardStatusBar 并排。
-    __tskbTrack(slots.inject('conversation.session.header.actions', function () { return slots.register({ name: 'conversation.session.header.actions', id: 'task-board-btn', label: '任务看板', order: 30 }, function (props) { return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } }, React.createElement(BoardButton, props), React.createElement(BoardStatusBar, props)) }) }))
+    // 方案 F 合并入口（task-mwndjbb8 落地状态条，task-mwnn0m74 合并入口）：状态条即「智能看板」唯一入口，
+    // 独立的「智能看板」按钮已移除（不再渲染）；仍复用既有注册（不新增注入点，vm 沙箱断言锁注入/句柄计数）。
+    __tskbTrack(slots.inject('conversation.session.header.actions', function () { return slots.register({ name: 'conversation.session.header.actions', id: 'task-board-btn', label: '任务看板', order: 30 }, function (props) { return React.createElement(BoardStatusBar, props) }) }))
     __tskbTrack(slots.inject('shell.overlay', function () { return slots.register({ name: 'shell.overlay', id: 'task-board-top-panel' }, function () { return React.createElement(TopPanel) }) }))
 
 // ============================================================================
