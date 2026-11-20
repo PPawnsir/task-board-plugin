@@ -25,6 +25,9 @@ import { buildDecomposerPrompt, TEAM_SIZE_GUIDE, TEAM_PIPELINE_GUIDE, TEAM_SIZE_
 // no-root 刷屏根治（task-muuf0o7a）专项：会话层幻影板防线 + 派发层 root 闸门直调断言
 import { createSession, isFullSessionId } from '../lib/session.mjs'
 import { createDispatch } from '../lib/dispatch.mjs'
+// spawn 重试治理常量（task-mwogcv7r）：按层直引（与 policy 层同款导入面——本卡 touches 不含 index.mjs
+// 薄壳，新导出不新增 re-export），SPAWN_BACKOFF_MS/SPAWN_MAX_FAILS/spawnBackoffMs 纯函数断言用。
+import * as dispatchMod from '../lib/dispatch.mjs'
 import { createNotify } from '../lib/notify.mjs'
 // host 端源码拼接（Phase 2 模块化后：薄壳 index.mjs + lib/*.mjs 领域模块），供源码级接线断言
 // 拆分第 6 刀（task-mvt8c1yx-6）：角色结算搬入 lib/settle.mjs——拼接清单补入 settle.mjs（接线断言随源码重指）
@@ -4566,7 +4569,7 @@ test('可续跑 Worker③：workerContinuable=false → 逐字回退一次性路
   assert.equal(t.claimedBy, 'run-1')                       // 任务侧写回同旧口径
 })
 
-test('可续跑 Worker④：startContinuable 失败 → spawn 回 null，任务回 pending（不卡 spawn-pending）', async () => {
+test('可续跑 Worker④：startContinuable 失败 → spawn 回 null，任务回 pending + 失败治理落卡（不卡 spawn-pending）', async () => {
   const t = mkTask({ id: 'w5', title: '起不来的卡', status: 'pending' })
   const h = mkContinuableDispatch(mkBoard([t]), {}, {
     subagents: {
@@ -4581,8 +4584,170 @@ test('可续跑 Worker④：startContinuable 失败 → spawn 回 null，任务�
   assert.equal(t.claimedBy, null)
   assert.equal(t.claimedAt, null)
   assert.equal(h.runs['w5'], undefined)      // 无活跃 rec（失败不占并发位）
+  // 占位回收留痕（releaseSpawnPlaceholder 原语义不变，task-mwogcv7r 只在其后追加治理留痕）
+  assert.ok(t.history.some(hh => /spawn 失败，回收重新排队/.test(hh.note)), '占位回收历史留痕在位')
+  // spawn 重试治理（task-mwogcv7r）：计数 + 退避点 + 最后一条历史为治理留痕
   const last = t.history[t.history.length - 1]
-  assert.match(last.note, /spawn 失败，回收重新排队/)
+  assert.match(last.note, /spawn 失败 x1\/5（continuation unavailable），15s 后自动重试/)
+  assert.ok(t.spawnFails && t.spawnFails.worker && t.spawnFails.worker.count === 1, '连续失败计数 1')
+  assert.ok(new Date(t.spawnFails.worker.retryAt).getTime() > Date.now(), '退避点在未来')
+  const gap0 = new Date(t.spawnFails.worker.retryAt).getTime() - new Date(t.spawnFails.worker.lastAt).getTime()
+  assert.ok(gap0 > 13500 && gap0 < 16500, '首轮退避 ≈ 15s（指数退避起点）')
+  assert.ok((t.messages || []).some(m => m.kind === 'spawn-fail' && /continuation unavailable/.test(m.text)), '真实错误文本落卡（不再只打印 console）')
+  assert.match(t.lastError, /continuation unavailable/)
+  // 退避窗口内不重派（不再无限循环）：再跑一轮 cycle，失败计数不增、卡面无新留痕
+  const histBefore = t.history.length
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(t.spawnFails.worker.count, 1, '退避窗口内不重派（失败计数不增）')
+  assert.equal(t.history.length, histBefore, '卡面无新留痕（spawn 未被重试）')
+  assert.equal(t.status, 'pending', '退避中维持 pending（不卡 spawn-pending）')
+})
+
+// ===== spawn 诊断与重试治理（task-mwogcv7r）：错误详情落卡 + 指数退避 + 最大次数转 blocked =====
+// 实证 task-mwnoabjg-6 spawn 重试风暴：spawn 失败只打印 console（错误详情丢失，卡面只见泛化「spawn 失败」）
+// + poolCycle 每 15s 无限重派。断言组与修法一一对应：
+//   ①① 连续失败：错误详情落卡（messages/lastError 含真实错误文本）+ 退避间隔递增（15/30/60/120s）
+//   ③④ 第 5 次失败转 blocked + 原因/三个恢复动作；blocked 后不再派（无限循环终结）
+//   ⑤ spawn 成功清计数（连续语义复位）；⑥ verifier 同款治理（两跳链 verifying→in-progress→blocked）
+//   ⑦ 退避表纯函数（15s→30s→60s→120s→封顶 300s）
+function mkSpawnFailCtx(errText) {
+  return {
+    subagents: {
+      list: () => ['mock'],
+      getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => { throw new Error('不该走一次性路径') },
+      startContinuable: async () => { throw new Error(errText) },
+    },
+  }
+}
+test('spawn 治理①：连续失败——错误详情落卡 + 指数退避间隔递增 + 退避窗口内不重派', async () => {
+  const t = mkTask({ id: 'sf1', title: '风暴卡', status: 'pending' })
+  const h = mkContinuableDispatch(mkBoard([t]), {}, mkSpawnFailCtx('provider quota exceeded: HTTP 429'))
+  const ladder = [15000, 30000, 60000, 120000] // 1~4 次失败的退避（第 5 次转 blocked，无需退避）
+  for (var i = 1; i <= 4; i++) {
+    await h.dispatch.poolCycle(FULL_SID)
+    assert.equal(t.status, 'pending', '第 ' + i + ' 次失败后回 pending（未到上限不 blocked）')
+    assert.equal(t.spawnFails.worker.count, i, '连续失败计数 = ' + i)
+    const gap = new Date(t.spawnFails.worker.retryAt).getTime() - new Date(t.spawnFails.worker.lastAt).getTime()
+    assert.ok(gap > ladder[i - 1] - 1500 && gap < ladder[i - 1] + 1500, '第 ' + i + ' 次退避 ≈ ' + (ladder[i - 1] / 1000) + 's（指数递增）')
+    // 退避窗口内再跑一轮：不重派（无限循环根治），失败计数不增
+    await h.dispatch.poolCycle(FULL_SID)
+    assert.equal(t.spawnFails.worker.count, i, '第 ' + i + ' 轮退避窗口内不重派（计数不增）')
+    t.spawnFails.worker.retryAt = new Date(Date.now() - 1000).toISOString() // 测试内时间快进：退避窗口已过
+  }
+  // 错误详情落卡：每次失败一条 spawn-fail 消息，真实错误文本（非泛化「spawn 失败」）
+  const sfs = (t.messages || []).filter(m => m.kind === 'spawn-fail')
+  assert.equal(sfs.length, 4, '4 次失败 4 条诊断消息')
+  assert.ok(sfs.every(m => /provider quota exceeded: HTTP 429/.test(m.text)), '真实错误文本含 429 详情')
+  assert.match(t.lastError, /provider quota exceeded/)
+})
+test('spawn 治理②：第 5 次连续失败 → 转 blocked + 原因 + 三个恢复动作（不再无限循环）', async () => {
+  const t = mkTask({ id: 'sf2', title: '终局卡', status: 'pending' })
+  const h = mkContinuableDispatch(mkBoard([t]), {}, mkSpawnFailCtx('permission denied: spawn rejected'))
+  for (var i = 1; i <= 5; i++) {
+    await h.dispatch.poolCycle(FULL_SID)
+    if (t.spawnFails && t.spawnFails.worker && t.spawnFails.worker.retryAt) t.spawnFails.worker.retryAt = new Date(Date.now() - 1000).toISOString()
+  }
+  assert.equal(t.status, 'blocked', '第 5 次连续失败转 blocked（最大次数）')
+  assert.equal(t.claimedBy, null)
+  assert.equal(t.spawnFails.worker.count, 5)
+  assert.equal(t.spawnFails.worker.retryAt, undefined, 'blocked 态无下次重试点')
+  const blk = (t.messages || []).filter(m => m.kind === 'spawn-blocked').pop()
+  assert.ok(blk, 'blocked 原因消息在位')
+  assert.match(blk.text, /Worker spawn 连续 5 次失败/)
+  assert.match(blk.text, /permission denied: spawn rejected/, '原因带最近真实错误文本')
+  assert.match(blk.text, /① 重试 spawn：task_update resetToPending/)
+  assert.match(blk.text, /② 更换路由：task_update model/)
+  assert.match(blk.text, /③ 转主窗口亲办：task_update pipeline=direct/)
+  assert.equal(t.escalation, undefined, '刻意不挂 escalation（resetToPending 不清 escalation，挂上会被 pickDispatch 永久跳过）')
+  assert.match(t.lastError, /Worker spawn 连续 5 次失败/)
+  const lastH = t.history[t.history.length - 1]
+  assert.match(lastH.note, /spawn 连续失败 x5\/5，转 blocked 待人工/)
+  // blocked 后再跑 cycle：不再派（治理终点，重试风暴终结）——失败计数不增、卡面零新留痕
+  const histBefore = t.history.length
+  await h.dispatch.poolCycle(FULL_SID)
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(t.spawnFails.worker.count, 5, 'blocked 后失败计数不增（不再 spawn）')
+  assert.equal(t.history.length, histBefore, 'blocked 后卡面零新留痕（不再无限循环）')
+})
+test('spawn 治理③：退避期过后 spawn 成功 → 清连续失败计数（连续语义复位，恢复闭环）', async () => {
+  const t = mkTask({ id: 'sf3', title: '恢复卡', status: 'pending' })
+  let fail = true
+  const h = mkContinuableDispatch(mkBoard([t]), {}, {
+    subagents: {
+      list: () => ['mock'],
+      getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => { throw new Error('不该走一次性路径') },
+      startContinuable: async () => { if (fail) throw new Error('ECONNREFUSED 127.0.0.1:443'); return { childId: 'child-ok', messageId: 'm1' } },
+    },
+  })
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(t.spawnFails.worker.count, 1, '先失败一次')
+  fail = false
+  t.spawnFails.worker.retryAt = new Date(Date.now() - 1000).toISOString() // 退避窗口已过
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(t.status, 'in-progress', '退避期过后重派成功')
+  assert.equal(t.claimedBy, 'child-ok')
+  assert.equal(t.spawnFails, undefined, 'spawn 成功清空连续失败计数（同 settle 成功臂清 retryCount 口径）')
+  // 复位后再失败 → 从 1 重新数（不是接续 2）
+  fail = true
+  delete h.runs['sf3'] // 模拟 run 结束回收（活跃表清空，卡片可再派）
+  t.status = 'pending'; t.claimedBy = null; t.claimedAt = null
+  await h.dispatch.poolCycle(FULL_SID)
+  assert.equal(t.spawnFails.worker.count, 1, '复位后失败从 1 重新计数（连续语义）')
+})
+test('spawn 治理④：verifier 连续 spawn 失败——退避 + 第 5 次两跳链转 blocked（verifying→in-progress→blocked）', async () => {
+  const t = mkTask({ id: 'sf4', title: '验收风暴卡', status: 'verifying' })
+  const h = mkContinuableDispatch(mkBoard([t]), {}, {
+    subagents: {
+      list: () => ['mock'],
+      getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => { throw new Error('verifier spawn 拒绝：INVALID_API_KEY') },
+      startContinuable: async () => { throw new Error('不该走 continuable') },
+    },
+  })
+  for (var i = 1; i <= 4; i++) {
+    await h.dispatch.poolCycle(FULL_SID)
+    assert.equal(t.status, 'verifying', '第 ' + i + ' 次失败清占位仍在 verifying（未到上限）')
+    assert.equal(t.spawnFails.verifier.count, i)
+    assert.equal(t.verifierRun, null, 'verifier 占位已清（幂等回收语义不变）')
+    assert.ok((t.messages || []).some(m => m.kind === 'spawn-fail' && /INVALID_API_KEY/.test(m.text)), 'verifier 失败详情落卡')
+    t.spawnFails.verifier.retryAt = new Date(Date.now() - 1000).toISOString()
+  }
+  await h.dispatch.poolCycle(FULL_SID) // 第 5 次 → 两跳链 blocked
+  assert.equal(t.status, 'blocked', '第 5 次 verifier spawn 失败转 blocked')
+  assert.equal(t.verifierRun, null)
+  assert.equal(t.spawnFails.verifier.count, 5)
+  assert.match(t.lastError, /Verifier spawn 连续 5 次失败/)
+  const hops = t.history.map(hh => hh.from + '→' + hh.to)
+  assert.ok(hops.indexOf('verifying→in-progress') >= 0, '两跳链第一跳 verifying→in-progress（表上既有边）')
+  assert.ok(hops.indexOf('in-progress→blocked') >= 0, '两跳链第二跳 in-progress→blocked（复刻 redispatchStuckVerifier 链）')
+  const blk = (t.messages || []).filter(m => m.kind === 'spawn-blocked').pop()
+  assert.ok(blk && /Verifier spawn 连续 5 次失败/.test(blk.text) && /① 重试 spawn/.test(blk.text), 'blocked 原因与恢复动作在位')
+})
+test('spawn 治理⑤（源码级+纯函数）：退避表 15s→30s→60s→120s→封顶 300s + 治理接线在位', async () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  // 纯函数：退避表指数递增 + 封顶
+  assert.deepEqual(dispatchMod.SPAWN_BACKOFF_MS, [15000, 30000, 60000, 120000, 300000], '退避表 15s→30s→60s→120s→300s')
+  assert.equal(dispatchMod.SPAWN_MAX_FAILS, 5, '最大连续失败 5 次')
+  assert.equal(dispatchMod.spawnBackoffMs(1), 15000)
+  assert.equal(dispatchMod.spawnBackoffMs(2), 30000)
+  assert.equal(dispatchMod.spawnBackoffMs(3), 60000)
+  assert.equal(dispatchMod.spawnBackoffMs(4), 120000)
+  assert.equal(dispatchMod.spawnBackoffMs(5), 300000, '表内末位 300s')
+  assert.equal(dispatchMod.spawnBackoffMs(9), 300000, '超出表长封顶 300s')
+  assert.equal(dispatchMod.spawnBackoffMs(0), 15000, '脏值兜底首档')
+  // 接线（源码级）：错误详情落卡 + 治理 + 派发闸 + 成功清计数
+  assert.match(dsp, /async function pushSpawnFailDetail\(sid, t, role, err, providerName, modelOverride\)/)
+  assert.match(dsp, /async function governSpawnRetry\(sid, sp\)/)
+  assert.match(dsp, /kind: 'spawn-fail'/)
+  assert.match(dsp, /kind: 'spawn-blocked'/)
+  assert.match(dsp, /info\.push\('spawn-backoff ' \+ t\.id\)/)
+  assert.match(dsp, /info\.push\('spawn-backoff-verify ' \+ t\.id\)/)
+  assert.match(dsp, /delete t2\.spawnFails\[sp\.role\]/)
+  // 返回值形状纪律：spawn 失败仍 return null（rpc decompose-task/dispatch-task 按 falsy 判败）
+  assert.match(dsp, /console\.error\('\[task-board\] spawn ' \+ role \+ ' failed:', String\(e\)\); return null/)
+  assert.match(dsp, /console\.error\('\[task-board\] spawn ' \+ role \+ ' failed:', String\(e2\)\); return null/)
 })
 
 test('可续跑 Worker⑤：idle 后从子会话 v4 日志读到助手文本 → 走文本通道推进 verifying（真读真日志）', async () => {

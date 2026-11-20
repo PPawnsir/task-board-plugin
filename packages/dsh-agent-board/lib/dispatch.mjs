@@ -86,6 +86,28 @@ function lastInProgressAt(t) {
   }
   return 0
 }
+// ===== spawn 重试治理（task-mwogcv7r）：错误详情落卡 + 指数退避 + 最大次数转 blocked =====
+// 实证 task-mwnoabjg-6 spawn 重试风暴：spawn 失败只打印 console（错误详情丢失，卡面只见泛化「spawn 失败」），
+// poolCycle 每 15s 心跳无条件重派 → 卡面 pending↔in-progress 翻转风暴。治理三件套（均在 createDispatch 内接线）：
+//   ① 错误详情落卡——spawnOneShot 失败点把真实错误文本（provider/模型/权限/额度/运行时异常的 String(e)）
+//      写进卡面 messages（kind='spawn-fail'）+ t.lastError，console 保留但不再只打 console（错误可诊断）；
+//   ② 指数退避——同一卡同一角色连续失败按 15s→30s→60s→120s 递增间隔重试（封顶 300s）：退避点写
+//      t.spawnFails[role].retryAt，poolCycle 派发闸（pendings/verifs 消费段）在窗口内跳过该卡；
+//   ③ 最大次数——连续 SPAWN_MAX_FAILS 次失败后转 blocked 并给原因 + 三个显式恢复动作（重试 spawn /
+//      更换路由 / 转主窗口亲办，落卡面 messages），不再无限循环。刻意不挂 t.escalation：pickDispatch
+//      候选过滤含 !t.escalation，而 update-task resetToPending 不清 escalation——挂上会让「重试 spawn」
+//      恢复动作把卡永久钉在池外；blocked 态本身已不进派发候选，原因由 lastError/卡消息承载。
+// 计数分账：与 settle.mjs 的 t.retryCount（run 级失败×3 → blocked）刻意分立——spawn 级失败记在
+// t.spawnFails[role] = { count, lastAt, lastError, retryAt }，spawn 成功一次即整段清除（「连续」语义，
+// 同 settle 成功臂清 retryCount 的口径）；人工 resetToPending 后首次 spawn 失败继续计数，再达上限即回
+// blocked（人工重试恰得一次机会，不无限烧）。
+export var SPAWN_BACKOFF_MS = [15000, 30000, 60000, 120000, 300000] // 指数退避表：15s→30s→60s→120s→（封顶）300s
+export var SPAWN_MAX_FAILS = 5 // 连续 spawn 失败最大次数：达到即转 blocked 停止自动重试
+// 第 failCount 次连续失败后的退避毫秒（1-based）：超出表长一律封顶 300s（防配置性滥用时退避无限膨胀）。
+export function spawnBackoffMs(failCount) {
+  var n = Math.max(1, Math.floor(Number(failCount) || 1))
+  return SPAWN_BACKOFF_MS[Math.min(n, SPAWN_BACKOFF_MS.length) - 1]
+}
 // 锁外候选预筛（hungZeroOutputSweep 同款纪律）：无候选的板（空板/全落定板）零锁调用——心跳每 15s
 // 一轮，不进锁就既不占文件锁也不碰写盘路径。预筛是超集判定（只用快照字段粗筛），锁内在新鲜 d 上
 // 重判全部精确条件（busy/frozen/escalation/pre 闸门/宽限/阈值），漏筛方向只会少动不会误动。
@@ -558,12 +580,91 @@ export function createDispatch(ctx, state, deps) {
       return core.normalizeSlotObj(v) // {id, effort?} | null（归一出口只含 id/effort 两键）
     }
 
+    // ===== spawn 失败错误详情落卡（task-mwogcv7r ①，spawnOneShot 各失败点调用）=====
+    // 真实错误文本（String(e) 的 message）写进卡面 messages（kind='spawn-fail'）+ t.lastError：
+    // provider/模型/权限/额度/运行时错误的原始文本不再只打印 console。spawnOneShot 的全部五个失败点
+    // （无通道/无 root/无 provider/首败无可剥/剥光重试仍败）都先经此落卡再 return null——返回值形状
+    // 刻意保持 null 不变（rpc.mjs decompose-task/dispatch-task 按 falsy 判败，改形状会击穿它们）。
+    // 截断口径 400 字符（同 activation 拆除诊断臂；429 重置时间结构化文本常超 120）。
+    // 工厂层定义：spawnOneShot（工厂层）与 poolCycleBody 内的 toSpawn 派发循环都要调它。
+    async function pushSpawnFailDetail(sid, t, role, err, providerName, modelOverride) {
+      var errText = String(err && err.message ? err.message : err).slice(0, 400)
+      var roleName = role === 'worker' ? 'Worker' : role === 'verifier' ? 'Verifier' : role === 'hook-pre' ? '前置 hook' : role === 'hook-post' ? '收口 hook' : role === 'decomposer' ? '拆解官' : String(role)
+      var text = '🚫 ' + roleName + ' spawn 失败' + (providerName ? '（provider ' + providerName + (modelOverride ? '，model ' + modelOverride : '') + '）' : '') + '：' + errText
+      try {
+        await mutateLocked(sid, function (d) {
+          var t2 = d.tasks.find(function (x) { return x.id === t.id })
+          if (!t2) return null
+          if (!Array.isArray(t2.messages)) t2.messages = []
+          t2.messages.push({ kind: 'spawn-fail', text: text, at: new Date().toISOString(), by: 'system' })
+          t2.lastError = String(text).slice(0, 300) // 与 settle 失败臂同口径：最近失败原因落卡
+          return t2
+        }, true)
+      } catch (e2) { console.error('[task-board] spawn 失败详情落卡异常 (task ' + t.id + '):', String(e2)) }
+    }
+    // ===== spawn 失败重试治理（task-mwogcv7r ②③，toSpawn 失败分支调用；主刀点）=====
+    // 前置：占位已由 releaseSpawnPlaceholder 释放（worker 回 pending / verifier 清 verifierRun）。
+    // 只治理 worker/verifier 两个任务角色：hook-pre/hook-post 的失败治理沿用既有状态机
+    // （applyHookSettle 的 failed→epic blocked 裁决通道）+ 2min 死占位回收，spawn-fail 诊断消息照落。
+    // 每次失败一笔原子写：count++ + 消息留痕 + 退避点（或 blocked 转移）。
+    //   · count < SPAWN_MAX_FAILS → retryAt = now + spawnBackoffMs(count)（15s→30s→60s→120s 递增），
+    //     退避窗口内 poolCycle 派发闸（见 pendings/verifs 消费段）跳过该卡 → 不再无限循环；
+    //   · count ≥ SPAWN_MAX_FAILS → 转 blocked + 原因 + 三个恢复动作（重试 spawn/更换路由/转主窗口
+    //     亲办）。worker 走 pending→blocked（表上既有边）；verifier 复刻 redispatchStuckVerifier
+    //     两跳链 verifying→in-progress→blocked（表上既有边，零新转移语义）。
+    // 状态守卫：卡面已被并发写翻走（人工领取/终止/验收）→ 本次失败不计数不治理，交翻卡那笔写主导。
+    // 错误文本从 t.lastError 取（pushSpawnFailDetail 刚落）——锁内新鲜 d 上现读，不信任过期快照 sp.t。
+    async function governSpawnRetry(sid, sp) {
+      if (sp.role !== 'worker' && sp.role !== 'verifier') return null
+      try {
+        return await mutateLocked(sid, function (d) {
+          var t = d.tasks.find(function (x) { return x.id === sp.t.id })
+          if (!t) return null
+          if (sp.role === 'worker' && t.status !== 'pending') return null
+          if (sp.role === 'verifier' && t.status !== 'verifying') return null
+          if (!t.spawnFails || typeof t.spawnFails !== 'object') t.spawnFails = {}
+          var f = t.spawnFails[sp.role] || (t.spawnFails[sp.role] = { count: 0 })
+          f.count = (f.count || 0) + 1
+          f.lastAt = new Date().toISOString()
+          f.lastError = String(t.lastError || 'spawn 失败').slice(0, 400)
+          var errShort = String(t.lastError || 'spawn 失败').replace(/^🚫[^：]*：/, '').slice(0, 160)
+          if (f.count >= SPAWN_MAX_FAILS) {
+            // ③ 最大次数 → blocked：原因 + 三个显式恢复动作落卡面 messages（主窗口/详情页直接可读）。
+            var why = (sp.role === 'worker' ? 'Worker' : 'Verifier') + ' spawn 连续 ' + f.count + ' 次失败（最近：' + errShort + '）——已停止自动重试，转 blocked 待人工。恢复动作：① 重试 spawn：task_update resetToPending 重置入池（修复后 spawn 成功会自动清计数）；② 更换路由：task_update model 换模型，或调整板级 laneModels/fallbackModels；③ 转主窗口亲办：task_update pipeline=direct 或 assignMode=manual'
+            var psB = t.status
+            if (sp.role === 'verifier') {
+              // 两跳链（复刻 redispatchStuckVerifier）：verifying --verify-rejected--> in-progress --blocked--> blocked
+              assertTransition(psB, 'in-progress', 'verify-rejected')
+              t.status = 'in-progress'
+              ah(t, psB, 'in-progress', 'system', 'Verifier spawn 连续失败，验收通道暂不可用')
+              psB = t.status
+              t.verifierRun = null; delete t.verifierRunAt
+            }
+            assertTransition(psB, 'blocked', 'blocked')
+            t.status = 'blocked'
+            t.lastError = String(why).slice(0, 300)
+            delete f.retryAt // blocked 态无「下次重试」语义
+            if (!Array.isArray(t.messages)) t.messages = []
+            t.messages.push({ kind: 'spawn-blocked', text: '⛔ ' + why, at: new Date().toISOString(), by: 'system' })
+            ah(t, psB, 'blocked', 'system', 'spawn 连续失败 x' + f.count + '/' + SPAWN_MAX_FAILS + '，转 blocked 待人工（原因与恢复动作见卡消息/lastError）')
+            return { blocked: true, why: why }
+          }
+          var backoff = spawnBackoffMs(f.count)
+          f.retryAt = new Date(Date.now() + backoff).toISOString()
+          ah(t, t.status, t.status, 'system', 'spawn 失败 x' + f.count + '/' + SPAWN_MAX_FAILS + '（' + errShort + '），' + Math.round(backoff / 1000) + 's 后自动重试')
+          return { blocked: false, retryInMs: backoff, count: f.count }
+        }, true)
+      } catch (e) { console.error('[task-board] spawn 失败治理异常（占位已释放，本轮放弃治理）(task ' + sp.t.id + ' ' + sp.role + '):', String(e)); return null }
+    }
+
     async function spawnOneShot(sid, t, role) {
-      var subagents = ctx.subagents; if (!subagents) return null
+      // 早闸失败也走错误详情落卡①（task-mwogcv7r）：这三类是 spawn 失败的常见风暴根因（老宿主缺通道/
+      // 死会话无 root/无 provider），只打 console 同样不可诊断。console 原文逐字保留（源码级断言锁定）。
+      var subagents = ctx.subagents; if (!subagents) { await pushSpawnFailDetail(sid, t, role, '宿主未提供 subagents 通道（老宿主/能力缺失）', '', ''); return null }
       // 兜底保留（真异常时有用）：poolCycle 入口已有 root 存活早闸门，正常派发路径不会到达这里；
       // 只有闸门外的直接调用（如 dispatch-task RPC 指定了无 root 的 sid）才会触发此报错。
-      var parent = rootForSession(sid); if (!parent) { console.error('[task-board] no root agent for session ' + sid + ', skip spawn'); return null }
-      var providerName = pickProvider(); if (!providerName) { console.error('[task-board] no subagent provider'); return null }
+      var parent = rootForSession(sid); if (!parent) { await pushSpawnFailDetail(sid, t, role, '会话无存活 root agent（spawn 通道无父会话）', '', ''); console.error('[task-board] no root agent for session ' + sid + ', skip spawn'); return null }
+      var providerName = pickProvider(); if (!providerName) { await pushSpawnFailDetail(sid, t, role, '无可用 subagent provider（subagents.list 为空）', '', ''); console.error('[task-board] no subagent provider'); return null }
       // ===== 力度路由四级取模链（task-mvnemvf5 地基）：card → lane → board → parent =====
       // 优先级：t.model（卡级特例，最高）→ t.size 查 cfg(dsnap).laneModels[size][roleKey]（非空才用）→
       //   dsnap.workerModel/verifierModel（板级，现状兜底）→ 父模型（modelOverride='' = 不挂 agentOptions，现状）。
@@ -838,9 +939,15 @@ export function createDispatch(ctx, state, deps) {
           } catch (e2) {
             // 冷却嗅探①b：剥光外挂参数后的二次失败同样嗅探（e2 文本）
             if (modelOverride) await sniffModelCooldown(sid, t.id, modelOverride, e2 && e2.message ? e2.message : String(e2))
+            // 错误详情落卡①（task-mwogcv7r 主刀点）：剥光重试仍失败——真实错误文本写进卡面
+            // messages/lastError，不再只打印 console（task-mwnoabjg-6 风暴根因：错误详情只进 console 即丢）。
+            await pushSpawnFailDetail(sid, t, role, e2, providerName, modelOverride)
             console.error('[task-board] spawn ' + role + ' failed:', String(e2)); return null
           }
-        } else { console.error('[task-board] spawn ' + role + ' failed:', String(e)); return null }
+        } else {
+          // 错误详情落卡①（task-mwogcv7r 主刀点）：无外挂参数可剥的直败同样落卡
+          await pushSpawnFailDetail(sid, t, role, e, providerName, modelOverride)
+          console.error('[task-board] spawn ' + role + ' failed:', String(e)); return null }
       }
       // rec 统一形态：id = 该次 run 的子会话 id（continuable 是 childId，一次性是 run.id——
       // 会话 id 语义不变，t.runs[].id / claimedBy / verifierRun / poolStatus.runId / 详情页跳转全部照旧）。
@@ -1478,9 +1585,21 @@ export function createDispatch(ctx, state, deps) {
             // 拆解结论未落地就派 Worker 整坨执行与「先拆再干」的意图直接冲突——活跃 decomposer rec 在跑即跳过本轮。
             var __drec = runs[t.id]
             if (__drec && __drec.role === 'decomposer' && !__drec.settled) { info.push('skip-decomposing ' + t.id); return }
+            // spawn 重试退避闸（task-mwogcv7r ②）：连续 spawn 失败的卡在退避窗口内不派——15s 心跳每轮
+            // 都会打到 pickDispatch，无此闸就是「失败→回 pending→立即重派」无限循环（task-mwnoabjg-6
+            // spawn 重试风暴实证）。退避点由失败治理写入（governSpawnRetry），窗口过后照常入池，
+            // spawn 成功一次即清计数（见 toSpawn 成功臂）。
+            var __sfb = t.spawnFails && t.spawnFails.worker
+            if (__sfb && __sfb.retryAt && new Date(__sfb.retryAt).getTime() > now) { info.push('spawn-backoff ' + t.id); return }
             claimApply(d, t, 'spawn-pending', 'dispatch'); if (parentKickOnDispatch(d, t)) info.push('epic-kick ' + t.parentId); toSpawn.push({ role: 'worker', t: t }); info.push('dispatch ' + t.id)
           })
-          picked.verifs.forEach(function (t) { t.verifierRun = 'spawn-pending'; t.verifierRunAt = new Date().toISOString(); toSpawn.push({ role: 'verifier', t: t }); info.push('verify ' + t.id) })
+          picked.verifs.forEach(function (t) {
+            // Verifier 同款退避闸（task-mwogcv7r ②）：占位超时回收/失败治理都会把卡留在 verifying，
+            // 无此闸同样是每 15s 无限重派；计数达上限由治理转 blocked（两跳链），不再重试。
+            var __sfv = t.spawnFails && t.spawnFails.verifier
+            if (__sfv && __sfv.retryAt && new Date(__sfv.retryAt).getTime() > now) { info.push('spawn-backoff-verify ' + t.id); return }
+            t.verifierRun = 'spawn-pending'; t.verifierRunAt = new Date().toISOString(); toSpawn.push({ role: 'verifier', t: t }); info.push('verify ' + t.id)
+          })
         } catch (e) { console.error('[task-board] 派发决策异常（本轮跳过派发，池状态照常写）:', String(e)) }
         // ③ hooks=agent run：pre 闸门占用 + post 收口补 spawn（接线①③）
         // pre：候选被 pickDispatch 的 preHookGate 拦下时，本轮不派子任务——这里改 spawn hook-pre run。
@@ -1562,6 +1681,9 @@ export function createDispatch(ctx, state, deps) {
           }
         } catch (e) { console.error('[task-board] 占位回收失败 (task ' + sp.t.id + ' ' + sp.role + '):', String(e)) }
       }
+      // pushSpawnFailDetail / governSpawnRetry（spawn 失败治理，task-mwogcv7r）定义在工厂层
+      // spawnOneShot 之前——spawnOneShot（工厂层）与 toSpawn 派发循环（poolCycleBody 内层）都要调它们，
+      // 放进 poolCycleBody 会让外层的 spawnOneShot 看不见（作用域单向：内层见外层，外层见不到内层）。
       for (var k = 0; k < toSpawn.length; k++) {
         var sp = toSpawn[k]
         // 单项隔离（池冻结防御）：派发一项牵动 spawn / 落卡 / 回执多个 await，任一环抛异常都只算这一项
@@ -1613,6 +1735,16 @@ export function createDispatch(ctx, state, deps) {
             // 结算（settle 已在闸门窗口内把卡翻走），本 swap 的占位守卫必然失败——此时写盘纯属在飞噪音
             // （实测：测试 cleanup 拆除临时目录后这笔迟到的 wt 以 ENOENT 刷屏），不变就返回 null。
             await mutateLocked(sid, function (d) { var t = d.tasks.find(function (x) { return x.id === sp.t.id }); if (!t) return null; var swapped = false; if (sp.role === 'worker' && t.claimedBy === 'spawn-pending') { t.claimedBy = String(rec.id); swapped = true }; if ((sp.role === 'verifier' || sp.role === 'hook-post') && t.verifierRun === 'spawn-pending') { t.verifierRun = String(rec.id); t.verifierRunAt = new Date().toISOString(); swapped = true }; if (sp.role === 'hook-pre' && t.hooks && t.hooks.pre && t.hooks.pre.runId !== String(rec.id)) { t.hooks.pre.runId = String(rec.id); swapped = true }; return swapped ? t : null }, true)
+            // spawn 成功清连续失败计数（task-mwogcv7r）：退避/最大次数都是「连续失败」语义，成功一次即
+            // 复位（同 settle 成功臂清 retryCount 的口径）。hook 角色无计数条目（治理只记 worker/verifier），
+            // 守卫返回 null 零写盘；人工 resetToPending 后的首次 spawn 成功同样清账——恢复闭环。
+            await mutateLocked(sid, function (d) {
+              var t2 = d.tasks.find(function (x) { return x.id === sp.t.id })
+              if (!t2 || !t2.spawnFails || !t2.spawnFails[sp.role]) return null
+              delete t2.spawnFails[sp.role]
+              if (!Object.keys(t2.spawnFails).length) delete t2.spawnFails
+              return t2
+            }, true)
             // 派发即回执：spawn 真成功后才入队（占位阶段失败不通知）；经 deps 注入，未注入静默跳过（老 host 兼容）
             // 回执开关（设置区「通知」）：notifyDispatch=false → 派发回执整条跳过（spawn 照常，只闭嘴）；
             // 闸门读本轮 poolCycle 已取的 cfg 快照 c（无额外读盘），老看板缺字段 → cfg 归一为 true。
@@ -1624,13 +1756,18 @@ export function createDispatch(ctx, state, deps) {
             // dependsOn 后补导致的否决（task-mv9yupm4）：占位由闸门调用方的 revertDepsVeto 条件化
             // 翻回 pending（依赖未满足 → pickDispatch 门控不派；依赖落定那笔写 kick 后自动重派）。
           } else if (sp.role === 'worker') {
-            // spawn 失败 → 回 pending
+            // spawn 失败 → 回 pending（重试治理 task-mwogcv7r：错误详情已由 spawnOneShot 落卡，
+            // 这里在占位释放后做计数/退避/最大次数转 blocked——不再每 15s 无限重派）
             await releaseSpawnPlaceholder(sid, sp, 'spawn 失败，回收重新排队')
-            pushSysNote(sid, '任务「' + sp.t.title + '」Worker 启动失败，已重新排队')
+            var govW = await governSpawnRetry(sid, sp)
+            if (govW && govW.blocked) pushSysNote(sid, '⛔ 任务「' + sp.t.title + '」Worker 连续 ' + SPAWN_MAX_FAILS + ' 次 spawn 失败，已转 blocked：' + String(govW.why || '').slice(0, 200), sp.t.id)
+            else pushSysNote(sid, '任务「' + sp.t.title + '」Worker 启动失败，已重新排队' + (govW && govW.retryInMs ? '（' + Math.round(govW.retryInMs / 1000) + 's 后自动重试，连续失败 ' + govW.count + '/' + SPAWN_MAX_FAILS + '）' : '（失败详情见卡面 spawn-fail 消息）'))
           } else if (sp.role === 'verifier') {
-            // verifier spawn 失败 → 清占位，下轮 cycle 重试（占位不清会永远卡住派发）
+            // verifier spawn 失败 → 清占位（占位不清会永远卡住派发），同款退避/最大次数治理
             await releaseSpawnPlaceholder(sid, sp, 'spawn 失败')
-            pushSysNote(sid, '任务「' + sp.t.title + '」Verifier 启动失败，下轮自动重试')
+            var govV = await governSpawnRetry(sid, sp)
+            if (govV && govV.blocked) pushSysNote(sid, '⛔ 任务「' + sp.t.title + '」Verifier 连续 ' + SPAWN_MAX_FAILS + ' 次 spawn 失败，已转 blocked：' + String(govV.why || '').slice(0, 200), sp.t.id)
+            else pushSysNote(sid, '任务「' + sp.t.title + '」Verifier 启动失败，下轮自动重试' + (govV && govV.retryInMs ? '（' + Math.round(govV.retryInMs / 1000) + 's 后）' : ''))
           } else if (sp.role === 'hook-pre') {
             // hook-pre spawn 失败 → 退回 idle + 重新置待跑标记，下轮自动重试（串行闸门保持关闭）
             await releaseSpawnPlaceholder(sid, sp, 'spawn 失败')
