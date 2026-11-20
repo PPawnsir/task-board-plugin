@@ -3,6 +3,10 @@
 // token 消耗累加 / poolCycle 派发周期（孤儿回收+占位 claim+池快照）/ 15s 心跳 / 插件卸载清理 /
 // Team 模式 systemPrompt 引导段 / 预研上下文瘦身清单（调研笔记全文 + 文件清单，随首条 prompt 一次性注入）/
 // 可续跑 Worker（continuable：硬超时 interrupt 留存 + 重派 sendMessage 冷复活续跑 + 失败回退 fresh spawn）。
+// 直接子代理生命周期（task-mwogdzfd）：停泊子会话额度回收（sweepParkedQuota/drainParkedChildren——
+// 永不续跑的 continuable 子会话走宿主 drainChildren 整批释放，堵「inactive 残影占满 active child
+// limit」；spawn 撞额度满时同款 eager 释放）+ 复用/首派 rec 的 label（显示标签与当前任务关联）+
+// messageId/deliveredAt（sendMessage 投递回执，poolStatus 透出「已投递 delivered / 已启动 running」二态）。
 // 拆分第 7 刀 task-mvt8c1yx-7：usage 水位（localDayKey/effectiveOf/seekSeqOf/num0/hasUsageRecorded）/
 // accumulateRunUsage / 重启 reconcile（reconcileRoot）/ 僵尸留档清扫（sweepZombieRuns）/ 幽灵占位回收
 // （recIsLive/reapGhostRecs）搬至 lib/settle.mjs——poolCycleBody 三挂点与 return API 的 accumulateRunUsage
@@ -556,8 +560,10 @@ export function createDispatch(ctx, state, deps) {
     }
     // Activation → 旧 SubagentRun 同形适配 {id,result,dispose}：一次性路径下游消费面（settleRun/
     // armTimeouts/资源清理）零改动。
+    // messageId 透传（task-mwogdzfd ③）：宿主 startActivation 的回执字段（首条 prompt 的收件箱 id）——
+    // 只作投递回执读取（spawnMsgId），一次性 run 的结算/超时/清理消费面不读它，多一键零影响。
     function activationAsRun(act) {
-      return { id: act.childId, result: act.result, dispose: function () { return act.dispose() } }
+      return { id: act.childId, messageId: act.messageId, result: act.result, dispose: function () { return act.dispose() } }
     }
     // 新契约 request 组装（Omit<label|signal>）：只带 prompt/parent/agentOptions/cwd。
     // persona/toolFilter 不在新契约面（v0.2.1 将其收进 agentPreset 体系——spawn-in-process 源码实证
@@ -655,6 +661,84 @@ export function createDispatch(ctx, state, deps) {
           return { blocked: false, retryInMs: backoff, count: f.count }
         }, true)
       } catch (e) { console.error('[task-board] spawn 失败治理异常（占位已释放，本轮放弃治理）(task ' + sp.t.id + ' ' + sp.role + '):', String(e)); return null }
+    }
+
+    // ===== 停泊子会话额度释放（task-mwogdzfd ①）：宿主 drainChildren 接线 =====
+    // 宿主契约实证（dsh-subagent ActivationPool）：active child limit 的槽位在 materialize（创建/冷复活）
+    // 时占用、finishDisposal 才释放。interrupt 对本地 activation 只是 cancel({keepInbox:true})——停 turn
+    // 不释放槽位：被中断/被取代的 continuable 子会话保持 resident 即持续占额度（主窗口实证：8 个
+    // inactive 旧子代理逐个 interrupt 后新建仍报 subagent limit reached (active child limit: 8)）。
+    // 宿主服务面提供 drainChildren(parent, childIds)——释放指定 resident 直接子代（absent 目标为
+    // no-op、manager-less 组合为 no-op）。本插件对「永不续跑」的停泊子会话调用它归还额度；老宿主无
+    // 此方法 → 返回 false，由调用方回退 interrupt 留存（既有行为逐字不变）。
+    // 成功即写 state.parkedDrained[sid] 幂等标记（续跑清场与额度回收两条路径共用同一账——
+    // 清场释放过的子会话，下一轮心跳的回收扫描不再重复调宿主）。
+    async function drainParkedChildren(sid, parent, childIds, why) {
+      var subagents = ctx.subagents
+      if (!subagents || typeof subagents.drainChildren !== 'function') return false
+      if (!Array.isArray(childIds) || !childIds.length) return false
+      try {
+        var q = subagents.drainChildren(parent, childIds)
+        if (q && typeof q.then === 'function') await withTimeout(q, 8000, 'drainChildren 停泊释放')
+        if (!state.parkedDrained) state.parkedDrained = {}
+        var dmap = state.parkedDrained[sid] || (state.parkedDrained[sid] = {})
+        childIds.forEach(function (cid) { dmap[cid] = true })
+        return true
+      } catch (e) {
+        console.error('[task-board] 停泊子会话额度释放失败（' + why + ', child ' + childIds.join(',') + '）:', String(e))
+        return false
+      }
+    }
+    // spawn 失败文本是否为宿主额度满（ACTIVATION_LIMIT_REACHED）：eager 停泊释放的触发判据。
+    function isChildLimitError(e) { return /limit reached|ACTIVATION_LIMIT_REACHED/i.test(String(e && e.message ? e.message : e)) }
+    // ===== 停泊子会话额度回收（task-mwogdzfd ①主刀）：扫描「永不续跑」的 continuable 子会话并释放 =====
+    // 每轮 poolCycle 心跳扫一遍卡面 runs 留档（纯读 snap 零锁零 IO；无候选即静默返回），对判定为
+    // 「永不续跑」的 continuable childId 走 drainParkedChildren 整体释放。判定口径（与 resumeTarget
+    // 同源取反，绝不误伤可续跑目标）：
+    //   · resumeTarget(t) 命中的 childId —— 续跑目标（interrupt 留存的本意），保留；
+    //   · 活跃 rec 在跑的子会话（runs 表 live 集合，含 rec.id/rec.childId 两键）—— 在途执行，保留；
+    //   · 未落定卡上 outcome 仍 'running' 的留档 —— 在途/野跑形态归 sweepWildRuns/sweepZombieRuns
+    //     看门狗，本清扫不抢（它们落定成续跑形态/终局后下一轮自然重判）；
+    //   · 其余 continuable 留档（任务已落定 resolved/cancelled/archived / run 标 noResume 永久失格 /
+    //     被更新的 worker run 取代（resumeTarget 只看最后一条）/ 终局结局 completed/terminated/
+    //     stale-closed 等非续跑形态）—— 永不续跑 → 释放额度（正是主窗口实证的「inactive 旧子代理
+    //     占满额度」淤积形态）。
+    // 幂等：state.parkedDrained[sid] 内存表标记已释放的 childId（宿主对 absent 目标本就是 no-op，
+    // 表只为免重复调用）；纯内存零落盘，重启后重判无害。返回本轮释放的 childId 条数。
+    async function sweepParkedQuota(sid, snap, runs) {
+      var subagents = ctx.subagents
+      if (!subagents || typeof subagents.drainChildren !== 'function') return 0
+      if (!snap || snap.__noPersist || !Array.isArray(snap.tasks)) return 0
+      var parent = rootForSession(sid)
+      if (!parent) return 0
+      if (!state.parkedDrained) state.parkedDrained = {}
+      var drained = state.parkedDrained[sid] || (state.parkedDrained[sid] = {})
+      var live = {}
+      Object.keys(runs).forEach(function (k) {
+        var rc = runs[k]; if (!rc) return
+        if (rc.id) live[String(rc.id)] = true
+        if (rc.childId) live[String(rc.childId)] = true
+      })
+      var ids = []
+      snap.tasks.forEach(function (t) {
+        if (!t || !Array.isArray(t.runs)) return
+        var settled = t.status === 'resolved' || t.status === 'cancelled' || t.status === 'archived'
+        var protect = String(resumeTarget(t) || '')
+        t.runs.forEach(function (r) {
+          if (!r || r.continuable !== true) return
+          var cid = String(r.id || '')
+          if (!cid || live[cid] || drained[cid]) return
+          if (cid === protect) return                       // 续跑目标：保留
+          if (!settled && r.outcome === 'running') return   // 在途/野跑形态：归看门狗，不抢
+          ids.push(cid)
+        })
+      })
+      if (!ids.length) return 0
+      ids.forEach(function (cid) { drained[cid] = true }) // 先占位：防与下一轮心跳的慢 drain 窗口重叠重放
+      var ok = await drainParkedChildren(sid, parent, ids, '停泊子会话额度回收')
+      if (!ok) ids.forEach(function (cid) { delete drained[cid] }) // 释放失败回滚标记：下轮照常重试
+      console.error('[task-board] 停泊子会话额度回收（task-mwogdzfd）：释放 ' + ids.length + ' 个永不续跑的子会话（' + (ok ? 'drainChildren 成功' : 'drain 失败，降级见上条') + '）—— ' + ids.join(','))
+      return ids.length
     }
 
     async function spawnOneShot(sid, t, role) {
@@ -889,6 +973,11 @@ export function createDispatch(ctx, state, deps) {
       var run
       var childId = ''
       var actForSettle = null // 新契约 activation 留存（continuable 结算兜底臂用，见 rec 创建后）
+      // ③（task-mwogdzfd）：首条 prompt 的投递回执 messageId——宿主契约 startActivation/
+      // startContinuable 落定即「收件箱已接受」，≠ 已启动（later execution is independent of this
+      // call）。老宿主一次性 SubagentRun 无此字段 → 空串。随 rec 留存，poolStatus 透出
+      // 「已投递 delivered / 已启动 running」二态（rec.ran 观测到 running 事件才算已启动）。
+      var spawnMsgId = ''
       try {
         if (useContinuable) {
           if (hasActivationApi(subagents)) {
@@ -896,16 +985,19 @@ export function createDispatch(ctx, state, deps) {
             var act0 = await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'parent' })
             actForSettle = act0
             childId = String(act0 && act0.childId || '')
+            spawnMsgId = String(act0 && act0.messageId || '')
             if (!childId) throw new Error('startActivation 未返回 childId')
           } else {
             var cs = await subagents.startContinuable({ provider: providerName, label: req.label, request: req, signal: req.signal })
             childId = String(cs && cs.childId || '')
+            spawnMsgId = String(cs && cs.messageId || '')
             if (!childId) throw new Error('startContinuable 未返回 childId')
           }
         } else {
           if (hasActivationApi(subagents)) {
             // 新契约：一次性走 startActivation delivery='caller'（只回 result，不惊动父会话），适配成旧 run 形状
             run = activationAsRun(await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'caller' }))
+            spawnMsgId = String(run && run.messageId || '')
           } else {
             run = await subagents.start(providerName, req)
           }
@@ -927,14 +1019,17 @@ export function createDispatch(ctx, state, deps) {
                 var act1 = await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'parent' })
                 actForSettle = act1
                 childId = String(act1 && act1.childId || '')
+                spawnMsgId = String(act1 && act1.messageId || '')
                 if (!childId) throw new Error('startActivation 未返回 childId')
               } else {
                 var cs2 = await subagents.startContinuable({ provider: providerName, label: req.label, request: req, signal: req.signal })
                 childId = String(cs2 && cs2.childId || '')
+                spawnMsgId = String(cs2 && cs2.messageId || '')
                 if (!childId) throw new Error('startContinuable 未返回 childId')
               }
             } else if (hasActivationApi(subagents)) {
               run = activationAsRun(await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'caller' }))
+              spawnMsgId = String(run && run.messageId || '')
             } else run = await subagents.start(providerName, req)
           } catch (e2) {
             // 冷却嗅探①b：剥光外挂参数后的二次失败同样嗅探（e2 文本）
@@ -942,11 +1037,16 @@ export function createDispatch(ctx, state, deps) {
             // 错误详情落卡①（task-mwogcv7r 主刀点）：剥光重试仍失败——真实错误文本写进卡面
             // messages/lastError，不再只打印 console（task-mwnoabjg-6 风暴根因：错误详情只进 console 即丢）。
             await pushSpawnFailDetail(sid, t, role, e2, providerName, modelOverride)
+            // 额度满（task-mwogdzfd ①）：eager 释放停泊子会话再回 null——退避重试（15s 起）时额度已
+            // 归还，避免「停泊残影占满 active child limit → spawn 永远失败→卡死在退避循环」的死锁形态。
+            if (isChildLimitError(e2)) { try { await sweepParkedQuota(sid, dsnap, runsFor(sid)) } catch (_) {} }
             console.error('[task-board] spawn ' + role + ' failed:', String(e2)); return null
           }
         } else {
           // 错误详情落卡①（task-mwogcv7r 主刀点）：无外挂参数可剥的直败同样落卡
           await pushSpawnFailDetail(sid, t, role, e, providerName, modelOverride)
+          // 额度满（task-mwogdzfd ①）：同上——直败路径同样 eager 释放停泊额度。
+          if (isChildLimitError(e)) { try { await sweepParkedQuota(sid, dsnap, runsFor(sid)) } catch (_) {} }
           console.error('[task-board] spawn ' + role + ' failed:', String(e)); return null }
       }
       // rec 统一形态：id = 该次 run 的子会话 id（continuable 是 childId，一次性是 run.id——
@@ -955,10 +1055,13 @@ export function createDispatch(ctx, state, deps) {
       // 用 rec.childId 定位 host 事件、dispose 走 drain（卡1 先不 interrupt，见 settleContinuable）。
       // rec.act（task-mvnyk55n）：新契约 activation 随 rec 留存——落闸弃权臂与 doTerminate 的
       // hold 终止据此 dispose 销毁子会话（老契约路径无 activation，act=null，保持 interrupt 留存）。
+      // rec 增补三字段（task-mwogdzfd ②③）：label（显示标签与当前任务关联，即 spawn 契约 req.label
+      // = 'role:taskId'，续跑路径同式现算）+ messageId（首条 prompt 投递回执）+ deliveredAt（投递时刻
+      // ——与 rec.ran（running 事件观测）合成「已投递/已启动」二态）。纯增量字段，结算/超时/回收面零消费。
       var rec = useContinuable
-        ? { id: childId, childId: childId, continuable: true, ran: false, run: null, act: actForSettle, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, size: laneSize || undefined, settled: false }
+        ? { id: childId, childId: childId, continuable: true, ran: false, run: null, act: actForSettle, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, size: laneSize || undefined, label: req.label, messageId: spawnMsgId, deliveredAt: Date.now(), settled: false }
         // activation 的 run.id=act.childId，可接 assistant-stream；老 start 的 run.id=provider run id，留空走日志闸。
-        : { id: String(run.id), frameSessionId: hasActivationApi(subagents) ? String(run.id) : '', run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, size: laneSize || undefined, settled: false }
+        : { id: String(run.id), frameSessionId: hasActivationApi(subagents) ? String(run.id) : '', run: run, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, size: laneSize || undefined, label: req.label, messageId: spawnMsgId, deliveredAt: Date.now(), settled: false }
       // ===== 新宿主 continuable 结算兜底臂（v0.2.1 实证 2026-10-24：activation.result 只认拆除落定）=====
       // 原形：rate-limit 子会话 turn/end error → 管理器拆除 activation → result 落定——
       // 但 agent/status 事件面在 v0.2.1 的 Scoped 事件体系下对插件全局订阅不再可达（子会话死亡 8 分钟零结算实证），
@@ -1168,35 +1271,60 @@ export function createDispatch(ctx, state, deps) {
       try { msgs = core.buildMessages(t) } catch (_) {}
       if (msgs) text += '\n\n该任务的最新消息（主窗口裁决/高优干预/驳回理由等，请务必遵循）：\n' + msgs
       text += '\n\n【优先级声明】本次消息与上面 messages 里的最新裁决/干预，优先于上文历史中的原始任务契约；两者冲突时以最新指示为准（例如原始契约写「上报歧义后不要做其他事」，而最新裁决要求「直接上报完成」，就以「上报完成」为准）。'
-      // ===== 续跑前清场（task-mvnyk55n，停泊残影防唤醒）=====
+      // ===== 续跑前清场（task-mvnyk55n 停泊残影防唤醒 + task-mwogdzfd① 额度归还）=====
       // 原形：ontology EW-B 卡一卡 6 个存活 worker 子会话，被终止者 8 小时后被意外唤醒与现任并行。
-      // 冷复活目标子会话前，对同卡 runs 留档里**其他** continuable childId（非本次续跑目标）逐个
-      // interrupt——停泊残影（被弃权/被取代/旧失败的留存会话）可被续跑/投递链路误唤醒，先清场
-      // 保住「同卡任一时刻最多一个活 Worker 会话」。目标 childId 不收（它就是本轮要复活的）；
-      // interrupt 幂等 fire-and-return，单个失败不阻断其余清场与续跑本体。
+      // 冷复活目标子会话前，对同卡 runs 留档里**其他** continuable childId（非本次续跑目标）清场，
+      // 保住「同卡任一时刻最多一个活 Worker 会话」——目标 childId 不收（它就是本轮要复活的）。
+      // task-mwogdzfd 起清场动作升级：这些停泊残影本就「永不续跑」（被弃权/被取代/旧失败），逐个
+      // interrupt 只停 turn、宿主 slot 随 resident activation 继续占额度（主窗口实证：8 个 inactive
+      // 旧子代理 interrupt 后新建仍报 active child limit）——改为整批 drainChildren 释放（停泊残影
+      // 连同额度一并归还）；老宿主无 drainChildren 面 → 回退逐个 interrupt 留存（task-mvnyk55n 原
+      // 行为逐字保留）。drain 失败同样回退 interrupt；单个 interrupt 失败不阻断其余清场与续跑本体。
       try {
-        if (typeof subagents.interrupt === 'function') {
-          var seenParked = {}
-          var pruns = Array.isArray(t.runs) ? t.runs : []
-          for (var pri = pruns.length - 1; pri >= 0; pri--) {
-            var pr = pruns[pri]
-            if (!pr || pr.continuable !== true) continue
-            var pid = String(pr.id || '')
-            if (!pid || pid === String(childId) || seenParked[pid]) continue
-            seenParked[pid] = true
-            try { subagents.interrupt(pid, { kind: 'ancestor', agent: parent }) } catch (_) {}
+        var parkedIds = []
+        var seenParked = {}
+        var pruns = Array.isArray(t.runs) ? t.runs : []
+        for (var pri = pruns.length - 1; pri >= 0; pri--) {
+          var pr = pruns[pri]
+          if (!pr || pr.continuable !== true) continue
+          var pid = String(pr.id || '')
+          if (!pid || pid === String(childId) || seenParked[pid]) continue
+          seenParked[pid] = true
+          parkedIds.push(pid)
+        }
+        if (parkedIds.length) {
+          // 幂等账统一（task-mwogdzfd）：本轮心跳的额度回收扫描可能已把同一批停泊 id 释放过
+          // （sweepParkedQuota 在派发之前跑）——已释放过的过滤掉，免对宿主重复调 drainChildren。
+          var __pdrain = state.parkedDrained && state.parkedDrained[sid]
+          if (__pdrain) parkedIds = parkedIds.filter(function (cid) { return !__pdrain[cid] })
+        }
+        if (parkedIds.length) {
+          var parkedDrained = await drainParkedChildren(sid, parent, parkedIds, '续跑前清场')
+          if (!parkedDrained && typeof subagents.interrupt === 'function') {
+            for (var pin = 0; pin < parkedIds.length; pin++) {
+              try { subagents.interrupt(parkedIds[pin], { kind: 'ancestor', agent: parent }) } catch (_) {}
+            }
           }
         }
       } catch (_) {}
+      var resumeMsgId = ''
       try {
-        await subagents.sendMessage(parent, childId, [{ type: 'text', text: text }], { signal: makeSignal() })
+        // ③（task-mwogdzfd）：捕获 sendMessage 的投递回执（宿主返回收件箱接受的 message id）——
+        // 落定 ≠ 已启动（宿主契约 Success identifies the message the child's inbox accepted; later
+        // execution is independent of this call）。老宿主/mock 可能返回非字符串（{ok:true} 等）→ 归一空串。
+        var smr = await subagents.sendMessage(parent, childId, [{ type: 'text', text: text }], { signal: makeSignal() })
+        if (typeof smr === 'string' || typeof smr === 'number') resumeMsgId = String(smr)
       } catch (e) {
         // NOT_RESUMABLE / 邻接校验失败 / 任何错：一律回退 fresh spawn（本函数不抛，调用方按 rec 为 null 处理）。
         return { fallback: String(e) }
       }
       // ⚠️ sendMessage 返回 → 登记 rec 必须**零 await**（既有纪律）：冷复活子会话的 running→idle
       // 随时可能到达，事件通道必须马上能在活跃表里看到它——否则 idle 被 rec.ran 守卫挡下，结算干等硬超时。
-      var rec = { id: childId, childId: childId, continuable: true, resumed: true, ran: false, run: null, role: 'worker', taskId: t.id, startedAt: Date.now(), model: origModel, size: (core.TASK_SIZES.indexOf(t && t.size) >= 0 ? t.size : 'standard'), settled: false, baselineBytes: logSizeOf(childId) }
+      // rec 增补三字段（task-mwogdzfd ②③）：label（复用会话的显示标签与当前任务关联——与首派
+      // spawn 契约同式 'worker:<taskId>'；宿主侧创建期 label 冻结、续跑是同一任务同一子会话，天然
+      // 一致）+ messageId（sendMessage 投递回执）+ deliveredAt（投递时刻）。「已启动」由 rec.ran
+      // （agent/status 观测到 running）承载，与 rec.settled 结算旗分立。
+      var rec = { id: childId, childId: childId, continuable: true, resumed: true, ran: false, run: null, role: 'worker', taskId: t.id, startedAt: Date.now(), model: origModel, size: (core.TASK_SIZES.indexOf(t && t.size) >= 0 ? t.size : 'standard'), label: 'worker:' + t.id, messageId: resumeMsgId, deliveredAt: Date.now(), settled: false, baselineBytes: logSizeOf(childId) }
       runsFor(sid)[t.id] = rec
       if (!dispatchedEver[sid]) dispatchedEver[sid] = {}
       dispatchedEver[sid][childId] = true
@@ -1484,6 +1612,12 @@ export function createDispatch(ctx, state, deps) {
       var stuckN = 0
       try { stuckN = await stuckSweep(sid, runs, snap) } catch (e) { console.error('[task-board] 死胡同检测失败（本轮跳过，派发照常）:', String(e)) }
       if (stuckN > 0) { try { snap = await rt(sid) } catch (_) {} }
+      // 停泊子会话额度回收（task-mwogdzfd ①）：每轮心跳扫「永不续跑」的 continuable 子会话并
+      // drainChildren 整批释放（宿主 slot 随 resident activation 归还——interrupt 不释放额度，主窗口
+      // 实证 8 个 inactive 旧子代理占满 active child limit）。位置在死胡同检测之后、活跃度计数之前：
+      // 纯读 snap 零锁零落盘（内存幂等表 state.parkedDrained），无候选即零 IO 静默返回，老宿主无
+      // drainChildren 面直接短路。不写盘 → 无需重读快照。
+      try { await sweepParkedQuota(sid, snap, runs) } catch (e) { console.error('[task-board] 停泊额度回收失败（本轮跳过，派发照常）:', String(e)) }
       var activeW = 0, activeV = 0
       // 角色口径：worker 计入 activeW（占 Worker 并发位）；verifier 与 hook run（hook-pre/hook-post）
       // 统一计入 activeV——hook run 不是 Worker，不该挤占 maxWorkers 并发位，但它确实是一条在跑的 run，
@@ -1649,10 +1783,16 @@ export function createDispatch(ctx, state, deps) {
         // hook run 也归「verifiers」区展示（同一格里都是非 Worker 的一次性 run）。
         // 条目带 role（task-mvomad6c 拆解官可见性①数据面）：decomposer 与 hook 同归 verifiers 桶，
         // 客户端靠 role 把拆解官择出单亮「🧩 拆解中」——此前不带角色，池条上拆解官混在 Verifier 堆里隐形。
-        // 纯透出字段，不改桶归属/并发位/结算任何语义；老消费方多读一个字段零影响。
+        // label/messageId/state（task-mwogdzfd ②③数据面）：label = 显示标签与当前任务关联（首派
+        // spawn 契约 'role:taskId'，续跑复用同式现算，缺省回落 role:taskId 同形）；messageId = 投递
+        // 回执（sendMessage/start 返回的收件箱 id）；state 区分「已投递 delivered（派发/续跑调用落定
+        // ≠ 已启动——宿主契约 later execution is independent of this call）」与「已启动 running
+        // （agent/status 观测到 running，rec.ran）」，一次性 run 无事件二态恒 running。busy 语义不变
+        // （占用并发位即 true）——「已启动」与否由 state 单独承载，避免主窗口过早宣称开始执行。
+        // 纯透出字段，不改桶归属/并发位/结算任何语义；老消费方多读字段零影响。
         try {
           d.poolStatus = { workers: [], verifiers: [] }
-          Object.keys(runs).forEach(function (k) { var rc = runs[k]; if (!rc) return; d.poolStatus[rc.role === 'worker' ? 'workers' : 'verifiers'].push({ id: k, num: '-', busy: true, taskId: rc.taskId, runId: String(rc.id), done: 0, queueLen: 0, suspect: false, role: rc.role || '', model: rc.model || '', modelSource: rc.modelSource || '' }) })
+          Object.keys(runs).forEach(function (k) { var rc = runs[k]; if (!rc) return; d.poolStatus[rc.role === 'worker' ? 'workers' : 'verifiers'].push({ id: k, num: '-', busy: true, taskId: rc.taskId, runId: String(rc.id), done: 0, queueLen: 0, suspect: false, role: rc.role || '', model: rc.model || '', modelSource: rc.modelSource || '', label: rc.label || ((rc.role || 'worker') + ':' + (rc.taskId || k)), messageId: rc.messageId || '', state: rc.continuable ? (rc.ran ? 'running' : 'delivered') : 'running' }) })
         } catch (e) { console.error('[task-board] 池状态快照异常（本轮跳过）:', String(e)) }
         if (info.length > 0) { d.dispatchInfo = info.join('; '); d.dispatchInfoAt = new Date().toISOString() }
         else if (d.dispatchInfo && (!d.dispatchInfoAt || Date.now() - new Date(d.dispatchInfoAt).getTime() > 90000)) { delete d.dispatchInfo; delete d.dispatchInfoAt } // 瞬时通知：90s TTL 过期即清，不再永久残留

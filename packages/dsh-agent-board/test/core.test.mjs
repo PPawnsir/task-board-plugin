@@ -5113,6 +5113,216 @@ test('可续跑 Worker⑬（卡2 手动终止臂）：终止 continuable run →
   assert.equal(t.runs[t.runs.length - 1].outcome, 'terminated')
 })
 
+// ===== 直接子代理生命周期（task-mwogdzfd）：inactive 停泊额度释放 + 复用标签关联 + 已投递/已启动 =====
+// 宿主契约锚（dsh-subagent ActivationPool，npm 安装面源码实证）：active child limit 的槽位在
+// materialize（创建/冷复活）时占用、finishDisposal 才释放；interrupt 对本地 activation 只是
+// cancel({keepInbox:true})——停 turn 不释放槽位。主窗口实证：8 个 inactive 旧子代理逐个
+// interrupt_agent 后新建仍报 subagent limit reached (active child limit: 8)。宿主服务面提供
+// drainChildren(parent, childIds)（释放指定 resident 直接子代，absent 目标 no-op）——插件侧修法：
+// ① 永不续跑的 continuable 停泊子会话整批 drain 释放（poolCycle 心跳扫描 + spawn 撞额度满 eager
+// 触发 + 续跑前清场升级）；② 复用（续跑）与首派 rec 同式 label 关联当前任务；③ sendMessage /
+// start 返回的 messageId 是投递回执（≠已启动），poolStatus 透出 delivered/running 二态。
+test('子代理生命周期①（额度回收）：poolCycle 心跳释放「永不续跑」的停泊子会话（续跑目标/在途不误伤），幂等不重放', async () => {
+  const parent = { id: FULL_SID }
+  const drains = []
+  const interrupts = []
+  // 四形态覆盖：已落定卡（child-a）/ 被更新 run 取代的停泊残影（child-b1）/ noResume 失格（child-c）
+  // → 三者释放；续跑目标（child-b2，resumeTarget 命中）与在途活跃 rec（child-d）→ 保留。
+  const tA = mkTask({ id: 'qa', title: '已落定卡', status: 'resolved', runs: [{ role: 'worker', id: 'child-a', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'completed', hardMin: 120, continuable: true }] })
+  const tB = mkTask({ id: 'qb', title: '续跑目标卡', status: 'pending', runs: [
+    { role: 'worker', id: 'child-b1', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true },
+    { role: 'worker', id: 'child-b2', at: '2026-01-01T00:00:01.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true }] })
+  const tC = mkTask({ id: 'qc', title: '失格卡', status: 'pending', runs: [{ role: 'worker', id: 'child-c', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true, noResume: true }] })
+  const tD = mkTask({ id: 'qd', title: '在途卡', status: 'in-progress', claimedBy: 'child-d', runs: [{ role: 'worker', id: 'child-d', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'running', hardMin: 120, continuable: true }] })
+  const board = Object.assign(mkBoard([tA, tB, tC, tD]), { boardMode: 'manual' }) // manual：pending 卡不派发，隔离回收扫描本身
+  const h = mkContinuableDispatch(board, { rootForSession: () => parent }, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => ({ id: 'run-1', result: new Promise(function () {}), dispose: async function () {} }),
+      startContinuable: async () => ({ childId: 'child-x', messageId: 'm' }),
+      sendMessage: async () => 'm',
+      interrupt: (id) => { interrupts.push(id) },
+      drainChildren: async (p, ids) => { drains.push({ parent: p, ids: ids.slice() }); return undefined },
+    },
+  })
+  // 在途活跃 rec（runs 表键=任务 id）：child-d 有 rec 在跑 → 清扫的 live 集合必须放它过
+  h.runs['qd'] = { id: 'child-d', childId: 'child-d', continuable: true, ran: true, run: null, role: 'worker', taskId: 'qd', startedAt: Date.now(), model: '', settled: false }
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush()
+  // 恰好一批：child-a（已落定）+ child-b1（被取代）+ child-c（noResume 失格）；child-b2（续跑目标）/ child-d（在途）不在
+  assert.equal(drains.length, 1, '心跳扫描恰一批 drainChildren')
+  assert.deepEqual(drains[0].ids.slice().sort(), ['child-a', 'child-b1', 'child-c'])
+  assert.equal(drains[0].parent, parent)                 // 授权形状：活的直接父 Agent（宿主邻接校验同款）
+  assert.deepEqual(interrupts, [])                       // 新宿主面：释放走 drain，不打 interrupt
+  // 幂等（内存账 state.parkedDrained）：第二轮心跳零重放
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush()
+  assert.equal(drains.length, 1)
+  // 状态零扰动：四张卡的卡面字段原样（回收纯释放，不碰状态机）
+  assert.equal(tA.status, 'resolved'); assert.equal(tB.status, 'pending')
+  assert.equal(tC.status, 'pending'); assert.equal(tD.status, 'in-progress')
+  assert.equal(tD.claimedBy, 'child-d')
+})
+
+test('子代理生命周期②（老宿主零回归）：无 drainChildren 面 → 清扫整体短路（零 drain 零 interrupt 零异常），既有行为逐字不变', async () => {
+  const interrupts = []
+  const tA = mkTask({ id: 'oa', title: '已落定卡', status: 'resolved', runs: [{ role: 'worker', id: 'child-oa', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'completed', hardMin: 120, continuable: true }] })
+  const tB = mkTask({ id: 'ob', title: '停泊卡', status: 'pending', runs: [{ role: 'worker', id: 'child-ob', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true }] })
+  const board = Object.assign(mkBoard([tA, tB]), { boardMode: 'manual' })
+  const h = mkContinuableDispatch(board, {}, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => ({ id: 'run-1', result: new Promise(function () {}), dispose: async function () {} }),
+      startContinuable: async () => ({ childId: 'child-x', messageId: 'm' }),
+      sendMessage: async () => 'm',
+      interrupt: (id) => { interrupts.push(id) },          // 老宿主面：只有 interrupt（无 drainChildren）
+    },
+  })
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush()
+  // 清扫对停泊子会话不打 interrupt（interrupt 不释放额度，打了也没用）——只静默跳过
+  assert.deepEqual(interrupts, [])
+  assert.equal(tA.status, 'resolved'); assert.equal(tB.status, 'pending')
+})
+
+test('子代理生命周期③（额度满 eager 释放）：spawn 撞 active child limit → 失败路径即时释放停泊额度再回 null（不等退避重试）', async () => {
+  const drains = []
+  const t1 = mkTask({ id: 'ea', title: '撞额度卡', status: 'in-progress', claimedBy: 'spawn-pending' })
+  const t2 = mkTask({ id: 'eb', title: '旧落定卡', status: 'resolved', runs: [{ role: 'worker', id: 'child-eb', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'completed', hardMin: 120, continuable: true }] })
+  const board = mkBoard([t1, t2])
+  const h = mkContinuableDispatch(board, {}, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => { throw new Error('不该走一次性路径') },
+      startContinuable: async () => { throw new Error('subagent limit reached (active child limit: 8); wait for an existing child to finish') },
+      sendMessage: async () => 'm',
+      drainChildren: async (p, ids) => { drains.push({ parent: p, ids: ids.slice() }); return undefined },
+    },
+  })
+  const sr = await h.dispatch.spawnOneShot(FULL_SID, t1, 'worker')
+  assert.equal(sr, null)                                   // 失败语义保持 null（rpc 侧按 falsy 判败，形状零迁移）
+  assert.equal(drains.length, 1)                           // 失败路径即时释放（eager）：退避 15s 后的重试额度已归还
+  assert.deepEqual(drains[0].ids, ['child-eb'])
+  // 失败详情照落卡（task-mwogcv7r ①既有语义不回归）
+  const note = (t1.messages || []).find((m) => m.kind === 'spawn-fail')
+  assert.ok(note, 'spawn 失败详情落卡')
+  assert.match(note.text, /limit reached/)
+})
+
+test('子代理生命周期④（复用清场+关联+投递回执）：续跑前停泊残影走 drainChildren（不打 interrupt），rec 带 label/messageId/deliveredAt，poolStatus 透出 delivered → running', async () => {
+  const parent = { id: FULL_SID }
+  const drains = []
+  const interrupts = []
+  const sent = []
+  // 停泊残影 child-park（旧 run）+ 续跑目标 child-tgt（最新 worker run，resumeTarget 命中）
+  const t = mkTask({ id: 'ra', title: '复用卡', status: 'pending', runs: [
+    { role: 'worker', id: 'child-park', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true },
+    { role: 'worker', id: 'child-tgt', at: '2026-01-01T00:00:01.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true }] })
+  const board = mkBoard([t])
+  const h = mkContinuableDispatch(board, { rootForSession: () => parent }, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => { throw new Error('不该走一次性路径') },
+      startContinuable: async () => ({ childId: 'child-new', messageId: 'm' }),
+      sendMessage: async (sender, targetId) => { sent.push(targetId); return 'm-resume' },
+      interrupt: (id) => { interrupts.push(id) },
+      drainChildren: async (p, ids) => { drains.push({ parent: p, ids: ids.slice() }); return undefined },
+    },
+  })
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush()
+  // ① 复用（续跑）：sendMessage 冷复活 child-tgt（零新 spawn）
+  assert.deepEqual(sent, ['child-tgt'])
+  // ② 清场：停泊残影 child-park 走 drainChildren 释放（额度一并归还，不打 interrupt——新宿主面）
+  assert.equal(drains.length, 1)
+  assert.deepEqual(drains[0].ids, ['child-park'])
+  assert.equal(drains[0].parent, parent)
+  assert.deepEqual(interrupts, [])
+  // ③ 复用 rec：显示标签与当前任务关联 + messageId 投递回执 + deliveredAt + ran=false（已投递未启动）
+  const rec = h.runs['ra']
+  assert.equal(rec.resumed, true)
+  assert.equal(rec.label, 'worker:ra')
+  assert.equal(rec.messageId, 'm-resume')
+  assert.equal(typeof rec.deliveredAt, 'number')
+  assert.equal(rec.ran, false)
+  assert.equal(t.claimedBy, 'child-tgt')
+  // ④ poolStatus（下轮心跳重建）透出 label/messageId/state=delivered；停泊已释放不重放 drain
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush()
+  assert.equal(drains.length, 1)                           // 幂等账：清场释放过的子会话，扫描不重复调宿主
+  const w = (board.poolStatus && board.poolStatus.workers) || []
+  assert.equal(w.length, 1)
+  assert.equal(w[0].taskId, 'ra')
+  assert.equal(w[0].label, 'worker:ra')                    // ② 显示标签与当前任务关联
+  assert.equal(w[0].messageId, 'm-resume')                 // ③ 投递回执透出
+  assert.equal(w[0].state, 'delivered')                    // ③ 已投递 ≠ 已启动（sendMessage 返回≠开始执行）
+  // ⑤ agent/status 观测到 running（rec.ran）→ 再下轮 poolStatus state=running（已启动）
+  h.listeners[0].fn({ agent: { session: { id: 'child-tgt' } }, status: 'running' })
+  assert.equal(h.runs['ra'].ran, true)
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush()
+  assert.equal(board.poolStatus.workers[0].state, 'running')
+})
+
+test('子代理生命周期⑤（老宿主清场回退）：无 drainChildren → 续跑前清场回退 interrupt 留存（task-mvnyk55n 原行为逐字保留）', async () => {
+  const parent = { id: FULL_SID }
+  const interrupts = []
+  const sent = []
+  const t = mkTask({ id: 'fa', title: '回退卡', status: 'pending', runs: [
+    { role: 'worker', id: 'child-fpark', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true },
+    { role: 'worker', id: 'child-ftgt', at: '2026-01-01T00:00:01.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true }] })
+  const board = mkBoard([t])
+  const h = mkContinuableDispatch(board, { rootForSession: () => parent }, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => { throw new Error('不该走一次性路径') },
+      startContinuable: async () => ({ childId: 'child-new', messageId: 'm' }),
+      sendMessage: async (sender, targetId) => { sent.push(targetId); return 'm2' },
+      interrupt: (id, auth) => { interrupts.push({ id: id, auth: auth }) },   // 老宿主：无 drainChildren
+    },
+  })
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush()
+  assert.deepEqual(sent, ['child-ftgt'])                      // 续跑本体照常
+  assert.deepEqual(interrupts.map(function (x) { return x.id }), ['child-fpark']) // 清场回退 interrupt：只打残影
+  assert.equal(interrupts[0].auth.kind, 'ancestor')           // authority 形状同款（SubagentInterruptAuthority）
+  assert.equal(t.claimedBy, 'child-ftgt')
+})
+
+test('子代理生命周期⑥（首派标签/一次性回执）：fresh spawn rec 带 label（worker:taskId）与 messageId 投递回执；一次性 verifier run 同带 label、老宿主 messageId 空串', async () => {
+  const t = mkTask({ id: 'sa', title: '首派卡', status: 'in-progress', claimedBy: 'spawn-pending' })
+  const board = mkBoard([t])
+  const h = mkContinuableDispatch(board, {}, {})
+  const sr = await h.dispatch.spawnOneShot(FULL_SID, t, 'worker')
+  assert.ok(sr && sr.continuable === true)
+  assert.equal(sr.label, 'worker:sa')                      // 显示标签与当前任务关联（spawn 契约 req.label 同源）
+  assert.equal(sr.messageId, 'msg-1')                      // 首条 prompt 投递回执（startContinuable 的 messageId）
+  assert.equal(typeof sr.deliveredAt, 'number')
+  // 一次性（verifier）：走 start() 旧路径，label 关联照带；老宿主 SubagentRun 无 messageId → 空串
+  const tv = mkTask({ id: 'sv', title: '验收卡', status: 'verifying' })
+  board.tasks.push(tv)
+  const sv = await h.dispatch.spawnOneShot(FULL_SID, tv, 'verifier')
+  assert.ok(sv && sv.continuable === undefined)
+  assert.equal(sv.label, 'verifier:sv')
+  assert.equal(sv.messageId, '')
+})
+
+test('子代理生命周期⑦（源码级）：drainChildren 接线 + sweepParkedQuota 扫描 + 额度满 eager 释放 + sendMessage 投递回执捕获 + poolStatus 二态透出', () => {
+  const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
+  // ① 额度释放：drainChildren 守卫（老宿主短路）+ poolCycle 心跳扫描 + spawn 失败路径双臂 eager 触发
+  assert.match(dsp, /typeof subagents\.drainChildren !== 'function'/)
+  assert.match(dsp, /async function sweepParkedQuota\(sid, snap, runs\)/)
+  assert.match(dsp, /await sweepParkedQuota\(sid, snap, runs\)/)
+  assert.match(dsp, /if \(isChildLimitError\(e2\)\) \{ try \{ await sweepParkedQuota\(sid, dsnap, runsFor\(sid\)\) \} catch \(_\) \{\} \}/)
+  assert.match(dsp, /if \(isChildLimitError\(e\)\) \{ try \{ await sweepParkedQuota\(sid, dsnap, runsFor\(sid\)\) \} catch \(_\) \{\} \}/)
+  // ② 续跑清场：drain 优先（drainParkedChildren），失败/老宿主回退 interrupt 循环
+  assert.match(dsp, /var parkedDrained = await drainParkedChildren\(sid, parent, parkedIds, '续跑前清场'\)/)
+  // ③ 投递回执：sendMessage 返回值捕获（调用形态不变）+ rec 三字段 + poolStatus delivered/running 二态
+  assert.match(dsp, /var smr = await subagents\.sendMessage\(parent, childId, \[\{ type: 'text', text: text \}\], \{ signal: makeSignal\(\) \}\)/)
+  assert.match(dsp, /label: 'worker:' \+ t\.id/)
+  assert.match(dsp, /state: rc\.continuable \? \(rc\.ran \? 'running' : 'delivered'\) : 'running'/)
+})
+
 test('hooks 接线（源码级）：spawnOneShot 三态 prompt + settleRun 分派 + pre/post 占用与 spawn 失败回收', () => {
   const dsp = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
   const settleSrc = readFileSync(new URL('../lib/settle.mjs', import.meta.url), 'utf8')
