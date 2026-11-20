@@ -52,8 +52,12 @@ export var parseRateLimit = parseModelCooldown
 //      容器卡（有子卡）不判：父卡 in-progress 无认领是 parentKick 的正常形态，收口归 maybeAutoCloseParent。
 //   ④ 父卡 verifying 但 post hook state='running' 超 hardMin 且无活跃 run——post hook 卡死（结算通道
 //      丢失/人工恢复现场残留）。不自动推进：收口方向（重跑/跳过/放弃）需人裁决 → pushSysNote 上报。
-//   ⑤ 卡 verifying 超 24h 无 verifierRun 且无活跃 run——验收卡住（派发侧过滤器全挡=frozen/manual/
-//      非 full 管线，或 maxVerifiers=0）→ pushSysNote 上报，不自动推进。
+//   ⑤ 卡 verifying 无 verifierRun 且无活跃 run——验收僵尸态（task-mwogc5nu 僵尸 Verifying 自动恢复，
+//      实证 task-mwnoabjg-5 僵尸验收 7h）：可派形态（非 manual/frozen/escalation、full 管线、验证位有空）
+//      过 2min 宽限即立即判僵尸（不等 2h 超时阈值）→ 锁内置 spawn-pending 占位（与主派发路径同款幂等位）
+//      并收集进 out.reverify，由 stuckSweep 锁外自动重派 Verifier（产生新 verifierRun）；重派 spawn 也
+//      失败 → 转 blocked 挂明确原因（不再无限等待）。不可自动恢复形态（manual 指派/非 full 管线/
+//      maxVerifiers=0/验证位全忙——派发侧过滤器刻意全挡）→ 2h 超时上报，人工裁决。
 //   ⑥ 父卡 pending 且 pipeline='direct' 且子卡全落定（resolved/cancelled/archived，与 isChildSettled
 //      同口径）→ 直接收口（task-mwkb7djc，② 类排除 direct 留下的盲区）。②类特意排除 direct（注释口径
 //      「direct 由 maybeAutoCloseParent 收口」），但 maybeAutoCloseParent 首道闸门要求父卡 in-progress：
@@ -63,12 +67,15 @@ export var parseRateLimit = parseModelCooldown
 //      maybeAutoCloseParent 的 direct 分支直接 resolved——语义即 core.mjs 既有口径「direct 父卡本就是
 //      主窗口亲办容器，子任务全了结即形式收口」，不需要等自然 parentKick（direct 卡不进派发池，那个
 //      「首个子卡派发」时机永不发生）。与②类并列不重叠：② 只管非 direct。
-//   ④⑤ 节流：每卡 stuckNotedAt 24h 一次（心跳 15s 一轮，不节流会对同一张卡刷屏）；检测窗口内静默
+//   ④⑤b 节流：每卡 stuckNotedAt 24h 一次（心跳 15s 一轮，不节流会对同一张卡刷屏；⑤a 立即重派走
+//   spawn-pending 占位幂等，不经此节流）；检测窗口内静默
 //   且零写盘。② 首见标记 pendingKickSince 同为一次性写。正常板全条件不命中 → 零写零报。
-// 边界纪律：①②③⑥只调既有推进点/既有转移语义，不新写状态变更；④⑤只上报；不动 poolCycle 既有
+// 边界纪律：①②③⑥只调既有推进点/既有转移语义，不新写状态变更；④与⑤b只上报；⑤a 重派复用主派发
+// 路径的 spawn-pending 占位语义（真 spawn 在 createDispatch 内 stuckSweep 锁外做，本函数仍锁内纯函数
+// 零 IO）；不动 poolCycle 既有
 // 派发/回收逻辑（本函数是独立扫描段，锁内纯函数零 IO，通知由 createDispatch 内 stuckSweep 投递）。
 export var STUCK_GRACE_MS = 120000 // ②③ 宽限（对齐 isOrphan/spawn-pending/hook-pre 的 2min 回收口径）
-export var STUCK_VERIFY_MS = 86400000 // ⑤ 验收卡住判定：verifying 超 24h 无 verifierRun
+export var STUCK_VERIFY_MS = 7200000 // ⑤b 验收卡住超时上报判定：verifying 超 2h 无 verifierRun（task-mwogc5nu 24h→2h；可派形态已由⑤a立即检测+自动重派接管，本阈值只兜不可自动恢复形态）
 export var STUCK_NOTE_EVERY_MS = 86400000 // ④⑤ 上报节流：每卡 24h 最多一条
 // ③ 的时间锚：最近一条 to='in-progress' 的 history 留痕（ah 在状态写入同笔原子落盘，崩溃残留也带账）
 function lastInProgressAt(t) {
@@ -112,12 +119,24 @@ function stuckNote(t, out, now, text) {
   out.changed = true
   out.findings.push({ taskId: t.id, text: text })
 }
-// 纯函数：锁内对 d 原位扫描/推进；runs=活跃 run 表（busy 判定）；now=当前墙钟；c=cfg 快照（hardMin）。
-// 返回 { advanced:自动推进条数, changed:是否写盘（推进/标记/节流时间戳）, findings:④⑤ 上报清单 }。
+// ⑤a 验证位占用计数（与 poolCycleBody 活跃计数同口径：worker 之外全算——verifier/hook/decomposer
+// 都占验证位）。⑤a 重派必须尊重 maxVerifiers 并发上限：位满时重派=超出配置并发，不判僵尸只等
+// 正常派发轮转（2h 后归⑤b 超时上报「并发上限」口径）。
+function stuckActiveV(runs) {
+  var n = 0
+  if (!runs) return 0
+  Object.keys(runs).forEach(function (k) { var rc = runs[k]; if (rc && rc.role !== 'worker') n++ })
+  return n
+}
+// 纯函数：锁内对 d 原位扫描/推进；runs=活跃 run 表（busy 判定）；now=当前墙钟；c=cfg 快照（hardMin/maxVerifiers）。
+// 返回 { advanced:自动推进条数, changed:是否写盘（推进/标记/节流时间戳/⑤a 占位）, findings:④⑤b 上报清单,
+//        reverify:⑤a 僵尸验收重派清单（锁外由 stuckSweep 真 spawn） }。
 export function sweepStuckCards(d, runs, now, c) {
-  var out = { advanced: 0, changed: false, findings: [] }
+  var out = { advanced: 0, changed: false, findings: [], reverify: [] }
   if (!d || !Array.isArray(d.tasks)) return out
   var hardMs = Math.max(1, Number(c && c.hardTimeoutMin) || 120) * 60000
+  var maxV = Math.max(0, Number(c && c.maxVerifiers) || 0)
+  var activeV = stuckActiveV(runs)
   var kidsOf = {} // parentId → 子卡数组（一次遍历建索引，免每卡全表扫）
   d.tasks.forEach(function (x) { if (x && x.parentId != null) { (kidsOf[x.parentId] = kidsOf[x.parentId] || []).push(x) } })
   d.tasks.forEach(function (t) {
@@ -189,12 +208,29 @@ export function sweepStuckCards(d, runs, now, c) {
           stuckNote(t, out, now, t.id + '「' + t.title + '」（verifying）收口 hook 卡在 running 超 ' + Math.round(hardMs / 60000) + ' 分钟且无活跃 run——需人工裁决：重跑（hooks.post.state 置回 idle）/ 跳过（置 done 放行收口）/ 放弃（终止该史诗）')
         }
       }
-      // ⑤ verifying 超 24h 无 verifierRun 且无活跃 run（派发侧过滤器全挡或 maxVerifiers=0）：只上报。
-      // frozen/escalation 卡有各自的人裁决通道，不重复报；verifierRun='spawn-pending' 归占位回收（2min）。
+      // ⑤（task-mwogc5nu 僵尸 Verifying 自动恢复）verifying 无 verifierRun 且无活跃 run——两段分流：
+      //   ⑤a 立即检测+自动重派：卡可派（assignMode≠manual、full 管线、maxVerifiers>0 且验证位有空）且过
+      //       STUCK_GRACE_MS 宽限（与②③同款 2min 口径：吞「resolve→下一轮派发」正常瞬态——正常路径
+      //       15s 内就会派上 Verifier，2min 还空着才是僵尸；不等 2h 阈值，实证 task-mwnoabjg-5 僵尸 7h）
+      //       → 置主派发路径同款 spawn-pending 占位（pickDispatch 见占位即跳过，防并发双派；spawn 中途
+      //       崩溃归既有 2min 占位回收，下轮重判）+ 收集进 out.reverify，由 stuckSweep 锁外真 spawn。
+      //       ④辖区（post hook 卡 running=收口卡死需人裁决）不抢，归④上报。
+      //   ⑤b 超时上报（既有行为，阈值 24h→2h）：不可自动恢复形态（manual 指派/非 full 管线/maxVerifiers=0/
+      //       验证位全忙）——自动重派会与人意图或并发上限打架，归人工裁决。
+      //       frozen/escalation 卡有各自的人裁决通道，不重复报；verifierRun='spawn-pending' 归占位回收（2min）。
       if (t.status === 'verifying' && !t.verifierRun && !busy && !t.frozen && !t.escalation) {
         var vAt = new Date(t.resolvedAt || 0).getTime()
-        if (vAt > 0 && now - vAt >= STUCK_VERIFY_MS) {
-          stuckNote(t, out, now, t.id + '「' + t.title + '」（verifying）超 24h 无 Verifier run——需人工处理：验收（board_verdict）或排查派发阻塞（手动指派/管线档/并发上限）')
+        if (vAt > 0 && now - vAt >= STUCK_GRACE_MS
+          && t.assignMode !== 'manual' && (!t.pipeline || t.pipeline === 'full')
+          && maxV > 0 && activeV < maxV
+          && !(hookOn(t, 'post') && core.hookState(t, 'post') === 'running')) {
+          t.verifierRun = 'spawn-pending' // 复用主派发路径的幂等占位（成功换真实 run id，失败由重派臂转 blocked）
+          t.verifierRunAt = new Date(now).toISOString()
+          ah(t, 'verifying', 'verifying', 'system', '死胡同⑤僵尸验收立即检测：verifying 无 Verifier run 且无活跃 run，自动重派 Verifier')
+          out.reverify.push(t)
+          out.advanced++; out.changed = true
+        } else if (vAt > 0 && now - vAt >= STUCK_VERIFY_MS) {
+          stuckNote(t, out, now, t.id + '「' + t.title + '」（verifying）超 2h 无 Verifier run——需人工处理：验收（board_verdict）或排查派发阻塞（手动指派/管线档/并发上限）')
         }
       }
     } catch (e) { console.error('[task-board] 死胡同判定失败 (task ' + (t && t.id) + '):', String(e)) }
@@ -1237,6 +1273,45 @@ export function createDispatch(ctx, state, deps) {
     // 持锁纪律与 hungZeroOutputSweep 同款：检测/推进/标记在锁内一笔原子写（无改动返回 null 不写盘，
     // 安静板零 IO）；pushSysNote 是纯内存缓冲（与既有孤儿回收 L1084 锁内直调同通道，此处锁外汇总
     // 一条更省）；skipKick——本轮已是 poolCycle，无需再踢。返回自动推进条数（调用方据此重读快照）。
+    // ⑤a 僵尸验收自动恢复（task-mwogc5nu）：锁内已置 spawn-pending 占位，这里锁外逐张真 spawn——
+    // 与主派发循环同款纪律（spawn 是慢操作绝不进锁）；成功换真实 run id（产生新 verifierRun），
+    // 失败转 blocked 挂明确原因（不再无限等待）。单项隔离：一张失败不拖累其余卡与④⑤b 上报。
+    async function redispatchStuckVerifier(sid, t) {
+      var rec = null
+      try { rec = await spawnOneShot(sid, t, 'verifier') } catch (e) { console.error('[task-board] 僵尸验收重派 spawn 异常 (task ' + t.id + '):', String(e)); rec = null }
+      if (rec && rec.vetoed) return // 落闸弃权（verifier 无此臂，防御性保留）：占位由翻卡那笔写清掉，下轮 cycle 按现状重判
+      if (rec) {
+        // 占位换真实 run id（守卫同主派发循环：只认仍是占位的那格，卡面已被并发写翻走就不抢）
+        await mutateLocked(sid, function (d) {
+          var t2 = d.tasks.find(function (x) { return x.id === t.id })
+          if (t2 && t2.verifierRun === 'spawn-pending') { t2.verifierRun = String(rec.id); t2.verifierRunAt = new Date().toISOString(); return t2 }
+          return null
+        }, true)
+        try { pushSysNote(sid, '任务「' + t.title + '」僵尸验收自动恢复：已重新派发 Verifier（run ' + String(rec.id) + '）') } catch (_) {}
+        return
+      }
+      // 自动恢复失败（Verifier spawn 也失败）→ 转 blocked + 明确原因（task-mwogc5nu 断言③：不再无限等待）。
+      // 复刻 settle.mjs「verifier 驳回×3」同款两跳链，全部走表上既有边（不动转移表）：
+      // verifying --verify-rejected--> in-progress --blocked--> blocked。
+      var why = '僵尸验收自动恢复失败：Verifier 重派 spawn 未成功（详细错误见 host 控制台 spawn 日志）。请人工处理：修复派发通道后 update-task resetToPending 重排队，或领取本卡后重新提交验收'
+      await mutateLocked(sid, function (d) {
+        var t2 = d.tasks.find(function (x) { return x.id === t.id })
+        if (!t2 || t2.status !== 'verifying' || t2.verifierRun !== 'spawn-pending') return null // 已被人工验收/终止等并发写翻走：不抢
+        var psV = t2.status
+        assertTransition(psV, 'in-progress', 'verify-rejected')
+        t2.status = 'in-progress'
+        ah(t2, psV, 'in-progress', 'system', '僵尸验收自动恢复：Verifier 重派失败，验收通道暂不可用')
+        var psB = t2.status
+        assertTransition(psB, 'blocked', 'blocked')
+        t2.status = 'blocked'
+        t2.lastError = String(why).slice(0, 300)
+        t2.escalation = { question: why, at: new Date().toISOString(), by: 'system' }
+        t2.verifierRun = null; delete t2.verifierRunAt
+        ah(t2, psB, 'blocked', 'system', '僵尸验收自动恢复失败，转人工（失败原因见最近失败行）')
+        return t2
+      }, true)
+      try { pushSysNote(sid, '任务「' + t.title + '」僵尸验收自动恢复失败：Verifier spawn 未成功，已转 blocked 待人工处理') } catch (_) {}
+    }
     async function stuckSweep(sid, runs, snap) {
       if (!snap || snap.__noPersist || !Array.isArray(snap.tasks)) return 0
       if (!stuckHasCandidates(snap.tasks)) return 0 // 锁外预筛（hung 同款纪律）：无候选零锁调用，空板心跳不进锁
@@ -1245,6 +1320,12 @@ export function createDispatch(ctx, state, deps) {
         res = sweepStuckCards(d, runs, Date.now(), cfg(d))
         return res.changed ? d : null
       }, true)
+      // ⑤a 重派（锁外真 spawn）：占位已在锁内置好，pickDispatch 本轮见占位即跳过——不会双派
+      if (res && Array.isArray(res.reverify) && res.reverify.length) {
+        for (var rvi = 0; rvi < res.reverify.length; rvi++) {
+          try { await redispatchStuckVerifier(sid, res.reverify[rvi]) } catch (e) { console.error('[task-board] 僵尸验收重派失败 (task ' + (res.reverify[rvi] && res.reverify[rvi].id) + '):', String(e)) }
+        }
+      }
       if (res && res.findings.length && typeof pushSysNote === 'function') {
         try {
           pushSysNote(sid, '🧭 [任务看板] 死胡同检测：' + res.findings.length + ' 张卡需人工裁决\n' + res.findings.map(function (f) { return '· ' + f.text }).join('\n'), res.findings.length === 1 ? res.findings[0].taskId : undefined)

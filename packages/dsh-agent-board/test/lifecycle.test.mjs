@@ -120,10 +120,11 @@ test('合法流冒烟：六推进点照常落状态（断言零干扰）', () =>
 // ===== 死胡同检测器 sweepStuckCards（task-mwk481xj）：六类「应推进但没推进」形态 =====
 // （⑥ 由 task-mwkb7djc 补：pending + direct 父卡 + 子卡全落定 → 直接收口 resolved——②类排除 direct
 //   而 maybeAutoCloseParent 要求父卡 in-progress，二者叠加留下的盲区，实证 task-mwk0daqx 停死）
-// 断言族：①六类各构造一例 → 全部识别 ②可自动推进的（①②③⑥）被正确推进 ③只上报的（④⑤）产生
-// pushSysNote 且不自动改状态 ④正常卡不误报 ⑤源码级挂点/查表断言锁。直调纯函数 + 薄桩 poolCycle
+// 断言族：①六类各构造一例 → 全部识别 ②可自动推进的（①②③⑥）被正确推进 ③只上报的（④⑤b）产生
+// pushSysNote 且不自动改状态（⑤a task-mwogc5nu：僵尸验收立即检测+自动重派 Verifier，失败转 blocked）
+// ④正常卡不误报 ⑤源码级挂点/查表断言锁。直调纯函数 + 薄桩 poolCycle
 //（mkGateDispatch 同款形态：真跑 createDispatch.poolCycle，stub 掉 IO/计时器）双面覆盖。
-import { createDispatch } from '../lib/dispatch.mjs'
+import { createDispatch, sweepStuckCards } from '../lib/dispatch.mjs'
 
 var SID = 'session-test-stk1-0000-0000-000000000000'
 function mkCard(over) {
@@ -287,24 +288,101 @@ test('死胡同④：verifying 父卡 post hook 卡死（running 超 hardMin 无
   assert.deepEqual(h3.notes, [], 'verifierRunAt 未超 hardMin：不报（宁少勿多）')
 })
 
-// ===== ⑤类：verifying 超 24h 无 verifierRun → 只上报；fresh/frozen/占位在途不报 =====
-test('死胡同⑤：verifying 超 24h 无 Verifier run → 上报不动状态；新鲜/frozen/spawn-pending 不误报', async () => {
-  var t = mkCard({ id: 'v5', status: 'verifying', title: '验收卡住卡', assignMode: 'manual', resolvedAt: ago(25 * 3600000) }) // 25h > 24h
+// ===== ⑤类（task-mwogc5nu 僵尸 Verifying 自动恢复）：阈值 24h→2h + ⑤a 立即检测自动重派 + 失败转 blocked =====
+// ⑤b 超时上报（不可自动恢复形态——manual 指派归人工）：只上报；fresh/frozen/占位在途不报
+test('死胡同⑤b：verifying 超 2h 无 Verifier run（不可自动恢复形态）→ 上报不动状态；新鲜/frozen/spawn-pending 不误报', async () => {
+  var t = mkCard({ id: 'v5', status: 'verifying', title: '验收卡住卡', assignMode: 'manual', resolvedAt: ago(3 * 3600000) }) // 3h > 2h（manual 指派=不可自动重派形态，阈值 task-mwogc5nu 24h→2h）
   var h = mkDispatch(mkBoard([t]))
   await cycle(h)
-  assert.equal(h.notes.length, 1, '⑤只上报：产生一条系统通知')
+  assert.equal(h.notes.length, 1, '⑤b 只上报：产生一条系统通知')
   assert.match(h.notes[0].text, /v5/, '带卡 id')
-  assert.match(h.notes[0].text, /超 24h 无 Verifier run/, '带判定口径')
+  assert.match(h.notes[0].text, /超 2h 无 Verifier run/, '带判定口径（2h 新阈值）')
   assert.match(h.notes[0].text, /board_verdict/, '带建议动作')
   assert.equal(t.status, 'verifying', '不自动推进：状态原位（验收归人）')
+  assert.ok(!t.verifierRun, 'manual 指派卡不自动重派 Verifier（人意图优先，⑤a 分流排除）')
   assert.ok(t.stuckNotedAt, '节流时间戳落卡')
-  var t2 = mkCard({ id: 'v5b', status: 'verifying', assignMode: 'manual', resolvedAt: ago(20 * 3600000) }) // 20h < 24h
-  var t3 = mkCard({ id: 'v5c', status: 'verifying', assignMode: 'manual', resolvedAt: ago(25 * 3600000), frozen: true, frozenAt: ago(25 * 3600000) }) // 裁决挂起：有人裁决通道
-  var t4 = mkCard({ id: 'v5d', status: 'verifying', assignMode: 'manual', resolvedAt: ago(25 * 3600000), verifierRun: 'spawn-pending', verifierRunAt: ago(30000) }) // 占位在途：归占位回收
+  var t2 = mkCard({ id: 'v5b', status: 'verifying', assignMode: 'manual', resolvedAt: ago(1 * 3600000) }) // 1h < 2h
+  var t3 = mkCard({ id: 'v5c', status: 'verifying', assignMode: 'manual', resolvedAt: ago(3 * 3600000), frozen: true, frozenAt: ago(3 * 3600000) }) // 裁决挂起：有人裁决通道
+  var t4 = mkCard({ id: 'v5d', status: 'verifying', assignMode: 'manual', resolvedAt: ago(3 * 3600000), verifierRun: 'spawn-pending', verifierRunAt: ago(30000) }) // 占位在途：归占位回收
   var h2 = mkDispatch(mkBoard([t2, t3, t4]))
   await cycle(h2)
-  assert.deepEqual(h2.notes, [], '未满 24h / frozen（人裁决通道）/ spawn-pending（占位回收辖区）：一律不报')
+  assert.deepEqual(h2.notes, [], '未满 2h / frozen（人裁决通道）/ spawn-pending（占位回收辖区）：一律不报')
   assert.equal(t3.status, 'verifying', 'frozen 不动')
+})
+
+// ===== ⑤a（task-mwogc5nu 断言②③）：verifying && verifierRun=null && 无活跃 run → 立即检测（不等 2h 阈值）+ 自动重派 Verifier =====
+test('死胡同⑤a：僵尸验收（verifying 无 Verifier run 无活跃 run，过 2min 宽限）→ 立即检测并自动重派 Verifier（产生新 verifierRun）', async () => {
+  var t = mkCard({ id: 'rv1', status: 'verifying', title: '僵尸验收卡', resolvedAt: ago(130000) }) // 130s > 120s 宽限；mkCard 缺省 assignMode=auto/pipeline=full = 可派形态
+  var h = mkDispatch(mkBoard([t]))
+  await cycle(h)
+  assert.equal(t.status, 'verifying', '状态原位（重派的是 Verifier，不推进卡面状态）')
+  assert.equal(t.verifierRun, 'run-x', '自动重派产生新 verifierRun（占位换真实 run id）')
+  assert.ok(h.runs['rv1'] && h.runs['rv1'].role === 'verifier', '活跃 run 表登记 verifier rec（占验证位）')
+  var last = t.history[t.history.length - 1]
+  assert.match(String(last && last.note || ''), /僵尸验收立即检测/, '留痕带立即检测口径')
+  assert.ok(String(h.board.dispatchInfo || '').indexOf('verify rv1') < 0, '主派发路径见占位/活跃 rec 即跳过（不双派）')
+  assert.equal(h.notes.length, 1, '恢复回执一条')
+  assert.match(h.notes[0].text, /僵尸验收自动恢复：已重新派发 Verifier（run run-x）/, '带新 run id 的恢复回执')
+  // 幂等：下一轮 sweep（verifierRun 已是真实 id）不再命中 ⑤a，无重复重派
+  await cycle(h)
+  assert.equal(t.verifierRun, 'run-x', '幂等：已有 Verifier run 不再重派')
+  assert.equal(h.notes.length, 1, '第二轮零新增通知')
+})
+
+test('死胡同⑤a 宽限防线：新鲜验收（< 2min）不判僵尸——正常派发路径同轮派上 Verifier（⑤a 零越权接管）', async () => {
+  var t = mkCard({ id: 'rv2', status: 'verifying', title: '新鲜验收卡', resolvedAt: ago(30000) }) // 30s < 120s 宽限：resolve→下轮派发的正常瞬态
+  var h = mkDispatch(mkBoard([t]))
+  await cycle(h)
+  assert.equal(t.verifierRun, 'run-x', '正常路径照常派发（非 ⑤a 接管）')
+  assert.ok(String(h.board.dispatchInfo || '').indexOf('verify rv2') >= 0, 'dispatchInfo 走正常 verify 通道（⑤a 未抢）')
+  assert.ok(!t.history.some(function (x) { return /僵尸验收/.test(String(x && x.note || '')) }), '零僵尸误判留痕')
+  assert.deepEqual(h.notes, [], '正常派发零系统通知')
+})
+
+// ===== ⑤a 失败臂（task-mwogc5nu 断言③④）：自动重派 Verifier spawn 失败 → 转 blocked 挂明确原因（不再无限等待） =====
+test('死胡同⑤a 失败臂：Verifier 重派 spawn 失败 → 转 blocked + escalation/lastError 明确原因；两跳链走表上既有边', async () => {
+  var t = mkCard({ id: 'rv3', status: 'verifying', title: '恢复失败卡', resolvedAt: ago(130000) })
+  var h = mkDispatch(mkBoard([t]), {
+    subagents: {
+      list: function () { return ['mock'] },
+      getProvider: function () { return { inheritsParentContext: false } },
+      start: async function () { throw new Error('spawn 通道故障') }, // 两次尝试（外挂参数回退重试）都失败 → spawnOneShot 返回 null
+    },
+  })
+  await cycle(h)
+  assert.equal(t.status, 'blocked', '自动恢复失败 → 转 blocked（不再无限等待重试）')
+  assert.ok(t.escalation && /僵尸验收自动恢复失败/.test(String(t.escalation.question)), 'escalation 挂明确原因（人工裁决入口）')
+  assert.match(String(t.lastError || ''), /僵尸验收自动恢复失败/, 'lastError 落卡（详情页最近失败行）')
+  assert.ok(!t.verifierRun, '占位清干净（不留死占位）')
+  var hs = t.history
+  assert.equal(hs[hs.length - 2].from, 'verifying', '两跳链第一跳起点 verifying')
+  assert.equal(hs[hs.length - 2].to, 'in-progress', '两跳链第一跳走表上既有 verify-rejected 边')
+  assert.equal(hs[hs.length - 1].from, 'in-progress', '两跳链第二跳起点 in-progress')
+  assert.equal(hs[hs.length - 1].to, 'blocked', '两跳链第二跳走表上既有 blocked 边（与 settle 驳回×3 同款）')
+  assert.equal(h.notes.length, 1, '失败回执一条')
+  assert.match(h.notes[0].text, /僵尸验收自动恢复失败.*已转 blocked/, '失败回执带去向')
+  // blocked 终局：下一轮 sweep 不再判 ⑤（blocked 在扫描排除面），无循环重试
+  await cycle(h)
+  assert.equal(t.status, 'blocked', 'blocked 即终局（人工接管），不再自动重派')
+  assert.equal(h.notes.length, 1, '第二轮零新增通知（不无限循环）')
+})
+
+// ===== ⑤a 守卫：maxVerifiers=0 / 验证位全忙——不自动重派（尊重并发配置），归⑤b 超时口径 =====
+test('死胡同⑤a 守卫：maxVerifiers=0（纯函数直调）与验证位全忙（活跃 ≥ maxVerifiers）不判僵尸不重派', async () => {
+  var t0 = mkCard({ id: 'rv4', status: 'verifying', resolvedAt: ago(130000) })
+  var out0 = sweepStuckCards(mkBoard([t0]), {}, Date.now(), { hardTimeoutMin: 120, maxVerifiers: 0 }) // c.maxVerifiers=0：⑤a 分流要求验证位有空
+  assert.deepEqual(out0.reverify, [], 'maxV=0：不收集重派（配置语义优先，归⑤b 超时上报口径）')
+  assert.equal(out0.changed, false, '零写盘')
+  assert.ok(!t0.verifierRun, '占位不置')
+  var other = mkCard({ id: 'rv5o', status: 'verifying', verifierRun: 'run-v9', resolvedAt: ago(3600000) }) // 别的卡在验收（占满唯一验证位）
+  var t = mkCard({ id: 'rv5', status: 'verifying', resolvedAt: ago(130000) })
+  var b = mkBoard([other, t]); b.maxVerifiers = 1
+  var h = mkDispatch(b)
+  h.runs['rv5o'] = { id: 'run-v9', role: 'verifier', taskId: 'rv5o', settled: false } // activeV=1 ≥ maxV=1
+  await cycle(h)
+  assert.ok(!t.verifierRun, '验证位全忙：不重派（不超并发上限，等正常派发轮转）')
+  assert.equal(t.status, 'verifying', '状态原位')
+  assert.deepEqual(h.notes, [], '零通知')
 })
 
 // ===== ⑥类（task-mwkb7djc）：pending + direct 父卡 + 子卡全落定 → 直接收口 resolved（②类盲区） =====
@@ -445,13 +523,22 @@ test('死胡同误报防线：正常板（草稿组装/发布瞬态/主会话认
 })
 
 // ===== 源码级挂点/查表断言锁（与②六推进点同族：检测器推进点也全部接表）=====
-test('死胡同源码锁：sweepStuckCards 纯函数 + poolCycleBody 挂点 + 推进点查表断言 + 常量化', () => {
+test('死胡同源码锁：sweepStuckCards 纯函数 + poolCycleBody 挂点 + 推进点查表断言 + 常量化 + ⑤a 自动重派接线', () => {
   const ds = srcOf('../lib/dispatch.mjs')
   assert.match(ds, /import \{ assertTransition \} from '\.\/lifecycle\.mjs'/, 'dispatch 接表')
   assert.match(ds, /export function sweepStuckCards\(d, runs, now, c\)/, '检测器纯函数导出（锁内零 IO 形态）')
   assert.match(ds, /var STUCK_GRACE_MS = 120000/, '②③宽限 120s 常量化（对齐 2min 回收口径）')
-  assert.match(ds, /var STUCK_VERIFY_MS = 86400000/, '⑤ 24h 阈值常量化')
-  assert.match(ds, /var STUCK_NOTE_EVERY_MS = 86400000/, '④⑤上报节流 24h 常量化')
+  assert.match(ds, /var STUCK_VERIFY_MS = 7200000/, '⑤b 超时阈值 2h 常量化（task-mwogc5nu 24h→2h）')
+  assert.match(ds, /var STUCK_NOTE_EVERY_MS = 86400000/, '④⑤b上报节流 24h 常量化')
+  // ⑤a 僵尸验收自动恢复（task-mwogc5nu）：立即检测 + 占位收集 + 锁外重派 + 失败转 blocked 接线锁
+  assert.match(ds, /now - vAt >= STUCK_GRACE_MS/, '⑤a 立即检测宽限复用②③ 2min 口径（不等 2h 阈值）')
+  assert.match(ds, /out\.reverify\.push\(t\)/, '⑤a 僵尸验收收集重派清单（锁内置占位）')
+  assert.match(ds, /await redispatchStuckVerifier\(sid, res\.reverify\[rvi\]\)/, '⑤a 锁外重派接线（stuckSweep 内逐张 spawn）')
+  assert.match(ds, /rec = await spawnOneShot\(sid, t, 'verifier'\)/, '⑤a 重派走 spawnOneShot verifier 派发路径（与主派发同源）')
+  assert.match(ds, /t2\.verifierRun = String\(rec\.id\)/, '⑤a 重派成功占位换真实 run id（产生新 verifierRun）')
+  assert.match(ds, /assertTransition\(psV, 'in-progress', 'verify-rejected'\)/, '⑤a 失败臂走表上既有 verify-rejected 边（verifying→in-progress）')
+  assert.match(ds, /assertTransition\(psB, 'blocked', 'blocked'\)/, '⑤a 失败臂走表上既有 blocked 边（in-progress→blocked 两跳链，不动转移表）')
+  assert.match(ds, /t2\.escalation = \{ question: why, at: new Date\(\)\.toISOString\(\), by: 'system' \}/, '⑤a 失败臂 escalation 挂明确原因')
   assert.match(ds, /assertTransition\(ps0, 'pending', 'decompose'\)/, '①走表上既有 decompose 边（推进点查表）')
   assert.match(ds, /assertTransition\(ps1, 'pending', 'reclaim'\)/, '③走表上既有 reclaim 边（推进点查表）')
   assert.match(ds, /parentKickOnDispatch\(d, child\)/, '②调既有推进点 parentKickOnDispatch')
