@@ -5164,6 +5164,49 @@ test('子代理生命周期①（额度回收）：poolCycle 心跳释放「永�
   assert.equal(tD.claimedBy, 'child-d')
 })
 
+// 驳回修复（task-mwogdzfd 二轮）：已落定卡若末条 worker run 是 continuable + timeout/error|incomplete
+// （resumeTarget 命中形态——可达链：worker 硬超时/失败留档 outcome='timeout/error'（continuable 保持
+// true）→ 卡随后落定 resolved/cancelled/archived），protect 分支曾先于 settled 判定执行 → 该停泊残影
+// 被永久跳过释放。修法：只有未落定卡的续跑目标才受 protect；落定卡整批释放（与 702-705 行注释口径
+// 对齐）。三形态取 Verifier 独立探针 B 原样：resolved+timeout/error / cancelled+timeout/error /
+// archived+incomplete。
+test('子代理生命周期①b（落定卡×续跑形态回收）：resolved/cancelled/archived 的 continuable 可续跑末条 run 也整批释放；未落定卡续跑目标保护不回归', async () => {
+  const parent = { id: FULL_SID }
+  const drains = []
+  const interrupts = []
+  const tR = mkTask({ id: 'pa', title: '落定resolved卡', status: 'resolved', runs: [{ role: 'worker', id: 'child-pr', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true }] })
+  const tC = mkTask({ id: 'pb', title: '落定cancelled卡', status: 'cancelled', runs: [{ role: 'worker', id: 'child-pc', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true }] })
+  const tA = mkTask({ id: 'pc', title: '落定archived卡', status: 'archived', runs: [{ role: 'worker', id: 'child-pa', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'incomplete', hardMin: 120, continuable: true }] })
+  // 对照组：未落定 pending 卡的续跑目标（resumeTarget 命中自己）→ protect 仍生效，保留不释放
+  const tU = mkTask({ id: 'pd', title: '未落定续跑目标卡', status: 'pending', runs: [{ role: 'worker', id: 'child-pu', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true }] })
+  const board = Object.assign(mkBoard([tR, tC, tA, tU]), { boardMode: 'manual' }) // manual：pending 卡不派发，隔离回收扫描本身
+  const h = mkContinuableDispatch(board, { rootForSession: () => parent }, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      start: async () => ({ id: 'run-1', result: new Promise(function () {}), dispose: async function () {} }),
+      startContinuable: async () => ({ childId: 'child-x', messageId: 'm' }),
+      sendMessage: async () => 'm',
+      interrupt: (id) => { interrupts.push(id) },
+      drainChildren: async (p, ids) => { drains.push({ parent: p, ids: ids.slice() }); return undefined },
+    },
+  })
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush()
+  // 三张落定卡整批释放（含 resumeTarget 命中自己的续跑形态——落定即永不续跑）；child-pu（未落定续跑目标）不在
+  assert.equal(drains.length, 1, '落定卡×续跑形态恰触发一批 drainChildren（修复前此形态零释放）')
+  assert.deepEqual(drains[0].ids.slice().sort(), ['child-pa', 'child-pc', 'child-pr'])
+  assert.equal(drains[0].parent, parent)
+  assert.deepEqual(interrupts, [])
+  // 对照不回归：未落定卡的续跑目标未被收进释放集（protect 分支对未落定卡照常生效）
+  assert.equal(tU.status, 'pending')
+  // 幂等：第二轮心跳零重放
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush()
+  assert.equal(drains.length, 1)
+  // 状态零扰动：落定卡不被翻转（回收纯释放，不碰状态机）
+  assert.equal(tR.status, 'resolved'); assert.equal(tC.status, 'cancelled'); assert.equal(tA.status, 'archived')
+})
+
 test('子代理生命周期②（老宿主零回归）：无 drainChildren 面 → 清扫整体短路（零 drain 零 interrupt 零异常），既有行为逐字不变', async () => {
   const interrupts = []
   const tA = mkTask({ id: 'oa', title: '已落定卡', status: 'resolved', runs: [{ role: 'worker', id: 'child-oa', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'completed', hardMin: 120, continuable: true }] })
@@ -5312,6 +5355,9 @@ test('子代理生命周期⑦（源码级）：drainChildren 接线 + sweepPark
   // ① 额度释放：drainChildren 守卫（老宿主短路）+ poolCycle 心跳扫描 + spawn 失败路径双臂 eager 触发
   assert.match(dsp, /typeof subagents\.drainChildren !== 'function'/)
   assert.match(dsp, /async function sweepParkedQuota\(sid, snap, runs\)/)
+  // 驳回修复锁定：protect 分支必须带 !settled 前置——落定卡（resolved/cancelled/archived）的续跑形态
+  // 留档不再被永久跳过释放（裸 `if (cid === protect) return` 是二轮驳回的漏放原形）
+  assert.match(dsp, /if \(!settled && cid === protect\) return/)
   assert.match(dsp, /await sweepParkedQuota\(sid, snap, runs\)/)
   assert.match(dsp, /if \(isChildLimitError\(e2\)\) \{ try \{ await sweepParkedQuota\(sid, dsnap, runsFor\(sid\)\) \} catch \(_\) \{\} \}/)
   assert.match(dsp, /if \(isChildLimitError\(e\)\) \{ try \{ await sweepParkedQuota\(sid, dsnap, runsFor\(sid\)\) \} catch \(_\) \{\} \}/)

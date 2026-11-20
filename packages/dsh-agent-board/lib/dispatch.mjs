@@ -695,7 +695,11 @@ export function createDispatch(ctx, state, deps) {
     // 每轮 poolCycle 心跳扫一遍卡面 runs 留档（纯读 snap 零锁零 IO；无候选即静默返回），对判定为
     // 「永不续跑」的 continuable childId 走 drainParkedChildren 整体释放。判定口径（与 resumeTarget
     // 同源取反，绝不误伤可续跑目标）：
-    //   · resumeTarget(t) 命中的 childId —— 续跑目标（interrupt 留存的本意），保留；
+    //   · 未落定卡上 resumeTarget(t) 命中的 childId —— 续跑目标（interrupt 留存的本意），保留；
+    //     已落定卡（resolved/cancelled/archived）的 protect 一律失效——落定即永不续跑，续跑形态留档
+    //     照释（驳回修复：protect 分支曾先于 settled 判定执行，落定卡的停泊残影被永久跳过释放——
+    //     可达链：worker 硬超时/失败留档 outcome='timeout/error'（continuable 保持）→ 卡落定 → 残影
+    //     占额度到永远，正是本卡要治的「inactive 残影占满 active child limit」形态之一）；
     //   · 活跃 rec 在跑的子会话（runs 表 live 集合，含 rec.id/rec.childId 两键）—— 在途执行，保留；
     //   · 未落定卡上 outcome 仍 'running' 的留档 —— 在途/野跑形态归 sweepWildRuns/sweepZombieRuns
     //     看门狗，本清扫不抢（它们落定成续跑形态/终局后下一轮自然重判）；
@@ -728,7 +732,7 @@ export function createDispatch(ctx, state, deps) {
           if (!r || r.continuable !== true) return
           var cid = String(r.id || '')
           if (!cid || live[cid] || drained[cid]) return
-          if (cid === protect) return                       // 续跑目标：保留
+          if (!settled && cid === protect) return           // 未落定卡的续跑目标：保留；落定卡 protect 失效（落定即永不续跑，见头注释驳回修复）
           if (!settled && r.outcome === 'running') return   // 在途/野跑形态：归看门狗，不抢
           ids.push(cid)
         })
