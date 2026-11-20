@@ -204,6 +204,31 @@
       return React.createElement('span', { title: b.tip, style: base }, b.txt)
     }
 
+    // ===== 执行者身份三型（主窗口 claim 与池 Worker 状态区分·direct 标识）=====
+    // 病根（主窗口实证）：主窗口手动 claim 后 claimedBy=主窗口 session id，卡面/详情页照旧按
+    // 「⚡ 会话id（执行该任务的子代理会话）」口径渲染——读起来像池 Worker 在跑，实际不存在池
+    // Worker，「无 Worker 的进行中」被误判为异常。把 in-progress 认领位按执行者身份分三型：
+    //   self（主窗口亲办）＝ claimedBy === selfId（GUI 所在主窗口会话认领亲办）；
+    //   pool（池 Worker） ＝ claimedBy 命中 t.runs 里 role='worker' 留档（host 派发 spawn 成功后把
+    //                        claimedBy 从 'spawn-pending' 换成真实 run id 并同 id 留档 runs——这是
+    //                        池 spawn 的可辨识指纹）；
+    //   subagent（直接子代理）＝ 其余真实会话 id（主窗口用 subagent 工具直接派生、非池 spawn 的
+    //                        子代理领取——board 无对应 role='worker' 留档）。
+    // 'spawn-pending'（派发在途占位）与 'auto-dispatch'/'system'（老哨兵）不算任何执行者 → null，
+    // 卡面维持原 ⚡ 渲染口径（派发在途既非「无 Worker」也非「亲办」）。pipeline=direct 的卡三型
+    // 都可能出现（亲办 / 转手直接子代理 / GUI 手动派发池 Worker），三型统一用执行者徽章表达，
+    // 不再一律表现成 Worker 执行中。纯函数（只读 t 与传入 selfId，不引用 state/C/React），
+    // 可被单测从源码提取执行。
+    function executorKindOf(t, selfId) {
+      if (!t || !t.claimedBy) return null
+      var sid = String(t.claimedBy)
+      if (sid === 'spawn-pending' || sid === 'auto-dispatch' || sid === 'system') return null
+      if (selfId && sid === String(selfId)) return 'self'
+      var runs = Array.isArray(t.runs) ? t.runs : []
+      for (var i = 0; i < runs.length; i++) { if (runs[i] && runs[i].role === 'worker' && String(runs[i].id) === sid) return 'pool' }
+      return 'subagent'
+    }
+
     function Card(props) { var t = props.task; var pc = prioColor[t.priority] || prioColor.low; var dragging = state.dragTask === t.id; var preview = (t.deliverable && t.deliverable.summary) || t.resolution; var critGlow = t.priority === 'critical' && !t.escalation; var sel = !!state.selected[t.id]; var pm = pipeOf(t); var depBlock = t.status === 'pending' && depsBlocked(t); var delOk = !state.selectMode && canDelete(t); var cs = (state.childStats && state.childStats[t.id]) || null; var csDone = cs ? (typeof cs.settled === 'number' ? cs.settled : cs.resolved) : 0; var epic = !!(cs && cs.total > 0); var parentT = t.parentId ? getTask(t.parentId) : null; var depWaitTitle = ''; var depWaitN = 0; if (depBlock) { t.dependsOn.forEach(function (id) { var d = getTask(id); if (!d || (d.status !== 'resolved' && d.status !== 'archived')) { depWaitN++; if (!depWaitTitle) depWaitTitle = d && d.title ? d.title : id } }) } var durB = cardDur(t);
       // 无障碍（反馈 n-mut9rzpyc7p1）：卡片根以 button 角色进 Tab 序（aria-label=标题+状态），
       // Enter/Space 触发与点击相同的激活行为（多选=切换选中，否则开详情）；
@@ -219,7 +244,15 @@
             (Array.isArray(t.waitingForTouches) && t.waitingForTouches.length) ? React.createElement('span', { title: '等文件锁释放：' + t.waitingForTouches.join('、') + '（touches 冲突，详情页可 force 越权派发）', style: { color: C.warn, fontWeight: 600 } }, '🔒 等文件释放') : null,
             React.createElement('span', { title: pm.label, style: { fontSize: 9, padding: '0 4px', borderRadius: 2, background: C.nested, border: '1px solid ' + C.border } }, pm.short),
             (t.retryCount || 0) + (t.rejectCount || 0) > 0 ? React.createElement('span', { title: '重试 ' + (t.retryCount || 0) + ' 次 / 驳回 ' + (t.rejectCount || 0) + ' 次', style: { color: C.warn, fontWeight: 600 } }, '⟳' + ((t.retryCount || 0) + (t.rejectCount || 0))) : null,
-            t.status === 'in-progress' && t.claimedBy ? React.createElement('span', { title: '执行该任务的子代理会话：' + t.claimedBy }, '⚡ ' + String(t.claimedBy).slice(0, 8) + '…') : null,
+            // 执行者三型徽章（主窗口 claim 与池 Worker 状态区分·direct 标识）：主窗口亲办（claimedBy=本会话）
+            // →「🪟 主窗口亲办」；直接子代理（非主窗口且无 runs worker 留档）→「🤖 直接子代理」+会话id；
+            // 池 Worker / 派发在途占位 → 维持原「⚡ 会话id…」形态（池 Worker 的既有身份表达，title 区分）。
+            t.status === 'in-progress' && t.claimedBy ? (function () {
+              var ek = executorKindOf(t, state.sessionId)
+              if (ek === 'self') return React.createElement('span', { title: '主窗口亲办：本卡由主窗口会话（' + t.claimedBy + '）认领直接处理，不存在池 Worker——「无 Worker 的进行中」是亲办语义、不是异常（pipeline=direct 的预期执行形态）', style: { color: C.brand, fontWeight: 600, whiteSpace: 'nowrap' } }, '🪟 主窗口亲办')
+              if (ek === 'subagent') return React.createElement('span', { title: '执行该任务的直接子代理会话（主窗口 subagent 工具派生、非派发池 spawn）：' + t.claimedBy, style: { color: C.brand, fontWeight: 600, whiteSpace: 'nowrap' } }, '🤖 直接子代理 ' + String(t.claimedBy).slice(0, 8) + '…')
+              return React.createElement('span', { title: (ek === 'pool' ? '执行该任务的池 Worker 子代理会话（派发池 spawn）' : '执行该任务的子代理会话（派发在途）') + '：' + t.claimedBy }, '⚡ ' + String(t.claimedBy).slice(0, 8) + '…')
+            })() : null,
             t.assignee ? React.createElement('span', { title: '指派给：' + t.assignee }, '👤→' + String(t.assignee).slice(0, 8) + '…') : null,
             durB ? React.createElement('span', { title: durB.tip }, durB.txt) : null,
             // 删除入口（仅草稿/待办/阻塞，多选模式下隐藏以免误触）：hover 才由透明转红，平时不抢视觉

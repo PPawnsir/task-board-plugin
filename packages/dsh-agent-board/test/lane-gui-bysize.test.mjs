@@ -1616,3 +1616,56 @@ test('㉞设置弹层字号阶梯：配置项标签 fsSub / 值·输入·注释 
     assert.ok(built.indexOf(m) >= 0, 'client.js 缺字号阶梯标记：' + m + '（需 npm run build-client）')
   }
 })
+
+// ===== ㉟ 主窗口 claim 与池 Worker 状态区分·执行者三型（direct 标识，task-mwogdfz6）=====
+// 断言清单（对应任务验收口径）：
+//   ① executorKindOf 纯函数行为级：三型分类——self=claimedBy 主窗口 session id（主窗口亲办）、
+//     pool=claimedBy 命中 runs 里 role='worker' 留档（派发池 spawn 指纹）、subagent=其余真实会话
+//     （直接子代理）；占位/哨兵值（spawn-pending / auto-dispatch / system）→ null 不算任何执行者
+//   ② 卡面三型徽章：主窗口亲办 / 直接子代理 命名徽章 + 池 Worker 维持原「⚡+会话id」形态（title 标注身份）
+//   ③ 详情三处：状态格附执行者类型后缀（三型文案齐备）+ 主窗口亲办横幅（三条件门禁）+
+//     当前动作区运行信息行分型（亲办卡「认领会话: …主窗口本会话」；非亲办维持
+//     '子会话 id: …（对应子代理列表同名条目）' 原字面量零回归）
+//   ④ canJump 条件零改动（亲办卡 claimedBy=本会话本就不可跳子会话——既有口径再锁一道）
+//   ⑤ 产物同步：client.js 重组装含三型全链标记
+test('㉟执行者三型（主窗口 claim 与池 Worker 状态区分）：executorKindOf 行为级 + 卡面/详情三型徽章 + 亲办横幅 + 产物同步', () => {
+  // ① 行为级：抽 board-list.js executorKindOf 纯函数（与 ⑩ decomposeBadgeOf 提取手法同款）
+  const fnM = blsrc.match(/function executorKindOf\(t, selfId\) \{[\s\S]*?\n    \}/)
+  assert.ok(fnM, '缺 executorKindOf 函数体（源码提取失败）')
+  const executorKindOf = new Function(fnM[0] + '\nreturn executorKindOf')()
+  assert.equal(executorKindOf(null, 's-main'), null, 'null 防御')
+  assert.equal(executorKindOf({}, 's-main'), null, '无 claimedBy 字段 → null')
+  assert.equal(executorKindOf({ claimedBy: null }, 's-main'), null, 'claimedBy=null → null（无认领不算执行者）')
+  assert.equal(executorKindOf({ claimedBy: 'spawn-pending' }, 's-main'), null, '派发在途占位（spawn-pending）不算任何执行者')
+  assert.equal(executorKindOf({ claimedBy: 'auto-dispatch' }, 's-main'), null, '老哨兵 auto-dispatch 不算任何执行者')
+  assert.equal(executorKindOf({ claimedBy: 'system' }, 's-main'), null, '老哨兵 system 不算任何执行者')
+  // 三型：self（claimedBy=主窗口 session id → 主窗口亲办）
+  assert.equal(executorKindOf({ claimedBy: 's-main' }, 's-main'), 'self', 'claimedBy=主窗口 session id → self（主窗口亲办）')
+  assert.equal(executorKindOf({ claimedBy: 's-main', runs: [{ role: 'worker', id: 's-main' }] }, 's-main'), 'self', 'self 判定优先于 runs 留档命中')
+  // 三型：pool（claimedBy 命中 runs 里 role='worker' 留档 → 池 Worker spawn 指纹）
+  assert.equal(executorKindOf({ claimedBy: 'child-1', runs: [{ role: 'worker', id: 'child-1' }] }, 's-main'), 'pool', 'claimedBy 命中 runs worker 留档 → pool（池 Worker）')
+  // 三型：subagent（非主窗口且无 worker 留档命中 → 直接子代理）
+  assert.equal(executorKindOf({ claimedBy: 'child-2', runs: [{ role: 'worker', id: 'child-1' }, { role: 'verifier', id: 'child-2' }] }, 's-main'), 'subagent', 'claimedBy 只命中 verifier 留档 → subagent（直接子代理，不算池 Worker）')
+  assert.equal(executorKindOf({ claimedBy: 'child-2', runs: [] }, 's-main'), 'subagent', '空 runs → subagent（无池 spawn 指纹）')
+  assert.equal(executorKindOf({ claimedBy: 'child-2' }, 's-main'), 'subagent', '缺 runs 字段 → subagent（缺省兼容不炸）')
+  // ② 卡面三型徽章（board-list Card 认领位渲染分型）
+  assert.ok(blsrc.indexOf('🪟 主窗口亲办') >= 0, '卡面缺「主窗口亲办」徽章（claimedBy=主窗口会话时的显示形态）')
+  assert.ok(blsrc.indexOf('🤖 直接子代理') >= 0, '卡面缺「直接子代理」徽章')
+  assert.ok(blsrc.indexOf('池 Worker 子代理会话') >= 0, '卡面池 Worker 认领行缺「池 Worker」身份标注（title）')
+  assert.match(blsrc, /'⚡ ' \+ String\(t\.claimedBy\)\.slice\(0, 8\) \+ '…'/, '池 Worker/派发在途的「⚡+会话id」既有渲染形态被误改')
+  // ③ 详情三处：状态格执行者后缀 + 亲办横幅 + 运行信息行分型
+  for (const m of ["' · 主窗口亲办'", "' · 直接子代理'", "' · 池 Worker'", '🪟 主窗口亲办', "认领会话: '"]) {
+    assert.ok(tdv.indexOf(m) >= 0, '详情缺执行者三型标记：' + m)
+  }
+  assert.ok(tdv.indexOf('（主窗口本会话 · 亲办，非子代理）') >= 0, '亲办卡运行信息行缺「主窗口本会话」认领行（不再按子代理会话口径渲染）')
+  assert.match(tdv, /task\.status === 'in-progress' && task\.claimedBy && executorKindOf\(task, state\.sessionId\) === 'self'/, '亲办横幅缺三条件门禁（in-progress+有认领+判 self）')
+  assert.ok(tdv.indexOf('执行者类型按认领位区分：主窗口亲办 / 直接子代理 / 池 Worker') >= 0, '亲办横幅缺三型说明一句（direct 标识口径）')
+  // 非亲办运行信息行原字面量保留（既有断言口径零回归——pool/subagent/在途仍按子会话 id 口径）
+  assert.match(tdv, /'子会话 id: ' \+ task\.claimedBy \+ '（对应子代理列表同名条目）'/, '非亲办运行信息行「子会话 id」字面量丢失')
+  // ④ canJump 零改动（亲办卡 claimedBy=本会话本就不可跳子会话——既有口径，㉘ 同款再锁一道）
+  assert.ok(tdv.indexOf("var canJump = (task.status === 'in-progress' || task.status === 'verifying') && task.claimedBy && task.claimedBy !== state.sessionId") >= 0, 'canJump 条件被改动（应保持原样）')
+  // ⑤ 产物同步（npm run build-client）
+  for (const m of ['function executorKindOf(t, selfId)', '🪟 主窗口亲办', '🤖 直接子代理', '池 Worker 子代理会话', "' · 主窗口亲办'", "' · 直接子代理'", "' · 池 Worker'", "认领会话: '"]) {
+    assert.ok(built.indexOf(m) >= 0, 'client.js 缺执行者三型标记：' + m + '（需 npm run build-client 重组装）')
+  }
+})
