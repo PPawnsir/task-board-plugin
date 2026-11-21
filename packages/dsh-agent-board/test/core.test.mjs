@@ -1642,6 +1642,77 @@ test('explainPlanFiles: rule 台账——散文片 no-path-shape / 中文无扩�
   assert.equal(e4.items[0].rule, 'regex-fragment', 'frag 哨兵基于剥装饰后内容（圈号剥净仍判残片）')
 })
 
+// ===== planGate 复发误报修复（task-mwqu6hx2，n-mvqfiofr0kt9 2026-11-21 复发样本①②③）=====
+// 复发形态（既往四轮修复后仍残留两类「像路径」误入选 + 一类裸词正判回归锁）：
+// ①下划线开头的 Python 方法名清单——斜杠是方法并列分隔符，旧判定「含分隔符即入选」当路径 → 假越界；
+// ②src 例外登记说明语境——`src/routes.tsx` 有分隔符有扩展名、截断后完整过路径判定，但整行是
+// 「legacy 例外登记」的说明文本不是路径声明；③裸词 hosting 旧判定已正确拒（no-path-shape，回归锁）。
+// 合法尾注行（『path 说明』『path 说明文字』——task-mvr44s0y 选定语义）不受说明语境识别影响。
+test('parsePlanFiles: 复发误报修复——下划线标识符（含 /）拒 + 例外登记说明语境拒 + 裸词照旧拒；合法尾注行零回归', () => {
+  // ① 复发样本一：三个下划线方法名（含 / 被旧判定当路径分隔符）不入选——'_' 开头即拒（即使含 /）
+  assert.deepEqual(core.parsePlanFiles('计划改动：_drift_counts/_drift_summary_zh/_drift_family_of_path'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：_drift_counts'), [])                     // 单方法名（无 /）同拒
+  assert.deepEqual(core.parsePlanFiles('计划改动：__merge_two_defs/_private_helper'), []) // 双下划线私有族同拒
+  // 含下划线的真实路径不受影响（只有「开头」下划线才拒——中段下划线是合法路径字符）
+  assert.deepEqual(core.parsePlanFiles('计划改动：tests/test_x.py'), ['tests/test_x.py'])
+  // ② 复发样本二：src 例外登记说明语境——路径后紧跟复合说明词（例外登记/登记/备注）判说明文本
+  assert.deepEqual(core.parsePlanFiles('计划改动：src/routes.tsx 例外登记说明（legacy 例外登记）'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：src/routes.tsx 例外登记'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：src/routes.tsx 登记说明'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：src/routes.tsx 备注遗留接口'), [])
+  assert.deepEqual(core.parsePlanFiles('计划改动：src/routes.tsx——例外登记说明'), [])    // 破折号连接的语境尾巴
+  // 中文真路径 + 说明语境同样拒（语境判定对 CJK 路径形态同样生效）
+  assert.deepEqual(core.parsePlanFiles('计划改动：原型/规则管理/控制台.html 例外登记说明'), [])
+  // ③ 合法尾注行不受影响（裸「说明」不是语境标志——『path+空格+说明』截到路径前缀入选）
+  assert.deepEqual(core.parsePlanFiles('计划改动：src/routes.tsx 说明'), ['src/routes.tsx'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：src/routes.tsx 说明文字'), ['src/routes.tsx'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：原型/a.py 说明尾巴'), ['原型/a.py'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs — 解析器现状'), ['lib/core.mjs'])
+  assert.deepEqual(core.parsePlanFiles('计划改动：lib/core.mjs（注释）'), ['lib/core.mjs'])
+  // ④ 复发样本三：裸词 hosting 照旧拒（无下划线/无语境尾巴/无路径特征）
+  assert.deepEqual(core.parsePlanFiles('计划改动：hosting'), [])
+  // ⑤ 混合清单：复发三样本丢弃、真路径保序入选（修复前：三样本误入选 → 越界误报）
+  assert.deepEqual(core.parsePlanFiles('计划改动：\n- lib/core.mjs\n- _drift_counts/_drift_summary_zh/_drift_family_of_path\n- src/routes.tsx 例外登记说明（legacy 例外登记）\n- hosting'),
+    ['lib/core.mjs'])
+  // ⑥ 闸口集成：真路径在边界内 → 零越界（修复前同样输入会报 3 条假越界 outside）
+  assert.deepEqual(core.planOutsideTouches(['lib/**'], core.parsePlanFiles('计划改动：lib/core.mjs\n_drift_counts/_drift_summary_zh/_drift_family_of_path\nsrc/routes.tsx 例外登记说明（legacy 例外登记）\nhosting')), [])
+})
+
+test('explainPlanFiles: 复发样本 rule 台账——underscore-ident / explain-context / no-path-shape 各就位；合法尾注行照旧 ok', () => {
+  // ① 方法名族 → underscore-ident（含 / 也拒的台账理由名）
+  var r1 = core.explainPlanFiles('计划改动：_drift_counts/_drift_summary_zh/_drift_family_of_path')
+  assert.equal(r1.items[0].rule, 'underscore-ident', '下划线开头标识符带 underscore-ident 理由名')
+  assert.equal(r1.items[0].kept, false, '被拒不入选')
+  assert.equal(r1.files.length, 0, 'files 恒空')
+  // ② 例外登记说明 → explain-context（candidate 恒空串）
+  var r2 = core.explainPlanFiles('计划改动：src/routes.tsx 例外登记说明（legacy 例外登记）')
+  assert.equal(r2.items[0].rule, 'explain-context', '说明语境带 explain-context 理由名')
+  assert.equal(r2.items[0].candidate, '', '被拒 candidate 恒空')
+  // ③ 裸词照旧 no-path-shape；④ 合法尾注行照旧 ok（新分支不动既有归因）
+  var r3 = core.explainPlanFiles('计划改动：hosting')
+  assert.equal(r3.items[0].rule, 'no-path-shape', '裸词照旧 no-path-shape（复发样本③正判回归锁）')
+  var r4 = core.explainPlanFiles('计划改动：src/routes.tsx 说明')
+  assert.equal(r4.items[0].rule, 'ok', '合法尾注行照旧 ok')
+  assert.equal(r4.items[0].candidate, 'src/routes.tsx', '照常归一入选')
+})
+
+test('planGate 复发误报修复（task-mwqu6hx2）端到端：复发三样本不进 touches 比对零越界；零路径分支被拒明细带新理由名', async () => {
+  // ① 复发场景端到端（n-mvqfiofr0kt9：真路径在边界内 + 三类误报样本不再入选 → 零越界零 warning；
+  // 修复前：方法名/例外登记说明误入选 → outside 非空 → 假「计划改动越界」警示）
+  var t1 = mkTask({ id: 'task-rec1', status: 'in-progress', claimedBy: 'w1', touches: ['lib/**'] })
+  var g1 = await mkRpcHandlers(mkBoard([t1])).__tools['board_report'].execute({ taskId: 'task-rec1', kind: 'progress', question: '计划改动：\n- lib/core.mjs\n- _drift_counts/_drift_summary_zh/_drift_family_of_path\n- src/routes.tsx 例外登记说明（legacy 例外登记）\n- hosting' })
+  assert.equal(g1.ok, true)
+  assert.deepEqual(g1.planGate, { files: 1, outside: [] }, '复发三样本不再误报越界（只解析出真路径）')
+  assert.equal('warning' in g1, false, '全合规零 warning（修复前为假越界警示）')
+  // ② 零路径分支：三类拒段在被拒明细里带新理由名（Worker 看 reason 自纠不必 escalate）
+  var t2 = mkTask({ id: 'task-rec2', status: 'in-progress', claimedBy: 'w1', touches: ['lib/**'] })
+  var g2 = await mkRpcHandlers(mkBoard([t2])).__tools['board_report'].execute({ taskId: 'task-rec2', kind: 'progress', question: '计划改动：_drift_counts/_drift_summary_zh/_drift_family_of_path\nsrc/routes.tsx 例外登记说明（legacy 例外登记）\nhosting' })
+  assert.match(g2.warning, /被拒明细：3 条/, '三段全拒（复发样本①②③各一段）')
+  assert.ok(g2.warning.indexOf("'_drift_counts/_drift_summary_zh/_drift_family_of_path'(underscore-ident)") >= 0, '方法名带 underscore-ident 理由名')
+  assert.ok(g2.warning.indexOf("'src/routes.tsx 例外登记说明（legacy 例外登记）'(explain-context)") >= 0, '例外登记说明带 explain-context 理由名')
+  assert.ok(g2.warning.indexOf("'hosting'(no-path-shape)") >= 0, '裸词照旧 no-path-shape 理由名')
+})
+
 test('planGate 解析诊断接入（task-mw7j4oy4）：零路径 warning 追加被拒明细；全量越界追加解析结果行；部分越界/全合规零附加', async () => {
   // ① 零路径：全部段被拒 → warning 追加被拒明细（含每段理由名）；原文案与卡消息形态不变
   const tA = mkTask({ id: 'ta', status: 'in-progress', claimedBy: 'w1', touches: ['lib/**'] })

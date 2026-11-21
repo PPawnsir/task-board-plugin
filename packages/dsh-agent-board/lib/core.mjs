@@ -179,6 +179,18 @@ function truncateAtDelim(v) {
   var cut = v.search(/[\s，；、：（）()「」『』《》〈〉【】〔〕“”‘’…—·～！？]/)
   return cut >= 0 ? v.slice(0, cut) : v
 }
+// 说明语境尾巴检测（task-mwqu6hx2 复发样本②）：尾巴 = 截断前快照 fragSrc 里路径 token v 之后的内容
+//（截断语义下 v 本是 fragSrc 前缀；含剥反引号偏差时取 v 在 fragSrc 中首处，容差内仍准）；剥掉截断
+// 类分隔符（truncateAtDelim 同款字符类 + 半角连字符——尾巴必以触发截断的分隔符开头）后以复合说明词
+//（例外登记/登记/备注，刻意不含裸「说明」——合法尾注行不误杀，见上方注释）开头 → 命中。引号包裹
+// 分支 fragSrc===v、尾巴恒空（显式反引号=Worker 对「这条真是路径」的显式背书，配对后尾巴按既有
+// 语义忽略，不受本判定影响）。
+var EXPLAIN_TAIL_RE = /^[\s，；、：（）()「」『』《》〈〉【】〔〕“”‘’…—·～！？\-]*(例外登记|登记|备注)/
+function explainTailHit(fragSrc, v) {
+  if (!fragSrc || !v || fragSrc === v) return false
+  var at = fragSrc.indexOf(v)
+  return at >= 0 ? EXPLAIN_TAIL_RE.test(fragSrc.slice(at + v.length)) : false
+}
 // 像路径判定（task-mvqfl7in，n-mvqfiofr0kt9 误报实证）：无路径特征的纯散文行（如「调研文件
 // 清单」「只动解析不动闸口比对」及截断后的散文首词）不入选；含路径分隔符（'/' 或 Windows
 // 反斜杠——normTouch 同源等价）或以代码扩展名结尾（宽正则，.mjs/.md/.json/.py/.yml 等）才
@@ -196,6 +208,18 @@ function truncateAtDelim(v) {
 // .mjs 等），无扩展名的中文散文片（「调用点/接线断言仍锁」有斜杠无扩展名）继续拒；ASCII token 判定
 // 逐字不变（分隔符或扩展名任一即可，含无扩展名的 ASCII 目录）。两者只校正「伪路径入选/真路径拒选」，
 // normTouch 归一语义、frag 残片哨兵、touchCovers 覆盖规则逐字不动。
+// 复发误报收紧（task-mwqu6hx2，n-mvqfiofr0kt9 2026-11-21 复发样本——既往四轮修复后仍复发）：
+// ①下划线开头的标识符不是路径：`_drift_counts/_drift_summary_zh/_drift_family_of_path` 是 Python
+// 方法名清单（斜杠是方法并列分隔符，不是路径分隔符），旧判定「含分隔符即入选」把它当路径 → 永远
+// 不在 touches 边界内 → 假越界。判据：token 以 '_' 开头即拒（即使含 '/'，不看扩展名不看分隔符）——
+// Python _xxx / JS __xxx 私有标识符形态与真实路径的分界；含下划线的真实路径（tests/test_x.py）不
+// 受影响（只有「开头」下划线才拒）。
+// ②说明语境识别：`src/routes.tsx 例外登记说明（legacy 例外登记）` 是「legacy 例外登记」语境里的
+// 说明文本（Worker 在解释例外登记、不是声明要改 src/routes.tsx），但该 token 有分隔符有扩展名、
+// 截断后完整通过路径判定 → 误入选。判据：路径 token 之后（截断前快照里）紧跟复合说明词（例外
+// 登记/登记/备注）→ 整条判说明文本。刻意不含裸「说明」：『path 说明』『path 说明文字』是
+// task-mvr44s0y 选定语义断言锁死的合法路径行（尾注=annotation，截到路径前缀入选），简单拒「说明」
+// 关键词会把它们一起误杀——语境标志取「例外登记/登记/备注」复合说明词（复发样本的标志词族）。
 // 拒选理由台账（task-mw7j4oy4：判定与文案共用同一事实源）：rule 字符串唯一出处——parsePlanItem 写入
 // Item.rule，rpc.mjs 闸口文案只引用 items[].rule、不重写字面量。枚举与旧 looksLikePath 布尔分支一一对应
 //（零行为变更，静态期望在测试锁字面量）：
@@ -204,24 +228,34 @@ function truncateAtDelim(v) {
 //   regex-fragment = 正则/代码残片（旧 frag 哨兵拒）
 //   cjk-no-ext     = 含 CJK、无 ASCII 扩展名、有分隔符（中文散文片的「像路径」形态）
 //   no-path-shape  = 无任何路径特征（ASCII 无分隔符无扩展名，或 CJK 无扩展名也无分隔符的纯散文词）
+//   underscore-ident = 下划线开头的标识符（Python 方法名清单；含 '/' 也拒——task-mwqu6hx2 复发样本①）
+//   explain-context  = 说明语境文本（路径后紧跟 例外登记/登记/备注 复合说明词——task-mwqu6hx2 复发样本②）
+//（两新值随 task-mwqu6hx2 增分支新增；rpc.mjs 闸口文案只引用 items[].rule 动态渲染，零接线改动）
 var REJECT_RULES = {
   OK: 'ok',
   EMPTY: 'empty',
   NO_PATH_SHAPE: 'no-path-shape',
   CJK_NO_EXT: 'cjk-no-ext',
-  REGEX_FRAGMENT: 'regex-fragment'
+  REGEX_FRAGMENT: 'regex-fragment',
+  UNDERSCORE_IDENT: 'underscore-ident',
+  EXPLAIN_CONTEXT: 'explain-context'
 }
 // 判定即理由（task-mw7j4oy4 台账化）：本函数直接产出 REJECT_RULES 值，kept = (rule === OK)——拒选
 // 理由不是事后猜测而是判定分支本身，判定与文案不可能漂移。布尔→规则映射与旧实现逐字对齐：frag →
 // REGEX_FRAGMENT；cjk&&!hasExt → 有分隔符 CJK_NO_EXT / 无分隔符 NO_PATH_SHAPE；!cjk&&!hasExt&&!分隔
 // 符 → NO_PATH_SHAPE；其余（cjk&&hasExt，或 !cjk&&(分隔符||hasExt)）→ OK。三个谓词逐字未动。
+// task-mwqu6hx2 增两分支（复发样本①②）：v 以 '_' 开头 → UNDERSCORE_IDENT（frag 之后、先于既有形态
+// 分支——方法名/私有标识符优先归因）；走到 OK 前先过说明语境尾巴（explainTailHit）——只对本会入选
+// 的路径形态生效（非路径 token 照旧记原拒选理由，台账归因不漂移），命中 → EXPLAIN_CONTEXT。
 function looksLikePathRule(v, fragSrc) {
   var cjk = /[\u4e00-\u9fff\uff00-\uffef]/.test(v)
   var frag = /^\//.test(fragSrc) && /[()\\]/.test(fragSrc.slice(1))
   var hasExt = /\.[a-z0-9]{1,6}$/i.test(v)
   if (frag) return REJECT_RULES.REGEX_FRAGMENT
+  if (/^_/.test(v)) return REJECT_RULES.UNDERSCORE_IDENT
   if (cjk && !hasExt) return /[\/\\]/.test(v) ? REJECT_RULES.CJK_NO_EXT : REJECT_RULES.NO_PATH_SHAPE
   if (!cjk && !hasExt && !/[\/\\]/.test(v)) return REJECT_RULES.NO_PATH_SHAPE
+  if (explainTailHit(fragSrc, v)) return REJECT_RULES.EXPLAIN_CONTEXT
   return REJECT_RULES.OK
 }
 // 单条解析流水线（旧实现循环体 L98-148 逐字提出）：顺序——列表符/圈号/序号剥离（stripDecor，幂等）
