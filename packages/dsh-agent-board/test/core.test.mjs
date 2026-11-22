@@ -1813,6 +1813,45 @@ test('touchCovers: 边界对齐后缀归一——同一文件的工作区前缀�
   assert.equal(core.patOverlap('task-board-plugin/packages/x/a.js', 'packages/x/a.js'), false, '锁语义零变化（红线）')
 })
 
+test('touchCovers: 目录锁中段单星通配——* 段匹配一层目录（task-mws9lmos，n-mwrdm0ktomce 实证）', () => {
+  // 实证根因：卡 touches 声明 'web/src/features/*/api/**' 等中段单星目录锁，实际路径
+  // 'web/src/features/modeling/api/ontology.ts' 被 f.indexOf(pfx)===0 字面量匹配误判越界
+  // （'*' 被当字面符而非通配符）。现语义：纯 '*' 段匹配恰好一层任意非空目录。
+  assert.equal(core.touchCovers('web/src/features/*/api/**', 'web/src/features/modeling/api/ontology.ts'), true, '中段单星匹配一层域名')
+  assert.equal(core.touchCovers('web/src/features/*/api/**', 'web/src/features/data-query/api/ontology.ts'), true, '换一层域名同样命中')
+  // 单星只吃一层：两层不匹配、缺域名段不匹配（尾部 '**' 仍锁任意深度后代，单星不跨段）
+  assert.equal(core.touchCovers('web/src/features/*/api/**', 'web/src/features/a/b/api/ontology.ts'), false, '单星只匹配一段')
+  assert.equal(core.touchCovers('web/src/features/*/api/**', 'web/src/features/api/ontology.ts'), false, '缺域名段不匹配')
+  // 兄弟目录不误报：api 锁盖不到 lib 段（段比对失败）；lib 锁照常盖 lib 实路径
+  assert.equal(core.touchCovers('web/src/features/*/lib/**', 'web/src/features/modeling/lib/ontology.ts'), true, 'lib 锁盖 lib 实路径')
+  assert.equal(core.touchCovers('web/src/features/*/api/**', 'web/src/features/modeling/lib/ontology.ts'), false, 'api 锁盖不到兄弟 lib')
+  // 目录锁只盖后代：锁定目录本体（'.../modeling/api'）不算后代——与无 '*' 字面量语义逐字对齐
+  assert.equal(core.touchCovers('web/src/features/*/api/**', 'web/src/features/modeling/api'), false, '目录本体不盖')
+  // 窄锁被宽锁覆盖：无星宽锁照旧字面量盖中段单星窄锁；中段单星锁也盖同域窄锁（段通配+** 深度）
+  assert.equal(core.touchCovers('web/src/features/**', 'web/src/features/*/api/**'), true, '无星宽锁盖中段单星窄锁')
+  assert.equal(core.touchCovers('web/src/features/*/api/**', 'web/src/features/modeling/api/**'), true, '中段单星锁盖同域窄锁')
+  // 既有 dir/** 目录锁零行为变化（硬约束③）
+  assert.equal(core.touchCovers('web/src/**', 'web/src/modeling/api/ontology.ts'), true, '无星目录锁原语义')
+  assert.equal(core.touchCovers('web/src/**', 'web/src'), false, '无星目录锁原语义：目录本体仍不盖')
+  // 锁语义 matchOne 逐字不动（红线）：中段单星在锁侧仍按字面量判不冲突——matchOne 未导出，
+  // 用其唯一导出口径 patOverlap（双向调用 matchOne）验证锁侧零变化（同 task-mw0f2zoc 先例）。
+  assert.equal(core.patOverlap('web/src/features/*/api/**', 'web/src/features/modeling/api/ontology.ts'), false, '锁语义零变化（红线）')
+})
+
+test('planOutsideTouches: 中段单星目录锁声明——实路径零越界（task-mws9lmos 复刻 n-mwrdm0ktomce）', () => {
+  // 实证复刻：全量重构卡 touches 三条中段单星目录锁，features 下各域 api/lib/types 实路径
+  // 原全被误报越界（Worker 被迫改写计划），现零越界；真越界（未声明子目录/域外路径）照报。
+  const touches = ['web/src/features/*/api/**', 'web/src/features/*/lib/**', 'web/src/features/*/types/**']
+  assert.deepEqual(core.planOutsideTouches(touches, [
+    'web/src/features/modeling/api/ontology.ts',
+    'web/src/features/data-query/api/ontology.ts',
+    'web/src/features/modeling/lib/ontology.ts',
+    'web/src/features/modeling/types/x.ts'
+  ]), [], '中段单星全合规零越界')
+  assert.deepEqual(core.planOutsideTouches(touches, ['web/src/features/modeling/components/Btn.tsx']), ['web/src/features/modeling/components/Btn.tsx'], '未声明子目录真越界照报')
+  assert.deepEqual(core.planOutsideTouches(touches, ['web/src/lib/x.ts']), ['web/src/lib/x.ts'], 'features 外真越界照报')
+})
+
 test('planOutsideTouches: 反向判定——计划文件不被任何 touches 模式覆盖 = 越界', () => {
   const touches = ['lib/core.mjs', 'test/**', '*.test.mjs']
   assert.deepEqual(core.planOutsideTouches(touches, ['lib/core.mjs', 'test/x.mjs', 'lib/a.test.mjs']), []) // 全合规

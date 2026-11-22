@@ -45,6 +45,22 @@ export function normTouch(s) {
 function baseOf(p) { var i = p.lastIndexOf('/'); return i < 0 ? p : p.slice(i + 1) }
 function isStarDot(p) { return p.length > 2 && p.indexOf('*') === 0 && p.charAt(1) === '.' && p.indexOf('/') < 0 }
 function dirLockPrefix(p) { return p.length > 3 && p.slice(-3) === '/**' ? p.slice(0, -2) : '' }
+// 目录锁前缀匹配（task-mws9lmos，n-mwrdm0ktomce 实证）：前缀含 '*' 时按段通配——纯 '*' 段匹配
+// 恰好一段任意非空段（'web/src/features/*/api/' 匹配 'web/src/features/modeling/api/'，modeling 是
+// 一层域名），而非旧字面量语义（f.indexOf(pfx)===0 把 '*' 当字面符，中段单星声明的实路径全被误判越界）。
+// 前缀恒以 '/' 结尾（'/**' 只剥星不剥斜杠）：段数取剥尾斜杠后段数，f 段数必须严格更多——目录锁只盖
+// 后代文件不盖目录本体，与无 '*' 时的字面量语义逐字对齐。含 '*' 但非纯 '*' 段（'**'、'*.ts'）仍按
+// 字面量比对——本修只放开中段单星，不引入通用 glob 展开。无 '*' 走原字面量分支：既有 dir/** 零变化。
+function dirLockCovers(pfx, f) {
+  if (pfx.indexOf('*') < 0) return f.indexOf(pfx) === 0
+  var segs = pfx.slice(0, -1).split('/'), fs = f.split('/')
+  if (fs.length <= segs.length) return false
+  for (var i = 0; i < segs.length; i++) {
+    if (segs[i] === '*') { if (!fs[i]) return false; continue }
+    if (segs[i] !== fs[i]) return false
+  }
+  return true
+}
 function matchOne(pattern, subject) {
   var p = normTouch(pattern), s = normTouch(subject)
   if (!p || !s) return false
@@ -304,8 +320,9 @@ export function touchCovers(pattern, file) {
   // 是另一侧边界对齐后缀」时短路，其余一律落到既有分支，五个既有分支逐字未动。
   if ((p.indexOf('/') >= 0) && (p.length < f.length) && f.slice(-(p.length + 1)) === '/' + p) return true
   if ((f.indexOf('/') >= 0) && (f.length < p.length) && p.slice(-(f.length + 1)) === '/' + f) return true
-  // 目录锁：'dir/**' 覆盖 dir 下任意路径（含更窄的子目录锁——'src/**' 覆盖 'src/lib/**'）
-  var pfx = dirLockPrefix(p); if (pfx && f.indexOf(pfx) === 0) return true
+  // 目录锁：'dir/**' 覆盖 dir 下任意路径（含更窄的子目录锁——'src/**' 覆盖 'src/lib/**'）；
+  // 前缀含 '*' 走 dirLockCovers 段通配（中段单星匹配一层目录，task-mws9lmos），无 '*' 字面量语义不变
+  var pfx = dirLockPrefix(p); if (pfx && dirLockCovers(pfx, f)) return true
   // 通配扩展名：'*.ext' 覆盖以该扩展名结尾的具体文件（f 也是 '*.ext' 时上面已判完全相等）
   if (isStarDot(p)) return f.length > p.length - 1 && f.slice(-(p.length - 1)) === p.slice(1)
   // 任一侧含 '/' 走目录链判定（与 matchOne 同口径）：p 是 f 的父目录链（'lib'、'src/lib' 都覆盖
