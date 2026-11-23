@@ -27,11 +27,18 @@ export function createSession(ctx, state) {
 
     // ===== 工具函数 =====
     function getActorId() { const a = ctx.agents; if (a) { const i = a.currentInitiator(); if (i) return String(i.id) } return 'unknown' }
+    // ===== 根 agent 判定（rc.5 契约迁移，task-mwqu2k7p）=====
+    // 宿主 0.2.2-rc.5 的 agents 服务移除 roots()/isOwnedBy()，只余 list()/get()；父子关系改由
+    // SessionHeader.parentSession 表达（root 会话该字段缺省，子代理带父会话 id）。
+    // 判据统一收敛到这两个纯读助手，避免各调用点再各写一套口径漂移。
+    function isRootAgent(a) { if (!a) return false; var h = a.session && a.session.header; return !h || !h.parentSession }
+    function rootIdsOf(agentsSvc) { var s = {}; try { var all = agentsSvc.list() || []; for (var i = 0; i < all.length; i++) { if (isRootAgent(all[i])) s[String(all[i].id)] = true } } catch (_) {} return s }
+    function parentSessionOf(agentsSvc, sid) { try { var a = agentsSvc.get(sid); return (a && a.session && a.session.header && a.session.header.parentSession) ? String(a.session.header.parentSession) : '' } catch (_) { return '' } }
     // resolveRoot 是同步热点（每个工具守卫/RPC/prompt 组装都调），agent 注册表可能有几百个子代理，
-    // 每次调用 roots()+list()+全表 isOwnedBy 扫描会反复卡宿主事件循环 → memoize 10s TTL。
+    // 每次调用全表扫描会反复卡宿主事件循环 → memoize 10s TTL。
     // 父子归属在一个 agent 存活期内不变，10s 过期窗口足够安全。
     var _rootCache = {}
-    function resolveRootUncached(sid) { const agentsSvc = ctx.agents; if (!agentsSvc) return sid; var cur = sid; var roots = agentsSvc.roots(); var rids = []; for (var i = 0; i < roots.length; i++) rids.push(String(roots[i].id)); if (rids.indexOf(cur) >= 0) return cur; var all = agentsSvc.list(); var visited = {}; while (!visited[cur]) { visited[cur] = true; var o = null; for (var j = 0; j < all.length; j++) { if (agentsSvc.isOwnedBy(cur, all[j])) { o = all[j]; break } }; if (!o) break; cur = String(o.id); if (rids.indexOf(cur) >= 0) return cur }; return cur }
+    function resolveRootUncached(sid) { const agentsSvc = ctx.agents; if (!agentsSvc) return sid; var cur = sid; var visited = {}; while (!visited[cur]) { visited[cur] = true; var p = parentSessionOf(agentsSvc, cur); if (!p) return cur; cur = p } return cur }
     function resolveRoot(sid) {
       var now = Date.now()
       var c = _rootCache[sid]
@@ -66,7 +73,8 @@ export function createSession(ctx, state) {
     function deriveWorkMode(d) { return (d && d.teamMode) ? 'team' : ((d && d.boardMode) === 'auto' ? 'auto' : 'list') }
 
     // 按会话找 root agent（静态插件挂 host 层后多会话共存，不能"取第一个"——会把 worker 挂到别的会话上）
-    function rootForSession(sid) { var s = ctx.agents; if (!s) return undefined; var r = s.roots(); for (var i = 0; i < r.length; i++) { if (String(r[i].id) === sid) return r[i] } return undefined }
+    // rc.5 契约迁移：不再读 roots() 集，直接按 id 取活体并校验「无 parentSession」= 根。
+    function rootForSession(sid) { var s = ctx.agents; if (!s) return undefined; var a = typeof s.get === 'function' ? s.get(sid) : undefined; return isRootAgent(a) ? a : undefined }
 
     function sessionCwd(sid) { try { var root = rootForSession(sid); var cwd = root && root.session && root.session.header && root.session.header.cwd; return (typeof cwd === 'string' && cwd) ? cwd : '' } catch (_) { return '' } }
 

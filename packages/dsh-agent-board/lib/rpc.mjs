@@ -114,7 +114,8 @@ export function createRpc(ctx, state, deps) {
       var ag = ctx.agents
       if (ag) {
         try {
-          var roots = ag.roots(); if (Array.isArray(roots)) for (var i = 0; i < roots.length; i++) blocked.add(String(roots[i].id))
+          // rc.5 契约迁移：agents.roots() 已移除，list() 已是「全部活体（含 root 与子代理）」超集，
+          // 原 roots()+list() 两行合并为一行 list() 即口径等价（blocked 集合语义=所有活体会话）。
           var all = ag.list(); if (Array.isArray(all)) for (var j = 0; j < all.length; j++) blocked.add(String(all[j].id))
         } catch (_) {}
       }
@@ -351,12 +352,14 @@ export function createRpc(ctx, state, deps) {
       }
       var ag = ctx.agents
       if (ag) {
-        var live = typeof ag.get === 'function' ? ag.get(sid) : undefined
-        if (live && live.session && live.session.header && live.session.header.parentSession) return false
-        var roots = ag.roots()
-        var rids = []
-        for (var i = 0; i < roots.length; i++) rids.push(String(roots[i].id))
-        return rids.indexOf(sid) >= 0
+        // rc.5 契约迁移：agents.roots() 已移除，改为按 id 从 list() 取活体 + SessionHeader.parentSession 缺省判根。
+        var all = (typeof ag.list === 'function') ? (ag.list() || []) : []
+        for (var i = 0; i < all.length; i++) {
+          if (String(all[i].id) !== String(sid)) continue
+          var hh2 = all[i].session && all[i].session.header
+          return !hh2 || !hh2.parentSession
+        }
+        return false
       }
       return true
     }
