@@ -41,7 +41,7 @@
 | **0.1.7 ~ 0.1.7-x**（含 rc） | **≥ 1.2.2（必须）** | 0.1.7 会话日志升级为 format v4：插件消息 `source.kind` 必须是生产者自有 kind。1.2.1 及更早会在**任务完成/阻塞回执**落盘时抛 `SessionFormatError: format v4 message requires a producer-owned source kind`，并连带使主窗口当前轮次失败（表现为「本轮运行失败」）；同时「跳转会话」因宿主移除 `sessions.open` 而失效（控制台 `sessionsSvc.open is not a function`），卡片活动心跳读不到 v4 日志（`session.v4.jsonl.zstd`） |
 | 0.1.5-rc.1 ~ 0.1.6 | ≤ 1.2.1 | 1.2.2 起按 0.1.7 协议编写（v4 source kind、`uiWorkspace.openSession` 跳转），旧宿主未做回归验证，建议停留 1.2.1 |
 
-> 当前版本 **v1.9.10** 已在宿主 **0.2.2-rc.1** 全量实测：860 断言全绿 + 拆解官/力度路由/健康嗅探/帧活性挂死检测真机 E2E 全链；宿主侧活性自检通过（get-tasks/list-models/set-work-mode/poolStatus 全通）。本版特性：**teamModeCache 主动预填充**（修新会话无 Team 提示词——订阅 agent/created 主动 rt 预填充，新会话第一轮即有 Team 提示词；section text() 未命中时 fire-and-forget 兜底，60s/sid 节流，老会话重启后第二轮有）。上一版（v1.9.9）特性：思考等级可配 + 卡片生命周期状态机 + 拆解官粒度引导 + pipeline 分类修正 + buildWorkerPrompt 注入 touches + epic 父卡生命周期。
+> 当前版本 **v1.9.11** 已在宿主 **0.2.2-rc.5** 适配：**agents 契约迁移**（rc.5 移除 `roots()`/`isOwnedBy()`，根判定改用 `list()` + `SessionHeader.parentSession` 缺省——修 `get-tasks` 的 `TypeError: s.roots is not a function`）；901 断言全绿 + 拆解官/力度路由/健康嗅探/帧活性挂死检测真机 E2E 全链。本版累积修复：**planGate 误报三轮收口**（下划线标识符非路径 + src 例外登记说明语境 + features 中段单星通配 dirLockCovers）+ **看板调度异常四修**（僵尸 Verifying 自动恢复、spawn 诊断与指数退避、主窗口 claim 三型区分、直接子代理 drain 额度释放）+ **UX redesign 五卡**（字号阶梯/仪表盘 16 区卡片化/归档卡片化/状态条常驻/详情页操作区/执行池四区/设置弹层卡片化/入口合并）。上一版（v1.9.10）特性：teamModeCache 主动预填充。
 
 ```sh
 dsh plugin --profile web add dsh-agent-board@latest   # 0.1.7+/0.2.x 宿主（推荐）
