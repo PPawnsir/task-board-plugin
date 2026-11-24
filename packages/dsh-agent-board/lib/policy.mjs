@@ -48,7 +48,7 @@ export var TEAM_CONTEXT_PACKING = '8. 拆解后的上下文装配：每张子卡
 // 拆解官参考方案起点（验证/修正而非从零重来），焊死「我已经设计好了」整卡直派的绕过缝隙。
 // ⚠️ 本条**不受 epicSplit 门禁**：它是「确认流怎么用」的流程引导，不是「主动劝你拆」——
 //    拆解官机制本身也不看 epicSplit（task_decompose 工具常驻）。dispatch 注入段在 splitRuleOf(...) 之后恒拼接本条。
-export var TEAM_DECOMPOSE_FLOW = '9. 需求卡工作流：用户用自然语言下达的大需求，先建成 draft 需求卡（保留需求原文），再用 task_decompose 派拆解官出实现侧子卡提案；提案以草稿子卡落位后，向用户呈现一览（标题/档位/模型/touches），用户确认或调档（task_update 改 size/model）后统一 publish。拆解官提案不是终稿——你的呈现与用户的那一眼确认是语义质量的最后防线。拆解官默认出 3~5 张业务纵切子卡（别顶格 8 张），串行成本纳入粒度判断：每张卡都要独立 spawn Worker + Verifier、Worker 还会重复加载上下文，代码+测试+直接类型/文档尽量同卡，禁止纯类型/纯文档/逐技术层机械拆卡。命中拆分树信号的需求，即使主窗口已在讨论中形成设计稿，也一律走拆解官——设计稿写进需求卡 contextNotes 作为参考方案；拆解官读它当起点，职责是验证/修正设计而非从零重来。禁止以『我已经设计好了』为由整卡直派。'
+export var TEAM_DECOMPOSE_FLOW = '9. 需求卡工作流：用户用自然语言下达的大需求，先建成 draft 需求卡（保留需求原文），再用 task_decompose 派拆解官出实现侧子卡提案；提案以草稿子卡落位后，向用户呈现一览（标题/档位/模型/touches），用户确认或调档（task_update 改 size/model）后统一 publish。拆解官提案不是终稿——你的呈现与用户的那一眼确认是语义质量的最后防线。拆解官默认出 3~5 张业务纵切子卡（别顶格 8 张），串行成本纳入粒度判断：每张卡都要独立 spawn Worker + Verifier、Worker 还会重复加载上下文，代码+测试+直接类型/文档尽量同卡，禁止纯类型/纯文档/逐技术层机械拆卡。命中拆分树信号的需求，即使主窗口已在讨论中形成设计稿，也一律走拆解官——设计稿写进需求卡 contextNotes 作为参考方案；拆解官读它当起点，职责是验证/修正设计而非从零重来。禁止以『我已经设计好了』为由整卡直派。**每次调 task_decompose 前必须先征询用户这次的拆解偏好**（parallel 并行优先 / vertical 纵切交付 / fine 细粒度小步 / auto 自适应，可另附自由指引），把答复作为 task_decompose 的 strategy/guidance 传入；用户不置可否才用 auto。验收不变量（每张子卡可独立验收、Verifier 独立复跑）不随策略改变。'
 // Team 提示词第 10 条：力度档位判档指引（样例化口径，与 TASK_SIZE_CONTRACT / 拆解官 prompt 同源）。
 // ⚠️ 与第 9 条同款纪律：**不受 epicSplit 门禁**——档位怎么判与「要不要拆」正交，关掉拆分引导
 //    也不能让主窗口重新失去判档标准（那正是「全落标档」的成因）。dispatch 恒拼接。
@@ -149,7 +149,17 @@ export var DECOMPOSE_SCHEMA = {
 //    modelHint 仅在有特殊理由时填（如超长上下文）；
 // ④ children 上限 DECOMPOSE_MAX_CHILDREN 张；verdict=keep 表示源卡不用拆；
 // ⑤ dependsOn 只许引用本批**前排**子卡的序号（'1' 起，string）——物化侧翻译成本批真实 id，按构造天然无环；无法解析的序号丢弃并在该子卡 messages 留痕。
-export function buildDecomposerPrompt(t, pack) {
+// ===== 拆解策略（task-mwqu2mmq，用户定稿）：把「怎么拆」作为每次拆解的一次性输入，而不是板级数字设置 =====
+// 验收不变量（每张子卡必须可独立验收、Verifier 独立复跑）由系统保证，**不在策略选项内**；策略只影响
+// 粒度与依赖形态。默认 auto=按需求规模自适应，张数由拆解官自行判断（上限 DECOMPOSE_MAX_CHILDREN 仅为护栏）。
+export var DECOMPOSE_STRATEGIES = ['auto', 'parallel', 'vertical', 'fine']
+export var DECOMPOSE_STRATEGY_TEXT = {
+  auto: '按需求规模自适应：小需求少拆、大需求按业务纵切切分；以「每张卡独立可交付且验收边界清晰」为第一原则，张数由你判断。',
+  parallel: '并行度优先：优先切成依赖最少（尽量无 dependsOn）的子卡，让多张能同时跑；并行收益明确时允许张数上探，但每张仍须独立可验收。',
+  vertical: '纵切交付优先：每张子卡都是可独立交付/演示的业务纵切，宁可少而完整；不为纯类型/纯文档/逐技术层单独成卡。',
+  fine: '细粒度小步优先：单卡改动面尽量小、验收边界尽量窄，允许多张小卡（验收往返次数增多是预期代价）。注意：验收不变量不受策略影响——每张卡仍必须可独立验收。'
+}
+export function buildDecomposerPrompt(t, pack, plan) {
   var p = '你是任务看板的拆解官（一次性 run）。你的唯一交付物是**结构化拆解提案**（由 outputSchema 强箍：verdict/children/rationale），提案落定后本会话即销毁。\n\n'
   p += '源卡：' + t.id + ' · ' + String(t.title || '') + '\n'
   p += '状态：' + String(t.status || '') + '\n'
@@ -158,12 +168,16 @@ export function buildDecomposerPrompt(t, pack) {
   if (t.context && t.context.instructions) p += '指引：' + String(t.context.instructions).slice(0, 1000) + '\n'
   if (Array.isArray(t.touches) && t.touches.length) p += '源卡 touches：' + t.touches.join('、') + '\n'
   if (pack) p += '\n' + pack + '\n'
+  // 策略意图（每次拆解的一次性输入；auto 也显式写出，保证拆解官知道「张数由你判断」而不是套固定数）
+  var strat = (plan && typeof plan.strategy === 'string' && DECOMPOSE_STRATEGY_TEXT[plan.strategy]) ? plan.strategy : 'auto'
+  p += '\n拆解策略（本次用户偏好，优先于默认倾向）：\n· ' + strat + '：' + DECOMPOSE_STRATEGY_TEXT[strat] + '\n'
+  if (plan && typeof plan.guidance === 'string' && plan.guidance.trim()) p += '用户补充指引（自由文本，按其中语义执行）：' + plan.guidance.trim().slice(0, 1000) + '\n'
   p += '\n拆解纪律（硬约束）：\n'
   p += '1. 第一步必须先用 read 工具读上面文件清单里的文件（按所给行号范围），从**实现侧**拆（按模块/文件边界切分）；禁止不读代码就拍脑袋拆，禁止只做需求侧转述。\n'
   p += '2. 每张子卡必须 10~30 分钟可独立完成并验收：touches 精确到文件（文件级排他锁，同批子卡 touches 不得互相重叠），acceptance 必须是可执行命令（如 "node --test test/xxx.test.mjs"）。\n'
-  p += '2b. 粒度判断（默认 3~5 张，别顶格 8 张）：串行链越长交付越慢——每张卡都要独立 spawn Worker + Verifier，Worker 还会重复加载上下文。优先按**可独立交付/演示的业务纵切**合并：代码+测试+直接类型/文档尽量同卡，禁止纯类型卡、纯文档卡、逐技术层机械拆卡。极小返工优先并入上游卡或原 Worker 续跑，不另起卡。只有「独立验收真实存在 / 并行收益真实存在 / 风险隔离真实存在 / 数据源差异真实存在」之一才值得多拆一张。\n'
+  p += '2b. 粒度与切法（按上面的拆解策略意图判断，工具**不给你固定张数**）：串行链越长交付越慢——每张卡都要独立 spawn Worker + Verifier，Worker 还会重复加载上下文。优先按**可独立交付/演示的业务纵切**合并：代码+测试+直接类型/文档尽量同卡，禁止纯类型卡、纯文档卡、逐技术层机械拆卡。极小返工优先并入上游卡或原 Worker 续跑，不另起卡。只有「独立验收真实存在 / 并行收益真实存在 / 风险隔离真实存在 / 数据源差异真实存在」之一才值得多拆一张。张数由你按需求规模与策略意图权衡后自行决定（硬上限见第 4 条）。\n'
   p += '3. size 判档（按样例落档，别一律标档；与主窗口 Team 注入同口径）：' + SIZE_TIER_SAMPLES + '。' + SIZE_PICK_QUESTIONS + 'modelHint 仅在有特殊理由时填（如某子卡需超长上下文模型），否则留空。\n'
-  p += '4. children 上限 ' + DECOMPOSE_MAX_CHILDREN + ' 张；有先后顺序时用 dependsOn 引用同批序号（只许引用本批**前排**子卡，序号 1 起计：如第 2 张依赖第 1 张填 ["1"]）。\n'
+  p += '4. children 上限 ' + DECOMPOSE_MAX_CHILDREN + ' 张（超出会被宿主拒收并回报，需重提）；有先后顺序时用 dependsOn 引用同批序号（只许引用本批**前排**子卡，序号 1 起计：如第 2 张依赖第 1 张填 ["1"]）。\n'
   p += '5. 源卡本身不大、不必拆时：verdict=keep，并在 rationale 写清理由。\n'
   p += '\n权限边界：你没有任何建卡工具——不要尝试创建/修改看板任务。提案由宿主读结构化结果后自动物化为 draft 子卡（物化后源卡只推一格 draft→pending 进入待执行，不进 in-progress；子卡仍是 draft，由主窗口确认后逐张 publish）。\n'
   return p
@@ -199,6 +213,13 @@ export function applyDecomposeProposal(d, t, proposal, now) {
   var kids = []
   if (verdict === 'split') {
     var raw = Array.isArray(proposal.children) ? proposal.children : []
+    // 超上限**拒收**（task-mwqu2mmq）：旧行为是静默截断——超出的提案子卡凭空消失，拆解官与主窗口都
+    // 得不到反馈（模型无法从结果中学习）。改为整批拒收 + 源卡留痕（含当前张数与可用的 strategy 提示），
+    // 让重拆能把张数调下来；上限本身仍只是护栏（默认 8，不暴露为板级设置）。
+    if (raw.length > DECOMPOSE_MAX_CHILDREN) {
+      t.messages.push({ kind: 'decompose', text: '🧩 拆解提案超上限（' + raw.length + ' 张 > 上限 ' + DECOMPOSE_MAX_CHILDREN + ' 张），已**拒收未物化**——请重提更少的纵切子卡（可用 strategy=vertical 表达「宁可少而完整」，或 fine 但控制张数）', at: stamp, by: 'decomposer' })
+      return { ok: false, error: '提案 ' + raw.length + ' 张超过上限 ' + DECOMPOSE_MAX_CHILDREN + ' 张（已拒收，未物化）' }
+    }
     for (var i = 0; i < raw.length && kids.length < DECOMPOSE_MAX_CHILDREN; i++) {
       var c0 = raw[i]
       if (!c0 || typeof c0 !== 'object') continue

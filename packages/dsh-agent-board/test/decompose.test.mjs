@@ -411,11 +411,15 @@ test('⑤ 幂等重拆：applyDecomposeProposal 清旧批 draft / 保留已发�
   var r5 = applyDecomposeProposal(board, src, { verdict: 'keep', children: [], rationale: '算了' }, '2026-01-01T05:00:00Z')
   assert.equal(r5.ok, true); assert.equal(r5.verdict, 'keep')
   assert.ok(!board.tasks.some(function (x) { return x.proposalOf === 'r1' && x.status === 'draft' }), 'keep 清掉残留 draft 提案')
-  // 上限截断：9 张提案 → 只落 8 张
+  // 上限超限拒收（task-mwqu2mmq：旧行为静默截断让超出的子卡凭空消失、拆解官得不到反馈）
   var many = []
   for (var i = 0; i < 9; i++) many.push({ title: '批' + i, description: '', size: 'standard', touches: [], acceptance: 'c' + i })
+  var beforeMany = board.tasks.length
   var r6 = applyDecomposeProposal(board, src, { verdict: 'split', children: many }, '2026-01-01T06:00:00Z')
-  assert.equal(r6.children.length, 8, 'children 上限 8 截断')
+  assert.equal(r6.ok, false, '9 张超上限 → 整批拒收')
+  assert.match(String(r6.error), /超过上限 8 张/)
+  assert.equal(board.tasks.length, beforeMany, '拒收不物化任何子卡')
+  assert.match(src.messages[src.messages.length - 1].text, /拒收未物化/, '源卡留痕说明拒收原因与调小张数的出口')
   // dependsOn 序号防御（task-mvr44rm3）：非法/越界/自引用/后排序号一律丢弃 + 该子卡 messages 留痕（本批无环）
   var board2 = mkBoard([mkTask({ id: 'r2', status: 'draft' })])
   var src2 = board2.tasks[0]
@@ -750,49 +754,55 @@ test('⑬c GUI 源码 + 产物：详情顶跳按钮 / 列表徽标可点 / 历�
 })
 
 // ===== ⑭ 拆解官粒度引导（task-mwk0ea5f）：默认 3~5 张纵切 + 串行成本纳入粒度判断 =====
-// 实证背景（看板反馈 n-mwj96103qrv9）：one_ledger 连续两个需求均顶格产出 8 张子卡——根因不是「需求天然要 8 张」
-// 而是 prompt 契约缺陷：拆解纪律只写了「每卡 10~30 分钟 + 上限 8 张」，**没有目标卡数引导、没有串行成本概念**，
-// 拆解官倾向拆细顶格。用户手工重排 8→5（-37.5%）实证有效。本卡只改 prompt 契约层：
-// buildDecomposerPrompt 插入 2b 粒度引导条（位次在第 2 条之后、第 3 条判档之前）+ TEAM_DECOMPOSE_FLOW 补同口径一句；
-// DECOMPOSE_MAX_CHILDREN=8 是硬顶不是目标（零改动）、outputSchema 与物化逻辑零改动。
-test('⑭ 粒度引导：prompt 2b 条（3~5/纵切/串行）位次正确 + Team 第 9 条同口径 + 上限与物化零改动', function () {
+// 实证背景（看板反馈 n-mwj96103qrv9）：连续两个需求均顶格产出 8 张子卡——根因是 prompt 只给「每卡 10~30 分钟 +
+// 上限 8 张」，没有粒度/串行成本引导。2026-11-24 用户定稿：**不给固定张数**，改为「拆解策略」一次性输入
+// （auto/parallel/vertical/fine + 可选自由指引），张数由拆解官按需求规模与策略意图自行判断；验收不变量不变。
+test('⑭ 拆解策略：prompt 注入策略意图（不再写死张数）+ 串行成本口径仍在 + 上限 8 保持硬护栏 + 超限拒收', function () {
   var p = buildDecomposerPrompt(mkTask({ id: 'g1', title: '大需求', description: '做点大事' }), '')
-  // ① 粒度引导三关键词在位（验收断言①）
-  assert.match(p, /3~5 张/, 'prompt 缺目标卡数引导「3~5 张」')
-  assert.match(p, /纵切/, 'prompt 缺「纵切」合并口径')
-  assert.match(p, /串行/, 'prompt 缺串行成本口径')
-  // 逐条要点：串行成本三要素（Worker+Verifier 双 spawn / 上下文重复加载）+ 同卡合并 + 禁纯类型纯文档 + 多拆四条件
+  // ① 不再写死目标张数（「默认 3~5 张」「别顶格 8 张」已退役），改为「张数由你判断」
+  assert.ok(p.indexOf('默认 3~5 张') < 0, 'prompt 不应再写死 3~5 张目标')
+  assert.match(p, /张数由你按需求规模与策略意图权衡后自行决定/, 'prompt 须把张数判断权交给拆解官')
+  // ② 默认策略 auto 显式注入（即使不传 plan 也写出，让拆解官知道「张数由你判断」）
+  assert.match(p, /拆解策略（本次用户偏好，优先于默认倾向）/, 'prompt 缺策略段')
+  assert.match(p, /auto：按需求规模自适应/, '未传 plan 时缺省策略应为 auto')
+  // ③ 串行成本口径仍在（保留既有质量约束，只是不再给数字）
   assert.match(p, /每张卡都要独立 spawn Worker \+ Verifier/, 'prompt 缺「双 spawn」串行成本')
   assert.match(p, /重复加载上下文/, 'prompt 缺 Worker 重复加载上下文成本')
-  assert.match(p, /代码\+测试\+直接类型\/文档尽量同卡/, 'prompt 缺「代码+测试+直接文档同卡」合并纪律')
+  assert.match(p, /代码\+测试\+直接类型\/文档尽量同卡/, 'prompt 缺同卡合并纪律')
   assert.match(p, /禁止纯类型卡、纯文档卡、逐技术层机械拆卡/, 'prompt 缺禁纯类型/纯文档/逐技术层卡')
-  assert.match(p, /极小返工优先并入上游卡或原 Worker 续跑/, 'prompt 缺极小返工并卡/续跑纪律')
   assert.match(p, /独立验收真实存在 \/ 并行收益真实存在 \/ 风险隔离真实存在 \/ 数据源差异真实存在/, 'prompt 缺多拆一张的四条件')
-  // ② 位次：2b 必须在第 2 条之后、第 3 条判档之前（位置错=判档前失去粒度约束）
+  // ④ 四档策略文案各就位（parallel/vertical/fine 生效 + guidance 自由文本注入）
+  var pp = buildDecomposerPrompt(mkTask({ id: 'g3', title: '并行需求' }), '', { strategy: 'parallel', guidance: '数据库层与前端分开' })
+  assert.match(pp, /parallel：并行度优先/, 'parallel 策略文案缺失')
+  assert.match(pp, /数据库层与前端分开/, 'guidance 自由文本未注入')
+  var pv = buildDecomposerPrompt(mkTask({ id: 'g4', title: '纵切需求' }), '', { strategy: 'vertical' })
+  assert.match(pv, /vertical：纵切交付优先/, 'vertical 策略文案缺失')
+  var pf = buildDecomposerPrompt(mkTask({ id: 'g5', title: '细粒度需求' }), '', { strategy: 'fine' })
+  assert.match(pf, /fine：细粒度小步优先/, 'fine 策略文案缺失')
+  assert.match(pf, /验收不变量不受策略影响/, 'fine 档须显式声明验收不变量不受影响')
+  // ⑤ 位次：策略段在拆解纪律之前（先给意图，再给纪律）；2b 不再写死张数
+  var iStrat = p.indexOf('拆解策略（本次用户偏好')
+  var iDiscipline = p.indexOf('拆解纪律（硬约束）')
+  assert.ok(iStrat >= 0 && iDiscipline > iStrat, '策略段应在拆解纪律之前')
   var i2 = p.indexOf('2. 每张子卡必须 10~30 分钟')
-  var i2b = p.indexOf('2b. 粒度判断')
+  var i2b = p.indexOf('2b. 粒度与切法')
   var i3 = p.indexOf('3. size 判档')
-  assert.ok(i2 >= 0 && i2b >= 0 && i3 >= 0, '2 / 2b / 3 三条应同时在位')
-  assert.ok(i2 < i2b && i2b < i3, '2b 粒度引导位次应在第 2 条之后、第 3 条判档之前')
-  // ③ 上限与判档口径零改动：8 是硬顶不是目标（验收边界「不改物化代码、不动 8 张上限」）
+  assert.ok(i2 < i2b && i2b < i3, '2b 位次保持在第 2 条之后、第 3 条判档之前')
+  // ⑥ 上限 8 仍是硬护栏（prompt 写明 + 常量不动）；超限整批拒收（不再静默截断）
   assert.equal(DECOMPOSE_MAX_CHILDREN, 8, '上限硬顶保持 8 不动')
-  assert.match(p, /上限 8 张/, 'prompt 仍须写明上限 8 张（硬顶）')
-  assert.match(p, /别顶格 8 张/, 'prompt 须明确「上限≠目标」')
-  // ④ Team 注入侧同口径（验收断言②）
-  assert.match(TEAM_DECOMPOSE_FLOW, /默认出 3~5 张业务纵切子卡/, 'Team 第 9 条缺目标卡数同口径引导')
-  assert.match(TEAM_DECOMPOSE_FLOW, /串行成本纳入粒度判断/, 'Team 第 9 条缺串行成本口径')
-  assert.match(TEAM_DECOMPOSE_FLOW, /禁止纯类型\/纯文档\/逐技术层机械拆卡/, 'Team 第 9 条缺禁机械拆卡口径')
-  // ⑤ 既有第 9 条要点与注入位置不破（core.test.mjs 既有拼接/位置断言口径）
-  assert.match(TEAM_DECOMPOSE_FLOW, /^9\. 需求卡工作流/)
-  assert.match(TEAM_DECOMPOSE_FLOW, /一律走拆解官/)
-  assert.match(TEAM_DECOMPOSE_FLOW, /最后防线/)
-  // ⑥ 物化零改动：上限截断仍 8——粒度引导只活在 prompt 契约层，不碰代码路径
+  assert.match(p, /上限 8 张/, 'prompt 仍须写明上限 8 张')
   var srcM = mkTask({ id: 'g2', status: 'draft' })
   var boardM = mkBoard([srcM])
   var many = []
   for (var i = 0; i < 9; i++) many.push({ title: 'G' + i, description: '', size: 'standard', touches: [], acceptance: 'c' + i })
   var rm = applyDecomposeProposal(boardM, srcM, { verdict: 'split', children: many }, '2026-01-01T08:00:00Z')
-  assert.equal(rm.children.length, 8, '物化上限截断口径零改动（仍 8）')
+  assert.equal(rm.ok, false, '超上限整批拒收')
+  assert.ok(!boardM.tasks.some(function (x) { return x.proposalOf === 'g2' }), '拒收不落任何提案子卡')
+  // ⑦ Team 第 9 条：每次拆解前必须征询用户偏好，并把答复作为 strategy/guidance 传入
+  assert.match(TEAM_DECOMPOSE_FLOW, /每次调 task_decompose 前必须先征询用户这次的拆解偏好/, 'Team 第 9 条缺「每次先征询」约定')
+  assert.match(TEAM_DECOMPOSE_FLOW, /parallel 并行优先 \/ vertical 纵切交付 \/ fine 细粒度小步 \/ auto 自适应/, 'Team 第 9 条缺四档口径')
+  assert.match(TEAM_DECOMPOSE_FLOW, /验收不变量（每张子卡可独立验收、Verifier 独立复跑）不随策略改变/, 'Team 第 9 条缺验收不变量声明')
+  assert.match(TEAM_DECOMPOSE_FLOW, /^9\. 需求卡工作流/)
 })
 
 // ===== ⑮ 首张子卡自动继承源卡外部依赖（task-mwk0f3f1）=====

@@ -9,7 +9,7 @@ import * as core from './core.mjs'
 import path from 'node:path'
 import fsNode from 'node:fs'
 import { findRunLog, readLogBytes, readLogFrames, aggregateUsageSummary, readMainWindowUsage, buildScoreboard, modelPerfHint, qualityChangeHints } from './usage.mjs'
-import { TASK_SIZE_CONTRACT, PIPELINE_SCENE_CONTRACT, SIZE_TIER_SAMPLES, withSplitHint, pushRejectLesson, pushArbitrationLesson } from './policy.mjs'
+import { TASK_SIZE_CONTRACT, PIPELINE_SCENE_CONTRACT, SIZE_TIER_SAMPLES, DECOMPOSE_STRATEGIES, withSplitHint, pushRejectLesson, pushArbitrationLesson } from './policy.mjs'
 import { makeMsg } from './notify.mjs'
 import { computeHealthHints, computeRuntimeHealthHints } from './health.mjs'
 import { isFullSessionId } from './session.mjs' // 幻影板防线口径（纯函数，与 policy.mjs 直引同例）
@@ -315,9 +315,14 @@ export function createRpc(ctx, state, deps) {
     // 提案由 host 读 result.structured 后物化成 draft 子卡（权限口子=根本不需要开）。
     // 门禁：源卡须 draft/pending（执行中/已落定卡不拆）；同卡已有活跃 decomposer run → 拒（幂等防重）。
     // 物化侧幂等（dispatch.settleDecompose → applyDecomposeProposal）：新提案落地时清掉上次未发布的提案子卡。
-    ctx.tools.register(defineTool({ name: 'task_decompose', description: '拆解官：对 draft/pending 源卡 spawn 一次性拆解 run（outputSchema 强箍结构化提案，role=decomposer 计入 verifier 并发位、不占 worker 位）。落定后 host 自动把提案物化为 draft 子卡（size/model/touches/acceptance/dependsOn 落位，上限 8 张）并通知主窗口；物化后源卡只推一格 draft→pending（进入待执行，不进 in-progress），子卡仍 draft，确认后逐张 task_update publish=true 发布。幂等：重拆自动清掉上次未发布的提案子卡。', parameters: { type: 'object', properties: { taskId: { type: 'string', description: '待拆解的源卡 id（须为 draft/pending）' } }, required: ['taskId'] }, output: jo(), execute: async function (args) {
+    // 参数（task-mwqu2mmq）：strategy=本次拆解偏好（auto/parallel/vertical/fine，缺省 auto）+
+    // guidance=自由指引；两者随源卡落盘（t.decomposePlan）供拆解官 prompt 读取。验收不变量不受影响。
+    ctx.tools.register(defineTool({ name: 'task_decompose', description: '拆解官：对 draft/pending 源卡 spawn 一次性拆解 run（outputSchema 强箍结构化提案，role=decomposer 计入 verifier 并发位、不占 worker 位）。可选 strategy（auto/parallel/vertical/fine，缺省 auto）表达本次拆解偏好：parallel=并行优先、vertical=纵切交付优先、fine=细粒度小步；guidance=自由文本指引。「每张子卡可独立验收」是系统不变量，不随策略改变。调用前应先征询用户偏好。落定后 host 自动把提案物化为 draft 子卡（size/model/touches/acceptance/dependsOn 落位，上限 8 张；超上限整批拒收并回报）并通知主窗口；物化后源卡只推一格 draft→pending（进入待执行，不进 in-progress），子卡仍 draft，确认后逐张 task_update publish=true 发布。幂等：重拆自动清掉上次未发布的提案子卡。', parameters: { type: 'object', properties: { taskId: { type: 'string', description: '待拆解的源卡 id（须为 draft/pending）' }, strategy: { type: 'string', enum: ['auto', 'parallel', 'vertical', 'fine'], description: '本次拆解偏好：auto=按需求自适应（缺省）/parallel=并行优先/vertical=纵切交付优先/fine=细粒度小步' }, guidance: { type: 'string', description: '自由文本拆解指引（如「按模块拆」「先出最小可运行链路」），不解析、原样注入拆解官 prompt' } }, required: ['taskId'] }, output: jo(), execute: async function (args) {
       var __ra = getActorId(); if (resolveRoot(__ra) !== __ra) return { ok: false, error: '看板管理工具仅主窗口可用（子代理无看板权限）' }
       var sid = toolSessionId()
+      var strat = (args.strategy === undefined || args.strategy === null || args.strategy === '') ? 'auto' : String(args.strategy).trim()
+      if (DECOMPOSE_STRATEGIES.indexOf(strat) < 0) return { ok: false, error: '非法 strategy: ' + String(args.strategy) + '（合法值: ' + DECOMPOSE_STRATEGIES.join('/') + '）' }
+      var guide = typeof args.guidance === 'string' ? args.guidance.trim().slice(0, 2000) : ''
       var d = await rt(sid)
       var t = d.tasks.find(function (x) { return x.id === args.taskId })
       if (!t) return { ok: false, error: 'not found: ' + args.taskId }
@@ -325,9 +330,17 @@ export function createRpc(ctx, state, deps) {
       var act = runsFor(sid)[t.id]
       if (act && !act.settled && act.role === 'decomposer') return { ok: false, error: '拆解官已在运行中（run ' + act.id + '），等它落定再重拆', runId: String(act.id) }
       if (typeof spawnOneShot !== 'function') return { ok: false, error: 'spawn 通道未接线（老宿主/测试桩）' }
-      var rec = await spawnOneShot(sid, t, 'decomposer')
+      // 策略随源卡落盘（同一把锁）：spawn 读卡面快照即拿到本次偏好；重拆无参数时覆盖回 auto（不留陈旧偏好）
+      var saved = await mutateLocked(sid, function (d2) {
+        var t2 = d2.tasks.find(function (x) { return x.id === args.taskId })
+        if (!t2) return null
+        t2.decomposePlan = { strategy: strat, guidance: guide, at: new Date().toISOString() }
+        return { t: t2 }
+      }, true)
+      if (!saved || !saved.t) return { ok: false, error: 'not found: ' + args.taskId }
+      var rec = await spawnOneShot(sid, saved.t, 'decomposer')
       if (!rec) return { ok: false, error: 'spawn 失败（无 root/provider 或落闸被否），详见 host 日志' }
-      return { ok: true, runId: String(rec.id), taskId: t.id, note: '拆解官运行中；落定后提案自动物化为 draft 子卡并通知主窗口（源卡只推一格 draft→pending，子卡仍 draft，确认后逐张 publish）' }
+      return { ok: true, runId: String(rec.id), taskId: saved.t.id, strategy: strat, guidance: guide, note: '拆解官运行中（策略 ' + strat + '）；落定后提案自动物化为 draft 子卡并通知主窗口（源卡只推一格 draft→pending，子卡仍 draft，确认后逐张 publish）' }
     } }))
 
     // ===== RPC =====

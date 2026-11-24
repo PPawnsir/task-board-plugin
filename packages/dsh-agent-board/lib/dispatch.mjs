@@ -953,7 +953,7 @@ export function createDispatch(ctx, state, deps) {
         var kids = []
         try { var hsnap = await rt(sid); kids = gsb(t.id, (hsnap && hsnap.tasks) || []) } catch (_) {}
         promptText = buildHookPrompt(t, role === 'hook-pre' ? 'pre' : 'post', kids)
-      } else if (role === 'decomposer') promptText = buildDecomposerPrompt(t, pack)
+      } else if (role === 'decomposer') promptText = buildDecomposerPrompt(t, pack, t.decomposePlan)
       else promptText = role === 'worker' ? buildWorkerPrompt(t, pack, cfg(dsnap).feedbackEnabled) : buildVerifierPrompt(t, pack, cfg(dsnap).verifyUserGuide)
       var req = { label: role + ':' + t.id, prompt: [{ type: 'text', text: promptText }], parent: parent, signal: makeSignal() }
       // ===== Verifier 验收员加餐（task-muy3gm03）：persona + toolFilter 只挂 verifier =====
