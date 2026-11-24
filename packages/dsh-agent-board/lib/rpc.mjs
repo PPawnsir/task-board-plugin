@@ -12,7 +12,7 @@ import { findRunLog, readLogBytes, readLogFrames, aggregateUsageSummary, readMai
 import { TASK_SIZE_CONTRACT, PIPELINE_SCENE_CONTRACT, SIZE_TIER_SAMPLES, DECOMPOSE_STRATEGIES, withSplitHint, pushRejectLesson, pushArbitrationLesson } from './policy.mjs'
 import { makeMsg } from './notify.mjs'
 import { computeHealthHints, computeRuntimeHealthHints } from './health.mjs'
-import { isFullSessionId } from './session.mjs' // 幻影板防线口径（纯函数，与 policy.mjs 直引同例）
+import { isFullSessionId, isRootSessionHeader } from './session.mjs' // 幻影板防线 + fork/seed 判根同源口径
 import { previewCleanup, runCleanup, SKIP_REASON_TEXT } from './cleanup.mjs' // 已结算会话清理（预览+执行）
 import { HUNG_SUSPECT_REARM_MS } from './hung.mjs' // 「继续观察」豁免防抖窗（与疑似阈值同值，task-mvxmxkq1）
 const { ah, isb, gsb, gpt, vt, validateDeps, classifyPipeline, cfg, claimCheck, claimApply, resolveApply, verifyApply, lateVerdictApply, verdictErr, lateNoticeFp, archiveApply, cancelApply, maybeAutoCloseParent, PRIO_RANK, touchesConflict, holdsFiles, boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint, appendDispatchWarning, TASK_SIZES, opsLogLine } = core
@@ -346,13 +346,11 @@ export function createRpc(ctx, state, deps) {
     // ===== RPC =====
     // get-tasks 是纯读路径（rt 只读文件）——poolCycle 由 15s 心跳 + 写入后 kickCycle 驱动，
     // 客户端 3s 轮询不再触发池计算/写盘（之前每轮询一次就 poolCycle+写盘一次，切会话时多会话轮询挤在文件锁上）
-    // isRoot 持久语义（banner 入口瞬态/持久消失修复）：根会话=无父（持久 parentSession 缺省），不再读活跃 roots() 集。
-    // 旧实现 roots() 只含活体会话——休眠根会话（有板有卡）恒 false，且生成开始/结束 agents 树重建有瞬态窗口
-    // 返回不含本 sid（假 false），入口分钟级消失。改读持久 parentSession（见 isRootPersistent）：
-    //   主源 sessionPersistence.stat(sid)（持久表，休眠会话也读得到）→ header.parentSession 缺省 = 根；
-    //   fork/seed 会话（v3→v4 迁移产物：parentSession 有值但 delegationDepth===0）同样认根
+    // isRoot 持久语义（banner 入口瞬态/持久消失修复）：判根统一走 isRootSessionHeader，不读活跃 roots() 集。
+    // 主源 sessionPersistence.stat(sid)（持久表，休眠会话也读得到）；普通根=无 parentSession，
+    // fork/seed 主会话（parentSession 有值但 delegationDepth===0 且 origin≠subagent）同样认根；
     //   （task-mv59nn9m：「本体数据平台开发」fork 会话被旧判据误判非根导致看板不可见）；
-    //   老宿主/测试桩无 sessionPersistence → 回退活跃 agent 的 session.header.parentSession，再回退旧 roots() 成员判定。
+    //   老宿主/测试桩无 sessionPersistence → 回退活跃 agent 的同一判根助手；都取不到时维持既有默认。
     // 防抖仍在客户端：kernel.js applyIsRoot——曾确认 true 的会话需连续 3 次 false（3s 心跳≈9s）才收抽屉；
     // 从未 true 的子代理会话仍即时收起（反馈 n-muuerxv9ijxs / task-muupr8ld）。
     async function isRootPersistent(sid) {
@@ -361,16 +359,16 @@ export function createRpc(ctx, state, deps) {
         // 判据改用 delegationDepth（task-mv59nn9m）：无父 = 根；有父但 delegationDepth===0 的 fork/seed
         // 会话同样认根；delegationDepth 缺省（v3 时代老会话无此字段）且有 parentSession 时维持非根
         // 保守判定——兼容 v3 时代子代理不误放行。
-        try { var snap = await sp.stat(sid); if (snap && snap.header) { var hh = snap.header; return !hh.parentSession || (typeof hh.delegationDepth === 'number' && hh.delegationDepth === 0) } } catch (_) {}
+        try { var snap = await sp.stat(sid); if (snap && snap.header) return isRootSessionHeader(snap.header) } catch (_) {}
       }
       var ag = ctx.agents
       if (ag) {
-        // rc.5 契约迁移：agents.roots() 已移除，改为按 id 从 list() 取活体 + SessionHeader.parentSession 缺省判根。
+        // rc.5 契约迁移：agents.roots() 已移除；活跃回退与持久主源共用 isRootSessionHeader，
+        // fork/seed 主会话（parentSession + delegationDepth=0）不再误判为子代理。
         var all = (typeof ag.list === 'function') ? (ag.list() || []) : []
         for (var i = 0; i < all.length; i++) {
           if (String(all[i].id) !== String(sid)) continue
-          var hh2 = all[i].session && all[i].session.header
-          return !hh2 || !hh2.parentSession
+          return isRootSessionHeader(all[i].session && all[i].session.header)
         }
         return false
       }

@@ -9,6 +9,17 @@
 // 传了截断短 id）不具备完整结构，用它建出的 tasks-<短id>.json 是幻影板：poolCycle 对它
 // pickDispatch 成功却永远匹配不到活 root（真实 id 带 session- 前缀与后缀），每 15s 心跳
 // console.error 刷屏。import- 前缀板（import-sess_df0837fa-...）是合法的导入会话板，放行。
+export function isRootSessionHeader(h) {
+  if (!h) return true // 活体缺失 header 时保持旧放行语义；祖先链在缺少证据时停在当前会话
+  if (h.origin === 'subagent') return false // rc.5 宿主 rootOf 的首要判据：显式子代理身份优先于深度/父 id
+  if (h.parentSession) {
+    // 主会话 fork/seed 也带 parentSession，但 delegationDepth=0；它不是子代理（task-mv59nn9m /
+    // ontology_ai task_create 误拒 2026-11-24）。老 v3 子代理没有 depth，维持 parentSession→非根的保守口径。
+    return typeof h.delegationDepth === 'number' && h.delegationDepth === 0
+  }
+  return true
+}
+
 export function isFullSessionId(sid) {
   if (!sid || typeof sid !== 'string') return false
   if (sid.indexOf('import-') === 0) return true // import- 前缀板合法，结构判断放行
@@ -27,13 +38,13 @@ export function createSession(ctx, state) {
 
     // ===== 工具函数 =====
     function getActorId() { const a = ctx.agents; if (a) { const i = a.currentInitiator(); if (i) return String(i.id) } return 'unknown' }
-    // ===== 根 agent 判定（rc.5 契约迁移，task-mwqu2k7p）=====
-    // 宿主 0.2.2-rc.5 的 agents 服务移除 roots()/isOwnedBy()，只余 list()/get()；父子关系改由
-    // SessionHeader.parentSession 表达（root 会话该字段缺省，子代理带父会话 id）。
-    // 判据统一收敛到这两个纯读助手，避免各调用点再各写一套口径漂移。
-    function isRootAgent(a) { if (!a) return false; var h = a.session && a.session.header; return !h || !h.parentSession }
+    // ===== 根 agent 判定（rc.5 契约迁移，task-mwqu2k7p；fork 误拒修复 task-mwqu2mmq）=====
+    // 宿主 0.2.2-rc.5 的 agents 服务移除 roots()/isOwnedBy()，只余 list()/get()。
+    // 不能只看 parentSession：主会话 fork/seed 也有父 id（delegationDepth=0），真正子代理则带
+    // origin='subagent'（通常 depth≥1）。统一走 isRootSessionHeader，与 rpc/store 的持久判根同源。
+    function isRootAgent(a) { return !!(a && isRootSessionHeader(a.session && a.session.header)) }
     function rootIdsOf(agentsSvc) { var s = {}; try { var all = agentsSvc.list() || []; for (var i = 0; i < all.length; i++) { if (isRootAgent(all[i])) s[String(all[i].id)] = true } } catch (_) {} return s }
-    function parentSessionOf(agentsSvc, sid) { try { var a = agentsSvc.get(sid); return (a && a.session && a.session.header && a.session.header.parentSession) ? String(a.session.header.parentSession) : '' } catch (_) { return '' } }
+    function parentSessionOf(agentsSvc, sid) { try { var a = agentsSvc.get(sid); var h = a && a.session && a.session.header; return isRootSessionHeader(h) ? '' : String(h.parentSession || '') } catch (_) { return '' } }
     // resolveRoot 是同步热点（每个工具守卫/RPC/prompt 组装都调），agent 注册表可能有几百个子代理，
     // 每次调用全表扫描会反复卡宿主事件循环 → memoize 10s TTL。
     // 父子归属在一个 agent 存活期内不变，10s 过期窗口足够安全。
@@ -73,7 +84,7 @@ export function createSession(ctx, state) {
     function deriveWorkMode(d) { return (d && d.teamMode) ? 'team' : ((d && d.boardMode) === 'auto' ? 'auto' : 'list') }
 
     // 按会话找 root agent（静态插件挂 host 层后多会话共存，不能"取第一个"——会把 worker 挂到别的会话上）
-    // rc.5 契约迁移：不再读 roots() 集，直接按 id 取活体并校验「无 parentSession」= 根。
+    // rc.5 契约迁移：不再读 roots() 集，直接按 id 取活体并用 isRootSessionHeader 判根（兼容 fork/seed 主会话）。
     function rootForSession(sid) { var s = ctx.agents; if (!s) return undefined; var a = typeof s.get === 'function' ? s.get(sid) : undefined; return isRootAgent(a) ? a : undefined }
 
     function sessionCwd(sid) { try { var root = rootForSession(sid); var cwd = root && root.session && root.session.header && root.session.header.cwd; return (typeof cwd === 'string' && cwd) ? cwd : '' } catch (_) { return '' } }

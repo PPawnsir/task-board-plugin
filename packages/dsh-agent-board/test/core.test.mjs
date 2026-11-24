@@ -6429,7 +6429,7 @@ test('no-root 刷屏根治接线断言（源码级）：闸门/防线/兜底注�
   // ② touchSession 注册口接入 isFullSessionId；纯函数出口 + rpc.mjs 直引
   assert.match(ses, /export function isFullSessionId\(sid\)/)
   assert.match(ses, /sid !== 'unknown' && isFullSessionId\(sid\)\) knownSessions\[sid\]/)
-  assert.match(rpc, /import \{ isFullSessionId \} from '\.\/session\.mjs'/)
+  assert.match(rpc, /import \{ isFullSessionId, isRootSessionHeader \} from '\.\/session\.mjs'/)
   // create-task handler 校验在 mutateLocked 之前（拒绝时不建板）
   // 窗口放宽到 700：幻影板防线与 return mutateLocked 之间新增了 hooks 角色门禁（本批 hooks=agent run；
   // hooks 是高权限入口，只许主窗口设置），防线本身仍紧随 handler 开头
@@ -6478,8 +6478,10 @@ test('isRoot 持久语义：host 侧改读 parentSession（根=无父），防�
   const rpcSrc = readFileSync(new URL('../lib/rpc.mjs', import.meta.url), 'utf8')
   // isRoot 持久判定入口：根会话=无父，不再读活跃 roots() 集
   assert.match(rpcSrc, /async function isRootPersistent\(sid\)/)
-  // task-mv59nn9m：判据改用 delegationDepth——无父=根，或 parentSession 有值但 delegationDepth===0（fork/seed 会话）也认根
-  assert.match(rpcSrc, /return !hh\.parentSession \|\| \(typeof hh\.delegationDepth === 'number' && hh\.delegationDepth === 0\)/)
+  // task-mv59nn9m + task-mwqu2mmq：持久与活跃回退统一走 isRootSessionHeader——
+  // 无父=根；parentSession + delegationDepth=0 的 fork/seed 主会话也认根；显式 origin=subagent 优先拒绝。
+  assert.match(rpcSrc, /return isRootSessionHeader\(snap\.header\)/)
+  assert.match(rpcSrc, /return isRootSessionHeader\(all\[i\]\.session && all\[i\]\.session\.header\)/)
   assert.match(rpcSrc, /d\.isRoot = await isRootPersistent\(sid\)/)
   // 指针注释：防抖仍在客户端 kernel.js applyIsRoot，曾确认 true 需连续 3 次 false 才收
   assert.match(rpcSrc, /防抖仍在客户端：kernel\.js applyIsRoot/)
@@ -6507,6 +6509,14 @@ test('isRootPersistent 判据 delegationDepth（行为级）：fork 认根 / 子
   // ④ 真根（无 parentSession）→ 根
   const h4 = mkRpcHandlers(mkBoard([]), null, mkPersistCtx({}))
   assert.equal((await h4['get-tasks']({})).isRoot, true)
+  // ⑤ 活跃 agents 回退（无 sessionPersistence）：事发主 fork 同样认根，不能再走 !parentSession 旧口径
+  const forkHeader = { parentSession: 'session-parent', delegationDepth: 0, isSeeded: true }
+  const h5 = mkRpcHandlers(mkBoard([]), null, { agents: { list: () => [{ id: FULL_SID, session: { header: forkHeader } }] } })
+  assert.equal((await h5['get-tasks']({})).isRoot, true)
+  // ⑥ 活跃 agents 回退的显式子代理仍非根
+  const childHeader = { parentSession: 'session-parent', delegationDepth: 0, origin: 'subagent' }
+  const h6 = mkRpcHandlers(mkBoard([]), null, { agents: { list: () => [{ id: FULL_SID, session: { header: childHeader } }] } })
+  assert.equal((await h6['get-tasks']({})).isRoot, false)
 })
 
 // ===== 史诗 hooks UI（task-muuw56yf）：卡片相位徽章 + 详情页 hooks 编辑区 =====

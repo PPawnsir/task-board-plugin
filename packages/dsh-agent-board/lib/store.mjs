@@ -7,6 +7,7 @@
 import * as core from './core.mjs'
 import path from 'node:path'
 import fsNode from 'node:fs'
+import { isRootSessionHeader } from './session.mjs'
 const { seed, normalizeBoard, vt, boardHome } = core
 
 // 进程内 tmp 序号（配合 pid + 时间戳拼出唯一 tmp 名）：并发 wt() 各自写各自的 tmp，
@@ -85,9 +86,9 @@ export function createStore(ctx, state, deps) {
     // 防误继承三闸门：① 只认 ownerCwd 严格相等；② 原主必须不在存活 root 集合里；
     // ③ 候选必须唯一 —— 多候选一律不动（宁可留孤儿板等人工认领，也不合并错板）。
     // 触发点在 rt() 的「文件不存在」分支：工具 / RPC / UI 三通道都走 rt，天然统一受益。
-    // 根 id 集合（rc.5 契约迁移：agents.roots() 已移除，改 list() + SessionHeader.parentSession 缺省判根，
-    // 与 session.mjs rootIdsOf 同口径——本层无 session 模块依赖，就地收敛三行镜像实现）。
-    function activeRootIds() { try { var all = (ctx.agents && typeof ctx.agents.list === 'function') ? (ctx.agents.list() || []) : []; var s = {}; for (var i = 0; i < all.length; i++) { var a = all[i]; var h = a && a.session && a.session.header; if (!h || !h.parentSession) s[String(a.id)] = true } return s } catch (_) { return {} } }
+    // 根 id 集合（rc.5 契约迁移：agents.roots() 已移除，改 list() + isRootSessionHeader 判根；
+    // fork/seed 主会话的 parentSession 不等于子代理，与 session/rpc 同源）。
+    function activeRootIds() { try { var all = (ctx.agents && typeof ctx.agents.list === 'function') ? (ctx.agents.list() || []) : []; var s = {}; for (var i = 0; i < all.length; i++) { var a = all[i]; if (a && isRootSessionHeader(a.session && a.session.header)) s[String(a.id)] = true } return s } catch (_) { return {} } }
     // ===== .tmp 原子写孤儿清扫（task-mvo9ca58，巡检 n-mvo4y8iyv3r0）=====
     // wt() 崩溃窗口（强杀发生在 rename 前）留下 tasks-*.json.<pid>.<ts>-<seq>.tmp 残件（实证 10-20 wedge
     // 重启窗 336KB 残件滞留 4 天无人清）。读盘列举 tasks-* 时顺手 unlink mtime 早于 now-1h 的 tasks-*.tmp：
