@@ -1494,6 +1494,38 @@ function apply(ctx) {
     }
 
     // 标签编辑（巡检三连①）：逗号分隔 input，提交走 update-task 的 tags 通道（trim + 去空）
+    // 流程展示与实时编辑（task-mwqu2mmq）：full=Worker+Verifier / work=只做不验 / direct=主窗口。
+    // 后端 update-task 本就支持 pipeline 热更新；这里补齐详情入口。验证中 full→work 是唯一附带状态推进的
+    // 分支：必须经用户 confirm 明确「主窗口人工通过、跳过 Verifier」，随后 verify-task(force:true) 原子语义
+    // 收口；在跑 Verifier 的迟到结论仍由既有 lateVerdict 通道保留，不冒充它已完成本次独立验收。
+    function PipelineEditor(props) {
+      var task = props.task
+      var _B = React.useState(false), busy = _B[0], setBusy = _B[1]
+      var _E = React.useState(''), err = _E[0], setErr = _E[1]
+      var current = task.pipeline || 'full'
+      function save(next) {
+        if (busy || next === current) return
+        var skipVerify = task.status === 'verifying' && current === 'full' && next === 'work'
+        if (skipVerify && !window.confirm('改为免验证并跳过当前独立验收？\n\n本卡将按「主窗口人工验收通过」直接完成；若 Verifier 已在运行，它稍后返回的结论只会作为迟到记录保留，不会改变本次人工决定。')) return
+        setBusy(true); setErr('')
+        rpc('update-task', { taskId: task.id, pipeline: next }).then(function (r) {
+          if (r && r.ok === false) throw new Error(r.error || '流程更新失败')
+          if (!skipVerify) return null
+          return rpc('verify-task', { taskId: task.id, verdict: 'approved', comment: '主窗口将流程从 full 改为 work，手动跳过独立 Verifier 验收', force: true }).then(function (vr) {
+            if (vr && vr.ok === false) throw new Error('流程已改为免验证，但跳过验收未完成：' + (vr.error || '验收失败') + '。可点击下方「验收通过」手动收口')
+          })
+        }).then(function () { return fetchTasks() }).catch(function (e) { setErr(String(e && e.message ? e.message : e)); fetchTasks() }).finally(function () { setBusy(false) })
+      }
+      return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 }, title: pipeOf(task).label + '；选中立即保存。验证中从全流程改为免验证时，经确认后按主窗口人工验收通过完成' },
+        React.createElement('span', { style: { fontSize: 10, color: C.text2 } }, '流程'),
+        React.createElement('select', { value: current, disabled: busy, onChange: function (e) { save(e.target.value) }, title: pipeOf(task).label, style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: current === 'full' ? C.brand : C.warn, fontWeight: 600 } },
+          React.createElement('option', { value: 'full' }, '全流程（执行+验收）'),
+          React.createElement('option', { value: 'work' }, '免验证（只做不验）'),
+          React.createElement('option', { value: 'direct' }, '主窗口处理')),
+        busy ? React.createElement('span', { style: { fontSize: 9, color: C.text2 } }, '保存中…') : null,
+        err ? React.createElement('span', { style: { fontSize: 9, color: C.err, maxWidth: 260 }, title: err }, err) : null)
+    }
+
     function TagsEditor(props) {
       var task = props.task
       var _R = React; var useState = _R.useState
@@ -1878,6 +1910,7 @@ function apply(ctx) {
         React.createElement('div', { id: 'tskb-adv-edit', style: { marginTop: 8 } },
           React.createElement('div', { style: { fontSize: 11, fontWeight: 600, color: C.text2, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 } }, ic('file-text', 11), '编辑（标题 / 描述 / 属性 / 标签 / touches）'),
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' } }, React.createElement('select', { value: task.priority || 'medium', onChange: function (e) { rpc('update-task', { taskId: task.id, priority: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '优先级（四档：紧急/高/中/低）', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: (prioColor[task.priority] || prioColor.low), fontWeight: 600 } }, ['critical', 'high', 'medium', 'low'].map(function (p) { return React.createElement('option', { key: p, value: p }, prioLabel[p] + '（' + p + '）') })), React.createElement('span', { style: { fontSize: 11, padding: '1px 8px', borderRadius: 3, background: C.nested, color: C.text } }, statusLabels[task.status] || task.status), React.createElement('select', { value: task.size || (state.teamMode ? 'standard' : ''), onChange: function (e) { rpc('update-task', { taskId: task.id, size: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '力度档位（路由板级 laneModels 三档表定模）：轻=单点小改/文档/配置，标=常规模块改动，重=跨模块/高风险' + (state.teamMode ? '；Team 板硬闸必填，不可调回继承' : '；继承=清除 size 回标档语义'), style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.brand, fontWeight: 600 } }, (state.teamMode ? [] : [React.createElement('option', { key: '', value: '' }, '继承（标）')]).concat([['light', '轻（light）'], ['standard', '标（standard）'], ['heavy', '重（heavy）']].map(function (s) { return React.createElement('option', { key: s[0], value: s[0] }, s[1]) }))), task.model ? React.createElement('span', { style: { fontSize: 9, padding: '1px 6px', borderRadius: 3, background: 'color-mix(in srgb, ' + C.warn + ' 18%, transparent)', color: C.warn, fontWeight: 700, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: '卡级模型特例 model=' + task.model + '（取模链最高优先；只读展示——改/删走对话 task_update，v1 不做 GUI 编辑）' }, '🎯 ' + task.model) : null, React.createElement('select', { value: task.pipeline || 'full', onChange: function (e) { rpc('update-task', { taskId: task.id, pipeline: e.target.value }).then(fetchTasks).catch(function () {}) }, title: '管线档位', style: { fontSize: 10, padding: '1px 4px', border: '1px solid ' + C.border, borderRadius: 3, background: C.card, color: C.text2 } }, React.createElement('option', { value: 'full' }, '全流程（执行+验证）'), React.createElement('option', { value: 'work' }, '免验证（只做不验）'), React.createElement('option', { value: 'direct' }, '主窗口处理')), task.pipelineAuto ? React.createElement('span', { style: { fontSize: 9, color: C.text2 }, title: '由规则自动分类，可手动覆盖' }, 'auto') : null, isManual ? React.createElement('span', { style: { fontSize: 10, color: C.text2, display: 'inline-flex', alignItems: 'center', gap: 2 } }, ic('user', 10), '手动派发') : null),
+          React.createElement(PipelineEditor, { key: task.id + '|pipeline', task: task }),
           React.createElement(TagsEditor, { key: task.id, task: task }),
           React.createElement(TouchesEditor, { key: task.id + '|touches', task: task }),
         React.createElement('input', { value: editTitle, onChange: function (e) { setEditTitle(e.target.value) }, style: { width: '100%', fontSize: 13, fontWeight: 600, padding: '4px 6px', marginBottom: 6, border: '1px solid ' + C.border2, borderRadius: 4, background: C.card, color: C.text, boxSizing: 'border-box' } }),
