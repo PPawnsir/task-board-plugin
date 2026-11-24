@@ -798,8 +798,11 @@ test('⑭ 拆解策略：prompt 注入策略意图（不再写死张数）+ 串�
   var rm = applyDecomposeProposal(boardM, srcM, { verdict: 'split', children: many }, '2026-01-01T08:00:00Z')
   assert.equal(rm.ok, false, '超上限整批拒收')
   assert.ok(!boardM.tasks.some(function (x) { return x.proposalOf === 'g2' }), '拒收不落任何提案子卡')
-  // ⑦ Team 第 9 条：每次拆解前必须征询用户偏好，并把答复作为 strategy/guidance 传入
-  assert.match(TEAM_DECOMPOSE_FLOW, /每次调 task_decompose 前必须先征询用户这次的拆解偏好/, 'Team 第 9 条缺「每次先征询」约定')
+  // ⑦ Team 第 9 条：征询是**按需判断**（不是强制关卡）——值得问/不必问判据在位，策略参数与验收不变量声明在位
+  assert.match(TEAM_DECOMPOSE_FLOW, /调用 task_decompose 前按需判断是否征询用户拆解偏好/, 'Team 第 9 条缺「按需征询」约定')
+  assert.match(TEAM_DECOMPOSE_FLOW, /需求较大、拆法会明显影响交付节奏、或用户此前表达过偏好时，值得先问一句/, 'Team 第 9 条缺「值得问」判据')
+  assert.match(TEAM_DECOMPOSE_FLOW, /需求小、或不同策略结果实质相同就不必打扰，直接 auto/, 'Team 第 9 条缺「不必问」判据')
+  assert.match(TEAM_DECOMPOSE_FLOW, /不是流程关卡/, 'Team 第 9 条须显式声明征询不是强制关卡')
   assert.match(TEAM_DECOMPOSE_FLOW, /parallel 并行优先 \/ vertical 纵切交付 \/ fine 细粒度小步 \/ auto 自适应/, 'Team 第 9 条缺四档口径')
   assert.match(TEAM_DECOMPOSE_FLOW, /验收不变量（每张子卡可独立验收、Verifier 独立复跑）不随策略改变/, 'Team 第 9 条缺验收不变量声明')
   assert.match(TEAM_DECOMPOSE_FLOW, /^9\. 需求卡工作流/)
