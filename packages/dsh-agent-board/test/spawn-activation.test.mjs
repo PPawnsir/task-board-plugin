@@ -178,8 +178,9 @@ test('startActivation⑤b：continuable 兜底臂——activation.result 拆除�
 test('startActivation⑥：新契约路径在源码层接线（startActivation 调用点 + 双 delivery 常量）', async () => {
   var { readFileSync } = await import('node:fs')
   var src = readFileSync(new URL('../lib/dispatch.mjs', import.meta.url), 'utf8')
-  assert.match(src, /subagents\.startActivation\(\{ provider: providerName, label: req\.label, request: activationRequestOf\(req\), signal: req\.signal, delivery: 'parent' \}\)/)
-  assert.match(src, /delivery: 'caller' \}\)\)/)
+  assert.match(src, /subagents\.startActivation\(activationSpecOf\(providerName, req, 'parent'\)\)/)
+  assert.match(src, /subagents\.startActivation\(activationSpecOf\(providerName, req, 'caller'\)\)/)
+  assert.match(src, /function activationSpecOf\(providerName, req, delivery\)/)
   assert.match(src, /function hasActivationApi\(subagents\)/)
   assert.match(src, /function activationAsRun\(act\)/)
   assert.match(src, /function activationRequestOf\(req\)/)
@@ -400,6 +401,22 @@ test('startActivation⑫（task-mvowb2hc 洞①边界）：worker 空文本失�
 // 宿主 0.2.2-rc.5 移除 subagents.list()（只余公开 providers Map + getProvider/expectProvider）。
 // 旧实现 pickProvider() 直接 subagents.list() → TypeError 逃出 spawnOneShot → 外层 catch 只写
 // 「spawn 异常，回收重新排队」，卡面零诊断、每 15s 重试一次（Issue 故障 B 实证）。
+test('rc.5 契约⓪：Activation 规格双形态——扁平业务字段（parent/prompt）与嵌套 request 同时提供', async () => {
+  var board = mkBoard([mkTask({ status: 'in-progress', claimedBy: 'spawn-pending' })])
+  var calls = []
+  var dispatch = mkDispatch(board, { subagents: mkActivationSubagents(calls) })
+  var sr = await dispatch.spawnOneShot(SID, board.tasks[0], 'worker')
+  assert.ok(sr, 'spawn 成功')
+  var spec = calls[0]
+  // rc.5：SubagentActivationSpec extends Omit<SubagentStartRequest,...> → 业务字段在**顶层**
+  assert.ok(spec.parent && String(spec.parent.id), '顶层 parent 存在（宿主读 spec.parent.id）')
+  assert.ok(Array.isArray(spec.prompt), '顶层 prompt 存在')
+  // v0.2.1 兼容：嵌套 request 仍在（旧宿主读 spec.request）
+  assert.ok(spec.request && Array.isArray(spec.request.prompt), '嵌套 request 保留（旧宿主兼容）')
+  assert.equal(spec.request.parent, spec.parent, 'request.parent 与顶层 parent 同源')
+  assert.equal(spec.delivery, 'parent')
+  assert.equal(spec.provider, 'p1')
+})
 test('rc.5 契约①：subagents 只有 providers Map（无 list）时 spawn 仍成功（provider 名从 Map 键枚举）', async () => {
   var board = mkBoard([mkTask({ status: 'in-progress', claimedBy: 'spawn-pending' })])
   var calls = []

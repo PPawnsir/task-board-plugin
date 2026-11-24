@@ -585,6 +585,19 @@ export function createDispatch(ctx, state, deps) {
       if (req.outputSchema) r.outputSchema = req.outputSchema // outputSchema 透传（task-mvnenrwk 拆解官结构化提案）
       return r
     }
+    // ===== Activation 规格双形态（rc.5 契约迁移，task-mwqu2mmq / Issue 2026-11-24 故障 B 二次根修）=====
+    // v0.2.1 规格：{ provider, label, request: Omit<SubagentStartRequest,'label'|'signal'>, signal, delivery }
+    //   —— 业务字段（parent/prompt/agentOptions/cwd/outputSchema）嵌在 request 里；
+    // rc.5 规格：SubagentActivationSpec **extends** Omit<SubagentStartRequest,...> —— 业务字段是**扁平顶层**
+    //   （宿主 startActivation 直接读 spec.parent.id；只给嵌套 request 时抛
+    //    「Cannot read properties of undefined (reading 'id')」——2026-11-24 实证）。
+    // 两形态并存：扁平展开 + 保留 request 键。旧宿主只读 request、新宿主只读扁平，互不干扰。
+    function activationSpecOf(providerName, req, delivery) {
+      var ar = activationRequestOf(req)
+      var spec = Object.assign({}, ar, { provider: providerName, label: req.label, signal: req.signal, delivery: delivery })
+      spec.request = ar
+      return spec
+    }
     // ===== 槽位值 → 取模链候选（task-mwkbnjk8）：string | {id,effort?} → {id, effort?} | null =====
     // 配置面（task-mwkbmu9k 子卡2）起 laneModels 槽/workerModel/verifierModel/fallbackModels 支持
     // {id, effort?} 复合槽位值；取模链候选统一升到该复合形态：id 供既有健康闸/熔断/冷却判定照旧消费
@@ -995,7 +1008,7 @@ export function createDispatch(ctx, state, deps) {
         if (useContinuable) {
           if (hasActivationApi(subagents)) {
             // 新契约：continuable 走 startActivation delivery='parent'（结算留言父会话，旧 startContinuable 行为）
-            var act0 = await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'parent' })
+            var act0 = await subagents.startActivation(activationSpecOf(providerName, req, 'parent'))
             actForSettle = act0
             childId = String(act0 && act0.childId || '')
             spawnMsgId = String(act0 && act0.messageId || '')
@@ -1009,7 +1022,7 @@ export function createDispatch(ctx, state, deps) {
         } else {
           if (hasActivationApi(subagents)) {
             // 新契约：一次性走 startActivation delivery='caller'（只回 result，不惊动父会话），适配成旧 run 形状
-            run = activationAsRun(await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'caller' }))
+            run = activationAsRun(await subagents.startActivation(activationSpecOf(providerName, req, 'caller')))
             spawnMsgId = String(run && run.messageId || '')
           } else {
             run = await subagents.start(providerName, req)
@@ -1029,7 +1042,7 @@ export function createDispatch(ctx, state, deps) {
           try {
             if (useContinuable) {
               if (hasActivationApi(subagents)) {
-                var act1 = await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'parent' })
+                var act1 = await subagents.startActivation(activationSpecOf(providerName, req, 'parent'))
                 actForSettle = act1
                 childId = String(act1 && act1.childId || '')
                 spawnMsgId = String(act1 && act1.messageId || '')
@@ -1041,7 +1054,7 @@ export function createDispatch(ctx, state, deps) {
                 if (!childId) throw new Error('startContinuable 未返回 childId')
               }
             } else if (hasActivationApi(subagents)) {
-              run = activationAsRun(await subagents.startActivation({ provider: providerName, label: req.label, request: activationRequestOf(req), signal: req.signal, delivery: 'caller' }))
+              run = activationAsRun(await subagents.startActivation(activationSpecOf(providerName, req, 'caller')))
               spawnMsgId = String(run && run.messageId || '')
             } else run = await subagents.start(providerName, req)
           } catch (e2) {
