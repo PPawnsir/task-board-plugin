@@ -7643,13 +7643,14 @@ test('池冻结根修②（防御）：派发单项异常不拖死同轮其余�
   assert.equal(c.claimedBy, 'child-3')
 })
 
-test('池冻结根修③（防御）：spawn 抛异常时四种占位全清（worker/verifier/hook-pre/hook-post），下一轮照常派发', async () => {
-  // 异常点在 spawnOneShot 的 try **之外**（pickProvider → subagents.list()）：这是旧形状里最真实的
-  // 抛穿路径——旧代码不接这一抛，第一项就把整个循环带走，紧随其后的 verifier 与两个 hook 占位
-  // （spawn-pending / state='running'）全部变成死占位。
+test('池冻结根修③（防御）：provider 枚举面抛错 → 优雅降级为 spawn-fail 诊断（不再抛穿），四种占位全清、下一轮照常派发', async () => {
+  // 异常点在旧形状里是 `pickProvider → subagents.list()`——rc.5 已移除 list()，旧代码不接这一抛，
+  // 第一项就把整个循环带走，紧随其后的 verifier 与两个 hook 占位全变死占位（Issue 2026-11-24 故障 B）。
+  // 新契约（task-mwqu2mmq）：providerNamesOf 双面探测（list → providers Map）并吞错，最坏返回 null →
+  // spawnOneShot 走 spawn-fail 诊断返回 null，四个角色各自隔离、占位全清、下一轮照常派发。
   const w = mkTask({ id: 'w1', title: 'W', createdAt: '2026-01-01T00:00:01Z' })
   const v = mkTask({ id: 'v1', title: 'V', status: 'verifying', createdAt: '2026-01-01T00:00:02Z' })
-  // claimedAt 取当下：本用例只验证「spawn 抛异常时的占位清理」，别让 isOrphan 的 2min 规则先把手动认领的
+  // claimedAt 取当下：本用例只验证「spawn 异常时的占位清理」，别让 isOrphan 的 2min 规则先把手动认领的
   // 史诗回收成 pending（那会把 hook 场景变成 worker 场景，测不到本该测的那条路径）
   const claimedAt = new Date().toISOString()
   const epicPre = mkTask({ id: 'e1', title: 'E-pre', status: 'in-progress', claimedBy: 'main', claimedAt: claimedAt, hooks: { pre: { enabled: true, prompt: '准备', state: 'idle', runId: null } } })
@@ -7668,7 +7669,10 @@ test('池冻结根修③（防御）：spawn 抛异常时四种占位全清（wo
   const origErr = console.error
   console.error = function () { errs.push(Array.prototype.join.call(arguments, ' ')) }
   try { await h.dispatch.poolCycle(FULL_SID) } finally { console.error = origErr }
-  assert.equal(errs.filter(s => /派发单项异常/.test(s)).length, 4, '四项派发各自被隔离并留痕')
+  // 新契约：不再有「派发单项异常」抛穿留痕；四条 spawn-fail 诊断各落一卡
+  assert.equal(errs.filter(s => /派发单项异常/.test(s)).length, 0, 'provider 枚举抛错已被吞（优雅降级，不抛穿）')
+  const failMsgs = [w, v, epicPre, epicPost].map(t => (t.messages || []).filter(m => m.kind === 'spawn-fail').length)
+  assert.deepEqual(failMsgs, [1, 1, 1, 1], '四项派发各自落 spawn-fail 诊断（可诊断）')
   // 四种占位全部回收（旧形状：w 卡在 in-progress/spawn-pending，v 卡在 verifying/spawn-pending，
   // e1 卡在 hooks.pre.state='running'（串行闸门永久关闭＝该史诗子任务永不派发），
   // e2 卡在 verifierRun='spawn-pending' 且待跑标记已清（＝永久不收口））
@@ -7677,7 +7681,9 @@ test('池冻结根修③（防御）：spawn 抛异常时四种占位全清（wo
   assert.equal(epicPre.hooks.pre.state, 'idle'); assert.equal(epicPre.hooks.pre.runId, null); assert.equal(epicPre.hooks.pre.pending, true)
   assert.equal(epicPost.verifierRun, null); assert.equal(epicPost.hooks.post.pending, true)
   assert.deepEqual(Object.keys(h.runs), []) // 没有半成品 rec 占并发位
-  // 下一轮（spawn 恢复正常）照常派发四种角色——占位清干净的直接证据
+  // 下一轮（spawn 恢复正常）照常派发四种角色——占位清干净的直接证据。
+  // 先清 spawnFails 退避标记：本用例验证的是「占位是否清干净」，不是退避窗口（退避/最大次数另有专测）。
+  ;[w, v, epicPre, epicPost].forEach(t => { delete t.spawnFails; delete t.retryAt })
   boom = false
   await h.dispatch.poolCycle(FULL_SID)
   assert.deepEqual(spawned.sort(), ['hook-post:e2', 'hook-pre:e1', 'verifier:v1', 'worker:w1'])
@@ -7753,6 +7759,10 @@ test('池冻结根修⑤（接线，源码级）：幽灵回收在活跃度计�
   assert.match(dsp, /派发单项异常（已回收占位，继续本轮其余项）/)
   assert.match(dsp, /await releaseSpawnPlaceholder\(sid, sp, 'spawn 失败，回收重新排队'\)/)
   assert.match(dsp, /await releaseSpawnPlaceholder\(sid, sp, 'spawn 失败'\)/)
+  // ⑤b 外层异常也必须可诊断 + 受重试治理（task-mwqu2mmq）：真错落卡（spawn-throw）+ 指数退避/最大次数
+  assert.match(dsp, /kind: 'spawn-throw'/, '外层派发异常写卡面 spawn-throw（不再只进 console）')
+  assert.match(dsp, /💥 ' \+ roleName \+ ' 派发异常/, '异常消息含真实错误文本前缀')
+  assert.match(dsp, /var govE = await governSpawnRetry\(sid, sp\)/, '外层异常同样走重试治理（退避/最大次数）')
   // ⑥ spawn-pending 死占位回收扩面到 in-progress（hook-post 的幂等占用位）
   assert.match(dsp, /if \(t\.verifierRun === 'spawn-pending' && \(now - new Date\(t\.verifierRunAt \|\| 0\)\.getTime\(\)\) > 120000\)/)
   assert.match(dsp, /reclaim-hook-pre/)

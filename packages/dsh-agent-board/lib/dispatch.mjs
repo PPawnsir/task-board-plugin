@@ -359,10 +359,19 @@ export function createDispatch(ctx, state, deps) {
     // 熔断名单与健康表熔断判定共用同一键式，上方 import 同源使用）。
 
     var _cachedProvider = null
+    // provider 名枚举（rc.5 契约迁移，task-mwqu2mmq）：宿主 0.2.2-rc.5 移除了 subagents.list()，
+    // 服务改为公开 `providers` Map + getProvider/expectProvider。双兼容：
+    //   老宿主（有 list 函数）→ 逐字走旧面；rc.5 → 读 providers Map 的键（Map 形态判定防脏值）。
+    // 两条都拿不到返回 null——调用方（spawnOneShot）据此落 spawn-fail 诊断，不再抛异常。
+    function providerNamesOf(subagents) {
+      try { if (typeof subagents.list === 'function') { var l = subagents.list(); if (Array.isArray(l)) return l.slice() } } catch (_) {}
+      try { var p = subagents.providers; if (p && typeof p.keys === 'function') return Array.from(p.keys()) } catch (_) {}
+      return null
+    }
     function pickProvider() {
       if (_cachedProvider) return _cachedProvider
       var subagents = ctx.subagents; if (!subagents) return null
-      var names = subagents.list(); if (!names.length) return null
+      var names = providerNamesOf(subagents); if (!names || !names.length) return null
       for (var i = 0; i < names.length; i++) { try { var p = subagents.getProvider(names[i]); if (p && p.inheritsParentContext === false) { _cachedProvider = names[i]; return _cachedProvider } } catch (_) {} }
       _cachedProvider = names[0]; return _cachedProvider
     }
@@ -1922,9 +1931,29 @@ export function createDispatch(ctx, state, deps) {
             pushSysNote(sid, '史诗「' + sp.t.title + '」收口 hook 启动失败，下轮自动重试')
           }
         } catch (e) {
+          var errText = String(e && e.message ? e.message : e).slice(0, 400)
           console.error('[task-board] 派发单项异常（已回收占位，继续本轮其余项）(task ' + sp.t.id + ' ' + sp.role + '):', String(e))
+          // 异常详情落卡（task-mwqu2mmq，故障 B 实证）：外层异常此前只进 console，卡面只剩「spawn 异常」，
+          // 用户侧无法诊断（Issue 2026-11-24 明确要求「失败可诊断」）。与 spawn-fail 同口径落 messages +
+          // lastError；随后同样走 retry 治理（指数退避/最大次数转 blocked），异常风暴也不会无限循环。
+          try {
+            await mutateLocked(sid, function (d) {
+              var t2 = d.tasks.find(function (x) { return x.id === sp.t.id })
+              if (!t2) return null
+              var roleName = sp.role === 'worker' ? 'Worker' : sp.role === 'verifier' ? 'Verifier' : String(sp.role)
+              var text = '💥 ' + roleName + ' 派发异常（非 spawn 返回失败）：' + errText
+              if (!Array.isArray(t2.messages)) t2.messages = []
+              t2.messages.push({ kind: 'spawn-throw', text: text, at: new Date().toISOString(), by: 'system' })
+              t2.lastError = text.slice(0, 300)
+              return t2
+            }, true)
+          } catch (e2) { console.error('[task-board] 派发异常详情落卡失败 (task ' + sp.t.id + '):', String(e2)) }
           await releaseSpawnPlaceholder(sid, sp, 'spawn 异常，回收重新排队')
-          try { pushSysNote(sid, '任务「' + sp.t.title + '」' + sp.role + ' 派发异常，已回收占位待重派') } catch (_) {}
+          try {
+            var govE = await governSpawnRetry(sid, sp)
+            if (govE && govE.blocked) pushSysNote(sid, '⛔ 任务「' + sp.t.title + '」' + sp.role + ' 连续派发异常 ' + SPAWN_MAX_FAILS + ' 次，已转 blocked：' + String(govE.why || '').slice(0, 200), sp.t.id)
+            else pushSysNote(sid, '任务「' + sp.t.title + '」' + sp.role + ' 派发异常，已回收占位待重派（原因见卡面 💥 消息）', sp.t.id)
+          } catch (e3) { console.error('[task-board] 派发异常治理失败 (task ' + sp.t.id + '):', String(e3)) }
         }
       }
       return result

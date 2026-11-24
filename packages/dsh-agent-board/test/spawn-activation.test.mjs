@@ -395,3 +395,33 @@ test('startActivation⑫（task-mvowb2hc 洞①边界）：worker 空文本失�
     assert.equal(Object.keys(hB.state.badModels).length, 0, 'completed 停止码拆除不计入模型面连击')
   } finally { console.error = origErr }
 })
+
+// ===== rc.5 provider 枚举契约迁移（task-mwqu2mmq，Issue 2026-11-24 故障 B 根修钉线）=====
+// 宿主 0.2.2-rc.5 移除 subagents.list()（只余公开 providers Map + getProvider/expectProvider）。
+// 旧实现 pickProvider() 直接 subagents.list() → TypeError 逃出 spawnOneShot → 外层 catch 只写
+// 「spawn 异常，回收重新排队」，卡面零诊断、每 15s 重试一次（Issue 故障 B 实证）。
+test('rc.5 契约①：subagents 只有 providers Map（无 list）时 spawn 仍成功（provider 名从 Map 键枚举）', async () => {
+  var board = mkBoard([mkTask({ status: 'in-progress', claimedBy: 'spawn-pending' })])
+  var calls = []
+  var legacy = mkActivationSubagents(calls)
+  delete legacy.list // rc.5 形态：只有 providers Map
+  legacy.providers = new Map([['p1', { name: 'p1', inheritsParentContext: false }]])
+  var dispatch = mkDispatch(board, { subagents: legacy })
+  var sr = await dispatch.spawnOneShot(SID, board.tasks[0], 'worker')
+  assert.ok(sr, 'rc.5 下 spawn 成功（不再抛 s.list is not a function）')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].provider, 'p1', 'provider 名来自 providers Map 键')
+})
+
+test('rc.5 契约②：两种枚举面都没有时返回 null 并落 spawn-fail 诊断（不抛异常）', async () => {
+  var board = mkBoard([mkTask()])
+  var dispatch = mkDispatch(board, { subagents: { getProvider: function () { return null }, startActivation: async function () { throw new Error('不应被调用') } } })
+  var origErr = console.error; console.error = function () {}
+  try {
+    var sr = await dispatch.spawnOneShot(SID, board.tasks[0], 'worker')
+    assert.equal(sr, null, '无 provider 枚举面 → 返回 null（不再抛 TypeError）')
+    var msgs = (board.tasks[0].messages || []).filter(function (m) { return m.kind === 'spawn-fail' })
+    assert.equal(msgs.length, 1, 'spawn-fail 诊断落卡（无可用 subagent provider）')
+    assert.match(msgs[0].text, /无可用 subagent provider/)
+  } finally { console.error = origErr }
+})
