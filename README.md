@@ -41,7 +41,7 @@
 | **0.1.7 ~ 0.1.7-x**（含 rc） | **≥ 1.2.2（必须）** | 0.1.7 会话日志升级为 format v4：插件消息 `source.kind` 必须是生产者自有 kind。1.2.1 及更早会在**任务完成/阻塞回执**落盘时抛 `SessionFormatError: format v4 message requires a producer-owned source kind`，并连带使主窗口当前轮次失败（表现为「本轮运行失败」）；同时「跳转会话」因宿主移除 `sessions.open` 而失效（控制台 `sessionsSvc.open is not a function`），卡片活动心跳读不到 v4 日志（`session.v4.jsonl.zstd`） |
 | 0.1.5-rc.1 ~ 0.1.6 | ≤ 1.2.1 | 1.2.2 起按 0.1.7 协议编写（v4 source kind、`uiWorkspace.openSession` 跳转），旧宿主未做回归验证，建议停留 1.2.1 |
 
-> 当前版本 **v1.9.12** 已在宿主 **0.2.2-rc.5** 实测：904 断言全绿 + 真机 Worker→Verifier 全链（pending→in-progress→verifying→resolved，Verifier 独立复跑验收通过）。本版修复 rc.5 两处破坏性契约变更：① **agents 服务移除 roots()/isOwnedBy()** → 根判定改 list()+SessionHeader.parentSession（修 get-tasks 500）；② **subagents 移除 list() 且 Activation 规格由嵌套 request 改为扁平继承** → provider 枚举改 list→providers Map 双面探测，activationSpecOf 同时给扁平字段与嵌套 request（修 spawn TypeError 重试风暴）+ 外层异常详情落卡（spawn-throw）并纳入指数退避/最大次数治理。上一版（v1.9.11）为 agents 契约迁移首修。
+> 当前版本 **v1.9.13** 已在宿主 **0.2.2-rc.5** 实测：911 断言全绿 + 重启后真机 Worker→Verifier→resolved + 完成回执实际投递。新增：① **拆解官策略定制**（`task_decompose` 增加 `auto/parallel/vertical/fine` + `guidance`，张数由模型按需求判断；征询按需；超上限拒收留痕）；② **主 fork 判根修复**（`origin=subagent` 优先，`parentSession + delegationDepth=0` 的 fork/seed 主会话认根，修 `task_create` 主窗口权限误拒）；③ **详情页流程实时编辑**（`full/work/direct` 下拉，验证中 `full→work` 经确认后按主窗口人工通过收口，迟到 Verifier 结论保留）。上一版 v1.9.12 修复 rc.5 agents/subagents 破坏性契约变更。
 
 ```sh
 dsh plugin --profile web add dsh-agent-board@latest   # 0.1.7+/0.2.x 宿主（推荐）
