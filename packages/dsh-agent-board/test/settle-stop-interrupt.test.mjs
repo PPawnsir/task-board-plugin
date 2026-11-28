@@ -67,6 +67,41 @@ test('① verifier 一次性 run 正常结算 → interrupt 补停恰一枪；�
   } finally { await env.cleanup() }
 })
 
+// ===== rc.5 停泊释放：hold 终止与后续 sweep 共用 Activation 幂等账（task-mx0divu4）=====
+test('rc.5 停泊释放：hold terminate 已 dispose 的子会话，后续 sweep 不重复 dispose，且绝不整树 drain', async () => {
+  var env = createMockCtx()
+  try {
+    var activations = []
+    var disposeCalls = 0
+    var treeDrains = 0
+    env.ctx.subagents.startActivation = async function (spec) {
+      var act = {
+        childId: 'child-rc5-hold-' + (activations.length + 1), messageId: 'mrc5-' + (activations.length + 1), label: spec.label,
+        result: new Promise(function () {}),
+        dispose: async function () { disposeCalls++ },
+      }
+      activations.push(act)
+      return act
+    }
+    env.ctx.subagents.drainDescendants = async function () { treeDrains++ }
+    plugin.apply(env.ctx)
+    await createTask(env, 'task-rc5-hold', { pipeline: 'work' })
+    await env.clock.advance(50)
+    await env.waitFor(function () { return activations.length >= 1 }, 'startActivation worker spawn')
+    var childId = activations[0].childId
+    await env.waitFor(function () { var x = env.task('task-rc5-hold'); return x && x.status === 'in-progress' && x.claimedBy === childId ? x : null }, '落卡 in-progress')
+    var term = await env.rpc('terminate-agent', { sessionId: env.sid, taskId: 'task-rc5-hold', hold: true })
+    assert.equal(term.ok, true)
+    assert.equal(disposeCalls, 1, 'hold 终止先精确 dispose 一次')
+    //  terminated 留档已是「永不续跑」候选；后续多轮心跳若漏写 parkedDrained，会在这里二次 dispose。
+    await env.clock.advance(50)
+    await env.clock.advance(50)
+    await new Promise(function (r) { setTimeout(r, 100) })
+    assert.equal(disposeCalls, 1, 'hold 与 sweep 共享幂等账：不得重复释放')
+    assert.equal(treeDrains, 0, '任何停泊释放路径都不得调用 drainDescendants(root)')
+  } finally { await env.cleanup() }
+})
+
 // ===== ① 一次性 worker（workerContinuable=false 回退开关）失败结算 → interrupt 补停（盖 failed 路径）=====
 test('① 一次性 worker（回退开关关）失败结算 → interrupt 补停；失败重排语义不回归', async () => {
   var env = createMockCtx()

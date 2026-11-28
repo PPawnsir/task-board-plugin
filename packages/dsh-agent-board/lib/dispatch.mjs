@@ -3,10 +3,9 @@
 // token 消耗累加 / poolCycle 派发周期（孤儿回收+占位 claim+池快照）/ 15s 心跳 / 插件卸载清理 /
 // Team 模式 systemPrompt 引导段 / 预研上下文瘦身清单（调研笔记全文 + 文件清单，随首条 prompt 一次性注入）/
 // 可续跑 Worker（continuable：硬超时 interrupt 留存 + 重派 sendMessage 冷复活续跑 + 失败回退 fresh spawn）。
-// 直接子代理生命周期（task-mwogdzfd）：停泊子会话额度回收（sweepParkedQuota/drainParkedChildren——
-// 永不续跑的 continuable 子会话走宿主 drainChildren 整批释放，堵「inactive 残影占满 active child
-// limit」；spawn 撞额度满时同款 eager 释放）+ 复用/首派 rec 的 label（显示标签与当前任务关联）+
-// messageId/deliveredAt（sendMessage 投递回执，poolStatus 透出「已投递 delivered / 已启动 running」二态）。
+// 直接子代理生命周期（task-mwogdzfd + task-mx0divu4）：停泊子会话额度回收（sweepParkedQuota——
+// 旧宿主 drainChildren 整批兼容；rc.5 改用本进程留存 Activation.dispose 逐个精确释放，堵「inactive
+// 残影占满 active child limit」；spawn 撞额度满时同款 eager 释放）+ 复用/首派 rec 的 label + messageId。
 // 拆分第 7 刀 task-mvt8c1yx-7：usage 水位（localDayKey/effectiveOf/seekSeqOf/num0/hasUsageRecorded）/
 // accumulateRunUsage / 重启 reconcile（reconcileRoot）/ 僵尸留档清扫（sweepZombieRuns）/ 幽灵占位回收
 // （recIsLive/reapGhostRecs）搬至 lib/settle.mjs——poolCycleBody 三挂点与 return API 的 accumulateRunUsage
@@ -696,6 +695,52 @@ export function createDispatch(ctx, state, deps) {
     // 此方法 → 返回 false，由调用方回退 interrupt 留存（既有行为逐字不变）。
     // 成功即写 state.parkedDrained[sid] 幂等标记（续跑清场与额度回收两条路径共用同一账——
     // 清场释放过的子会话，下一轮心跳的回收扫描不再重复调宿主）。
+    // rc.5 已移除 drainChildren：本进程留存的 Activation 是唯一可精确释放单个 activation 的句柄。
+    // drainDescendants 是整树 teardown，绝不能在这里作为替代。注册表仅内存保存；重启后无句柄即安全跳过。
+    function forgetParkedActivation(sid, cid, act) {
+      var bySid = state.parkedActivations
+      var map = bySid && bySid[sid]
+      if (!map || (act && map[cid] !== act)) return
+      delete map[cid]
+      if (!Object.keys(map).length) delete bySid[sid]
+    }
+    function markParkedDrained(sid, cid) {
+      if (!state.parkedDrained) state.parkedDrained = {}
+      var dmap = state.parkedDrained[sid] || (state.parkedDrained[sid] = {})
+      dmap[cid] = true
+    }
+    function noteColdParkedSkip(sid, ids) {
+      if (!ids.length) return
+      if (!state.parkedColdNoted) state.parkedColdNoted = {}
+      var noted = state.parkedColdNoted[sid] || (state.parkedColdNoted[sid] = {})
+      var fresh = ids.filter(function (cid) { if (noted[cid]) return false; noted[cid] = true; return true })
+      // 能力边界要留痕，但冷子会话可能长期存在：每个本进程 childId 只报一次，避免 15s 心跳刷屏。
+      if (fresh.length) console.error('[task-board] 停泊子会话无本进程 Activation 句柄（重启/冷子会话或续跑新纪元），安全跳过：' + fresh.join(','))
+    }
+    function trackParkedActivation(sid, cid, act) {
+      if (!act || typeof act.dispose !== 'function' || !cid) return act
+      if (!state.parkedActivations) state.parkedActivations = {}
+      var map = state.parkedActivations[sid] || (state.parkedActivations[sid] = {})
+      // 同一 childId 的新 activation 是新驻留纪元，不能继承上一轮已释放标记。
+      if (state.parkedDrained && state.parkedDrained[sid]) delete state.parkedDrained[sid][cid]
+      if (state.parkedColdNoted && state.parkedColdNoted[sid]) delete state.parkedColdNoted[sid][cid]
+      var tracked = Object.assign({}, act)
+      var inFlight = null
+      tracked.dispose = function () {
+        if (inFlight) return inFlight // hold 终止、清扫与重复调用共享同一次精确释放
+        inFlight = Promise.resolve().then(function () { return act.dispose() }).then(function () {
+          var current = state.parkedActivations && state.parkedActivations[sid]
+          // 只清理自己这一轮；若注册表已换成新 activation，旧句柄的迟到完成不得清掉新句柄。
+          if (!current || current[cid] === tracked) {
+            markParkedDrained(sid, cid)
+            forgetParkedActivation(sid, cid, tracked)
+          }
+        }, function (e) { inFlight = null; throw e }) // 失败保留注册表与重试机会，不写 parkedDrained
+        return inFlight
+      }
+      map[cid] = tracked
+      return tracked
+    }
     async function drainParkedChildren(sid, parent, childIds, why) {
       var subagents = ctx.subagents
       if (!subagents || typeof subagents.drainChildren !== 'function') return false
@@ -703,9 +748,10 @@ export function createDispatch(ctx, state, deps) {
       try {
         var q = subagents.drainChildren(parent, childIds)
         if (q && typeof q.then === 'function') await withTimeout(q, 8000, 'drainChildren 停泊释放')
-        if (!state.parkedDrained) state.parkedDrained = {}
-        var dmap = state.parkedDrained[sid] || (state.parkedDrained[sid] = {})
-        childIds.forEach(function (cid) { dmap[cid] = true })
+        childIds.forEach(function (cid) {
+          markParkedDrained(sid, cid)
+          forgetParkedActivation(sid, cid) // 旧宿主整批释放成功后，留存句柄也不再需要
+        })
         return true
       } catch (e) {
         console.error('[task-board] 停泊子会话额度释放失败（' + why + ', child ' + childIds.join(',') + '）:', String(e))
@@ -714,10 +760,45 @@ export function createDispatch(ctx, state, deps) {
     }
     // spawn 失败文本是否为宿主额度满（ACTIVATION_LIMIT_REACHED）：eager 停泊释放的触发判据。
     function isChildLimitError(e) { return /limit reached|ACTIVATION_LIMIT_REACHED/i.test(String(e && e.message ? e.message : e)) }
+    // rc.5 选择性释放：只处理调用方已判定「永不续跑且无活跃 rec」的 ids。成功才记 parkedDrained；
+    // 失败回滚占位并保留下轮重试；无句柄的冷子会话不写已释放账，也绝不退化成 drainDescendants 整树清理。
+    async function disposeParkedActivations(sid, ids, why) {
+      var map = state.parkedActivations && state.parkedActivations[sid]
+      if (!state.parkedDrained) state.parkedDrained = {}
+      var drained = state.parkedDrained[sid] || (state.parkedDrained[sid] = {})
+      var out = { done: [], skipped: [], failed: [] }
+      var seen = {}
+      for (var i = 0; i < ids.length; i++) {
+        var cid = String(ids[i] || '')
+        if (!cid || seen[cid]) continue
+        seen[cid] = true
+        if (drained[cid]) continue // 与并发 sweep/hold 终止共享幂等账
+        var act = map && map[cid]
+        if (!act || typeof act.dispose !== 'function') { out.skipped.push(cid); continue }
+        drained[cid] = true // 先占位，挡住慢 dispose 窗口内的下一轮心跳重放
+        try {
+          var q = act.dispose()
+          if (q && typeof q.then === 'function') await withTimeout(q, 8000, 'Activation.dispose 停泊释放')
+          var currentAfter = state.parkedActivations && state.parkedActivations[sid]
+          if (currentAfter && currentAfter[cid] !== act) {
+            delete drained[cid] // 等待期间已换成新 activation：本次旧纪元完成不得替新纪元记已释放
+            continue
+          }
+          markParkedDrained(sid, cid) // 原始句柄也走同一成功记账；tracked 句柄内部已成功记账时此处幂等
+          forgetParkedActivation(sid, cid, act)
+          out.done.push(cid)
+        } catch (e) {
+          delete drained[cid] // 失败保留重试；tracked.dispose 自身也保留注册表
+          out.failed.push(cid)
+          console.error('[task-board] 停泊子会话 Activation.dispose 失败（' + why + ', child ' + cid + '）:', String(e))
+        }
+      }
+      return out
+    }
     // ===== 停泊子会话额度回收（task-mwogdzfd ①主刀）：扫描「永不续跑」的 continuable 子会话并释放 =====
     // 每轮 poolCycle 心跳扫一遍卡面 runs 留档（纯读 snap 零锁零 IO；无候选即静默返回），对判定为
-    // 「永不续跑」的 continuable childId 走 drainParkedChildren 整体释放。判定口径（与 resumeTarget
-    // 同源取反，绝不误伤可续跑目标）：
+    // 「永不续跑」的 continuable childId 走 drainParkedChildren（旧宿主）或 disposeParkedActivations（rc.5）释放。
+    // 判定口径（与 resumeTarget 同源取反，绝不误伤可续跑目标）：
     //   · 未落定卡上 resumeTarget(t) 命中的 childId —— 续跑目标（interrupt 留存的本意），保留；
     //     已落定卡（resolved/cancelled/archived）的 protect 一律失效——落定即永不续跑，续跑形态留档
     //     照释（驳回修复：protect 分支曾先于 settled 判定执行，落定卡的停泊残影被永久跳过释放——
@@ -734,10 +815,12 @@ export function createDispatch(ctx, state, deps) {
     // 表只为免重复调用）；纯内存零落盘，重启后重判无害。返回本轮释放的 childId 条数。
     async function sweepParkedQuota(sid, snap, runs) {
       var subagents = ctx.subagents
-      if (!subagents || typeof subagents.drainChildren !== 'function') return 0
+      var canDrain = !!(subagents && typeof subagents.drainChildren === 'function')
+      var activations = state.parkedActivations && state.parkedActivations[sid]
+      if (!canDrain && !activations) return 0 // 老宿主且无本进程句柄：维持安全跳过
       if (!snap || snap.__noPersist || !Array.isArray(snap.tasks)) return 0
       var parent = rootForSession(sid)
-      if (!parent) return 0
+      if (canDrain && !parent) return 0 // 旧 drainChildren 仍需活父授权；Activation.dispose 自身不需要 parent
       if (!state.parkedDrained) state.parkedDrained = {}
       var drained = state.parkedDrained[sid] || (state.parkedDrained[sid] = {})
       var live = {}
@@ -761,11 +844,17 @@ export function createDispatch(ctx, state, deps) {
         })
       })
       if (!ids.length) return 0
-      ids.forEach(function (cid) { drained[cid] = true }) // 先占位：防与下一轮心跳的慢 drain 窗口重叠重放
-      var ok = await drainParkedChildren(sid, parent, ids, '停泊子会话额度回收')
-      if (!ok) ids.forEach(function (cid) { delete drained[cid] }) // 释放失败回滚标记：下轮照常重试
-      console.error('[task-board] 停泊子会话额度回收（task-mwogdzfd）：释放 ' + ids.length + ' 个永不续跑的子会话（' + (ok ? 'drainChildren 成功' : 'drain 失败，降级见上条') + '）—— ' + ids.join(','))
-      return ids.length
+      if (canDrain) {
+        ids.forEach(function (cid) { drained[cid] = true }) // 先占位：防与下一轮心跳的慢 drain 窗口重叠重放
+        var ok = await drainParkedChildren(sid, parent, ids, '停泊子会话额度回收')
+        if (!ok) ids.forEach(function (cid) { delete drained[cid] }) // 释放失败回滚标记：下轮照常重试
+        console.error('[task-board] 停泊子会话额度回收（task-mwogdzfd）：释放 ' + ids.length + ' 个永不续跑的子会话（' + (ok ? 'drainChildren 成功' : 'drain 失败，降级见上条') + '）—— ' + ids.join(','))
+        return ids.length
+      }
+      var released = await disposeParkedActivations(sid, ids, '停泊子会话额度回收')
+      if (released.done.length) console.error('[task-board] 停泊子会话额度回收（task-mx0divu4）：Activation.dispose 精确释放 ' + released.done.length + ' 个—— ' + released.done.join(','))
+      noteColdParkedSkip(sid, released.skipped)
+      return released.done.length
     }
 
     async function spawnOneShot(sid, t, role) {
@@ -1085,6 +1174,9 @@ export function createDispatch(ctx, state, deps) {
       // rec 增补三字段（task-mwogdzfd ②③）：label（显示标签与当前任务关联，即 spawn 契约 req.label
       // = 'role:taskId'，续跑路径同式现算）+ messageId（首条 prompt 投递回执）+ deliveredAt（投递时刻
       // ——与 rec.ran（running 事件观测）合成「已投递/已启动」二态）。纯增量字段，结算/超时/回收面零消费。
+      // rec.act 与 state.parkedActivations 共享同一幂等包装：正常结算后 rec 离场，sweepParkedQuota 仍可用
+      // 该精确 activation 句柄；hold 终止/落闸弃权走 rec.act 时也会同步写幂等账并清注册表。
+      if (useContinuable && actForSettle) actForSettle = trackParkedActivation(sid, childId, actForSettle)
       var rec = useContinuable
         ? { id: childId, childId: childId, continuable: true, ran: false, run: null, act: actForSettle, role: role, taskId: t.id, startedAt: Date.now(), model: modelOverride, modelSource: modelSource, size: laneSize || undefined, label: req.label, messageId: spawnMsgId, deliveredAt: Date.now(), settled: false }
         // activation 的 run.id=act.childId，可接 assistant-stream；老 start 的 run.id=provider run id，留空走日志闸。
@@ -1103,6 +1195,7 @@ export function createDispatch(ctx, state, deps) {
       // （各臂按函数名定位；本文件历次拆分后行号持续漂移，此注释不再钉行号。）
       if (useContinuable && actForSettle && actForSettle.result && typeof actForSettle.result.then === 'function') {
         actForSettle.result.then(function (res) {
+          forgetParkedActivation(sid, childId, actForSettle) // 宿主已拆除该 activation，句柄无需再保留
           if (rec.settled) return
           rec.settled = true // 先立旗：与事件/超时臂同一纪律
           var stopReason = (res && res.stopReason) || 'error'
@@ -1112,6 +1205,7 @@ export function createDispatch(ctx, state, deps) {
           // settleWorker 调用点重指 settle.settleWorker（拆分第 6 刀：函数已搬入 settle.mjs，从工厂返回集导出）
           settle.settleWorker(sid, rec, '', true, errText).catch(function (e) { console.error('[task-board] activation 拆除结算失败 (task ' + rec.taskId + '):', String(e)) })
         }, function (err) {
+          forgetParkedActivation(sid, childId, actForSettle)
           if (rec.settled) return
           rec.settled = true
           settle.settleWorker(sid, rec, '', true, '子会话 activation 异常：' + String(err && err.message || err).slice(0, 200)).catch(function (e) { console.error('[task-board] activation 异常结算失败 (task ' + rec.taskId + '):', String(e)) })
@@ -1147,6 +1241,8 @@ export function createDispatch(ctx, state, deps) {
                 try { await actForSettle.dispose() }
                 catch (e2) { console.error('[task-board] 落闸弃权 dispose 失败，降级 interrupt 留存（task ' + t.id + ' child ' + childId + '）:', String(e2)) }
               }
+              // 弃权 run 不落卡面历史，之后 sweep 无法找到该句柄；成功/失败都清注册表，避免不可达句柄泄漏。
+              forgetParkedActivation(sid, childId, actForSettle)
             }
             else if (run && typeof run.dispose === 'function') await run.dispose()
           } catch (_) {}
@@ -1341,6 +1437,9 @@ export function createDispatch(ctx, state, deps) {
         // execution is independent of this call）。老宿主/mock 可能返回非字符串（{ok:true} 等）→ 归一空串。
         var smr = await subagents.sendMessage(parent, childId, [{ type: 'text', text: text }], { signal: makeSignal() })
         if (typeof smr === 'string' || typeof smr === 'number') resumeMsgId = String(smr)
+        // Activation.dispose 只作用于原驻留纪元、绝不作用于后续 resume。续跑已接管后淘汰旧句柄；
+        // 若本轮是冷复活产生的新 activation，后续清扫只能按无句柄安全跳过，不能误用旧句柄记账。
+        forgetParkedActivation(sid, childId)
       } catch (e) {
         // NOT_RESUMABLE / 邻接校验失败 / 任何错：一律回退 fresh spawn（本函数不抛，调用方按 rec 为 null 处理）。
         return { fallback: String(e) }
@@ -1405,8 +1504,8 @@ export function createDispatch(ctx, state, deps) {
       // 原形（task-mvoutja4）：会话 14:07:07 已被宿主拆除，sendMessage 后续跑留档照挂 running——
       // 冷复活承诺落空且无任何结算通道可达（v0.2.1 scoped 事件面对插件订阅不可达 + 续跑 rec 无
       // activation 句柄），running 假相一路挂到硬超时/人工终止（实证 38 分钟零产出）。短延时后查
-      // 活跃目录（childSessionsOf 统一目录源，task-mwzzub2w：旧 listChildren 或 rc.5 agents.list
-      // 过滤，与 reconcileRoot 同一存活源）：会话不在 + 本轮从未观测到 running
+      // 活跃目录（childSessionsOf 统一目录源，task-mwzzub2w：旧 listChildren / listDescendants 持久 catalog /
+      // agents.list 活体回退，与 reconcileRoot 同一存活源）：会话不在 + 本轮从未观测到 running
       // 事件 → 立即按失败结算重派（不留 running 假相）；会话在/已观测到 running → 哨兵退位，
       // 结算归事件/超时通道既有语义（健康模型续跑行为零变化）。老宿主/桩无 timer 或目录
       // 能力 → 不挂哨兵，行为逐字不变。
@@ -1418,8 +1517,8 @@ export function createDispatch(ctx, state, deps) {
     // 观测到 running 事件 → 立即失败结算重派。RESUME_DEATH_WATCH_MS=5000：给冷复活留出落定窗口
     // （sendMessage 返回 ≠ 目录立即可见），相对硬超时 120min 仍是「立即」。结算走 settleRun 失败臂
     // （与事件/超时通道同一套口径：retryCount/重排/kickCycle 全复用，不留第二套失败结算）。
-    // 目录源统一走 childSessionsOf（session.mjs，task-mwzzub2w rc.5 迁移）：旧宿主 listChildren
-    // 原样兼容，rc.5 无旧 API 时改 agents.list()+parentSession/origin 过滤——「会话在目录」判定面不变。
+    // 目录源统一走 childSessionsOf（session.mjs，task-mwzzub2w rc.5 迁移）：旧 listChildren 兼容，
+    // listDescendants 持久 catalog 主源，agents.list 仅作最后活体回退——「会话在目录」判定面不变。
     // 查询失败/无目录能力：不判定，交给既有结算通道（老宿主/桩无 timer 或无目录能力 → 不挂哨兵，
     // 行为逐字不变）。
     var RESUME_DEATH_WATCH_MS = 5000
@@ -1642,11 +1741,10 @@ export function createDispatch(ctx, state, deps) {
       var stuckN = 0
       try { stuckN = await stuckSweep(sid, runs, snap) } catch (e) { console.error('[task-board] 死胡同检测失败（本轮跳过，派发照常）:', String(e)) }
       if (stuckN > 0) { try { snap = await rt(sid) } catch (_) {} }
-      // 停泊子会话额度回收（task-mwogdzfd ①）：每轮心跳扫「永不续跑」的 continuable 子会话并
-      // drainChildren 整批释放（宿主 slot 随 resident activation 归还——interrupt 不释放额度，主窗口
-      // 实证 8 个 inactive 旧子代理占满 active child limit）。位置在死胡同检测之后、活跃度计数之前：
-      // 纯读 snap 零锁零落盘（内存幂等表 state.parkedDrained），无候选即零 IO 静默返回，老宿主无
-      // drainChildren 面直接短路。不写盘 → 无需重读快照。
+      // 停泊子会话额度回收（task-mwogdzfd + task-mx0divu4）：每轮心跳扫「永不续跑」的 continuable
+      // 子会话；旧宿主 drainChildren 整批释放，rc.5 用留存 Activation.dispose 精确释放（interrupt 不释放额度）。
+      // 位置在死胡同检测之后、活跃度计数之前：纯读 snap 零锁零落盘（内存幂等表 state.parkedDrained），
+      // 无候选即零 IO 静默返回；无 drainChildren 且无本进程 Activation 句柄才直接短路。不写盘 → 无需重读快照。
       try { await sweepParkedQuota(sid, snap, runs) } catch (e) { console.error('[task-board] 停泊额度回收失败（本轮跳过，派发照常）:', String(e)) }
       var activeW = 0, activeV = 0
       // 角色口径：worker 计入 activeW（占 Worker 并发位）；verifier 与 hook run（hook-pre/hook-post）
@@ -1983,7 +2081,7 @@ export function createDispatch(ctx, state, deps) {
     // 表的处置保持既有语义：逐会话原位清空（旧引用不会看到残留 rec）+ 顶层容器换新（与原实现的
     // state.activeRuns = {} 等价）。原位清空是必要的——runsFor(sid) 返回的是每会话子对象，
     // 只换顶层容器会把这些子对象连同里面的 rec 一起漏掉。
-    ctx.effect(function () { return function () { Object.keys(state.activeRuns).forEach(function (psid) { var rr = state.activeRuns[psid]; Object.keys(rr).forEach(function (k) { try { var r0 = rr[k]; if (r0 && r0.run) r0.run.dispose(); if (r0) r0.settled = true } catch (_) {} ; delete rr[k] }) }); state.activeRuns = {}; state.reconcileDone = {} } })
+    ctx.effect(function () { return function () { Object.keys(state.activeRuns).forEach(function (psid) { var rr = state.activeRuns[psid]; Object.keys(rr).forEach(function (k) { try { var r0 = rr[k]; if (r0 && r0.run) r0.run.dispose(); if (r0) r0.settled = true } catch (_) {} ; delete rr[k] }) }); state.activeRuns = {}; state.parkedActivations = {}; state.parkedColdNoted = {}; state.reconcileDone = {} } })
     // 卸载同时停主动嗅探（拆分第 4 刀重指）：注册仍在本侧执行，回调只调 health 工厂暴露的 disposeProbe()
     // （AbortSignal 取消在飞请求 + 清 probeNextAt 间隔闸表 + 落 probeDisposed 卸载闸，三步操作逐字一致；
     // 迟到结果不再写健康表，已有被动表随 host 状态一并废弃）。

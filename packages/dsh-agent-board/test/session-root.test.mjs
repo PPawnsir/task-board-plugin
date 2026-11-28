@@ -62,6 +62,7 @@ test('resolveRoot/task_create 门禁：主 fork 解析到自身；子代理解�
 const GRANDCHILD = 'session-grand-00000000-aaaa-bbbb-cccc-ddddeeee0000'
 const OTHER_ROOT = 'session-other-0000000-aaaa-bbbb-cccc-ddddeeee0001'
 const OTHER_CHILD = 'session-othkid-000000-aaaa-bbbb-cccc-ddddeeee0002'
+const COLD_CHILD = 'session-coldkid-00000-aaaa-bbbb-cccc-ddddeeee0003'
 
 function mkAgent(id, header, label) {
   const a = { id: id, session: { header: header } }
@@ -91,6 +92,45 @@ test('目录源 rc.5 路径：agents.list 过滤只收直接子代理——主 f
   assert.deepEqual(otherKids, [{ sessionId: OTHER_CHILD, id: OTHER_CHILD, label: '' }], '别家子代理只出现在别家目录（红线：不能把所有 origin=subagent 都算作本会话子代理）')
 })
 
+test('目录源 rc.5 持久主源：listDescendants 优先于 agents.list，收冷子会话且只认直接 child', async () => {
+  const calls = []
+  const signal = new AbortController().signal
+  const ctx = {
+    subagents: {
+      listDescendants: async (sid, sig) => {
+        calls.push({ sid, sig })
+        return [
+          { kind: 'child', id: COLD_CHILD, parentId: MAIN_FORK, depth: 1, label: 'worker:cold', activity: 'inactive', mode: 'continuable' },
+          { kind: 'diagnostic', id: 'diagnostic-1', parentId: MAIN_FORK, depth: 1, reason: 'unavailable' },
+          { kind: 'child', id: GRANDCHILD, parentId: COLD_CHILD, depth: 2, label: 'worker:grand', mode: 'continuable' },
+          { kind: 'child', id: OTHER_CHILD, parentId: OTHER_ROOT, depth: 1, label: 'worker:other', mode: 'continuable' },
+          { kind: 'child', id: 'wrong-depth', parentId: MAIN_FORK, depth: 2, label: 'wrong-depth', mode: 'continuable' },
+          null,
+          {},
+        ]
+      },
+    },
+    agents: { list: () => { throw new Error('listDescendants 在位时不得回退 agents.list') } },
+  }
+  assert.equal(hasChildDirectory(ctx), true, 'listDescendants 单独即可提供目录能力（无需 agents）')
+  const kids = await childSessionsOf(ctx, MAIN_FORK, signal)
+  assert.deepEqual(calls, [{ sid: MAIN_FORK, sig: signal }], 'rootSessionId 与 signal 原样透传')
+  assert.deepEqual(kids, [{ sessionId: COLD_CHILD, id: COLD_CHILD, label: 'worker:cold' }],
+    '持久但 agents.list 不含的冷子会话在列；diagnostic/depth>1/别家 parent/无 kind 行全部排除')
+})
+
+test('目录源 listDescendants：空持久目录不合并活体表；同步/异步异常原样透传', async () => {
+  const ctxEmpty = {
+    subagents: { listDescendants: async () => [] },
+    agents: { list: () => { throw new Error('持久空目录是权威结果，不得再读 agents.list') } },
+  }
+  assert.deepEqual(await childSessionsOf(ctxEmpty, MAIN_FORK), [], '持久 catalog 确认空目录即返回 []，不与 agents.list 活体行合并')
+  const ctxAsyncErr = { subagents: { listDescendants: async () => { throw new Error('desc-async-boom') } } }
+  await assert.rejects(() => childSessionsOf(ctxAsyncErr, MAIN_FORK), /desc-async-boom/)
+  const ctxSyncErr = { subagents: { listDescendants: () => { throw new Error('desc-sync-boom') } } }
+  await assert.rejects(() => childSessionsOf(ctxSyncErr, MAIN_FORK), /desc-sync-boom/)
+})
+
 test('目录源 rc.5 路径：无目录能力 → null（跳过语义）；agents.list 空表 → 空数组（确认无子会话）', async () => {
   assert.equal(hasChildDirectory({}), false, 'subagents/agents 都缺席：无目录能力')
   assert.equal(childSessionsOf({}, MAIN_FORK), null, '无能力返回 null 而非空数组（null=查不了，[] = 确认没有）')
@@ -117,7 +157,10 @@ test('目录源旧宿主路径：listChildren 原样兼容（归一化 + 旧 API
   ], 'label 归一链 label||title||mode 与旧 rpc 实现同口径；空行/空 id 行剔除')
   // 旧 API 优先：同 ctx 也有 agents.list（mock-ctx 形态）时仍走 listChildren，不被新桩改道
   const ctxBoth = {
-    subagents: { listChildren: async () => [{ sessionId: 'old-way' }] },
+    subagents: {
+      listChildren: async () => [{ sessionId: 'old-way' }],
+      listDescendants: async () => { throw new Error('旧 listChildren 优先时不得调用 listDescendants') },
+    },
     agents: { list: () => [mkAgent(CHILD, childHeader)] },
   }
   assert.deepEqual(await childSessionsOf(ctxBoth, MAIN_FORK), [{ sessionId: 'old-way', id: 'old-way', label: '' }], '旧 API 在位 → 只走旧路径')

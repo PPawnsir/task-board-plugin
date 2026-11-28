@@ -41,6 +41,10 @@ export function apply(ctx) {
                            //   id = 该次 run 的子会话 id（一次性=run.id，continuable=childId，语义统一）；
                            //   continuable Worker 无 run（持久子会话），turn 结算靠 agent/status 事件见 dispatch.mjs
       dispatchedEver: {},  // sid -> { runId: true }（回执判定：区分派发执行 vs 主窗口手动）
+      parkedActivations: {}, // sid -> { childId: Activation }（仅本进程 continuable 句柄；rc.5 无 drainChildren 时
+                             //   sweepParkedQuota 对「永不续跑且无活跃 rec」的子会话逐个精确 dispose；纯内存，
+                             //   重启/续跑新纪元无句柄安全跳过，绝不以 drainDescendants 整树清理替代）
+      parkedColdNoted: {}, // sid -> { childId: true }（无句柄冷子会话能力边界提示去抖；每进程每 child 只报一次）
       reconcileDone: {},   // sid -> true（可续跑 Worker 重启 reconcile 的 per-host 一次性标记，见 dispatch.mjs）
       badModels: {},       // 模型熔断坏名单（sid|model → true）
       modelCooldown: {},   // RATE_LIMIT 额度冷却表（task-mvneq4kk）：modelId → until 时间戳；纯内存不持久化，

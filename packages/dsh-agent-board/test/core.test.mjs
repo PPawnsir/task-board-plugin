@@ -4519,16 +4519,17 @@ function mkContinuableDispatch(board, over, ctxOver) {
       },
     },
   }
+  const state = { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: activeRuns }
   const dispatch = createDispatch(
     Object.assign(base, ctxOver || {}),
-    { knownSessions: {}, dispatchedEver: {}, badModels: {}, teamModeCache: {}, activeRuns: activeRuns },
+    state,
     Object.assign({
       rt: async () => board, wt: async () => {}, mutateLocked: async (sid, fn) => fn(board), kickCycle: () => {},
       rootForSession: () => ({ id: FULL_SID }),
       withTimeout: (p) => p, runsFor: () => runs, feedbackOn: () => true,
       pushSysNote: () => {}, maybeNotify: () => {}, notifyTaskDone: () => {},
     }, over || {}))
-  return { dispatch, log, listeners, runs, board }
+  return { dispatch, log, listeners, runs, board, state }
 }
 const flush = () => new Promise(r => setImmediate(r))
 
@@ -5317,7 +5318,7 @@ test('子代理生命周期①b（落定卡×续跑形态回收）：resolved/ca
   assert.equal(tR.status, 'resolved'); assert.equal(tC.status, 'cancelled'); assert.equal(tA.status, 'archived')
 })
 
-test('子代理生命周期②（老宿主零回归）：无 drainChildren 面 → 清扫整体短路（零 drain 零 interrupt 零异常），既有行为逐字不变', async () => {
+test('子代理生命周期②（老宿主零回归）：无 drainChildren 且无任何 Activation 句柄 → 清扫整体短路（零 drain 零 interrupt 零异常），既有行为逐字不变', async () => {
   const interrupts = []
   const tA = mkTask({ id: 'oa', title: '已落定卡', status: 'resolved', runs: [{ role: 'worker', id: 'child-oa', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'completed', hardMin: 120, continuable: true }] })
   const tB = mkTask({ id: 'ob', title: '停泊卡', status: 'pending', runs: [{ role: 'worker', id: 'child-ob', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'timeout/error', hardMin: 120, continuable: true }] })
@@ -5336,6 +5337,87 @@ test('子代理生命周期②（老宿主零回归）：无 drainChildren 面 �
   // 清扫对停泊子会话不打 interrupt（interrupt 不释放额度，打了也没用）——只静默跳过
   assert.deepEqual(interrupts, [])
   assert.equal(tA.status, 'resolved'); assert.equal(tB.status, 'pending')
+})
+
+test('子代理生命周期②c（rc.5 Activation 回收）：无 drainChildren 时，永不续跑 child 精确 dispose 恰一次；续跑目标/活跃 run 不误伤', async () => {
+  const parent = { id: FULL_SID }
+  const disposes = []
+  const treeDrains = []
+  const interrupts = []
+  const t = mkTask({ id: 'rc5-act', title: 'Activation 回收卡', status: 'in-progress', claimedBy: 'spawn-pending' })
+  const board = Object.assign(mkBoard([t]), { boardMode: 'manual' }) // 隔离回收扫描，不触发续跑/新派发
+  const h = mkContinuableDispatch(board, { rootForSession: () => parent }, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      startActivation: async () => ({
+        childId: 'child-rc5', messageId: 'm-rc5', result: new Promise(function () {}),
+        dispose: async () => { disposes.push('child-rc5') },
+      }),
+      interrupt: (id) => { interrupts.push(id) },
+      drainDescendants: async () => { treeDrains.push('root') },
+    },
+  })
+  const rec = await h.dispatch.spawnOneShot(FULL_SID, t, 'worker')
+  assert.ok(rec && rec.act, 'startActivation 句柄随 rec 留存')
+  assert.equal(h.state.parkedActivations[FULL_SID]['child-rc5'], rec.act, '同一幂等句柄登记到本进程停泊表')
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush()
+  assert.deepEqual(disposes, [], '活跃 rec 在跑：不得 dispose')
+
+  delete h.runs['rc5-act']
+  t.status = 'pending'; t.claimedBy = null
+  t.runs[t.runs.length - 1].outcome = 'timeout/error' // resumeTarget 命中本 child
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush()
+  assert.deepEqual(disposes, [], '未落定卡的续跑目标：仍不得 dispose')
+
+  t.status = 'resolved' // 落定即永不续跑，protect 失效
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush()
+  assert.deepEqual(disposes, ['child-rc5'], '无 drainChildren：回退到留存 Activation.dispose 精确释放')
+  assert.equal(h.state.parkedDrained[FULL_SID]['child-rc5'], true, '成功才写幂等账')
+  assert.equal(h.state.parkedActivations[FULL_SID], undefined, '成功释放后句柄清理，避免内存泄漏')
+  await h.dispatch.poolCycle(FULL_SID)
+  await flush()
+  assert.deepEqual(disposes, ['child-rc5'], '重复 sweep 不重复 dispose')
+  assert.deepEqual(treeDrains, [], '绝不以 drainDescendants(root) 代替选择性释放')
+  assert.deepEqual(interrupts, [], '回收本身不新增 interrupt（只精确 dispose）')
+})
+
+test('子代理生命周期②d（rc.5 冷会话与失败重试）：无句柄安全跳过；dispose 失败不写账且下轮重试，成功后幂等', async () => {
+  const tCold = mkTask({ id: 'rc5-cold', title: '重启冷子会话', status: 'resolved', runs: [{ role: 'worker', id: 'child-cold', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'completed', hardMin: 120, continuable: true }] })
+  const tRetry = mkTask({ id: 'rc5-retry', title: '释放重试', status: 'resolved', runs: [{ role: 'worker', id: 'child-retry', at: '2026-01-01T00:00:00.000Z', model: '', outcome: 'completed', hardMin: 120, continuable: true }] })
+  const board = Object.assign(mkBoard([tCold, tRetry]), { boardMode: 'manual' })
+  const treeDrains = []
+  let calls = 0
+  const h = mkContinuableDispatch(board, {}, {
+    subagents: {
+      list: () => ['mock'], getProvider: () => ({ inheritsParentContext: false }),
+      drainDescendants: async () => { treeDrains.push('root') },
+    },
+  })
+  h.state.parkedActivations = { [FULL_SID]: { 'child-retry': {
+    dispose: async () => { calls++; if (calls === 1) throw new Error('dispose-retry-me') },
+  } } }
+  const origErr = console.error
+  console.error = function () {} // 首轮预期失败与冷会话能力边界留痕，压掉测试噪音
+  try {
+    await h.dispatch.poolCycle(FULL_SID)
+    await flush()
+    assert.equal(calls, 1, '首轮 dispose 失败')
+    assert.equal(h.state.parkedDrained[FULL_SID]['child-retry'], undefined, '失败不得写 parkedDrained')
+    assert.ok(h.state.parkedActivations[FULL_SID]['child-retry'], '失败保留句柄供下轮重试')
+    assert.equal(h.state.parkedDrained[FULL_SID]['child-cold'], undefined, '无句柄冷子会话不伪装成已释放')
+    await h.dispatch.poolCycle(FULL_SID)
+    await flush()
+    assert.equal(calls, 2, '下轮重试成功')
+    assert.equal(h.state.parkedDrained[FULL_SID]['child-retry'], true, '成功后才写幂等账')
+    assert.equal(h.state.parkedActivations[FULL_SID], undefined, '成功后句柄清理')
+    await h.dispatch.poolCycle(FULL_SID)
+    await flush()
+    assert.equal(calls, 2, '后续 sweep 不再重复 dispose')
+    assert.deepEqual(treeDrains, [], '冷子会话也绝不触发 drainDescendants 整树清理')
+  } finally { console.error = origErr }
 })
 
 test('子代理生命周期③（额度满 eager 释放）：spawn 撞 active child limit → 失败路径即时释放停泊额度再回 null（不等退避重试）', async () => {
