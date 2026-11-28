@@ -6427,9 +6427,10 @@ test('no-root 刷屏根治接线断言（源码级）：闸门/防线/兜底注�
   assert.match(dsp, /console\.error\('\[task-board\] no root agent for session ' \+ sid \+ ', skip spawn'\)/)
   assert.match(dsp, /poolCycle 入口已有 root 存活早闸门/)
   // ② touchSession 注册口接入 isFullSessionId；纯函数出口 + rpc.mjs 直引
+  // ② touchSession 注册口接入 isFullSessionId；纯函数出口 + rpc.mjs 直引（task-mwzzub2w：目录统一源 childSessionsOf 同款直引出口）
   assert.match(ses, /export function isFullSessionId\(sid\)/)
   assert.match(ses, /sid !== 'unknown' && isFullSessionId\(sid\)\) knownSessions\[sid\]/)
-  assert.match(rpc, /import \{ isFullSessionId, isRootSessionHeader \} from '\.\/session\.mjs'/)
+  assert.match(rpc, /import \{ isFullSessionId, isRootSessionHeader, childSessionsOf \} from '\.\/session\.mjs'/)
   // create-task handler 校验在 mutateLocked 之前（拒绝时不建板）
   // 窗口放宽到 700：幻影板防线与 return mutateLocked 之间新增了 hooks 角色门禁（本批 hooks=agent run；
   // hooks 是高权限入口，只许主窗口设置），防线本身仍紧随 handler 开头
@@ -6517,6 +6518,43 @@ test('isRootPersistent 判据 delegationDepth（行为级）：fork 认根 / 子
   const childHeader = { parentSession: 'session-parent', delegationDepth: 0, origin: 'subagent' }
   const h6 = mkRpcHandlers(mkBoard([]), null, { agents: { list: () => [{ id: FULL_SID, session: { header: childHeader } }] } })
   assert.equal((await h6['get-tasks']({})).isRoot, false)
+})
+
+// ===== list-children 契约迁移（task-mwzzub2w，rc.5；截图故障 n-mwzztin5okiv：subs.listChildren is not a function）=====
+// 行为级：rc.5 宿主 subagents 无 listChildren → RPC 走 agents.list()+parentSession/origin 过滤直接子代理；
+// 无任何目录能力 → 空列表 ok:true 不冒 TypeError；旧 listChildren 路径原样兼容。
+const KID1 = 'session-kid-00000000-aaaa-bbbb-cccc-ddddeeee0001'
+const KID_FORK = 'session-fork-0000000-aaaa-bbbb-cccc-ddddeeee0002'
+const KID_GRAND = 'session-grand-0000000-aaaa-bbbb-cccc-ddddeeee0003'
+const KID_OTHER = 'session-othr-00000000-aaaa-bbbb-cccc-ddddeeee0004'
+test('list-children rc.5 路径：无 listChildren → agents.list 过滤只收直接子代理；无目录能力不抛 TypeError', async () => {
+  // rc.5 宿主形态：subagents 服务在位（start/sendMessage/interrupt）但无 listChildren
+  const rc5ctx = {
+    subagents: { list: () => ['p'], getProvider: () => ({ inheritsParentContext: false }), start: async () => ({}), startContinuable: async () => ({}), sendMessage: async () => ({}), interrupt: () => {} },
+    agents: {
+      list: () => [
+        { id: KID1, label: 'worker:task-x', session: { header: { id: KID1, parentSession: FULL_SID, origin: 'subagent', delegationDepth: 1 } } },
+        { id: KID_FORK, session: { header: { id: KID_FORK, parentSession: FULL_SID, delegationDepth: 0, isSeeded: true } } }, // 主 fork/seed：排除
+        { id: KID_GRAND, session: { header: { id: KID_GRAND, parentSession: KID1, origin: 'subagent', delegationDepth: 2 } } }, // 孙代理：排除
+        { id: KID_OTHER, session: { header: { id: KID_OTHER, parentSession: 'session-somewhere-else-000000000009', origin: 'subagent', delegationDepth: 1 } } }, // 别家子代理：排除
+        { id: FULL_SID, session: { header: { id: FULL_SID, delegationDepth: 0 } } }, // 无父子主会话：排除
+      ],
+    },
+  }
+  const h = mkRpcHandlers(mkBoard([]), null, rc5ctx)
+  const r = await h['list-children']({})
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.children, [{ id: KID1, label: 'worker:task-x' }], '只收 parentSession===sid 且 origin=subagent 的直接子代理')
+  // 事故原形回归：无 listChildren 且无 agents（更老宿主）→ 不再冒 TypeError，安静返回空列表
+  const rOld = await mkRpcHandlers(mkBoard([]), null, { subagents: { list: () => ['p'] } })['list-children']({})
+  assert.equal(rOld.ok, true)
+  assert.deepEqual(rOld.children, [])
+  assert.equal('error' in rOld, false, '目录能力缺失不是本板故障：不冒错（旧实现此处会撞 TypeError 进 error 字段）')
+  // 旧路径兼容：listChildren 在位 → 原样透传（含异常 → error 字段，客户端可见化口径不变）
+  const rLegacy = await mkRpcHandlers(mkBoard([]), null, { subagents: { listChildren: async () => [{ sessionId: 'c1', label: 'worker:k1' }, { id: 'c2' }] } })['list-children']({})
+  assert.deepEqual(rLegacy.children, [{ id: 'c1', label: 'worker:k1' }, { id: 'c2', label: '' }])
+  const rLegacyErr = await mkRpcHandlers(mkBoard([]), null, { subagents: { listChildren: async () => { throw new Error('boom') } } })['list-children']({})
+  assert.equal(rLegacyErr.ok, true); assert.deepEqual(rLegacyErr.children, []); assert.match(rLegacyErr.error, /boom/)
 })
 
 // ===== 史诗 hooks UI（task-muuw56yf）：卡片相位徽章 + 详情页 hooks 编辑区 =====
@@ -7406,10 +7444,11 @@ test('卡2/卡3 接线（源码级）：usage 水位线落卡 + reconcile 一次
   // 同 id 的续跑新条目尚未结算（usageSeq 未设）→ 必须继续往前找已结算的那条，否则水位线恒 0（踩过的坑）
   assert.match(settleSrc, /if \(!r \|\| String\(r\.id\) !== String\(runId\)\) continue\s*\n\s*var w = num0\(r\.usageSeq\)\s*\n\s*if \(w > 0\) return w/)
   assert.match(settleSrc, /t\.runs\[ri\]\.usageSeq = Math\.max\(num0\(t\.runs\[ri\]\.usageSeq\), num0\(u\.maxSeq\)\)/)
-  // ③ reconcile：per-host 一次性标记 + listChildren 存活判定 + 重建 rec/重挂超时臂 + 死会话回 pending
+  // ③ reconcile：per-host 一次性标记 + 子会话目录存活判定（childSessionsOf，task-mwzzub2w rc.5 迁移）+ 重建 rec/重挂超时臂 + 死会话回 pending
   assert.match(settleSrc, /async function reconcileRoot\(sid\) \{/)
   assert.match(settleSrc, /if \(state\.reconcileDone\[sid\]\) return/)
-  assert.match(settleSrc, /typeof subagents\.listChildren !== 'function'/)
+  assert.match(settleSrc, /if \(!hasChildDirectory\(ctx\)\) return/)
+  assert.match(settleSrc, /var q = childSessionsOf\(ctx, sid\)/)
   assert.match(settleSrc, /await withTimeout\(q, 5000, 'reconcile listChildren'\)/)
   assert.match(settleSrc, /restored: true, ran: false/)
   assert.match(settleSrc, /baselineBytes: logSizeOf\(childId\)/)

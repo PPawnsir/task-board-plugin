@@ -368,6 +368,51 @@ test('假杀根修②c：宿主无 interrupt/listChildren 能力 → 补杀按�
   assert.equal(h.__state.poolHealth[FULL_SID].terminateFailNote.taskId, 'kf3')
 })
 
+// ===== 终止核验 rc.5 路径（task-mwzzub2w，子会话目录契约迁移）：无 listChildren → agents.list 直接子代理佐证 =====
+// 两分支验收：子会话仍在 agents.list（parentSession=sid + origin=subagent）→ 核验未过可见化；
+// 不在列（含 fork 残影不算）→ 核验通过零告警。老宿主双缺（无 interrupt 又无目录）仍按②c 可见化。
+test('假杀根修②b rc.5 路径：无 listChildren → 核验查 agents.list；子会话仍在目录（直接子代理）→ err 通知 + healthHint', async () => {
+  const sysNotes = [], interrupts = []
+  const board = mkTermBoard('kf4', 'child-z4')
+  const h = mkRpcHarness(board, {}, {
+    rootForSession: () => ({ id: FULL_SID }),
+    pushSysNote: (sid, text) => sysNotes.push(text),
+  }, {
+    subagents: { interrupt: (id) => interrupts.push(id) },
+    agents: { list: () => [
+      { id: 'child-z4', session: { header: { id: 'child-z4', parentSession: FULL_SID, origin: 'subagent', delegationDepth: 1 } } },
+      { id: 'child-fork', session: { header: { id: 'child-fork', parentSession: FULL_SID, delegationDepth: 0, isSeeded: true } } }, // fork 残影不算子会话
+    ] },
+  })
+  const r = await h['terminate-agent']({ taskId: 'kf4' })
+  assert.equal(r.ok, true); assert.equal(r.terminated, 'worker:kf4')
+  assert.deepEqual(interrupts, ['child-z4']) // 补杀信号已发
+  assert.equal(r.killUnconfirmed, 'child-z4')
+  assert.equal(sysNotes.length, 1); assert.match(sysNotes[0], /核验未过/)
+  assert.equal(h.__state.poolHealth[FULL_SID].terminateFailNote.taskId, 'kf4')
+})
+
+test('假杀根修① rc.5 路径：无 listChildren → agents.list 无该子会话（fork 残影不算）→ 核验通过零告警 + 关账', async () => {
+  const parent = { id: FULL_SID }
+  const interrupts = [], closed = [], sysNotes = []
+  const board = mkTermBoard('zk2', 'child-gone')
+  const h = mkRpcHarness(board, {}, {
+    rootForSession: () => parent,
+    closeRunHistory: mkCloseRunHistory(board, closed),
+    pushSysNote: (sid, text) => sysNotes.push(text),
+  }, {
+    subagents: { interrupt: (id, auth) => interrupts.push({ id: id, auth: auth }) },
+    agents: { list: () => [{ id: 'child-fork', session: { header: { id: 'child-fork', parentSession: FULL_SID, delegationDepth: 0, isSeeded: true } } }] },
+  })
+  const r = await h['terminate-agent']({ taskId: 'zk2' })
+  assert.equal(r.ok, true); assert.equal(r.terminated, 'worker:zk2')
+  assert.equal('killUnconfirmed' in r, false, '子会话已不在目录：核验通过，不再误报未生效')
+  assert.deepEqual(interrupts, [{ id: 'child-gone', auth: { kind: 'ancestor', agent: parent } }])
+  assert.deepEqual(closed, [{ taskId: 'zk2', runId: 'child-gone', outcome: 'terminated' }])
+  assert.deepEqual(sysNotes, [])
+  assert.equal(h.__state.poolHealth[FULL_SID], undefined)
+})
+
 test('假杀根修③：hold=true → 同一次落账 pending+assignMode=manual 原子完成（pickDispatch 不再选中本卡）', async () => {
   // 工具通道（task_terminate hold:true）
   const board = mkBoard([mkTask({ id: 'hd1', status: 'in-progress', claimedBy: 'run-w', runs: [{ role: 'worker', id: 'run-w', outcome: 'running' }] })])

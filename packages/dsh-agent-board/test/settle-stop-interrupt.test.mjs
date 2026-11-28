@@ -547,6 +547,61 @@ test('死会话哨兵·退位（task-mvowb2hc 洞③）：会话在活跃目录 
   assert.equal(t2.runs[1].outcome, 'running', '续跑留档不被误关')
 })
 
+// ===== 死会话哨兵 rc.5 路径（task-mwzzub2w，子会话目录契约迁移）=====
+// 宿主 rc.5：subagents 无 listChildren → 哨兵目录源切 agents.list()+parentSession/origin 过滤。
+// 按存活/缺席两分支验收新路径：直接子代理在列（主 fork/孙代理不算）→ 退位不误杀；不在列 → 立即失败重派。
+test('死会话哨兵 rc.5 路径（task-mwzzub2w）：无 listChildren 时查 agents.list 直接子代理——在列退位 / 缺席立即结算', async () => {
+  // rc.5 形态 subagents（无 listChildren）+ agents.list 剧本
+  var rc5Sub = function () {
+    return {
+      list: function () { return ['mock'] },
+      getProvider: function () { return { inheritsParentContext: false } },
+      start: async function () { throw new Error('不该走一次性路径') },
+      startContinuable: async function () { throw new Error('续跑命中时不该 fresh spawn') },
+      sendMessage: async function (p, cid, content, opts) { return 'm2' },
+    }
+  }
+  // Case A：agents.list 含 child-old（parentSession=GATE_SID + origin=subagent）→ 哨兵触发但退位
+  // （干扰项：主 fork/seed（depth=0）与孙代理（parent 指向 child-old）都不算本会话子会话）
+  var t = mkGateTask({ runs: [gateResumeRow('prov/glm-5.3-flash')] })
+  var board = mkGateBoard([t])
+  board.workerModel = 'prov/glm-5.3-flash'
+  var h = mkGateDispatch(board, {
+    agents: {
+      list: function () { return [
+        { id: 'child-old', session: { header: { id: 'child-old', parentSession: GATE_SID, origin: 'subagent', delegationDepth: 1 } } },
+        { id: 'child-fork', session: { header: { id: 'child-fork', parentSession: GATE_SID, delegationDepth: 0, isSeeded: true } } },
+        { id: 'child-grand', session: { header: { id: 'child-grand', parentSession: 'child-old', origin: 'subagent', delegationDepth: 2 } } },
+      ] },
+    },
+    subagents: rc5Sub(),
+  })
+  await h.dispatch.poolCycle(GATE_SID)
+  await flushGate()
+  assert.ok(gateWatchArms(h).length >= 1, 'rc.5 目录源（agents.list）在位 → 哨兵照挂')
+  gateWatchArms(h).forEach(function (c) { c.cb() })
+  await flushGate()
+  assert.equal(t.status, 'in-progress', '直接子代理在 agents.list 目录：哨兵退位不误杀')
+  assert.ok(h.runs['g1'], '活跃 rec 保留（结算归事件/超时通道）')
+  assert.equal(t.runs[1].outcome, 'running', '续跑留档不被误关')
+  // Case B：agents.list 不含 child-old（会话已拆）→ 立即失败结算重派（不留 running 假相）
+  var t2 = mkGateTask({ id: 'g2', runs: [gateResumeRow('prov/glm-5.3-flash')] })
+  var board2 = mkGateBoard([t2])
+  board2.workerModel = 'prov/glm-5.3-flash'
+  var h2 = mkGateDispatch(board2, {
+    agents: { list: function () { return [{ id: 'child-fork', session: { header: { id: 'child-fork', parentSession: GATE_SID, delegationDepth: 0, isSeeded: true } } }] } }, // 只有 fork 残影：不算子会话
+    subagents: rc5Sub(),
+  })
+  await h2.dispatch.poolCycle(GATE_SID)
+  await flushGate()
+  assert.equal(h2.runs['g2'] && h2.runs['g2'].resumed, true, '续跑先正常落闸（哨兵随后接管）')
+  gateWatchArms(h2).forEach(function (c) { c.cb() })
+  await flushGate()
+  assert.equal(t2.status, 'pending', '子会话不在 agents.list 目录（fork 残影不算）：立即失败重排')
+  assert.equal(t2.runs[1].outcome, 'timeout/error', '续跑留档立即关账（非 running 假相）')
+  assert.equal(h2.runs['g2'], undefined, '活跃 rec 摘除')
+})
+
 // ===== 挂死零产出检测（task-mvqcoz9l）：在跑 worker/verifier run 日志字节零增长判死重派+喂熔断 =====
 // 原形（2026-10-27 降级实测）：glm-5.2 续跑挂「连接开着永不响应」——会话不死（死会话哨兵查不出）、
 // 不报错（无 settle 事件）、零产出（日志零增长 7 分钟），running 假相直到人工终止。本套与死会话哨兵

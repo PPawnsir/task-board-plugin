@@ -12,7 +12,7 @@ import { findRunLog, readLogBytes, readLogFrames, aggregateUsageSummary, readMai
 import { TASK_SIZE_CONTRACT, PIPELINE_SCENE_CONTRACT, SIZE_TIER_SAMPLES, DECOMPOSE_STRATEGIES, withSplitHint, pushRejectLesson, pushArbitrationLesson } from './policy.mjs'
 import { makeMsg } from './notify.mjs'
 import { computeHealthHints, computeRuntimeHealthHints } from './health.mjs'
-import { isFullSessionId, isRootSessionHeader } from './session.mjs' // 幻影板防线 + fork/seed 判根同源口径
+import { isFullSessionId, isRootSessionHeader, childSessionsOf } from './session.mjs' // 幻影板防线 + fork/seed 判根同源口径 + 子会话目录统一源（rc.5 迁移 task-mwzzub2w）
 import { previewCleanup, runCleanup, SKIP_REASON_TEXT } from './cleanup.mjs' // 已结算会话清理（预览+执行）
 import { HUNG_SUSPECT_REARM_MS } from './hung.mjs' // 「继续观察」豁免防抖窗（与疑似阈值同值，task-mvxmxkq1）
 const { ah, isb, gsb, gpt, vt, validateDeps, classifyPipeline, cfg, claimCheck, claimApply, resolveApply, verifyApply, lateVerdictApply, verdictErr, lateNoticeFp, archiveApply, cancelApply, maybeAutoCloseParent, PRIO_RANK, touchesConflict, holdsFiles, boardHome, aggregateChildStats, createTaskWarnings, epicPrecheck, epicPrecheckNote, attachContextSuggestions, REJECT_REDISPATCH_HINT, tasksHash, normalizeHooks, mergeHooks, pushRejection, normalizeUserTest, draftLint, appendDispatchWarning, TASK_SIZES, opsLogLine } = core
@@ -956,15 +956,19 @@ export function createRpc(ctx, state, deps) {
           catch (e) { killFail = blindTarget; killWhy = 'interrupt 抛错: ' + String(e); console.error('[task-board] terminate 补杀 interrupt 抛错 (task ' + taskId + ' child ' + blindTarget + '):', String(e)) }
         } else { killFail = blindTarget; killWhy = '宿主无 interrupt 能力或无活 root 可授权' }
         // 核验（根修②）：interrupt 是 fire-and-return（信号发出≠对方已停），且此路径无 rec 可观测，
-        // 只能拿 listChildren 目录佐证——子会话已不在目录 = 会话不存在，杀无可杀，核验通过；仍在目录 =
-        // 无法确认它停了（continuable 留存语义下成功的 interrupt 也还在列——宁误报勿漏报）；listChildren
+        // 只能拿子会话目录佐证——子会话已不在目录 = 会话不存在，杀无可杀，核验通过；仍在目录 =
+        // 无法确认它停了（continuable 留存语义下成功的 interrupt 也还在列——宁误报勿漏报）；目录
         // 不可用/超时 = 无法核验，同样摆上台面。核验挂死不能拖住 terminate：3s 超时兜底。
+        // rc.5 契约迁移（task-mwzzub2w）：目录统一走 childSessionsOf（session.mjs）——旧宿主
+        // listChildren 原样兼容（signal 透传），rc.5 无旧 API 时改 agents.list()+parentSession/origin
+        // 过滤直接子代理；两者都无 → 维持「无法核验」可见化，不冒 TypeError。
         if (!killFail) {
-          if (subs2 && typeof subs2.listChildren === 'function') {
+          var kidsQ = childSessionsOf(ctx, sid, makeSignal())
+          if (kidsQ) {
             var kids2 = null
             try {
               kids2 = await Promise.race([
-                Promise.resolve(subs2.listChildren(sid, makeSignal())),
+                kidsQ,
                 new Promise(function (_, rej) { setTimeout(function () { rej(new Error('listChildren 核验超时')) }, 3000) })
               ])
             } catch (e2) { killFail = blindTarget; killWhy = '核验失败: ' + String(e2) }
@@ -973,7 +977,7 @@ export function createRpc(ctx, state, deps) {
               for (var ki = 0; ki < (kids2 || []).length; ki++) { var kc = kids2[ki]; if (kc && String(kc.sessionId || kc.id || '') === blindTarget) { stillThere = true; break } }
               if (stillThere) { killFail = blindTarget; killWhy = '核验未过：子会话仍在目录中，无法确认中断已生效' }
             }
-          } else { killFail = blindTarget; killWhy = '宿主无 listChildren，无法核验' }
+          } else { killFail = blindTarget; killWhy = '宿主无子会话目录能力（listChildren/agents.list），无法核验' }
         }
         // 关账（根修①后半）：不只靠 rec.id——按卡面最后一条 outcome==='running' 且无 endedAt 的留档关
         // terminated（否则留档停在 running，activeRunOf 卡面兜底误判活跃 → archive 永久拒，巡检也被误导）。
@@ -1735,7 +1739,12 @@ export function createRpc(ctx, state, deps) {
       })
     })
     handle('create-task', async function (args) { var sid = rpcSessionId(args); /* 短 id 防幻影板（task-muuf0o7a）：截断/不完整 sessionId 建出的板永远匹配不到活 root（每 15s 刷屏元凶），显式报错优于静默建幻影板；import- 前缀板由 isFullSessionId 放行 */ if (!isFullSessionId(sid)) return { ok: false, error: 'sessionId 不完整（疑似截断短 id），拒绝创建任务: ' + sid }; var actor = rpcActor(args); /* hooks 只许主窗口设置（角色门禁） */ if (args.hooks !== undefined && hooksDenied(actor)) return { ok: false, error: HOOKS_MAIN_ONLY }; return mutateLocked(sid, function (d) { var nHooks = null; if (args.hooks !== undefined) { var hn = normalizeHooks(args.hooks); if (hn.error) return { ok: false, error: hn.error }; nHooks = hn.hooks } if (args.id && d.tasks.find(function (x) { return x.id === args.id })) return { ok: false, error: 'duplicate id' }; if (args.dependsOn && args.dependsOn.length) { var derr = validateDeps(d, args.id || '(pending)', args.dependsOn); if (derr) return { ok: false, error: derr } }; var now = new Date().toISOString(); /* Team 模式护栏：draft 缺省跟随 teamMode（先补齐依赖/上下文再统一 publish）；显式 draft:false 保留为立即派发的逃生门 */ var asDraft = args.draft === undefined ? !!d.teamMode : !!args.draft; /* size 普适化（task-mvomad2c）：白名单校验（双模式）+ Team 硬闸（缺档拒建，非 Team 零约束零提示） */ var __sz = typeof args.size === 'string' ? args.size.trim() : ''; if (__sz && TASK_SIZES.indexOf(__sz) < 0) return { ok: false, error: '非法 size: ' + String(args.size) + '（合法值: light/standard/heavy）' }; if (d.teamMode && !__sz) return { ok: false, error: core.TEAM_SIZE_REQUIRED_ERR }; var t = { id: args.id || ('task-' + Date.now().toString(36)), title: args.title || 'Untitled', description: args.description || '', status: asDraft ? 'draft' : 'pending', priority: args.priority || 'medium', tags: args.tags || [], parentId: args.parentId || null, subtaskStrategy: null, assignMode: 'auto', assignee: null, context: { files: (Array.isArray(args.contextFiles) ? args.contextFiles.map(String).slice(0, 20) : []), docs: [], instructions: args.instructions || '', notes: (typeof args.contextNotes === 'string' ? args.contextNotes.slice(0, 8000) : ''), relatedTasks: [], prerequisites: '' }, acceptance: args.acceptance || '', dependsOn: args.dependsOn || [], touches: normTouches(args.touches), pipeline: args.pipeline || '', claimedBy: null, claimedAt: null, createdAt: now, resolvedAt: null, verifiedAt: null, verifiedBy: null, archivedAt: null, resolution: null, waitingForTouches: null, messages: [], history: [{ from: 'created', to: asDraft ? 'draft' : 'pending', timestamp: now, actor: actor, note: asDraft ? 'created as draft' : 'created' }] }; if (__sz) t.size = __sz; if (nHooks && Object.keys(nHooks).length) t.hooks = nHooks; if (!t.pipeline) { t.pipeline = classifyPipeline(t); t.pipelineAuto = true }; d.tasks.push(t); t.lintWarnings = draftLint(t, draftLintIo(sid, d.ownerCwd)); /* 调研门禁 warning 族（与并行 UI 卡约定字段名 warning，core 纯函数统一口径）：空描述/无调研上下文/整树 glob 三类软提示合并为一条（；分隔），不拦截创建；字段可选，老 client 无感 */ var out = withSplitHint({ ok: true, task: t }, t, cfg(d).epicSplit); appendDispatchWarning(out, d, t); /* 派发预警（task-mvbealtf）：与 task_create 工具同口径，返回体瞬态提示不落卡 */ var warns = createTaskWarnings(t); attachContextSuggestions(out, warns, t.touches, existsInSession(sid)); if (warns.length) out.warning = warns.join('；'); return out }) })
-    handle('list-children', async function (args) { var sid = rpcSessionId(args); var subs = ctx.subagents; if (!subs) return { ok: true, children: [] }; try { var list = await subs.listChildren(sid); var children = (list || []).map(function (c) { return { id: String(c.sessionId || c.id || ''), label: String(c.label || c.title || c.mode || '') } }).filter(function (c) { return c.id.length > 0 }); return { ok: true, children: children } } catch (e) { return { ok: true, children: [], error: String(e) } } })
+    // list-children（截图故障点 n-mwzztin5okiv：rc.5 宿主 subagents 无 listChildren → 旧实现
+    // subs.listChildren is not a function，客户端弹「子任务列表刷新失败」）：统一走 childSessionsOf
+    // （session.mjs）——旧宿主 listChildren 原样兼容，rc.5 用 agents.list()+parentSession/origin 过滤
+    // 只收直接子代理。无任何目录能力 → 空列表 ok:true（目录能力缺失不是本板故障，不冒错）；
+    // 查询失败仍按旧口径透出 error（客户端可见化）。归一化已在 session.mjs 做，这里只剩形状透传。
+    handle('list-children', async function (args) { var sid = rpcSessionId(args); var q = childSessionsOf(ctx, sid); if (!q) return { ok: true, children: [] }; try { var kids = await q; var children = (kids || []).map(function (c) { return { id: String(c.sessionId || c.id || ''), label: String(c.label || '') } }).filter(function (c) { return c.id.length > 0 }); return { ok: true, children: children } } catch (e) { return { ok: true, children: [], error: String(e) } } })
     // ===== #14 批量操作：archive（仅 resolved/cancelled）/ set-priority（全部）/ delete（真删，无 undo）/ publish（仅 draft → pending）=====
     // delete op 与单任务 delete-task 走同一套 deleteGate 门禁（状态 + 未归档子任务），
     // done/skipped 语义与 archive 完全一致：门禁不过就进 skipped（附 reasons[id] 一行原因）。

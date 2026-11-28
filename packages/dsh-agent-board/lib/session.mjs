@@ -2,7 +2,9 @@
 // createSession(ctx, state)：agent 归属解析（resolveRoot 10s 缓存）/ 工具与 RPC 的会话 id 归一 /
 // 已知会话心跳集合 / 工作模式三档派生 / feedback 与 epicSplit 开关读取 / 按会话找 root agent / 会话工作区 /
 // 通用超时包装 / 活跃 run 表与派发履历访问。共享状态全部经 state 显式注入（别名为本地 var）。
-// 另出口纯函数 isFullSessionId（幻影板防线口径，rpc.mjs 直接 import 复用，与 policy.mjs 纯函数同例）。
+// 另出口纯函数 isFullSessionId（幻影板防线口径，rpc.mjs 直接 import 复用，与 policy.mjs 纯函数同例）
+// 与 hasChildDirectory/childSessionsOf（子会话目录统一源：旧 listChildren 兼容 + rc.5 agents.list
+// 过滤，task-mwzzub2w；rpc/settle/dispatch 三面直接 import，与 isFullSessionId 同例）。
 
 // 完整会话 id 结构判定（防幻影板，task-muuf0o7a）：真实 root 会话 id 形如
 // session-cc24eb5c-702c-...（长度 ≥20 且至少两个 '-'）；裸短 id（如 cc24eb5c——某次调用
@@ -26,6 +28,66 @@ export function isFullSessionId(sid) {
   if (sid.length < 20) return false
   var first = sid.indexOf('-')
   return first > 0 && sid.indexOf('-', first + 1) > first
+}
+
+// ===== 子会话目录统一源（rc.5 契约迁移，task-mwzzub2w；截图故障 n-mwzztin5okiv）=====
+// 四个消费点全部经此归一，不再各自摸 ctx.subagents.listChildren：list-children RPC 与 terminate
+// 终止核验（rpc.mjs）/ 重启 reconcile（settle.mjs）/ 续跑死会话哨兵（dispatch.mjs）。
+// 优先级：旧宿主 subagents.listChildren 原样兼容——有它就只用它（测试剧本/rc.5 之前的宿主零扰动，
+// 勿让新 agents.list 桩无意改变老用例）；rc.5 宿主 subagents 服务无 listChildren → agents.list()
+// 全表 + header 过滤：parentSession===sid 且 origin==='subagent'（判据与 isRootSessionHeader 同源）。
+// 只收**直接子代理**：主 fork/seed 有 parentSession 但无 origin（或 depth=0）→ 不收；孙代理的
+// parentSession 指向子代理而非 sid → 不收；无父子关系会话 → 不收（红线：不能把 agents.list 里
+// 所有 origin=subagent 都算作 sid 的直接子代理）。
+// 返回形状统一归一 {sessionId,id,label}（sessionId 与 id 同为子会话 id——旧目录行两种命名都见过，
+// 消费方两种取法都不破）。查询统一包成 Promise：同步抛错也转 rejection，消费方 catch 口径单一。
+// 无任何目录能力 → 返回 null（≠ 空数组）：null 是「查不了」，调用方保留既有跳过/无法核验语义；
+// 空数组是「确认没有活子会话」（reconcile 判死 / 哨兵立即结算 / 终止核验通过）。
+export function hasChildDirectory(ctx) {
+  var subs = ctx && ctx.subagents
+  if (subs && typeof subs.listChildren === 'function') return true
+  var ag = ctx && ctx.agents
+  return !!(ag && typeof ag.list === 'function')
+}
+
+export function childSessionsOf(ctx, sid, signal) {
+  var subs = (ctx && ctx.subagents) || null
+  if (subs && typeof subs.listChildren === 'function') {
+    // 旧宿主路径：透传调用（signal 仅旧 API 有意义，rc.5 路径忽略），返回行按消费面历史口径归一
+    // （label||title||mode 与 rpc 旧实现同链）。异常原样转 rejection 交给调用方既有 catch。
+    return Promise.resolve().then(function () { return subs.listChildren(sid, signal) }).then(function (kids) {
+      var out = []
+      var list = Array.isArray(kids) ? kids : []
+      for (var i = 0; i < list.length; i++) {
+        var c = list[i]; if (!c) continue
+        var cid = String(c.sessionId || c.id || '')
+        if (!cid) continue
+        out.push({ sessionId: cid, id: cid, label: String(c.label || c.title || c.mode || '') })
+      }
+      return out
+    })
+  }
+  var ag = (ctx && ctx.agents) || null
+  if (ag && typeof ag.list === 'function') {
+    // rc.5 路径：agents.list() 全表 + header 过滤。查询本身同步（list 是同步 registry 读），
+    // 包 Promise 只为统一消费面；list() 抛错转 rejection 透传——四个消费点都有既有 catch
+    // （跳过/可见化），不在这里吞错。
+    return Promise.resolve().then(function () {
+      var all = ag.list() || []
+      var out = []
+      for (var i = 0; i < all.length; i++) {
+        var a = all[i]; if (!a) continue
+        var h = a.session && a.session.header
+        if (!h || h.origin !== 'subagent') continue
+        if (String(h.parentSession || '') !== String(sid)) continue
+        var cid = String(a.id || h.id || '')
+        if (!cid) continue
+        out.push({ sessionId: cid, id: cid, label: String(a.label || a.name || '') })
+      }
+      return out
+    })
+  }
+  return null
 }
 
 export function createSession(ctx, state) {

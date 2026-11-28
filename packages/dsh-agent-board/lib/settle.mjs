@@ -13,6 +13,7 @@
 // （pushSysNote/maybeNotify/notifyTaskDone/notifyLate*/notifyDecomposed/kickCycle）随工厂入参注入。
 import { statSync } from 'node:fs'
 import * as core from './core.mjs'
+import { hasChildDirectory, childSessionsOf } from './session.mjs' // 子会话目录统一源（rc.5 迁移 task-mwzzub2w：reconcile 存活判定的目录源）
 import { findRunLog, readLogBytes, readLogFrames, readRunUsage } from './usage.mjs'
 import { applyDecomposeProposal, pushRejectLesson } from './policy.mjs'
 import { modelKey } from './model-health.mjs'
@@ -673,22 +674,25 @@ export function createSettle(opts) {
     // 本身是**持久子会话**，可能正跑得好好（或刚跑完一轮）。此时任务停在 in-progress 却没人认领：
     // 既不会被 agent/status 结算（表里没 rec），又不会被孤儿回收（isOrphan 的 2 分钟门槛＋它确实
     // 有 claimedBy），只能干等——重启一次就白挂一个 Worker 位。
-    // 解法（一次，per host 生命周期）：对本会话板上「in-progress 且无活跃 rec」的任务查 listChildren(root)，
+    // 解法（一次，per host 生命周期）：对本会话板上「in-progress 且无活跃 rec」的任务查子会话目录
+    // （childSessionsOf(root)，task-mwzzub2w），
     //   · 该 childId 仍在列 → 判定存活：重建 rec 观测（agent/status 监听本来就在，登记即可续上），
     //     基线取**当前日志字节数**（重启前那轮的产出已落盘，不该冒充重启后的新交付物），重挂两级超时臂；
     //   · 不在列 → 会话已死：走「硬超时等价物」——失败结算的等价动作（回 pending 重排 + 留历史），
     //     不占用 Worker 并发位，等下一轮 poolCycle 正常重派（续跑资格由卡上 runs 留档决定）。
     // 三道门禁：①只对 role=worker + continuable + 结局停在 running 的 run（一次性 run 没有可找回的会话）；
     // ②per host 生命周期只做一次（state.reconcileDone）——重复做会把用户手动终止的卡又挂回去；
-    // ③listChildren 不可用（老宿主/测试桩）→ 整段跳过，行为逐字不变。
+    // ③子会话目录不可用（老宿主无目录服务/测试桩）→ 整段跳过，行为逐字不变。
+    // 目录源统一走 childSessionsOf（session.mjs，task-mwzzub2w rc.5 迁移）：旧宿主 listChildren
+    // 原样兼容，rc.5 无旧 API 时改 agents.list()+parentSession/origin 过滤直接子代理——
+    // 「仍在列=存活 / 不在列=已死」的判定面不变。
     // 已知边界（有意不做，交给既有机制）：重启**之后**才被中断的那一轮，reconcile 追不回它的结局——
     // 硬超时臂已在重建时重挂，到点照常结算。
     async function reconcileRoot(sid) {
       if (!state.reconcileDone) state.reconcileDone = {} // 老宿主/测试桩没建这个容器：就地补（不清空已有标记）
       if (state.reconcileDone[sid]) return
       state.reconcileDone[sid] = true
-      var subagents = ctx.subagents
-      if (!subagents || typeof subagents.listChildren !== 'function') return
+      if (!hasChildDirectory(ctx)) return
       var runs = runsFor(sid)
       var snap = null
       try { snap = await rt(sid) } catch (_) { return }
@@ -712,7 +716,7 @@ export function createSettle(opts) {
       // ===== 孤儿一次性子会话补停（task-mv8wuznb ②，重启场景）=====
       // 卡已落定（resolved/cancelled/archived）而 verifier/一次性 worker 的 run 留档仍 running 无
       // endedAt：重启把内存 rec 清零后，结算收尾（stopSettledOneShot）的 interrupt 再也打不到它——
-      // 若子会话仍活在宿主目录（下方 listChildren 命中），顺手 interrupt 停掉（「结算即销毁」的重启补课，
+      // 若子会话仍活在宿主目录（下方 childSessionsOf 命中），顺手 interrupt 停掉（「结算即销毁」的重启补课，
       // 实证：verifier 空转 8h 的会话若中途遇 host 重启，苏醒后照旧空烧）。
       // 只停会话、不动卡面：running 留档的关账归 sweepZombieRuns（每轮都跑，就排在本函数之后）。
       // continuable worker 豁免（留存会话供续跑是设计语义；在飞卡的 continuable 由上方候选①重建观测）。
@@ -729,10 +733,12 @@ export function createSettle(opts) {
         }
       }
       if (!cands.length && !orphans.length) return
-      // 存活判定：listChildren 列出的就是「活的子会话」。带超时保护（查询挂死也不能拖住心跳）。
+      // 存活判定：子会话目录列出的就是「活的子会话」（childSessionsOf：旧 listChildren 或 rc.5
+      // agents.list 过滤，两者「仍在列」语义等价）。带超时保护（查询挂死也不能拖住心跳）。
       var kids = null
       try {
-        var q = subagents.listChildren(sid)
+        var q = childSessionsOf(ctx, sid)
+        if (!q) return // 门禁后仍无目录源（防御式）：跳过整段，卡片留在 in-progress 等人工处理
         kids = (typeof withTimeout === 'function') ? await withTimeout(q, 5000, 'reconcile listChildren') : await q
       } catch (e) {
         console.error('[task-board] reconcile listChildren 失败（本轮跳过，卡片留在 in-progress 等人工处理）:', String(e))
@@ -792,13 +798,14 @@ export function createSettle(opts) {
       // 杀无可杀（留档归 sweepZombieRuns 关账）；无 interrupt 能力/无活 root → 静默跳过；
       // 单条失败只 console.error，不拖住本轮 reconcile 的其它动作。
       var stopped = 0
-      if (orphans.length && typeof subagents.interrupt === 'function') {
+      var subag = ctx.subagents // 目录门禁放开后（rc.5 可能只有 agents.list），interrupt 仍看 subagents 服务
+      if (orphans.length && subag && typeof subag.interrupt === 'function') {
         var oroot = rootForSession(sid)
         if (oroot) {
           for (var oi2 = 0; oi2 < orphans.length; oi2++) {
             var oid = orphans[oi2]
             if (!alive[oid]) continue
-            try { subagents.interrupt(oid, { kind: 'ancestor', agent: oroot }); stopped++ }
+            try { subag.interrupt(oid, { kind: 'ancestor', agent: oroot }); stopped++ }
             catch (e) { console.error('[task-board] reconcile 孤儿一次性子会话 interrupt 失败（' + oid + '）:', String(e)) }
           }
         }

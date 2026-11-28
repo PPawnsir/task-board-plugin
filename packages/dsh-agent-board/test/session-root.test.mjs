@@ -1,7 +1,7 @@
 // 主会话 fork/seed 判根回归（Issue：ontology_ai 主窗口 task_create 被误判为子代理，2026-11-24）
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createSession, isRootSessionHeader } from '../lib/session.mjs'
+import { createSession, isRootSessionHeader, hasChildDirectory, childSessionsOf } from '../lib/session.mjs'
 
 const MAIN_FORK = 'session-aa61f7c9-0e21-4080-b252-4b95ada9b7c4'
 const PREVIOUS_MAIN = 'session-0c60e64e-3389-4242-98d8-52e910ba1ac2'
@@ -56,4 +56,75 @@ test('resolveRoot/task_create 门禁：主 fork 解析到自身；子代理解�
   assert.equal(session.resolveRoot(CHILD), MAIN_FORK, '子代理归到当前主 fork，不再穿过它误归上一代主会话')
   assert.notEqual(session.resolveRoot(CHILD), CHILD, '真正子代理仍被主窗口门禁拒绝')
   assert.equal(session.rootForSession(CHILD), undefined, '子代理不能充当 spawn root')
+})
+
+// ===== 子会话目录统一源（task-mwzzub2w，rc.5 契约迁移：截图故障 n-mwzztin5okiv）=====
+const GRANDCHILD = 'session-grand-00000000-aaaa-bbbb-cccc-ddddeeee0000'
+const OTHER_ROOT = 'session-other-0000000-aaaa-bbbb-cccc-ddddeeee0001'
+const OTHER_CHILD = 'session-othkid-000000-aaaa-bbbb-cccc-ddddeeee0002'
+
+function mkAgent(id, header, label) {
+  const a = { id: id, session: { header: header } }
+  if (label !== undefined) a.label = label
+  return a
+}
+
+test('目录源 rc.5 路径：agents.list 过滤只收直接子代理——主 fork/seed、孙代理、别家子代理、无父子会话全部排除', async () => {
+  const ctx = {
+    subagents: { list: () => ['mock'] }, // rc.5 形态：subagents 服务在位但无 listChildren
+    agents: {
+      list: () => [
+        mkAgent(MAIN_FORK, mainForkHeader), // 主 fork/seed（parentSession+depth=0）：不算子会话
+        mkAgent(PREVIOUS_MAIN, { id: PREVIOUS_MAIN, delegationDepth: 0 }), // 无父子主会话
+        mkAgent(CHILD, childHeader, 'worker:task-x'), // 唯一直接子代理
+        mkAgent(GRANDCHILD, { id: GRANDCHILD, parentSession: CHILD, origin: 'subagent', delegationDepth: 2 }), // 孙代理
+        mkAgent(OTHER_CHILD, { id: OTHER_CHILD, parentSession: OTHER_ROOT, origin: 'subagent', delegationDepth: 1 }), // 别家子代理
+        mkAgent('weird', { parentSession: MAIN_FORK }), // 有父但无 origin（v3 老/非子代理形态）：不收
+      ],
+    },
+  }
+  assert.equal(hasChildDirectory(ctx), true, 'agents.list 在位即有目录能力')
+  const kids = await childSessionsOf(ctx, MAIN_FORK)
+  assert.deepEqual(kids, [{ sessionId: CHILD, id: CHILD, label: 'worker:task-x' }], '只收 parentSession===sid 且 origin=subagent 的直接子代理')
+  // 查别的会话目录：别家 root 的直接子代理归它，不串门
+  const otherKids = await childSessionsOf(ctx, OTHER_ROOT)
+  assert.deepEqual(otherKids, [{ sessionId: OTHER_CHILD, id: OTHER_CHILD, label: '' }], '别家子代理只出现在别家目录（红线：不能把所有 origin=subagent 都算作本会话子代理）')
+})
+
+test('目录源 rc.5 路径：无目录能力 → null（跳过语义）；agents.list 空表 → 空数组（确认无子会话）', async () => {
+  assert.equal(hasChildDirectory({}), false, 'subagents/agents 都缺席：无目录能力')
+  assert.equal(childSessionsOf({}, MAIN_FORK), null, '无能力返回 null 而非空数组（null=查不了，[] = 确认没有）')
+  assert.equal(childSessionsOf({ subagents: {} }, MAIN_FORK), null, 'rc.5 事故原形：subagents 无 listChildren 且无 agents → null，消费方跳过不抛 TypeError')
+  const ctx = { agents: { list: () => [] } }
+  assert.equal(hasChildDirectory(ctx), true)
+  assert.deepEqual(await childSessionsOf(ctx, MAIN_FORK), [], '空表=确认无活子会话（reconcile 判死/哨兵结算的合法输入）')
+})
+
+test('目录源旧宿主路径：listChildren 原样兼容（归一化 + 旧 API 优先 + 异常透传 + 同步返回承接）', async () => {
+  const calls = []
+  const ctx = {
+    subagents: {
+      listChildren: (sid) => { calls.push(sid); return [{ sessionId: 'c-old-1', label: 'worker:k1' }, { id: 'c-old-2', title: 't2' }, { id: 'c-old-3', mode: 'continuable' }, null, {}] },
+    },
+  }
+  assert.equal(hasChildDirectory(ctx), true)
+  const kids = await childSessionsOf(ctx, MAIN_FORK)
+  assert.deepEqual(calls, [MAIN_FORK], '查询入参原样透传')
+  assert.deepEqual(kids, [
+    { sessionId: 'c-old-1', id: 'c-old-1', label: 'worker:k1' },
+    { sessionId: 'c-old-2', id: 'c-old-2', label: 't2' },
+    { sessionId: 'c-old-3', id: 'c-old-3', label: 'continuable' },
+  ], 'label 归一链 label||title||mode 与旧 rpc 实现同口径；空行/空 id 行剔除')
+  // 旧 API 优先：同 ctx 也有 agents.list（mock-ctx 形态）时仍走 listChildren，不被新桩改道
+  const ctxBoth = {
+    subagents: { listChildren: async () => [{ sessionId: 'old-way' }] },
+    agents: { list: () => [mkAgent(CHILD, childHeader)] },
+  }
+  assert.deepEqual(await childSessionsOf(ctxBoth, MAIN_FORK), [{ sessionId: 'old-way', id: 'old-way', label: '' }], '旧 API 在位 → 只走旧路径')
+  // 异常透传：异步拒绝交给消费方既有 catch
+  const ctxErr = { subagents: { listChildren: async () => { throw new Error('boom') } } }
+  await assert.rejects(() => childSessionsOf(ctxErr, MAIN_FORK), /boom/)
+  // 同步抛错同样转 rejection（消费方 catch 口径单一）
+  const ctxSyncErr = { subagents: { listChildren: () => { throw new Error('sync-boom') } } }
+  await assert.rejects(() => childSessionsOf(ctxSyncErr, MAIN_FORK), /sync-boom/)
 })

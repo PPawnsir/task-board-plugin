@@ -17,6 +17,7 @@ import { findRunLog } from './usage.mjs'
 import { splitRuleOf, DECOMPOSE_SCHEMA, buildDecomposerPrompt, TEAM_DECOMPOSE_FLOW, TEAM_SIZE_PIPELINE_GUIDE } from './policy.mjs'
 import { createHung } from './hung.mjs'
 import { createSettle } from './settle.mjs'
+import { hasChildDirectory, childSessionsOf } from './session.mjs' // 子会话目录统一源（rc.5 迁移 task-mwzzub2w：死会话哨兵的目录源）
 // 生命周期转移表（task-mwk47az1）：死胡同检测器（task-mwk481xj）的自动推进全部走表上既有边
 // （①decompose ②parentKick ③reclaim）——推进前 assertTransition 查表，与六既有推进点同款纪律。
 import { assertTransition } from './lifecycle.mjs'
@@ -1404,9 +1405,10 @@ export function createDispatch(ctx, state, deps) {
       // 原形（task-mvoutja4）：会话 14:07:07 已被宿主拆除，sendMessage 后续跑留档照挂 running——
       // 冷复活承诺落空且无任何结算通道可达（v0.2.1 scoped 事件面对插件订阅不可达 + 续跑 rec 无
       // activation 句柄），running 假相一路挂到硬超时/人工终止（实证 38 分钟零产出）。短延时后查
-      // 活跃目录（listChildren，与 reconcileRoot 同一存活源）：会话不在 + 本轮从未观测到 running
+      // 活跃目录（childSessionsOf 统一目录源，task-mwzzub2w：旧 listChildren 或 rc.5 agents.list
+      // 过滤，与 reconcileRoot 同一存活源）：会话不在 + 本轮从未观测到 running
       // 事件 → 立即按失败结算重派（不留 running 假相）；会话在/已观测到 running → 哨兵退位，
-      // 结算归事件/超时通道既有语义（健康模型续跑行为零变化）。老宿主/桩无 timer 或 listChildren
+      // 结算归事件/超时通道既有语义（健康模型续跑行为零变化）。老宿主/桩无 timer 或目录
       // 能力 → 不挂哨兵，行为逐字不变。
       armResumeDeathWatch(sid, rec, t)
       return { rec: rec }
@@ -1416,12 +1418,15 @@ export function createDispatch(ctx, state, deps) {
     // 观测到 running 事件 → 立即失败结算重派。RESUME_DEATH_WATCH_MS=5000：给冷复活留出落定窗口
     // （sendMessage 返回 ≠ 目录立即可见），相对硬超时 120min 仍是「立即」。结算走 settleRun 失败臂
     // （与事件/超时通道同一套口径：retryCount/重排/kickCycle 全复用，不留第二套失败结算）。
+    // 目录源统一走 childSessionsOf（session.mjs，task-mwzzub2w rc.5 迁移）：旧宿主 listChildren
+    // 原样兼容，rc.5 无旧 API 时改 agents.list()+parentSession/origin 过滤——「会话在目录」判定面不变。
+    // 查询失败/无目录能力：不判定，交给既有结算通道（老宿主/桩无 timer 或无目录能力 → 不挂哨兵，
+    // 行为逐字不变）。
     var RESUME_DEATH_WATCH_MS = 5000
     function armResumeDeathWatch(sid, rec, t) {
       var tm = ctx.timer
-      var subagents = ctx.subagents
       if (!tm || typeof tm.timeout !== 'function') return
-      if (!subagents || typeof subagents.listChildren !== 'function') return
+      if (!hasChildDirectory(ctx)) return
       var h = tm.timeout(function () {
         if (rec.settled || rec.ran) return // 已结算 / 已观测到 running（会话真活）→ 哨兵退位
         var check = function (kids) {
@@ -1436,12 +1441,11 @@ export function createDispatch(ctx, state, deps) {
           console.error('[task-board] 续跑会话已不存在（sendMessage 后活跃目录未命中，死会话哨兵），立即失败重派 task ' + rec.taskId + ' child ' + rec.childId)
           settle.settleRun(sid, rec, null, new Error('续跑会话已不存在（sendMessage 后未在活跃目录命中，死会话哨兵）'))
         }
-        var q
-        try { q = subagents.listChildren(sid) } catch (e) { return }
-        if (q && typeof q.then === 'function') {
-          var guarded = (typeof withTimeout === 'function') ? withTimeout(q, 5000, '死会话哨兵 listChildren') : q
-          Promise.resolve(guarded).then(check, function () {}) // 查询失败：不判定，交给既有结算通道
-        } else check(q)
+        var q = null
+        try { q = childSessionsOf(ctx, sid) } catch (e) { return }
+        if (!q) return // 门禁后仍无目录源（防御式）：不判定，交给既有结算通道
+        var guarded = (typeof withTimeout === 'function') ? withTimeout(q, 5000, '死会话哨兵 listChildren') : q
+        Promise.resolve(guarded).then(check, function () {}) // 查询失败：不判定，交给既有结算通道
       }, RESUME_DEATH_WATCH_MS)
       rec.deathDispose = function () { try { if (typeof h === 'function') h() } catch (_) {} }
     }
